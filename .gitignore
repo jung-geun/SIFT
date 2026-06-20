@@ -1,0 +1,45 @@
+# Xcode
+.DS_Store
+*.xcuserstate
+xcuserdata/
+*.xcworkspace/xcuserdata/
+DerivedData/
+*.moved-aside
+*.orig
+*.pbxuser
+*.perspectivev3
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# CocoaPods
+Pods/
+
+# Carthage
+Carthage/Build/
+
+# fastlane
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/screenshots/**/*.png
+fastlane/test_output
+
+# Code Injection
+iOSInjectionProject/
+
+# Oh-my-claudecode & OMC state
+.omc/
+
+# Claude Code project config
+.claude/
+
+# Environment & secrets
+.env
+*.pem
+*.p12
+GoogleService-Info.plist
+
+# OS
+.DS_Store
+Thumbs.db

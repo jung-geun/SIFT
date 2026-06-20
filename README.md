@@ -1,0 +1,102 @@
+# SIFT
+
+> 난잡한 일정을 채로 걸러 중요한 것을 추려주는 TODO 관리 시스템
+
+SIFT는 이메일·캘린더·수동 입력으로 쌓이는 할 일들을 온디바이스 AI가 자동으로 분류·정리해 **지금 당장 해야 할 것**만 보여주는 iOS/macOS TODO 앱입니다.
+
+---
+
+## 핵심 기능
+
+### 🔍 자동 분석 & 정리
+- **온디바이스 AI** (Apple Foundation Models / MLX Qwen) 가 앱 활성화 시 이메일을 분석해 마감 할 일을 자동 추출
+- 추출된 할 일은 **등록 대기열** (검토 필요) 또는 **진행중** (즉시 처리)으로 분류
+- 페르소나 기반 우선순위 자동 산출 — 내 패턴을 학습해 중요도를 재정렬
+
+### 📬 Gmail 연동
+- Gmail OAuth로 받은편지함 스캔 → 마감·일정 자동 추출 → 할 일 등록
+- 원본 메일 딥링크: Gmail 앱(`googlegmail:///cv=`) 우선, Mail.app(`message://`) 폴백, 최종 Gmail 웹
+- 저장 식별자: Gmail message.id · RFC822 Message-ID · threadId (3종 모두 보존)
+
+### 📅 캘린더 연동
+- **마감일이 있는 할 일**은 시스템 캘린더에 자동 등록 (EventKit)
+- 캘린더 이벤트 → 등록 대기열 자동 import (30일 이내, 7일 쿨다운)
+- **반복 일정**: 1주일 이내로 마감이 다가오면 대기열 → 진행중 자동 승급
+- 완료 처리 시 캘린더 이벤트 삭제 또는 알람만 끄기 (설정에서 선택)
+
+### 📊 숨김 Audit 기록
+- 등록 시각·완료 시각·삭제 시각·출처·종류를 자동 기록 (UI에 미노출)
+- 페르소나·행동 패턴 분석에 활용 — 처리 소요 시간·할 일 유형 통계
+
+### 🔒 프라이버시 우선
+- **이메일 본문은 기기 밖으로 전송하지 않음** — 온디바이스 AI(AFM/NSDataDetector)만 처리
+- 백그라운드 GPU 미사용 (iOS 제약 준수) — 배경은 NSDataDetector, 포그라운드는 Foundation Models
+
+---
+
+## 아키텍처
+
+```
+┌─────────────────────────────────────────────────────┐
+│                      SIFT iOS App                   │
+│                                                     │
+│  Views (SwiftUI)                                    │
+│  ├── TodoListView  ── 필터링·우선순위·캘린더 정책   │
+│  ├── TodoDetailView ─ 원본 메일 딥링크              │
+│  └── PersonaSettingsView ─ AI·캘린더·Gmail 설정     │
+│                                                     │
+│  Models (SwiftData @Model)                          │
+│  ├── Todo          ─ 핵심 할 일 (CloudKit 호환)     │
+│  ├── Persona       ─ 사용자 페르소나                │
+│  └── TaskAuditEvent ─ 삭제 lifecycle 스냅샷         │
+│                                                     │
+│  Services                                           │
+│  ├── EmailService       ── Gmail REST API           │
+│  ├── CalendarService    ── EventKit                 │
+│  ├── LLMAutomationOrchestrator ─ 포그라운드 AI      │
+│  ├── FoundationModelsService   ─ Apple FM (ANE)     │
+│  ├── OnDeviceLLMService        ─ MLX Qwen           │
+│  └── MemoryService      ── 패턴·페르소나 분석       │
+└─────────────────────────────────────────────────────┘
+```
+
+**AI 라우팅 원칙**
+- 페르소나 생성·이메일 분석·패턴 분석: **Apple Foundation Models** (기본값, ANE 사용)
+- TODO 자동 정렬: 사용자 선택 모델 우선 (FM / MLX Qwen / Cloud API)
+- 백그라운드 BGTask: **NSDataDetector** (ANE 미사용)
+
+---
+
+## 빌드 요구사항
+
+| 항목 | 버전 |
+|------|------|
+| Xcode | 26.5+ |
+| iOS Deployment Target | 26.5 |
+| 테스트 기기 | iPhone 17 (iOS 27+ beta 권장) |
+| Apple Developer | 무료 계정 가능 (CloudKit·APNs 제외) |
+
+### 주요 패키지
+- `mlx-swift` 0.31.4 + `mlx-swift-lm` 3.31.3 — MLX Qwen 온디바이스 추론
+- FoundationModels.framework (시스템 프레임워크, iOS 26+)
+
+### Gmail OAuth 설정
+1. Google Cloud Console에서 OAuth 2.0 클라이언트 ID 생성 (iOS 앱 유형)
+2. `GoogleService-Info.plist` 또는 클라이언트 ID를 프로젝트에 등록
+3. URL Scheme: `com.googleusercontent.apps.{CLIENT_ID}` (Info.plist에 이미 등록됨)
+
+---
+
+## 프라이버시 불변식
+
+> **이메일 본문은 절대 외부로 전송되지 않습니다.**
+
+- 포그라운드: Apple Foundation Models (ANE 온디바이스) 또는 MLX Qwen (기기 내 DRAM)
+- 백그라운드: NSDataDetector (Apple 시스템 프레임워크, 온디바이스)
+- Cloud AI(OpenAI·Gemini·Claude)는 **TODO 자동 정렬 기능에만** 선택적으로 사용 가능하며, 이 경우에도 이메일 본문은 전송하지 않고 제목·마감·태그 등 요약 데이터만 사용
+
+---
+
+## 라이선스
+
+Private repository — jung-geun/SIFT

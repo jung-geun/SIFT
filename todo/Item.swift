@@ -1,18 +1,3 @@
-//
-//  Item.swift
-//  todo
-//
-//  Created by pieroot on 6/15/26.
-//
-
-import Foundation
-import SwiftData
-
-@Model
-final class Item {
-    var timestamp: Date
-    
-    init(timestamp: Date) {
-        self.timestamp = timestamp
-    }
-}
+// Item.swift
+// 이 파일은 더 이상 사용되지 않습니다.
+// 데이터 모델은 Models/Todo.swift 및 Models/Persona.swift 로 이동했습니다.

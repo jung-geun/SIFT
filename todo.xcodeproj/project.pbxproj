@@ -6,6 +6,14 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		AEDC6C872FE3E978006E59B5 /* MLXEmbedders in Frameworks */ = {isa = PBXBuildFile; productRef = AEDC6C862FE3E978006E59B5 /* MLXEmbedders */; };
+		AEDC6C892FE3E978006E59B5 /* MLXHuggingFace in Frameworks */ = {isa = PBXBuildFile; productRef = AEDC6C882FE3E978006E59B5 /* MLXHuggingFace */; };
+		AEDC6C8B2FE3E978006E59B5 /* MLXLLM in Frameworks */ = {isa = PBXBuildFile; productRef = AEDC6C8A2FE3E978006E59B5 /* MLXLLM */; };
+		AEDC6C8D2FE3E978006E59B5 /* MLXLMCommon in Frameworks */ = {isa = PBXBuildFile; productRef = AEDC6C8C2FE3E978006E59B5 /* MLXLMCommon */; };
+		AEDC6C8F2FE3E978006E59B5 /* MLXVLM in Frameworks */ = {isa = PBXBuildFile; productRef = AEDC6C8E2FE3E978006E59B5 /* MLXVLM */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		AE58F1B42FDEFA3C00690FA6 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -65,6 +73,11 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				AEDC6C8F2FE3E978006E59B5 /* MLXVLM in Frameworks */,
+				AEDC6C8B2FE3E978006E59B5 /* MLXLLM in Frameworks */,
+				AEDC6C872FE3E978006E59B5 /* MLXEmbedders in Frameworks */,
+				AEDC6C8D2FE3E978006E59B5 /* MLXLMCommon in Frameworks */,
+				AEDC6C892FE3E978006E59B5 /* MLXHuggingFace in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -125,6 +138,11 @@
 			);
 			name = todo;
 			packageProductDependencies = (
+				AEDC6C862FE3E978006E59B5 /* MLXEmbedders */,
+				AEDC6C882FE3E978006E59B5 /* MLXHuggingFace */,
+				AEDC6C8A2FE3E978006E59B5 /* MLXLLM */,
+				AEDC6C8C2FE3E978006E59B5 /* MLXLMCommon */,
+				AEDC6C8E2FE3E978006E59B5 /* MLXVLM */,
 			);
 			productName = todo;
 			productReference = AE58F1A22FDEFA3B00690FA6 /* todo.app */;
@@ -184,7 +202,7 @@
 			attributes = {
 				BuildIndependentTargetsInParallel = 1;
 				LastSwiftUpdateCheck = 2650;
-				LastUpgradeCheck = 2650;
+				LastUpgradeCheck = 2700;
 				TargetAttributes = {
 					AE58F1A12FDEFA3B00690FA6 = {
 						CreatedOnToolsVersion = 26.5;
@@ -200,14 +218,18 @@
 				};
 			};
 			buildConfigurationList = AE58F19D2FDEFA3B00690FA6 /* Build configuration list for PBXProject "todo" */;
-			developmentRegion = en;
+			developmentRegion = ko;
 			hasScannedForEncodings = 0;
 			knownRegions = (
 				en,
 				Base,
+				ko,
 			);
 			mainGroup = AE58F1992FDEFA3B00690FA6;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				AEDC6C852FE3E978006E59B5 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = AE58F1A32FDEFA3B00690FA6 /* Products */;
 			projectDirPath = "";
@@ -294,6 +316,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = todo/Info.plist;
+				INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription = "할 일 마감을 캘린더에 등록하고 일정을 읽어오기 위해 캘린더 접근이 필요합니다.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -328,6 +351,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = todo/Info.plist;
+				INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription = "할 일 마감을 캘린더에 등록하고 일정을 읽어오기 위해 캘린더 접근이 필요합니다.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -404,11 +428,13 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.5;
+				INFOPLIST_KEY_CFBundleDisplayName = "SIFT";
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
 				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 			};
@@ -462,10 +488,12 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.5;
+				INFOPLIST_KEY_CFBundleDisplayName = "SIFT";
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_COMPILATION_MODE = wholemodule;
 				VALIDATE_PRODUCT = YES;
 			};
@@ -522,6 +550,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = VQXGRP23X5;
 				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 27.0;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = pieroot.todoUITests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -542,6 +571,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = VQXGRP23X5;
 				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 27.0;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = pieroot.todoUITests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -595,6 +625,45 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		AEDC6C852FE3E978006E59B5 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/ml-explore/mlx-swift-lm";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 3.31.3;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		AEDC6C862FE3E978006E59B5 /* MLXEmbedders */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AEDC6C852FE3E978006E59B5 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */;
+			productName = MLXEmbedders;
+		};
+		AEDC6C882FE3E978006E59B5 /* MLXHuggingFace */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AEDC6C852FE3E978006E59B5 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */;
+			productName = MLXHuggingFace;
+		};
+		AEDC6C8A2FE3E978006E59B5 /* MLXLLM */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AEDC6C852FE3E978006E59B5 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */;
+			productName = MLXLLM;
+		};
+		AEDC6C8C2FE3E978006E59B5 /* MLXLMCommon */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AEDC6C852FE3E978006E59B5 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */;
+			productName = MLXLMCommon;
+		};
+		AEDC6C8E2FE3E978006E59B5 /* MLXVLM */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AEDC6C852FE3E978006E59B5 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */;
+			productName = MLXVLM;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = AE58F19A2FDEFA3B00690FA6 /* Project object */;
 }

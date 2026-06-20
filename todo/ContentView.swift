@@ -1,61 +1,18 @@
-//
-//  ContentView.swift
-//  todo
-//
-//  Created by pieroot on 6/15/26.
-//
+// ContentView.swift
+// 앱 루트 뷰는 todoApp.swift에서 TodoListView()를 직접 사용합니다.
+// 이 파일은 SwiftUI Preview 등 보조 목적으로 유지됩니다.
 
 import SwiftUI
 import SwiftData
 
+/// SwiftUI Preview 진입점 — 앱 실제 루트는 todoApp.swift의 WindowGroup 참조.
 struct ContentView: View {
-    @Environment(\.modelContext) private var modelContext
-    @Query private var items: [Item]
-
     var body: some View {
-        NavigationSplitView {
-            List {
-                ForEach(items) { item in
-                    NavigationLink {
-                        Text("Item at \(item.timestamp, format: Date.FormatStyle(date: .numeric, time: .standard))")
-                    } label: {
-                        Text(item.timestamp, format: Date.FormatStyle(date: .numeric, time: .standard))
-                    }
-                }
-                .onDelete(perform: deleteItems)
-            }
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    EditButton()
-                }
-                ToolbarItem {
-                    Button(action: addItem) {
-                        Label("Add Item", systemImage: "plus")
-                    }
-                }
-            }
-        } detail: {
-            Text("Select an item")
-        }
-    }
-
-    private func addItem() {
-        withAnimation {
-            let newItem = Item(timestamp: Date())
-            modelContext.insert(newItem)
-        }
-    }
-
-    private func deleteItems(offsets: IndexSet) {
-        withAnimation {
-            for index in offsets {
-                modelContext.delete(items[index])
-            }
-        }
+        TodoListView()
     }
 }
 
 #Preview {
     ContentView()
-        .modelContainer(for: Item.self, inMemory: true)
+        .modelContainer(for: [Todo.self, Persona.self], inMemory: true)
 }
