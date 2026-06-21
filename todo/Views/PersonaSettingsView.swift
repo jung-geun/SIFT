@@ -39,6 +39,7 @@ struct PersonaSettingsView: View {
     @State private var memoryInsights: [String] = []
     @State private var memoryDate: Date?
     @State private var isAnalyzing = false
+    @State private var pendingMemoryResult: MemoryAnalysisResult?
 
     // MARK: - Email Learning
     @State private var suppressedSendersList: [String] = []
@@ -53,8 +54,8 @@ struct PersonaSettingsView: View {
     @State private var afmAvailable = false
 
     // MARK: - Calendar
-    // "remove" = 이벤트 삭제 (기본), "silence" = 알람만 끄기
-    @AppStorage("pieroot.todo.calendarCompletionAction") private var calendarCompletionAction = "remove"
+    // "silence" = 알람만 끄기 (기본), "remove" = 이벤트 삭제
+    @AppStorage("pieroot.todo.calendarCompletionAction") private var calendarCompletionAction = "silence"
 
     // MARK: - On-Device LLM (Qwen/MLX)
     @AppStorage("pieroot.todo.emailAnalysisEngine") private var emailAnalysisEngineKey = EmailAnalysisEngineKey.onDevice.rawValue
@@ -309,8 +310,8 @@ struct PersonaSettingsView: View {
                 }
             }
 
-            // 인사이트 목록
-            if !memoryInsights.isEmpty {
+            // 인사이트 목록 (저장된 기존 패턴)
+            if pendingMemoryResult == nil, !memoryInsights.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("발견된 패턴")
                         .font(.caption.bold())
@@ -322,14 +323,20 @@ struct PersonaSettingsView: View {
                     }
                 }
                 .padding(.vertical, 2)
-            } else if memoryDate == nil {
+            } else if pendingMemoryResult == nil, memoryDate == nil {
                 Text("아직 분석 데이터가 없습니다. 할 일을 완료한 후 분석을 실행하세요.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
+            // 미리보기 카드 (분석 완료 후 사용자 확인 대기)
+            if let result = pendingMemoryResult {
+                memoryAnalysisResultCard(result)
+            }
+
             // 수동 분석 버튼
             Button {
+                pendingMemoryResult = nil
                 Task { await analyzeMemory() }
             } label: {
                 if isAnalyzing {
@@ -338,7 +345,7 @@ struct PersonaSettingsView: View {
                         Text("패턴 분석 중…")
                     }
                 } else {
-                    Label("지금 패턴 분석", systemImage: "chart.bar.xaxis")
+                    Label(pendingMemoryResult == nil ? "지금 패턴 분석" : "다시 분석", systemImage: "chart.bar.xaxis")
                 }
             }
             .disabled(isAnalyzing || todos.filter { $0.isCompleted }.isEmpty)
@@ -348,6 +355,58 @@ struct PersonaSettingsView: View {
         } footer: {
             Text("완료한 할 일의 시간대 · 태그별 처리 속도 · 완료율을 분석합니다. Apple Foundation Models가 사용자 친화적 패턴 인사이트를 재작성합니다(미가용 시 통계 기반). AI 우선순위와 페르소나 생성에 자동 반영됩니다. 백그라운드에서 2일 간격으로 자동 실행됩니다.")
         }
+    }
+
+    @ViewBuilder
+    private func memoryAnalysisResultCard(_ result: MemoryAnalysisResult) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("새 분석 결과", systemImage: "sparkles")
+                .font(.subheadline.bold())
+                .foregroundStyle(.blue)
+
+            // 요약 통계
+            if !result.summary.isEmpty {
+                Text(result.summary)
+                    .font(.caption)
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+            }
+
+            // 인사이트 목록
+            if !result.insights.isEmpty {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("발견된 패턴")
+                        .font(.caption.bold())
+                        .foregroundStyle(.secondary)
+                    ForEach(result.insights, id: \.self) { insight in
+                        Text("• \(insight)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            // 적용 / 다시 분석 / 취소
+            HStack(spacing: 8) {
+                Button("적용") { applyMemoryAnalysis() }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+
+                Button("다시 분석") {
+                    pendingMemoryResult = nil
+                    Task { await analyzeMemory() }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                Button("취소") { pendingMemoryResult = nil }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 4)
     }
 
     // 4. Gmail 연동
@@ -1034,10 +1093,19 @@ struct PersonaSettingsView: View {
     private func analyzeMemory() async {
         isAnalyzing = true
         defer { isAnalyzing = false }
-        // B: FM이 insights를 재작성 (포그라운드 전용). summary·fastTags는 휴리스틱 유지.
-        let (_, insights) = await MemoryService.shared.analyzeForeground(todos: todos)
-        memoryInsights = insights
+        // 분석만 수행하고 저장하지 않음 — 미리보기 카드로 표시 후 사용자 확인 대기
+        let result = await MemoryService.shared.analyzeForegroundPreview(todos: todos)
+        if !result.summary.isEmpty || !result.insights.isEmpty {
+            pendingMemoryResult = result
+        }
+    }
+
+    private func applyMemoryAnalysis() {
+        guard let result = pendingMemoryResult else { return }
+        MemoryService.shared.applyAnalysisResult(result)
+        memoryInsights = result.insights
         memoryDate = MemoryService.shared.lastAnalysisDate
+        pendingMemoryResult = nil
     }
 
     // MARK: - Keychain

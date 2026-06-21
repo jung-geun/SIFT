@@ -128,7 +128,7 @@ struct TodoListView: View {
     @ObservedObject private var llmOrchestrator = LLMAutomationOrchestrator.shared
     @AppStorage("pieroot.todo.hasOnboarded") private var hasOnboarded = false
     // "remove" = 이벤트 삭제 (기본), "silence" = 알람만 끄기
-    @AppStorage("pieroot.todo.calendarCompletionAction") private var calendarCompletionAction = "remove"
+    @AppStorage("pieroot.todo.calendarCompletionAction") private var calendarCompletionAction = "silence"
 
     @State private var showAddTodo = false
     @State private var showSettings = false
@@ -152,8 +152,17 @@ struct TodoListView: View {
             return todos.filter { !$0.isCompleted && $0.triage == .todo }
                 .sorted { $0.effectivePriority > $1.effectivePriority }
         case .active:
-            return todos.filter { !$0.isCompleted && !$0.isOverdue && $0.triage == .todo }
-                .sorted { $0.effectivePriority > $1.effectivePriority }
+            return todos.filter {
+                guard !$0.isCompleted && $0.triage == .todo else { return false }
+                // 기한 초과여도 긴급(0.8+) 이상이면 진행중에 포함
+                return !$0.isOverdue || $0.effectivePriority >= 0.8
+            }
+            .sorted {
+                // 기한 초과 + 긴급 항목은 동점일 때 일반 항목보다 위에 정렬
+                let aBoost: Double = ($0.isOverdue && $0.effectivePriority >= 0.8) ? 0.05 : 0
+                let bBoost: Double = ($1.isOverdue && $1.effectivePriority >= 0.8) ? 0.05 : 0
+                return ($0.effectivePriority + aBoost) > ($1.effectivePriority + bBoost)
+            }
         case .overdue:
             return todos.filter { $0.isOverdue && $0.triage == .todo }
                 .sorted { $0.effectivePriority > $1.effectivePriority }
@@ -174,7 +183,12 @@ struct TodoListView: View {
     }
 
     var overdueCount: Int { todos.filter { $0.isOverdue && $0.triage == .todo }.count }
-    var activeCount: Int  { todos.filter { !$0.isCompleted && !$0.isOverdue && $0.triage == .todo }.count }
+    var activeCount: Int  {
+        todos.filter {
+            guard !$0.isCompleted && $0.triage == .todo else { return false }
+            return !$0.isOverdue || $0.effectivePriority >= 0.8
+        }.count
+    }
     var reviewCount: Int  { todos.filter { !$0.isCompleted && $0.triage == .review }.count }
 
     // MARK: - Body
