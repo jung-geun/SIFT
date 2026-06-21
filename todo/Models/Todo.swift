@@ -83,6 +83,9 @@ final class Todo {
     /// 예: [-3600.0, -21600.0, -86400.0] = 1시간·6시간·하루 전
     var reminderOffsets: [Double] = []
 
+    /// timesorter-v9 ScheduleInput용 예상 소요 시간(분). 기본 30분. CloudKit-safe(비옵셔널+기본값).
+    var estimatedDurationMinutes: Int = 30
+
     // MARK: - Source Tracking
 
     /// TodoSource.rawValue — CloudKit String 호환

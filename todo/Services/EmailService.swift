@@ -45,6 +45,25 @@ struct GmailMessage: Sendable {
     let isBulk: Bool
 }
 
+// MARK: - Mail Provider Protocol
+
+/// 메일 소스 추상화 프로토콜.
+/// 현재 구현: EmailService (Gmail OAuth).
+/// 향후 확장: IMAPProvider, GraphProvider(Outlook) 등.
+///
+/// ⚠️ 프라이버시 불변식: 어떤 구현이든 메일 본문은 온디바이스 전용
+/// (NSDataDetector/AFM-PCC). 외부 서드파티 클라우드 전송 금지.
+protocol MailProvider: AnyObject {
+    /// 메일 계정 인증 (OAuth 등)
+    func authenticate() async throws
+
+    /// 최근 메시지 목록 가져오기
+    func fetchRecentMessages() async throws -> [GmailMessage]
+
+    /// 인증 해제 및 세션 종료
+    func signOut()
+}
+
 // MARK: - Email Service
 
 /// Gmail OAuth + 메시지 fetch + 온디바이스 FM 할 일 추출 (v2)
@@ -53,7 +72,7 @@ struct GmailMessage: Sendable {
 /// 1. Google Cloud Console에서 OAuth 클라이언트 ID 발급 (iOS 앱 유형)
 /// 2. 리디렉트 URI 스킴을 Info.plist CFBundleURLSchemes에 등록
 /// 3. `clientID`와 `clientSecret`에 실제 값 입력
-final class EmailService: NSObject {
+final class EmailService: NSObject, MailProvider {
     static let shared = EmailService()
     private override init() {}
 
@@ -106,6 +125,12 @@ final class EmailService: NSObject {
 
     func signOut() {
         deleteTokens()
+    }
+
+    /// MailProvider 프로토콜 구현 — 최근 메시지 목록 반환.
+    /// 내부적으로 `listNewMessages(after:)`를 호출하며 Gmail 동작은 무변경.
+    func fetchRecentMessages() async throws -> [GmailMessage] {
+        try await listNewMessages(after: nil)
     }
 
     // MARK: - Fetch & Extract

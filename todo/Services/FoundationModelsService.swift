@@ -68,7 +68,7 @@ struct FMPriorityRankingList {
 /// summary는 휴리스틱 값 유지 — FM은 insights 배열만 재작성.
 @Generable
 struct FMPatternOutput {
-    @Guide(description: "2~4개의 사용자 행동 패턴 인사이트. 각 항목은 한 문장 한국어. 통계 요약을 사용자 친화적 언어로 재표현.")
+    @Guide(description: "2~4개의 관찰된 사용자 행동 패턴. 각 항목은 한 문장 한국어. 패턴 사실만 서술. 추천·조언·권고 없음.")
     var insights: [String]
 }
 
@@ -179,7 +179,6 @@ struct FoundationModelsService {
         }
 
         let instructions = buildRankingInstructions(persona: persona)
-        let isoParser    = ISO8601DateFormatter()
         var allResults   = [PriorityResult]()
 
         for batch in batches {
@@ -192,7 +191,7 @@ struct FoundationModelsService {
                 // E-2: 정수 번호로 역참조 — 모델이 번호를 에코하면 변형 없이 매핑
                 let key = r.todoID.trimmingCharacters(in: .whitespaces)
                 guard let uuid = indexMap[key] else { continue }
-                let recommendedTime: Date? = r.recommendedISO.isEmpty ? nil : isoParser.date(from: r.recommendedISO)
+                let recommendedTime: Date? = r.recommendedISO.isEmpty ? nil : AppDateFormat.parseLLMDate(r.recommendedISO)
                 allResults.append(PriorityResult(
                     todoID: uuid,
                     score: max(0.01, min(1.0, r.score)),
@@ -217,11 +216,7 @@ struct FoundationModelsService {
     func generatePatternInsights(summary: String, todos: [Todo]) async throws -> [String] {
         guard !summary.isEmpty else { return [] }
 
-        let instructions = """
-당신은 사용자의 할 일 완료 패턴을 분석해 실용적 인사이트를 제공하는 어시스턴트입니다.
-통계 데이터를 사용자가 이해하기 쉬운 한국어 문장으로 재표현하세요.
-각 인사이트는 한 문장으로, 구체적이고 행동 가능한 조언을 포함하세요.
-"""
+        let instructions = Prompts.PatternInsights.systemInstruction
         let recentTitles = todos.filter { $0.isCompleted }.prefix(10)
             .map { String($0.title.prefix(40)) }.joined(separator: ", ")
 
@@ -230,7 +225,7 @@ struct FoundationModelsService {
 \(String(summary.prefix(inputCharCap)))
 
 \(recentTitles.isEmpty ? "" : "[최근 완료 할 일 예시]\n\(recentTitles)\n")
-위 데이터를 바탕으로 사용자 친화적 인사이트 2~4개를 생성해주세요.
+\(Prompts.PatternInsights.requestSuffix)
 """
         let session  = LanguageModelSession(instructions: instructions)
         let response = try await session.respond(to: prompt, generating: FMPatternOutput.self)
@@ -246,15 +241,9 @@ struct FoundationModelsService {
         let bodyPreview = String(msg.body.prefix(1500))
         guard !msg.subject.isEmpty else { return nil }
 
-        let instructions = """
-당신은 이메일 마감일 분석 전문가입니다.
-이메일을 분석해 마감일·발신자·핵심 내용을 추출하세요.
-명시적 마감일이 없으면 dueDateISO를 빈 문자열로 두세요.
-절대로 추측이나 가정으로 날짜를 만들지 마세요.
-"""
-        let isoNow = ISO8601DateFormatter().string(from: now)
+        let instructions = Prompts.EmailFM.systemInstruction
         let prompt = """
-현재 시각: \(isoNow)
+현재 시각: \(AppDateFormat.llmString(from: now))
 발신자: \(msg.from)
 제목: \(msg.subject)
 \(bodyPreview.isEmpty ? "" : "본문:\n\(bodyPreview)")
@@ -265,9 +254,7 @@ struct FoundationModelsService {
 
         // 마감일 파싱
         guard !output.dueDateISO.isEmpty else { return nil }
-        let isoParser = ISO8601DateFormatter()
-        isoParser.formatOptions = [.withInternetDateTime, .withDashSeparatorInDate, .withColonSeparatorInTime]
-        guard let dueDate = isoParser.date(from: output.dueDateISO), dueDate > now else { return nil }
+        guard let dueDate = AppDateFormat.parseLLMDate(output.dueDateISO), dueDate > now else { return nil }
 
         // 종일 보정
         let comps = Calendar.current.dateComponents([.hour, .minute, .second], from: dueDate)
@@ -302,15 +289,9 @@ struct FoundationModelsService {
     // MARK: - Prompt Builders (페르소나)
 
     private func buildPersonaInstructions(existingPersona: String) -> String {
-        var lines = [
-            "당신은 할 일 패턴을 분석해 AI 우선순위 페르소나를 생성·개선하는 어시스턴트입니다.",
-            "페르소나는 AI가 할 일 우선순위를 결정할 때 참고하는 사용자 가치관 프로필입니다.",
-            "반드시 지정된 구조(personaText 2~4문장, insights 2~3개)로만 답하세요."
-        ]
-        if !existingPersona.isEmpty {
-            lines.append("기존 페르소나를 유지하며 새 패턴을 반영해 점진적으로 개선하세요.")
-        }
-        return lines.joined(separator: "\n")
+        var text = Prompts.PersonaFM.baseInstruction
+        if !existingPersona.isEmpty { text += "\n" + Prompts.PersonaFM.refinementSuffix }
+        return text
     }
 
     private func buildPersonaPrompt(existingPersona: String, todos: [Todo]) -> String {
@@ -373,24 +354,21 @@ struct FoundationModelsService {
     // MARK: - Prompt Builders (우선순위)
 
     private func buildRankingInstructions(persona: PersonaContext) -> String {
-        var lines = [
-            "당신은 개인 스케줄 비서입니다. 할 일 목록의 우선순위를 분석하세요.",
-            "score: 0.01~1.0. 마감 없어도 중요도(교수·관계·제출·미팅)에 따라 0.3 이상 부여.",
-            "페르소나 부합 시 score 높게, personaFit: true, reason에 '페르소나 관련' 포함.",
-            "고정 일정 여부는 '고정(주기)' 표기 항목에만 판단. 직접입력 항목을 '필수·고정·반드시'로 단정 금지.",
-            "needsNotification: 오늘 마감·임박·중요 키워드 있으면 true.",
-            "recommendedISO: 처리 추천 시각(ISO8601). 불확실하면 빈 문자열."
-        ]
-        if !persona.types.isEmpty { lines.append("사용자 유형: \(persona.displayNames)") }
+        var parts = [Prompts.RankingFM.baseInstruction]
+        if !persona.types.isEmpty { parts.append("사용자 유형: \(persona.displayNames)") }
         // E-4: 가변 길이 입력 방어 캡
         if !persona.description.isEmpty {
-            lines.append("사용자 가치관:\n\(String(persona.description.prefix(inputCharCap)))")
+            parts.append("사용자 가치관:\n\(String(persona.description.prefix(inputCharCap)))")
+        }
+        let keywords = persona.weightedKeywords
+        if !keywords.isEmpty {
+            parts.append("핵심 업무 키워드: \(keywords.joined(separator: ", "))")
         }
         let memory = MemoryService.shared.summary
         if !memory.isEmpty {
-            lines.append("사용자 행동 패턴 (참고):\n\(String(memory.prefix(inputCharCap)))")
+            parts.append("사용자 행동 패턴 (참고):\n\(String(memory.prefix(inputCharCap)))")
         }
-        return lines.joined(separator: "\n")
+        return parts.joined(separator: "\n")
     }
 
     /// E-1/E-2: 배치 슬라이스(전역 인덱스 포함) + 이벤트로 랭킹 프롬프트 생성.
@@ -399,18 +377,17 @@ struct FoundationModelsService {
         indexedBatch: [(idx: Int, todo: Todo)],
         events: [CalendarService.CalendarEventSummary]
     ) -> String {
-        let iso = ISO8601DateFormatter()
-        var lines = ["현재 시각: \(iso.string(from: Date()))"]
+        var lines = ["현재 시각: \(AppDateFormat.llmString(from: Date()))"]
         if !events.isEmpty {
             lines.append("\n[캘린더 이벤트 (향후 7일)]")
-            for e in events.prefix(10) { lines.append("• \(e.title) — \(iso.string(from: e.startDate))") }
+            for e in events.prefix(10) { lines.append("• \(e.title) — \(AppDateFormat.llmString(from: e.startDate))") }
         }
         lines.append("\n[우선순위 평가 대상 할 일]")
         for (idx, todo) in indexedBatch {
             // E-2: 정수 번호, E-3: 제목 60자 절단
             let title = String(todo.title.prefix(60))
             var ps = ["번호:\(idx)", "제목:\(title)"]
-            if let due = todo.dueDate { ps.append("마감:\(iso.string(from: due))") }
+            if let due = todo.dueDate { ps.append("마감:\(AppDateFormat.llmString(from: due))") }
             if !todo.tags.isEmpty     { ps.append("태그:\(todo.tags.joined(separator: ","))") }
             let src: String
             switch todo.todoSource {

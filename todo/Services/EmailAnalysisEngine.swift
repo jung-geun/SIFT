@@ -73,14 +73,7 @@ struct FoundationModelsEmailEngine: EmailAnalysisEngine {
 struct OnDeviceLLMEmailEngine: EmailAnalysisEngine {
     private let fallback = OnDeviceDetectorEngine()
 
-    private static let systemPrompt = """
-당신은 이메일 마감일 분석 전문가입니다. 이메일을 분석해 아래 JSON 형식으로만 응답하세요.
-형식: {"dueDate":"<ISO8601 또는 null>","triage":"todo|review","notes":"<한국어 1-2문장 요약>"}
-- dueDate: 명시적 마감일이 있으면 ISO8601(예: 2025-12-31T23:59:00), 없으면 null
-- triage: 마감 키워드(까지/마감/기한/deadline/due/expires) 있으면 todo, 없으면 review
-- notes: 이메일 핵심 내용 1-2문장 요약 (AI 생성)
-반드시 JSON만 출력. 코드블록, 설명, 다른 텍스트 없음.
-"""
+    private static let systemPrompt = Prompts.EmailLLM.systemInstruction
 
     func analyze(_ msg: GmailMessage, now: Date) async -> EmailExtraction? {
         let service = OnDeviceLLMService.shared
@@ -102,7 +95,7 @@ struct OnDeviceLLMEmailEngine: EmailAnalysisEngine {
         }
     }
 
-    private func parseExtraction(json: String, msg: GmailMessage, now: Date) -> EmailExtraction? {
+    func parseExtraction(json: String, msg: GmailMessage, now: Date) -> EmailExtraction? {
         var t = json.trimmingCharacters(in: .whitespacesAndNewlines)
         if let s = t.range(of: "{"), let e = t.range(of: "}", options: .backwards) {
             t = String(t[s.lowerBound...e.lowerBound])
@@ -115,9 +108,7 @@ struct OnDeviceLLMEmailEngine: EmailAnalysisEngine {
         var finalDate: Date
         var isAllDay = false
         if let ds = parsed["dueDate"] as? String, ds != "null", !ds.isEmpty {
-            let iso = ISO8601DateFormatter()
-            iso.formatOptions = [.withInternetDateTime, .withDashSeparatorInDate, .withColonSeparatorInTime]
-            guard let d = iso.date(from: ds), d > now else { return nil }
+            guard let d = AppDateFormat.parseLLMDate(ds), d > now else { return nil }
             let comps = Calendar.current.dateComponents([.hour, .minute, .second], from: d)
             if comps.hour == 0 && comps.minute == 0 && (comps.second ?? 0) == 0 {
                 isAllDay = true

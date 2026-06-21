@@ -43,20 +43,29 @@ final class OnDeviceLLMService: ObservableObject {
         let sizeMB: Int         // 예상 다운로드 크기(MB)
     }
     static let modelCatalog: [ModelOption] = [
+        // ── timesorter-v9 파인튜닝 모델 (권장) ──────────────────────────────────────────
+        // 선행조건: Qwen3.5 기반 파인튜닝 → MLX-4bit 변환 → HF 호스팅 후 활성화.
+        // 미호스팅 시 자동으로 AFM → Heuristic 폴백. ID는 HF 업로드 후 확정.
+        ModelOption(
+            id: "pieroot/timesorter-scheduler-v9-ko-mlx",
+            displayName: "timesorter-v9 · 4bit (스케줄 전용, 준비 중)",
+            sizeMB: 1400
+        ),
+        // ── 범용 Qwen 모델 (파인튜닝 전 폴백 / 성능 비교용) ──────────────────────────
         ModelOption(
             id: "mlx-community/Qwen3.5-2B-MLX-4bit",
-            displayName: "Qwen3.5-2B · 4bit (권장, ~1.4GB)",
+            displayName: "Qwen3.5-2B · 4bit (범용, ~1.4GB)",
             sizeMB: 1400
         ),
         ModelOption(
             id: "mlx-community/Qwen3.5-4B-MLX-4bit",
-            displayName: "Qwen3.5-4B · 4bit (고품질, ~2.4GB)",
+            displayName: "Qwen3.5-4B · 4bit (범용 고품질, ~2.4GB)",
             sizeMB: 2400
         ),
     ]
-    /// 기본 모델: 2B-4bit (~1.4GB). 메모리 안전 — 기기 포화 시 메모리 경고 임계 아래.
-    /// 4B-4bit (~2.9GB 상주)는 다른 앱 병존 시 메모리 경고로 취소 유발 → 선택적 사용.
-    static let defaultModelID = "mlx-community/Qwen3.5-2B-MLX-4bit"
+    /// 기본 모델: timesorter-v9 파인튜닝 모델(HF 업로드 후). 미존재 시 Qwen2B로 수동 전환.
+    /// UserDefaults "pieroot.todo.onDeviceModelID"로 기기당 재지정 가능.
+    static let defaultModelID = "pieroot/timesorter-scheduler-v9-ko-mlx"
     /// 입력 컨텍스트 최대 토큰 수. 기본 4K로 메모리 절약 (Qwen3.5-2B는 32K 지원).
     static let defaultContextLength = 4096
     /// MLXLLM 패키지가 Xcode에 추가되어 있는지 여부. false면 모든 기능이 stub.
@@ -674,10 +683,11 @@ final class OnDeviceLLMService: ObservableObject {
         let id: String; let displayName: String; let sizeMB: Int
     }
     static let modelCatalog: [ModelOption] = [
-        ModelOption(id: "mlx-community/Qwen3.5-2B-MLX-4bit", displayName: "Qwen3.5-2B · 4bit (권장, ~1.4GB)", sizeMB: 1400),
-        ModelOption(id: "mlx-community/Qwen3.5-4B-MLX-4bit", displayName: "Qwen3.5-4B · 4bit (고품질, ~2.4GB)", sizeMB: 2400),
+        ModelOption(id: "pieroot/timesorter-scheduler-v9-ko-mlx", displayName: "timesorter-v9 · 4bit (스케줄 전용, 준비 중)", sizeMB: 1400),
+        ModelOption(id: "mlx-community/Qwen3.5-2B-MLX-4bit", displayName: "Qwen3.5-2B · 4bit (범용, ~1.4GB)", sizeMB: 1400),
+        ModelOption(id: "mlx-community/Qwen3.5-4B-MLX-4bit", displayName: "Qwen3.5-4B · 4bit (범용 고품질, ~2.4GB)", sizeMB: 2400),
     ]
-    static let defaultModelID = "mlx-community/Qwen3.5-2B-MLX-4bit"
+    static let defaultModelID = "pieroot/timesorter-scheduler-v9-ko-mlx"
     static let defaultContextLength = 4096
     static let isMLXAvailable = false   // 패키지 미설치 — Xcode GUI로 추가 필요
     var modelID: String {

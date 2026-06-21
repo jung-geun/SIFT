@@ -15,13 +15,16 @@ enum PriorityEngine: String, Sendable {
 
 struct PriorityResult: Sendable {
     let todoID: UUID
-    let score: Double          // 0.0 ~ 1.0
+    let score: Double          // 0.0 ~ 1.0 (axes 있으면 ScheduleScorer 재산출, 없으면 레거시)
     let reason: String         // 40자 이내 한 줄 요약
     let detail: String         // 세부 설명 (빈 문자열 가능)
     let needsNotification: Bool
     let recommendedTime: Date? // nil = 추천 없음
     let personaFit: Bool       // 페르소나 부합 여부
     let engine: PriorityEngine // 실제 산출 엔진 식별자 (UI 배지용)
+    // 4축 (nil = 레거시 단일 score 경로, 하위호환)
+    var axes: AxisScores? = nil
+    var chainingDetail: String = ""
 }
 
 // MARK: - Persona Context
@@ -60,6 +63,7 @@ protocol IntelligenceService: Sendable {
 
 // MARK: - Heuristic Engine (항상 동작하는 규칙 기반 fallback)
 
+/// 4축 결정론적 산출 + ScheduleScorer 수동 계산 — 모델 폴백 시에도 동일 구조 보장.
 struct HeuristicEngine: IntelligenceService {
 
     func prioritize(
@@ -67,19 +71,101 @@ struct HeuristicEngine: IntelligenceService {
         events: [CalendarService.CalendarEventSummary],
         persona: PersonaContext
     ) async -> [PriorityResult] {
-        todos.map { todo in
-            PriorityResult(
-                todoID: todo.id,
-                score: heuristicScore(todo: todo, persona: persona),
-                reason: heuristicReason(todo: todo, persona: persona),
-                detail: "",
+        let weights = ScheduleWeights.adaptive()
+        let memory  = MemoryService.shared
+        return todos.map { todo in
+            let axes  = heuristicAxes(todo: todo, persona: persona, memory: memory, allTodos: todos)
+            let score = ScheduleScorer.normalizedScore(axes, weights: weights)
+            return PriorityResult(
+                todoID:            todo.id,
+                score:             score,
+                reason:            heuristicReason(todo: todo, persona: persona),
+                detail:            "",
                 needsNotification: isNearDeadline(todo: todo),
-                recommendedTime: nil,
-                personaFit: isPersonaFit(todo: todo, persona: persona),
-                engine: .heuristic
+                recommendedTime:   productiveHourTime(from: memory),
+                personaFit:        isPersonaFit(todo: todo, persona: persona),
+                engine:            .heuristic,
+                axes:              axes,
+                chainingDetail:    ""
             )
         }
     }
+
+    // MARK: - 4축 산출
+
+    private func heuristicAxes(
+        todo: Todo,
+        persona: PersonaContext,
+        memory: MemoryService,
+        allTodos: [Todo]
+    ) -> AxisScores {
+
+        // 1. deadlineProximity (0~10): 잔여 시간 기반
+        let deadlineProximity: Double
+        if let dueDate = todo.dueDate {
+            let hours = dueDate.timeIntervalSinceNow / 3600
+            switch hours {
+            case ..<0:   deadlineProximity = 10.0
+            case ..<1:   deadlineProximity = 9.7
+            case ..<6:   deadlineProximity = 9.0
+            case ..<24:  deadlineProximity = 7.8
+            case ..<72:  deadlineProximity = 6.0
+            case ..<168: deadlineProximity = 4.0
+            case ..<720: deadlineProximity = 2.5
+            default:     deadlineProximity = 1.5
+            }
+        } else {
+            deadlineProximity = 2.0
+        }
+
+        // 2. urgency (0~10): 즉시성 신호 (마감근접과 의도적으로 분리)
+        let urgencyKeywords = ["긴급", "즉시", "오늘", "마감", "asap", "urgent", "지금", "바로"]
+        let hasUrgentKeyword = urgencyKeywords.contains(where: {
+            todo.title.localizedCaseInsensitiveContains($0)
+                || todo.notes.localizedCaseInsensitiveContains($0)
+        })
+        let isEmailSource = todo.todoSource == .email
+        var urgency = deadlineProximity * 0.7
+        if hasUrgentKeyword { urgency += 2.0 }
+        if isEmailSource    { urgency += 1.0 }
+        urgency = min(10.0, urgency)
+
+        // 3. importance (0~10): 태그·페르소나·fastTags
+        let importantTags   = ["업무", "work", "마감", "중요", "긴급"]
+        let personaKeywords = persona.weightedKeywords
+        let personaMatch    = !personaKeywords.isEmpty && (
+            todo.tags.contains(where: { personaKeywords.contains($0) }) ||
+            personaKeywords.contains(where: { todo.title.localizedCaseInsensitiveContains($0) })
+        )
+        let fastTags = memory.fastTags
+        var importance = 5.0
+        if todo.tags.contains(where: importantTags.contains) { importance += 2.0 }
+        if personaMatch                                       { importance += 1.5 }
+        if !fastTags.isEmpty && todo.tags.contains(where: { fastTags.contains($0) }) {
+            importance += 0.5
+        }
+        importance = min(10.0, importance)
+
+        // 4. chaining (0~10): 이메일 스레드 기반 (휴리스틱 한계 인정, 보수적)
+        let chaining: Double
+        if !todo.sourceThreadID.isEmpty {
+            let hasFollowUp = allTodos.contains {
+                $0.id != todo.id && $0.sourceThreadID == todo.sourceThreadID && !$0.isCompleted
+            }
+            chaining = hasFollowUp ? 9.0 : 6.0
+        } else {
+            chaining = 2.0
+        }
+
+        return AxisScores(
+            deadlineProximity: deadlineProximity,
+            urgency:           urgency,
+            importance:        importance,
+            chaining:          chaining
+        )
+    }
+
+    // MARK: - 보조
 
     private func isNearDeadline(todo: Todo) -> Bool {
         guard let due = todo.dueDate else { return false }
@@ -94,45 +180,9 @@ struct HeuristicEngine: IntelligenceService {
             || kw.contains(where: { todo.title.localizedCaseInsensitiveContains($0) })
     }
 
-    private func heuristicScore(todo: Todo, persona: PersonaContext) -> Double {
-        var base: Double
-        if let dueDate = todo.dueDate {
-            let hours = dueDate.timeIntervalSinceNow / 3600
-            switch hours {
-            case ..<0:    base = 1.00
-            case ..<1:    base = 0.97
-            case ..<6:    base = 0.90
-            case ..<24:   base = 0.78
-            case ..<72:   base = 0.60
-            case ..<168:  base = 0.40
-            case ..<720:  base = 0.25
-            default:      base = 0.15
-            }
-        } else {
-            base = 0.20
-        }
-
-        let importantTags = ["업무", "work", "마감", "중요", "긴급"]
-        let tagBoost = todo.tags.contains(where: importantTags.contains) ? 0.08 : 0.0
-
-        // 페르소나 유형 키워드 가중치 — API 키 없이 온디바이스로 즉시 반영 (다중 유형 합산)
-        let personaKeywords = persona.weightedKeywords
-        let personaMatch = !personaKeywords.isEmpty && (
-            todo.tags.contains(where: { personaKeywords.contains($0) }) ||
-            personaKeywords.contains(where: { todo.title.localizedCaseInsensitiveContains($0) })
-        )
-        let personaBoost = personaMatch ? 0.06 : 0.0
-
-        // MemoryService 빠른 태그 부스트 (사용 패턴 미세 조정)
-        let fastTags = MemoryService.shared.fastTags
-        let memoryBoost = !fastTags.isEmpty && todo.tags.contains(where: { fastTags.contains($0) }) ? 0.04 : 0.0
-
-        return min(1.0, base + tagBoost + personaBoost + memoryBoost)
-    }
-
     private func heuristicReason(todo: Todo, persona: PersonaContext) -> String {
         let personaKeywords = persona.weightedKeywords
-        let personaMatch = !personaKeywords.isEmpty && (
+        let personaMatch    = !personaKeywords.isEmpty && (
             todo.tags.contains(where: { personaKeywords.contains($0) }) ||
             personaKeywords.contains(where: { todo.title.localizedCaseInsensitiveContains($0) })
         )
@@ -140,22 +190,31 @@ struct HeuristicEngine: IntelligenceService {
             ? " · 페르소나(\(persona.displayNames)) 관련" : ""
 
         guard let due = todo.dueDate else {
-            return personaMatch
-                ? "마감 없음\(personaSuffix)"
-                : "마감 없음 — 낮은 기본 우선순위"
+            return personaMatch ? "마감 없음\(personaSuffix)" : "마감 없음 — 낮은 기본 우선순위"
         }
         let hours = due.timeIntervalSinceNow / 3600
         let dueStr: String
         switch hours {
-        case ..<0:    dueStr = "마감 초과"
-        case ..<1:    dueStr = "1시간 이내 마감"
-        case ..<6:    dueStr = "6시간 이내 마감"
-        case ..<24:   dueStr = "오늘 마감"
-        case ..<72:   dueStr = "3일 이내 마감"
-        case ..<168:  dueStr = "이번 주 마감"
-        default:      dueStr = "\(Int(hours / 24))일 후 마감"
+        case ..<0:   dueStr = "마감 초과"
+        case ..<1:   dueStr = "1시간 이내 마감"
+        case ..<6:   dueStr = "6시간 이내 마감"
+        case ..<24:  dueStr = "오늘 마감"
+        case ..<72:  dueStr = "3일 이내 마감"
+        case ..<168: dueStr = "이번 주 마감"
+        default:     dueStr = "\(Int(hours / 24))일 후 마감"
         }
         return dueStr + personaSuffix
+    }
+
+    /// productiveHour 있으면 당일 해당 시각. 이미 지났으면 nil.
+    private func productiveHourTime(from memory: MemoryService) -> Date? {
+        guard let hour = memory.productiveHour else { return nil }
+        var comps    = Calendar.current.dateComponents([.year, .month, .day], from: Date())
+        comps.hour   = hour
+        comps.minute = 0
+        comps.second = 0
+        guard let date = Calendar.current.date(from: comps), date > Date() else { return nil }
+        return date
     }
 }
 
@@ -203,60 +262,148 @@ final class FoundationModelsEngine: IntelligenceService {
     }
 }
 
-// MARK: - On-Device LLM Intelligence Engine (스텁 — Phase B에서 실 구현)
+// MARK: - On-Device LLM Intelligence Engine (timesorter-v9 / MLX)
 
-/// Qwen 4B MLX 온디바이스 LLM 기반 우선순위 산출 엔진 스텁.
+/// timesorter-scheduler-v9-ko MLX 파인튜닝 모델 기반 우선순위 산출 엔진.
 ///
-/// Phase A: 모델 미설치 → HeuristicEngine으로 폴백.
-/// Phase B: OnDeviceLLMService 모델 로드 후 실제 LLM 추론.
-///          입력: 제목/마감/태그/페르소나/캘린더 메타데이터 (본문 아님 — CloudIntelligenceEngine과 동일 수준)
-///          출력 JSON 파싱: CloudIntelligenceEngine.parseRankings 패턴 재사용.
+/// 입력: ScheduleInput JSON (current_time / user_persona / tasks[]).
+/// 출력: ScheduleResponseV9 JSON (4축 scoring + reasoning + recommended_schedule).
+/// total_score는 모델 출력값을 무시하고 ScheduleScorer + 적응형 가중치로 재산출.
+/// 파싱 실패 시 FoundationModelsEngine(AFM) → HeuristicEngine 폴백 체인.
 final class OnDeviceLLMIntelligenceEngine: IntelligenceService {
-    // D: Qwen 실패 시 AFM으로 폴백 (AFM 보편 기본값 — Qwen→AFM→Heuristic 체인)
     private let fallback = FoundationModelsEngine()
 
-    private static func buildSystemPrompt(persona: PersonaContext) -> String {
-        var lines = [
-            "당신은 개인 스케줄 비서입니다. 할 일 목록의 우선순위를 분석하세요.",
-            "반드시 아래 JSON 형식으로만 답하세요 (Markdown 없이 순수 JSON):",
-            "{\"rankings\":[{\"todoID\":\"<UUID>\",\"score\":0.0,\"reason\":\"<40자 이내 한국어>\",\"detail\":\"<세부 이유, 빈문자 가능>\",\"needsNotification\":false,\"recommendedISO\":\"<ISO8601 또는 빈문자>\",\"personaFit\":false}]}",
-            "score는 0.0(가장 낮음)~1.0(최우선). 절대 0.0으로 두지 말 것 — 마감 없어도 중요도(교수·관계·제출·미팅)에 따라 0.3 이상 부여. 페르소나 부합 시 높게, personaFit:true, reason에 '페르소나 관련' 포함.",
-            "고정 일정 여부는 오직 할 일에 '고정(주기)' 표기가 있는 경우에만 판단. 출처:직접입력 항목을 '필수'·'고정'·'반드시'로 단정하지 말 것 — 사용자의 자발적 선택이므로 선호로 표현.",
-            "needsNotification: 오늘 마감/마감 임박/중요 키워드 있으면 true.",
-            "recommendedISO: 처리 추천 시각(ISO8601). 오전 업무라면 당일 09:00, 저녁이라면 17:00 등. 확실하지 않으면 빈문자."
+    // ScheduleResponseV9 JSON 출력 지시 — Prompts.swift에서 수정 가능
+    private static let systemPrompt = Prompts.Schedule.systemInstruction
+
+    // MARK: ScheduleInput JSON 직렬화
+
+    private static func buildScheduleInput(
+        todos: [Todo],
+        persona: PersonaContext,
+        events: [CalendarService.CalendarEventSummary]
+    ) -> String {
+        let memory = MemoryService.shared
+
+        let availability: String
+        if let h = memory.productiveHour {
+            let end  = min(23, h + 8)
+            availability = String(format: "%02d:00-%02d:00", h, end)
+        } else {
+            availability = "09:00-22:00"
+        }
+
+        let bioValue = persona.types.isEmpty
+            ? persona.description
+            : persona.types.map { $0.displayName }.joined(separator: ", ")
+
+        let personaDict: [String: Any] = [
+            "occupations":     persona.types.map { $0.displayName },
+            "detailed_status": persona.description,
+            "bio":             bioValue,
+            "availability":    availability
         ]
-        if !persona.types.isEmpty       { lines.append("사용자 유형: \(persona.displayNames)") }
-        if !persona.description.isEmpty { lines.append("사용자 가치관:\n\(persona.description)") }
-        // MemoryService 사용자 행동 패턴 주입 (CloudIntelligenceEngine과 동일)
-        let memory = MemoryService.shared.summary
-        if !memory.isEmpty { lines.append("사용자 행동 패턴 (참고):\n\(memory)") }
-        return lines.joined(separator: "\n")
+
+        let tasks: [[String: Any]] = todos.map { todo in
+            let sourceStr: String
+            switch todo.todoSource {
+            case .manual:   sourceStr = "memo_app"
+            case .email:    sourceStr = "email"
+            case .calendar: sourceStr = "calendar"
+            }
+            return [
+                "task_id":                    todo.id.uuidString,
+                "title":                      todo.title,
+                "memo":                       todo.notes,
+                "source":                     sourceStr,
+                "deadline":                   todo.dueDate.map { AppDateFormat.llmString(from: $0) } as Any,
+                "estimated_duration_minutes": todo.estimatedDurationMinutes
+            ]
+        }
+
+        let input: [String: Any] = [
+            "current_time": AppDateFormat.llmString(from: Date()),
+            "user_persona": personaDict,
+            "tasks":        tasks
+        ]
+        let data = (try? JSONSerialization.data(withJSONObject: input, options: .prettyPrinted)) ?? Data()
+        return String(data: data, encoding: .utf8) ?? "{}"
     }
 
-    private static func buildUserPrompt(todos: [Todo], events: [CalendarService.CalendarEventSummary]) -> String {
-        let iso = ISO8601DateFormatter()
-        var lines = ["현재 시각: \(iso.string(from: Date()))"]
-        if !events.isEmpty {
-            lines.append("\n[캘린더 이벤트 (향후 7일)]")
-            for e in events.prefix(10) { lines.append("• \(e.title) — \(iso.string(from: e.startDate))") }
-        }
-        lines.append("\n[우선순위 평가 대상 할 일]")
-        for todo in todos {
-            var ps = ["ID:\(todo.id.uuidString)", "제목:\(todo.title)"]
-            if let due = todo.dueDate { ps.append("마감:\(iso.string(from: due))") }
-            if !todo.tags.isEmpty     { ps.append("태그:\(todo.tags.joined(separator: ","))") }
-            let sourceLabel: String
-            switch todo.todoSource {
-            case .manual:   sourceLabel = "직접입력"
-            case .email:    sourceLabel = "이메일"
-            case .calendar: sourceLabel = "캘린더"
+    // MARK: ScheduleResponseV9 관대 파싱
+
+    func parseScheduleResponseV9(
+        text: String,
+        todos: [Todo],
+        persona: PersonaContext
+    ) -> [PriorityResult]? {
+        var t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let first = t.range(of: "{"),
+              let last  = t.range(of: "}", options: .backwards)
+        else { return nil }
+        t = String(t[first.lowerBound...last.lowerBound])
+
+        guard let data           = t.data(using: .utf8),
+              let json           = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let scheduledTasks = json["scheduled_tasks"] as? [[String: Any]]
+        else { return nil }
+
+        let weights   = ScheduleWeights.adaptive()
+        var results   = [PriorityResult]()
+
+        for taskDict in scheduledTasks {
+            guard let taskID = taskDict["task_id"] as? String,
+                  let uuid   = UUID(uuidString: taskID)
+            else { continue }
+
+            let scoring = taskDict["scoring"] as? [String: Any] ?? [:]
+            let axes    = AxisScores(
+                deadlineProximity: max(0, min(10, (scoring["deadline_proximity"] as? Double) ?? 2.0)),
+                urgency:           max(0, min(10, (scoring["urgency"]             as? Double) ?? 5.0)),
+                importance:        max(0, min(10, (scoring["task_importance"]     as? Double) ?? 5.0)),
+                chaining:          max(0, min(10, (scoring["task_chaining"]       as? Double) ?? 2.0))
+            )
+            let score = ScheduleScorer.normalizedScore(axes, weights: weights)
+
+            let reasoning      = taskDict["reasoning"] as? [String: Any] ?? [:]
+            let summary        = reasoning["summary"]         as? String ?? ""
+            let chainingDetail = reasoning["chaining_detail"] as? String ?? ""
+
+            var recommendedTime: Date? = nil
+            if let sched    = taskDict["recommended_schedule"] as? [String: Any],
+               let startISO = sched["start_time"]              as? String,
+               !startISO.isEmpty {
+                recommendedTime = AppDateFormat.parseLLMDate(startISO)
             }
-            ps.append("출처:\(sourceLabel)")
-            if todo.isFixedSchedule  { ps.append("고정(주기)") }
-            lines.append("• " + ps.joined(separator: " | "))
+
+            let personaKeywords = persona.weightedKeywords
+            let personaFit: Bool
+            if let todo = todos.first(where: { $0.id == uuid }) {
+                personaFit = !personaKeywords.isEmpty && (
+                    todo.tags.contains(where: { personaKeywords.contains($0) }) ||
+                    personaKeywords.contains(where: { todo.title.localizedCaseInsensitiveContains($0) })
+                )
+            } else {
+                personaFit = false
+            }
+
+            results.append(PriorityResult(
+                todoID:            uuid,
+                score:             score,
+                reason:            String(summary.prefix(80)),
+                detail:            summary,
+                needsNotification: axes.deadlineProximity >= 7.0 || axes.urgency >= 7.0,
+                recommendedTime:   recommendedTime,
+                personaFit:        personaFit,
+                engine:            .onDeviceMLX,
+                axes:              axes,
+                chainingDetail:    chainingDetail
+            ))
         }
-        return lines.joined(separator: "\n")
+        return results.isEmpty ? nil : results
     }
+
+    // MARK: prioritize
 
     func prioritize(
         todos: [Todo],
@@ -264,15 +411,13 @@ final class OnDeviceLLMIntelligenceEngine: IntelligenceService {
         persona: PersonaContext
     ) async -> [PriorityResult] {
         let service = OnDeviceLLMService.shared
-        // 모델이 디스크에 있지만 메모리에 없는 경우(백그라운드 후 복귀 등) 자동 로드
         if !service.isModelLoaded && service.isModelCachedOnDisk {
             await service.loadModelIfNeeded()
         }
         guard service.isModelLoaded else {
             return await fallback.prioritize(todos: todos, events: events, persona: persona)
         }
-        // 최대 20개 캡: 항목 과다 시 JSON이 maxTokens를 초과해 파싱 실패하는 것 방지.
-        // 마감 있는 항목을 우선 정렬해 가장 중요한 todo가 LLM 입력에 포함되도록 함.
+
         let sortedActive = todos.filter { !$0.isCompleted }.sorted {
             switch ($0.dueDate, $1.dueDate) {
             case (let a?, let b?): return a < b
@@ -280,77 +425,25 @@ final class OnDeviceLLMIntelligenceEngine: IntelligenceService {
             default:               return false
             }
         }
-        let active = Array(sortedActive.prefix(20))
+        let active = Array(sortedActive.prefix(15))
         guard !active.isEmpty else { return [] }
 
-        // 항목 수에 비례해 maxTokens 조정 (항목당 ~80 토큰, 최소 512 최대 1536)
-        // 20개 JSON ≈ 1500 토큰으로 상한 하향. 메모리 절약 + 생성 속도 개선.
-        let maxTokens = max(512, min(1536, active.count * 80))
+        // V9 출력은 항목당 ~120 토큰 (4축 + reasoning + schedule)
+        let maxTokens = max(512, min(2048, active.count * 120))
+
         do {
             let text = try await service.generate(
-                systemPrompt: Self.buildSystemPrompt(persona: persona),
-                userPrompt: Self.buildUserPrompt(todos: active, events: events),
-                maxTokens: maxTokens
+                systemPrompt: Self.systemPrompt,
+                userPrompt:   Self.buildScheduleInput(todos: active, persona: persona, events: events),
+                maxTokens:    maxTokens
             )
-            let parsed = parseRankings(text: text)
-            guard !parsed.isEmpty else {
-                return await fallback.prioritize(todos: todos, events: events, persona: persona)
+            if let parsed = parseScheduleResponseV9(text: text, todos: active, persona: persona),
+               !parsed.isEmpty {
+                return parsed
             }
-            // 점수 보정: 휴리스틱 baseline blend + personaFit/notification floor
-            // 4B 모델이 score:0.0을 반환해도 결정론적 하한을 보장 (버그 A 수정)
-            let baselineResults = await fallback.prioritize(todos: active, events: events, persona: persona)
-            let baselineMap = Dictionary(uniqueKeysWithValues: baselineResults.map { ($0.todoID, $0.score) })
-            return parsed.map { r in
-                let baseline = baselineMap[r.todoID] ?? 0.0
-                var s = max(r.score, baseline)
-                if r.personaFit             { s = max(s, 0.6) }
-                else if r.needsNotification { s = max(s, 0.5) }
-                return PriorityResult(
-                    todoID: r.todoID,
-                    score: min(1.0, s),
-                    reason: r.reason,
-                    detail: r.detail,
-                    needsNotification: r.needsNotification,
-                    recommendedTime: r.recommendedTime,
-                    personaFit: r.personaFit,
-                    engine: .onDeviceMLX
-                )
-            }
-        } catch {
-            return await fallback.prioritize(todos: todos, events: events, persona: persona)
-        }
-    }
+        } catch {}
 
-    private func parseRankings(text: String) -> [PriorityResult] {
-        var t = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let s = t.range(of: "{"), let e = t.range(of: "}", options: .backwards) {
-            t = String(t[s.lowerBound...e.lowerBound])
-        }
-        guard let data     = t.data(using: .utf8),
-              let json     = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let rankings = json["rankings"] as? [[String: Any]]
-        else { return [] }
-        let isoParser = ISO8601DateFormatter()
-        return rankings.compactMap { ranking in
-            guard let idStr = ranking["todoID"] as? String,
-                  let uuid  = UUID(uuidString: idStr),
-                  let score = ranking["score"] as? Double else { return nil }
-            let detail            = ranking["detail"] as? String ?? ""
-            let needsNotification = ranking["needsNotification"] as? Bool ?? false
-            let recommendedISO    = ranking["recommendedISO"] as? String ?? ""
-            let recommendedTime   = recommendedISO.isEmpty ? nil : isoParser.date(from: recommendedISO)
-            let personaFit        = ranking["personaFit"] as? Bool ?? false
-            return PriorityResult(
-                todoID: uuid,
-                score:  max(0.0, min(1.0, score)),
-                reason: ranking["reason"] as? String ?? "",
-                detail: detail,
-                needsNotification: needsNotification,
-                recommendedTime: recommendedTime,
-                personaFit: personaFit,
-                engine: .onDeviceMLX
-            )
-        }
+        return await fallback.prioritize(todos: todos, events: events, persona: persona)
     }
 }
 
@@ -476,19 +569,19 @@ final class CloudIntelligenceEngine: IntelligenceService {
 
     private func buildInstructions(persona: PersonaContext) -> String {
         var parts = [
-            "당신은 개인 스케줄 비서입니다. 할 일 목록의 우선순위를 분석하세요.",
-            "반드시 아래 JSON 형식으로만 답하세요 (Markdown 없이 순수 JSON):",
-            "{\"rankings\":[{\"todoID\":\"<UUID>\",\"score\":0.0,\"reason\":\"<40자 이내 한국어>\",\"detail\":\"<세부 이유, 빈문자 가능>\",\"needsNotification\":false,\"recommendedISO\":\"<ISO8601 또는 빈문자>\",\"personaFit\":false}]}",
-            "score는 0.0(가장 낮음)~1.0(최우선). 절대 0.0으로 두지 말 것 — 마감 없어도 중요도(교수·관계·제출·미팅)에 따라 0.3 이상 부여. 페르소나 부합 시 높게, personaFit:true, reason에 '페르소나 관련' 포함.",
-            "고정 일정 여부는 오직 할 일에 '고정(주기)' 표기가 있는 경우에만 판단. 출처:직접입력 항목을 '필수'·'고정'·'반드시'로 단정하지 말 것 — 사용자의 자발적 선택이므로 선호로 표현.",
-            "needsNotification: 오늘 마감/마감 임박/중요 키워드 있으면 true.",
-            "recommendedISO: 처리 추천 시각(ISO8601). 오전 업무라면 당일 09:00, 저녁이라면 17:00 등. 확실하지 않으면 빈문자."
+            Prompts.RankingCloud.baseInstruction,
+            Prompts.RankingCloud.jsonFormatExample,
+            Prompts.RankingCloud.scoringRules
         ]
         if !persona.types.isEmpty {
             parts.append("\n사용자 유형: \(persona.displayNames)")
         }
         if !persona.description.isEmpty {
             parts.append("\n사용자 가치관:\n\(persona.description)")
+        }
+        let keywords = persona.weightedKeywords
+        if !keywords.isEmpty {
+            parts.append("\n핵심 업무 키워드: \(keywords.joined(separator: ", "))")
         }
         let memory = MemoryService.shared.summary
         if !memory.isEmpty { parts.append("\n사용자 행동 패턴 (참고):\n\(memory)") }
@@ -499,16 +592,15 @@ final class CloudIntelligenceEngine: IntelligenceService {
         todos: [Todo],
         events: [CalendarService.CalendarEventSummary]
     ) -> String {
-        let iso = ISO8601DateFormatter()
-        var lines = ["현재 시각: \(iso.string(from: Date()))"]
+        var lines = ["현재 시각: \(AppDateFormat.llmString(from: Date()))"]
         if !events.isEmpty {
             lines.append("\n[캘린더 이벤트 (향후 7일)]")
-            for e in events.prefix(10) { lines.append("• \(e.title) — \(iso.string(from: e.startDate))") }
+            for e in events.prefix(10) { lines.append("• \(e.title) — \(AppDateFormat.llmString(from: e.startDate))") }
         }
         lines.append("\n[우선순위 평가 대상 할 일]")
         for todo in todos {
             var ps = ["ID:\(todo.id.uuidString)", "제목:\(todo.title)"]
-            if let due = todo.dueDate { ps.append("마감:\(iso.string(from: due))") }
+            if let due = todo.dueDate { ps.append("마감:\(AppDateFormat.llmString(from: due))") }
             if !todo.tags.isEmpty     { ps.append("태그:\(todo.tags.joined(separator: ","))") }
             let sourceLabel: String
             switch todo.todoSource {
@@ -523,38 +615,61 @@ final class CloudIntelligenceEngine: IntelligenceService {
         return lines.joined(separator: "\n")
     }
 
-    // MARK: JSON Parser
+    // MARK: JSON Parser (V9 4축 형식)
 
-    private func parseRankings(text: String) -> [PriorityResult] {
+    func parseRankings(text: String) -> [PriorityResult] {
         // Markdown 코드 블록 또는 순수 JSON 모두 처리
         var t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if let s = t.range(of: "{"), let e = t.range(of: "}", options: .backwards) {
             t = String(t[s.lowerBound...e.lowerBound])
         }
-        guard let data     = t.data(using: .utf8),
-              let json     = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let rankings = json["rankings"] as? [[String: Any]]
+        guard let data           = t.data(using: .utf8),
+              let json           = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let scheduledTasks = json["scheduled_tasks"] as? [[String: Any]]
         else { return [] }
 
-        let isoParser = ISO8601DateFormatter()
-        return rankings.compactMap { ranking in
-            guard let idStr = ranking["todoID"] as? String,
-                  let uuid  = UUID(uuidString: idStr),
-                  let score = ranking["score"] as? Double else { return nil }
-            let detail            = ranking["detail"] as? String ?? ""
-            let needsNotification = ranking["needsNotification"] as? Bool ?? false
-            let recommendedISO    = ranking["recommendedISO"] as? String ?? ""
-            let recommendedTime   = recommendedISO.isEmpty ? nil : isoParser.date(from: recommendedISO)
-            let personaFit        = ranking["personaFit"] as? Bool ?? false
+        let weights   = ScheduleWeights.adaptive()
+
+        return scheduledTasks.compactMap { taskDict in
+            guard let taskID = taskDict["task_id"] as? String,
+                  let uuid   = UUID(uuidString: taskID)
+            else { return nil }
+
+            let scoring = taskDict["scoring"] as? [String: Any] ?? [:]
+            let axes    = AxisScores(
+                deadlineProximity: max(0, min(10, (scoring["deadline_proximity"] as? Double) ?? 2.0)),
+                urgency:           max(0, min(10, (scoring["urgency"]             as? Double) ?? 5.0)),
+                importance:        max(0, min(10, (scoring["task_importance"]     as? Double) ?? 5.0)),
+                chaining:          max(0, min(10, (scoring["task_chaining"]       as? Double) ?? 2.0))
+            )
+            let score = ScheduleScorer.normalizedScore(axes, weights: weights)
+
+            let reasoning      = taskDict["reasoning"] as? [String: Any] ?? [:]
+            let summary        = reasoning["summary"]         as? String ?? ""
+            let chainingDetail = reasoning["chaining_detail"] as? String ?? ""
+
+            var recommendedTime: Date? = nil
+            if let sched    = taskDict["recommended_schedule"] as? [String: Any],
+               let startISO = sched["start_time"]              as? String,
+               !startISO.isEmpty {
+                recommendedTime = AppDateFormat.parseLLMDate(startISO)
+            }
+
+            let needsNotification = (taskDict["needs_notification"] as? Bool)
+                ?? (axes.deadlineProximity >= 7.0 || axes.urgency >= 7.0)
+            let personaFit        = (taskDict["persona_fit"] as? Bool) ?? false
+
             return PriorityResult(
-                todoID: uuid,
-                score:  max(0.0, min(1.0, score)),
-                reason: ranking["reason"] as? String ?? "",
-                detail: detail,
+                todoID:            uuid,
+                score:             score,
+                reason:            String(summary.prefix(80)),
+                detail:            summary,
                 needsNotification: needsNotification,
-                recommendedTime: recommendedTime,
-                personaFit: personaFit,
-                engine: .cloud
+                recommendedTime:   recommendedTime,
+                personaFit:        personaFit,
+                engine:            .cloud,
+                axes:              axes,
+                chainingDetail:    chainingDetail
             )
         }
     }

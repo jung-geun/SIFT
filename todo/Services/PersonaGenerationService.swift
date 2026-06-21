@@ -140,7 +140,7 @@ struct PersonaGenerationService {
               let text  = parts.first?["text"] as? String
         else { throw PersonaError.apiFailed("Gemini 응답 파싱 실패") }
 
-        return parseText(text)
+        return parsePersonaJSON(text)
     }
 
     // MARK: Anthropic Claude
@@ -168,7 +168,7 @@ struct PersonaGenerationService {
               let text    = content.first?["text"] as? String
         else { throw PersonaError.apiFailed("Claude 응답 파싱 실패") }
 
-        return parseText(text)
+        return parsePersonaJSON(text)
     }
 
     // MARK: OpenAI
@@ -198,7 +198,7 @@ struct PersonaGenerationService {
               let text    = message["content"] as? String
         else { throw PersonaError.apiFailed("OpenAI 응답 파싱 실패") }
 
-        return parseText(text)
+        return parsePersonaJSON(text)
     }
 
     // MARK: On-Device LLM
@@ -238,27 +238,15 @@ struct PersonaGenerationService {
             userPrompt: userPrompt,
             maxTokens: 512
         )
-        return parseText(text)
+        return parsePersonaJSON(text)
     }
 
     // MARK: Prompt Building
 
     private func buildInstructions(existingPersona: String) -> String {
-        var lines = [
-            "당신은 할 일 패턴을 분석해 AI 우선순위 페르소나를 생성·개선하는 어시스턴트입니다.",
-            "페르소나는 AI가 할 일 우선순위를 결정할 때 참고하는 사용자 가치관 프로필입니다.",
-            "",
-            "반드시 아래 형식으로만 답하세요:",
-            "PERSONA: [2~4문장 한국어. 업무 가치관·시간대 선호·처리 스타일·카테고리 우선순위 포함]",
-            "INSIGHTS:",
-            "- [발견 패턴 1]",
-            "- [발견 패턴 2]",
-            "- [발견 패턴 3 (없으면 생략)]"
-        ]
-        if !existingPersona.isEmpty {
-            lines += ["", "기존 페르소나를 유지하며 새 패턴을 반영해 점진적으로 개선하세요."]
-        }
-        return lines.joined(separator: "\n")
+        var text = Prompts.PersonaCloud.baseInstruction
+        if !existingPersona.isEmpty { text += "\n\n" + Prompts.PersonaCloud.refinementSuffix }
+        return text
     }
 
     private func buildPrompt(existingPersona: String, todos: [Todo]) -> String {
@@ -324,32 +312,24 @@ struct PersonaGenerationService {
         return lines.joined(separator: "\n")
     }
 
-    // MARK: Text Parser (Gemini / Claude)
+    // MARK: JSON Parser (PersonaCloud)
 
-    private func parseText(_ raw: String) -> (String, [String]) {
-        var personaLines: [String] = []
-        var insights: [String] = []
-        var inInsights = false
-
-        for line in raw.components(separatedBy: "\n") {
-            let t = line.trimmingCharacters(in: .whitespaces)
-            let u = t.uppercased()
-            if u.hasPrefix("PERSONA:") {
-                let v = String(t.dropFirst(8)).trimmingCharacters(in: .whitespaces)
-                if !v.isEmpty { personaLines.append(v) }
-                inInsights = false
-            } else if u.hasPrefix("INSIGHTS:") {
-                inInsights = true
-            } else if inInsights && (t.hasPrefix("-") || t.hasPrefix("•")) {
-                let v = String(t.dropFirst()).trimmingCharacters(in: .whitespaces)
-                if !v.isEmpty { insights.append(v) }
-            } else if !inInsights && !personaLines.isEmpty && !t.isEmpty && !u.hasPrefix("INSIGHT") {
-                personaLines.append(t)
-            }
+    /// PersonaCloud JSON 출력 파싱: {"persona":"...","insights":["...","..."]}
+    /// JSON 파싱 실패 시 raw 전체를 persona로, insights는 빈 배열로 fallback.
+    func parsePersonaJSON(_ raw: String) -> (String, [String]) {
+        var t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let s = t.range(of: "{"), let e = t.range(of: "}", options: .backwards) {
+            t = String(t[s.lowerBound...e.lowerBound])
         }
-
-        let persona = personaLines.joined(separator: " ").trimmingCharacters(in: .whitespaces)
-        return (persona.isEmpty ? raw.trimmingCharacters(in: .whitespaces) : persona, insights)
+        guard let data   = t.data(using: .utf8),
+              let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            let fallback = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            return (fallback.isEmpty ? raw : fallback, [])
+        }
+        let persona  = (parsed["persona"] as? String ?? "").trimmingCharacters(in: .whitespaces)
+        let insights = (parsed["insights"] as? [String] ?? []).filter { !$0.isEmpty }
+        return (persona.isEmpty ? raw.trimmingCharacters(in: .whitespacesAndNewlines) : persona, insights)
     }
 }
 
