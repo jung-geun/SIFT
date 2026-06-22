@@ -568,7 +568,12 @@ struct TodoListView: View {
     private func deleteTodo(_ todo: Todo) {
         NotificationService.shared.cancel(todo: todo)
         if !todo.isCompleted, let eventID = todo.calendarEventID {
-            try? CalendarService.shared.removeEvent(eventID: eventID)
+            if todo.isFixedSchedule, let due = todo.dueDate {
+                // 반복 이벤트: dueDate 기준 해당 발생분만 제거
+                try? CalendarService.shared.removeEventOccurrence(eventID: eventID, on: due)
+            } else {
+                try? CalendarService.shared.removeEvent(eventID: eventID)
+            }
         }
         // 이메일 출처 삭제 → 학습 기록 (단일 choke point)
         // - messageID(sourceRef) → dismissed 영속화: 재폴링 시 재생성 방지

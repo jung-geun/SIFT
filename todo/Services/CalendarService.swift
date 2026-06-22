@@ -99,11 +99,28 @@ final class CalendarService {
         return event.eventIdentifier
     }
 
-    /// 캘린더에서 이벤트 제거 (todo 삭제·완료 시)
+    /// 캘린더에서 이벤트 제거 (todo 삭제·완료 시, 단일 이벤트용)
     func removeEvent(eventID: String) throws {
         guard isAuthorized,
               let event = store.event(withIdentifier: eventID) else { return }
         try store.remove(event, span: .thisEvent)
+    }
+
+    /// 반복 이벤트의 특정 날짜 발생분만 제거.
+    /// store.event(withIdentifier:)는 반복 이벤트의 첫 발생분을 반환하므로,
+    /// dueDate 기준 ±60초 윈도우 스캔으로 정확한 발생분을 찾아 thisEvent 삭제.
+    func removeEventOccurrence(eventID: String, on date: Date) throws {
+        guard isAuthorized else { return }
+        let start = date.addingTimeInterval(-60)
+        let end   = date.addingTimeInterval(60)
+        let pred  = store.predicateForEvents(withStart: start, end: end, calendars: nil)
+        if let occurrence = store.events(matching: pred)
+            .first(where: { $0.eventIdentifier == eventID }) {
+            try store.remove(occurrence, span: .thisEvent)
+        } else {
+            // 날짜 스캔 실패 시 표준 경로로 폴백
+            try removeEvent(eventID: eventID)
+        }
     }
 
     /// 이벤트를 삭제하지 않고 알람(리마인더)만 모두 제거.
