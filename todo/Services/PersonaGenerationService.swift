@@ -70,31 +70,17 @@ struct PersonaGenerationService {
     // MARK: Entry Point
 
     /// 사용자 패턴을 분석해 페르소나를 생성하거나 점진적으로 개선합니다.
+    /// 항상 온디바이스 — AFM(ANE) 우선, .onDevice 선택 시 Qwen 폴백 포함.
     func generate(
         existingPersona: String,
         todos: [Todo],
-        provider: PersonaAIProvider,
-        apiKey: String? = nil,
-        model: String? = nil
+        provider: PersonaAIProvider
     ) async throws -> (personaText: String, insights: [String]) {
-        let instructions   = buildInstructions(existingPersona: existingPersona)
-        let prompt         = buildPrompt(existingPersona: existingPersona, todos: todos)
-        let effectiveModel = model?.isEmpty == false ? model! : provider.defaultModel
-
         switch provider {
-        case .foundationModels:
-            return try await withAFM(existingPersona: existingPersona, todos: todos)
-        case .gemini:
-            guard let key = apiKey, !key.isEmpty else { throw PersonaError.missingAPIKey }
-            return try await withGemini(instructions: instructions, prompt: prompt, apiKey: key)
-        case .claude:
-            guard let key = apiKey, !key.isEmpty else { throw PersonaError.missingAPIKey }
-            return try await withClaude(instructions: instructions, prompt: prompt, apiKey: key, model: effectiveModel)
-        case .openai:
-            guard let key = apiKey, !key.isEmpty else { throw PersonaError.missingAPIKey }
-            return try await withOpenAI(instructions: instructions, prompt: prompt, apiKey: key, model: effectiveModel)
         case .onDevice:
             return try await generateWithOnDeviceLLM(existingPersona: existingPersona, todos: todos)
+        default:
+            return try await withAFM(existingPersona: existingPersona, todos: todos)
         }
     }
 
@@ -110,95 +96,6 @@ struct PersonaGenerationService {
         }
         #endif
         throw PersonaError.afmUnavailable
-    }
-
-    // MARK: Google Gemini
-
-    private func withGemini(instructions: String, prompt: String, apiKey: String) async throws -> (String, [String]) {
-        guard let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent") else {
-            throw PersonaError.apiFailed("잘못된 URL")
-        }
-        var req = URLRequest(url: url)
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
-        req.httpBody = try JSONSerialization.data(withJSONObject: [
-            "system_instruction": ["parts": [["text": instructions]]],
-            "contents": [["role": "user", "parts": [["text": prompt]]]],
-            "generationConfig": ["temperature": 0.7, "maxOutputTokens": 1024]
-        ])
-
-        let (data, response) = try await URLSession.shared.data(for: req)
-        let code = (response as? HTTPURLResponse)?.statusCode ?? 0
-        guard code == 200 else {
-            throw PersonaError.apiFailed("Gemini \(code) 오류. API 키와 모델 접근 권한을 확인하세요.")
-        }
-        guard let json  = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let cands = json["candidates"] as? [[String: Any]],
-              let cont  = cands.first?["content"] as? [String: Any],
-              let parts = cont["parts"] as? [[String: Any]],
-              let text  = parts.first?["text"] as? String
-        else { throw PersonaError.apiFailed("Gemini 응답 파싱 실패") }
-
-        return parsePersonaJSON(text)
-    }
-
-    // MARK: Anthropic Claude
-
-    private func withClaude(instructions: String, prompt: String, apiKey: String, model: String) async throws -> (String, [String]) {
-        var req = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!)
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "content-type")
-        req.setValue(apiKey, forHTTPHeaderField: "x-api-key")
-        req.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
-        req.httpBody = try JSONSerialization.data(withJSONObject: [
-            "model": model,
-            "max_tokens": 1024,
-            "system": instructions,
-            "messages": [["role": "user", "content": prompt]]
-        ])
-
-        let (data, response) = try await URLSession.shared.data(for: req)
-        let code = (response as? HTTPURLResponse)?.statusCode ?? 0
-        guard code == 200 else {
-            throw PersonaError.apiFailed("Claude \(code) 오류. API 키를 확인하세요.")
-        }
-        guard let json    = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let content = json["content"] as? [[String: Any]],
-              let text    = content.first?["text"] as? String
-        else { throw PersonaError.apiFailed("Claude 응답 파싱 실패") }
-
-        return parsePersonaJSON(text)
-    }
-
-    // MARK: OpenAI
-
-    private func withOpenAI(instructions: String, prompt: String, apiKey: String, model: String) async throws -> (String, [String]) {
-        var req = URLRequest(url: URL(string: "https://api.openai.com/v1/chat/completions")!)
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        req.httpBody = try JSONSerialization.data(withJSONObject: [
-            "model": model,
-            "max_tokens": 1024,
-            "messages": [
-                ["role": "system", "content": instructions],
-                ["role": "user",   "content": prompt]
-            ]
-        ])
-
-        let (data, response) = try await URLSession.shared.data(for: req)
-        let code = (response as? HTTPURLResponse)?.statusCode ?? 0
-        guard code == 200 else {
-            throw PersonaError.apiFailed("OpenAI \(code) 오류. API 키를 확인하세요.")
-        }
-        guard let json    = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let choices = json["choices"] as? [[String: Any]],
-              let message = choices.first?["message"] as? [String: Any],
-              let text    = message["content"] as? String
-        else { throw PersonaError.apiFailed("OpenAI 응답 파싱 실패") }
-
-        return parsePersonaJSON(text)
     }
 
     // MARK: On-Device LLM
@@ -338,19 +235,13 @@ struct PersonaGenerationService {
 enum PersonaError: LocalizedError {
     case afmUnavailable
     case onDeviceModelNotLoaded
-    case missingAPIKey
-    case apiFailed(String)
 
     var errorDescription: String? {
         switch self {
         case .afmUnavailable:
-            "Apple Intelligence를 사용할 수 없습니다. iPhone 15 Pro+ / M-시리즈 Mac이 필요하거나 Siri 언어 설정을 확인하세요. 다른 AI를 선택하세요."
+            "Apple Intelligence를 사용할 수 없습니다. iPhone 15 Pro+ / M-시리즈 Mac이 필요하거나 Siri 언어 설정을 확인하세요."
         case .onDeviceModelNotLoaded:
             "온디바이스 모델이 로드되지 않았습니다. 설정 > 온디바이스 모델 관리에서 모델을 다운로드하거나 상태를 확인하세요."
-        case .missingAPIKey:
-            "API 키를 입력하고 저장해주세요."
-        case .apiFailed(let msg):
-            msg
         }
     }
 }

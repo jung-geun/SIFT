@@ -91,11 +91,8 @@ final class LLMAutomationOrchestrator: ObservableObject {
 
     // MARK: - 이메일 파이프라인
 
-    /// EmailService로 이메일을 가져와 LLM 분석 후 Todo + 캘린더에 등록한다.
-    ///
-    /// EmailAnalysisEngineFactory가 `pieroot.todo.emailAnalysisEngine` 설정에 따라
-    /// OnDeviceLLMEmailEngine(LLM 요약·마감 추출) 또는 OnDeviceDetectorEngine(NSDataDetector)
-    /// 을 자동 선택한다 — 모델이 로드된 상태이므로 LLM 경로가 활성화됨.
+    /// EmailService로 이메일을 가져와 온디바이스 분석 후 Todo + 캘린더에 등록한다.
+    /// 포그라운드: FoundationModelsEmailEngine (AFM, 미가용 시 NSDataDetector 폴백).
     @discardableResult
     private func runEmailPipeline(context: ModelContext) async -> Bool {
         guard EmailService.shared.isAuthenticated else { return false }

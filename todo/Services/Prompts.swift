@@ -9,11 +9,10 @@ import Foundation
 //   1. Schedule        → IntelligenceService.swift — OnDeviceLLMIntelligenceEngine
 //   2. PatternInsights → FoundationModelsService.swift — generatePatternInsights()
 //   3. EmailFM         → FoundationModelsService.swift — analyzeEmail()
-//   4. EmailLLM        → EmailAnalysisEngine.swift — OnDeviceLLMEmailEngine
-//   5. PersonaFM       → FoundationModelsService.swift — buildPersonaInstructions()
-//   6. PersonaCloud    → PersonaGenerationService.swift — buildInstructions()
-//   7. RankingFM       → FoundationModelsService.swift — buildRankingInstructions()
-//   8. RankingCloud    → IntelligenceService.swift — CloudIntelligenceEngine.buildInstructions()
+//   4. PersonaFM       → FoundationModelsService.swift — buildPersonaInstructions()
+//   5. PersonaCloud    → PersonaGenerationService.swift — buildInstructions() (Qwen 폴백)
+//   6. RankingFM       → FoundationModelsService.swift — buildRankingInstructions()
+//   7. RankingCloud    → IntelligenceService.swift — CloudIntelligenceEngine.buildInstructions()
 
 enum Prompts {
 
@@ -156,48 +155,7 @@ enum Prompts {
         """
     }
 
-    // MARK: - 4. 이메일 마감 분석 (온디바이스 LLM / Qwen)
-
-    enum EmailLLM {
-        /// JSON 형식 응답 전용 — Qwen/MLX 온디바이스 모델용.
-        /// EmailFM(@Generable)과 동일한 분석 품질을 목표로 하되,
-        /// 파서 호환성을 위해 출력은 3필드 JSON으로 유지한다.
-        static let systemInstruction = """
-        # Role
-        당신은 업무 효율을 높이기 위해 이메일을 분석하고 핵심만 추출하는 '이메일 요약 및 마감 추출 에이전트'입니다.
-
-        # Objective
-        제공된 이메일을 분석하여 수신자가 취해야 할 핵심 액션과 마감일을 추출하고, 아래 JSON 형식으로만 응답하십시오.
-
-        # Instructions
-        1. 마감일(dueDate) 추출:
-           - 본문에 명시된 날짜·시각·요일 표현(예: "이번 주 금요일까지", "7월 31일 18시")을 ISO8601로 변환하십시오.
-           - 시각 없이 날짜만 있으면 T23:59:00을 붙이십시오.
-           - 마감일이 명시되지 않았거나 불분명하면 반드시 null로 두십시오. 절대 추측·계산하지 마십시오.
-        2. 긴급도 분류(triage):
-           - 마감 키워드(까지/마감/기한/deadline/due/expires/제출/완료/회신) 중 하나라도 있으면 "todo".
-           - 없으면 "review".
-        3. 핵심 내용(notes):
-           - 수신자가 수행해야 할 액션 아이템을 중심으로 1~2문장 한국어로 요약하십시오.
-           - 인사말, 서명, 불필요한 부연 설명은 제외하십시오.
-
-        # Strict Constraints
-        - 반드시 아래 형식의 순수 JSON만 출력하십시오. 코드블록·설명 텍스트 없음.
-        - {"dueDate":"<ISO8601 또는 null>","triage":"todo|review","notes":"<한국어 1~2문장>"}
-
-        # Examples
-        입력: "제안서를 이번 주 금요일(7월 25일) 오후 6시까지 제출해 주세요."
-        출력: {"dueDate":"2025-07-25T18:00:00","triage":"todo","notes":"제안서를 7월 25일 18시까지 제출해야 합니다."}
-
-        입력: "다음 주 화요일 팀 회의 안내드립니다. 참석 부탁드립니다."
-        출력: {"dueDate":null,"triage":"review","notes":"다음 주 화요일 팀 회의에 참석해야 합니다."}
-
-        입력: "안녕하세요, 오늘 날씨가 좋네요."
-        출력: {"dueDate":null,"triage":"review","notes":"일상적인 인사 메일입니다."}
-        """
-    }
-
-    // MARK: - 5. 페르소나 생성 — AFM (Guided Generation)
+    // MARK: - 4. 페르소나 생성 — AFM (Guided Generation)
 
     enum PersonaFM {
         /// AFM(@Generable) 전용 — 텍스트 형식 강제 없음, 구조 설명만.
@@ -224,10 +182,10 @@ enum Prompts {
         static let refinementSuffix = "기존 페르소나를 유지하며 새 패턴을 반영해 점진적으로 개선하세요."
     }
 
-    // MARK: - 6. 페르소나 생성 — 클라우드 / 온디바이스 LLM (텍스트 형식)
+    // MARK: - 5. 페르소나 생성 — 온디바이스 LLM / Qwen (텍스트 형식)
 
     enum PersonaCloud {
-        /// 클라우드(Claude/OpenAI/Gemini) 및 Qwen 텍스트 형식 전용.
+        /// Qwen/MLX 온디바이스 LLM 전용 — JSON 출력 형식.
         static let baseInstruction = """
         # Role
         당신은 사용자의 행동 패턴, 대화 맥락, 선호도를 바탕으로 정교한 사용자 페르소나를 모델링하고 업데이트하는 '전문 페르소나 분석 AI(Persona Profiling Expert)'입니다.
@@ -252,21 +210,24 @@ enum Prompts {
         static let refinementSuffix = "기존 페르소나를 유지하며 새 패턴을 반영해 점진적으로 개선하세요."
     }
 
-    // MARK: - 7. 우선순위 랭킹 — AFM (Guided Generation)
+    // MARK: - 6. 우선순위 랭킹 — AFM (Guided Generation)
 
     enum RankingFM {
         /// AFM(@Generable) 전용 기본 지시 — 동적 페르소나·메모리는 호출 시 추가.
         static let baseInstruction = """
         당신은 개인 스케줄 비서입니다. 할 일 목록의 우선순위를 분석하세요.
         score: 0.01~1.0. 마감 없어도 사용자 페르소나·핵심 업무 키워드에 부합하는 항목은 0.3 이상 부여.
-        페르소나 부합 시 score 높게, personaFit: true, reason에 '페르소나 관련' 포함.
+        페르소나 부합 시 score를 높이고, personaFit은 true로 하십시오.
+        이유(reason)에는 해당 할 일이 왜 우선순위가 높은지 혹은 낮은지 구체적인 근거를 서술하십시오. 
+        ⚠️ 주의: '개발 관련 핵심 업무', '개발 관련 핵심 업무(협업)' 같은 상투적인 문구를 기계적으로 모든 항목에 반복해서 붙이지 마십시오. 학생 평가, 논문 서베이, 워크숍 계획 등 각 태스크의 구체적인 제목과 성격에 기반하여 실제 맥락에 맞고 차별화된 이유를 작성해야 합니다.
+        마감 기한 정보 옆에 제공된 남은 시간(예: '4시간 후 마감', '3일 후 마감') 힌트를 적극적으로 참고하여, 실제 남은 기한에 부합하는 현실적인 이유를 쓰십시오.
         고정 일정 여부는 '고정(주기)' 표기 항목에만 판단. 직접입력 항목을 '필수·고정·반드시'로 단정 금지.
         needsNotification: 오늘 마감·임박·중요 키워드 있으면 true.
         recommendedISO: 처리 추천 시각(ISO8601). 불확실하면 빈 문자열.
         """
     }
 
-    // MARK: - 8. 우선순위 랭킹 — 클라우드 (4축 JSON)
+    // MARK: - 7. 우선순위 랭킹 — 클라우드 (4축 JSON)
 
     enum RankingCloud {
         /// 기본 역할 지시 — 동적 페르소나·메모리는 호출 시 추가.
@@ -283,7 +244,9 @@ enum Prompts {
         static let scoringRules = """
         scoring 각 축 0~10: deadline_proximity(마감임박도), urgency(긴급도), task_importance(중요도), task_chaining(2=독립/6=최종체인/9=비최종체인).
         절대 0.0으로 두지 말 것 — 마감 없어도 사용자 페르소나·핵심 업무 키워드에 부합하는 항목은 3.0 이상 부여.
-        페르소나 및 핵심 업무 키워드 부합 시 task_importance 높게, persona_fit:true, summary에 '페르소나 관련' 포함.
+        페르소나 및 핵심 업무 키워드 부합 시 task_importance 높게, persona_fit:true.
+        이유(reasoning.summary)에는 단순히 '개발 관련 핵심 업무'라는 동일한 문장을 복사-붙여넣기 하듯 반복하지 말고, 태스크 본질에 부합하는 구체적인 사유를 작성하십시오.
+        마감 기한 정보 옆에 괄호로 주어지는 남은 시간 힌트를 토대로 사실에 맞는 기한 사유를 기술하십시오.
         needs_notification: 오늘 마감/마감 임박/중요 키워드 있으면 true.
         start_time: 처리 추천 시각(ISO8601). 확실하지 않으면 빈문자.
         """
