@@ -191,70 +191,77 @@ struct todoApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @Environment(\.scenePhase) private var scenePhase
 
-    /// iCloud 동기화 설정 키. 기본값 false(로컬 전용).
-    /// 사용자가 설정에서 활성화하면 앱 재시작 후 CloudKit 동기화가 시작된다.
+    /// iCloud 동기화 설정 키.
     static let iCloudSyncKey = "pieroot.todo.iCloudSyncEnabled"
 
-    let sharedModelContainer: ModelContainer = {
-        let schema = Schema([Todo.self, Persona.self, TaskAuditEvent.self])
-        let useICloud = UserDefaults.standard.bool(forKey: todoApp.iCloudSyncKey)
-        
-        let config: ModelConfiguration
-        if useICloud {
-            config = ModelConfiguration(
-                schema: schema,
-                isStoredInMemoryOnly: false,
-                cloudKitDatabase: .private("iCloud.pieroot.sift-todo")
-            )
-        } else {
-            config = ModelConfiguration(
-                schema: schema,
-                isStoredInMemoryOnly: false,
-                cloudKitDatabase: .none
-            )
-        }
+    /// swappable 컨테이너 홀더 — iCloud 동기화 전환 시 재시작 없이 교체.
+    /// init() 에서 AppDataContainer.shared 싱글턴이 설정되므로
+    /// 서비스 레이어(MemoryService 등)도 AppDataContainer.shared.container로 접근 가능.
+    @StateObject private var appData = AppDataContainer()
 
+    // MARK: - 페르소나 중복 제거 (PersonaSettingsView에서도 참조)
+
+    static func deduplicatePersonas(context: ModelContext) {
         do {
-            return try ModelContainer(for: schema, configurations: [config])
-        } catch {
-            print("[SwiftData] 저장소 초기화 실패: \(error). 기존 파일 삭제 후 재시도.")
-            let configURL = config.url
-            try? FileManager.default.removeItem(at: configURL)
-            do {
-                return try ModelContainer(for: schema, configurations: [config])
-            } catch {
-                print("[SwiftData] 재시도 실패: \(error). 메모리 전용 모드로 실행.")
-                let fallback = ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
-                return try! ModelContainer(for: schema, configurations: [fallback])
+            let descriptor = FetchDescriptor<Persona>(sortBy: [SortDescriptor(\.updatedAt, order: .reverse)])
+            let personas = try context.fetch(descriptor)
+            guard personas.count > 1 else { return }
+
+            print("[Deduplication] \(personas.count)개의 페르소나가 발견되어 중복을 제거합니다.")
+
+            let targetToKeep = personas.first(where: { !$0.descriptionText.isEmpty || !$0.personaTypeRaw.isEmpty }) ?? personas.first
+
+            if let keep = targetToKeep {
+                for persona in personas where persona.id != keep.id {
+                    context.delete(persona)
+                }
+                try context.save()
             }
+        } catch {
+            print("[Deduplication] 페르소나 중복 제거 중 오류 발생: \(error)")
         }
-    }()
+    }
+
+    // MARK: - Init
+
+    init() {
+        // iCloud Key-Value Store(SettingsStore)를 앱 최시작 시점에 조기 초기화하여
+        // 초기 동기화(Initial Sync) 알림이 누락되지 않도록 방지합니다.
+        _ = SettingsStore.shared
+    }
+
+    // MARK: - Body
 
     var body: some Scene {
         WindowGroup {
             TodoListView()
                 .onAppear {
-                    // iCloud Key-Value Store 동기화 및 SettingsStore 초기화
-                    _ = SettingsStore.shared
                     NSUbiquitousKeyValueStore.default.synchronize()
 
-                    appDelegate.modelContext = sharedModelContainer.mainContext
-                    // 앱 업데이트·재실행 후 캘린더 권한 복원 (다이얼로그 없이)
+                    let ctx = appData.container.mainContext
+                    appDelegate.modelContext = ctx
+                    todoApp.deduplicatePersonas(context: ctx)
+
                     CalendarService.shared.restoreAuthorizationIfGranted()
                     scheduleEmailRefresh()
                     scheduleMemoryAnalysis()
+
                     // 콜드 런치: scenePhase는 이미 .active라 onChange가 발동하지 않음
-                    let ctx = sharedModelContainer.mainContext
                     Task {
                         await LLMAutomationOrchestrator.shared.runIfEligible(context: ctx)
                     }
                     Task {
-                        await CalendarService.shared.runWeeklyImportIfDue(context: sharedModelContainer.mainContext)
+                        await CalendarService.shared.runWeeklyImportIfDue(context: ctx)
                     }
                     Task {
-                        await CalendarService.shared.syncCalendarWithTodos(context: sharedModelContainer.mainContext)
-                        await CalendarService.shared.cleanupOldCompletedTodos(context: sharedModelContainer.mainContext)
+                        await CalendarService.shared.syncCalendarWithTodos(context: ctx)
+                        await CalendarService.shared.cleanupOldCompletedTodos(context: ctx)
                     }
+                }
+                .onChange(of: appData.rebuildID) { _, _ in
+                    // 컨테이너 재건(iCloud 동적 전환) 후 AppDelegate 컨텍스트 갱신
+                    appDelegate.modelContext = appData.container.mainContext
+                    todoApp.deduplicatePersonas(context: appData.container.mainContext)
                 }
                 .onReceive(NotificationCenter.default.publisher(for: .EKEventStoreChanged)) { _ in
                     if let ctx = appDelegate.modelContext {
@@ -266,8 +273,6 @@ struct todoApp: App {
             .onChange(of: scenePhase) { _, newPhase in
                 switch newPhase {
                 case .active:
-                    // 앱 활성화 시 LLM 자동화 파이프라인 실행 (조건 충족 시)
-                    // 포그라운드에서만 실행 — iOS는 백그라운드 GPU 작업을 금지함
                     if let ctx = appDelegate.modelContext {
                         Task {
                             await LLMAutomationOrchestrator.shared.runIfEligible(context: ctx)
@@ -281,14 +286,13 @@ struct todoApp: App {
                         }
                     }
                 case .background:
-                    // 백그라운드 진입 시 즉시 모델 언로드 (iOS 26.2+ GPU 크래시 방지 안전망)
                     OnDeviceLLMService.shared.unloadModel(reason: .background)
                 default:
                     break
                 }
             }
         }
-        .modelContainer(sharedModelContainer)
+        .modelContainer(appData.container)
 
         // macOS Settings 창 (Mac Catalyst / native Mac 대응)
         #if os(macOS)
@@ -296,7 +300,7 @@ struct todoApp: App {
             NavigationStack {
                 PersonaSettingsView()
             }
-            .modelContainer(sharedModelContainer)
+            .modelContainer(appData.container)
         }
         #endif
     }

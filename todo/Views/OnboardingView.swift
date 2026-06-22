@@ -8,7 +8,7 @@ import SwiftData
 /// isResetup = true : 설정 내 시트(PersonaSettingsView) — 재설정 모드
 struct OnboardingView: View {
     @Environment(\.modelContext) private var modelContext
-    @Query private var personas: [Persona]
+    @Query(sort: \Persona.updatedAt, order: .reverse) private var personas: [Persona]
     @AppStorage("pieroot.todo.hasOnboarded") private var hasOnboarded = false
 
     @AppStorage("pieroot.todo.iCloudSyncEnabled") private var iCloudSyncEnabled = false
@@ -18,7 +18,6 @@ struct OnboardingView: View {
 
     @State private var step: Int
     @State private var tempICloudSync: Bool = false
-    @State private var showRestartAlert: Bool = false
     @State private var selectedTypes: Set<PersonaType> = []
     @State private var selectedPresets: Set<String> = []
     @State private var customText: String = ""
@@ -51,13 +50,7 @@ struct OnboardingView: View {
             .navigationBarTitleDisplayMode(.large)
             .toolbar { toolbarContent }
             .animation(.easeInOut(duration: 0.25), value: step)
-            .alert("앱 재시작 필요", isPresented: $showRestartAlert) {
-                Button("확인") {
-                    exit(0)
-                }
-            } message: {
-                Text("iCloud 동기화가 활성화되었습니다. 동기화된 데이터를 불러오기 위해 앱을 종료합니다. 다시 시작해 주세요.")
-            }
+            // 재시작 알림 제거 — AppDataContainer.rebuild()로 동적 전환
             .task {
                 // 재설정 모드: 유형 + 프리셋 칩 + 커스텀 텍스트 복원
                 guard isResetup, let p = personas.first else { return }
@@ -344,8 +337,10 @@ struct OnboardingView: View {
                 Button {
                     if tempICloudSync {
                         iCloudSyncEnabled = true
+                        SettingsStore.shared.uploadLocalSettingsToCloud()
                         hasOnboarded = true
-                        showRestartAlert = true
+                        // 재시작 없이 동적 전환 — TodoListView에서 sync 배너 + 페르소나 체크
+                        AppDataContainer.shared.rebuild(useICloud: true)
                     } else {
                         withAnimation {
                             step = 1

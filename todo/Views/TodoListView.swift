@@ -123,11 +123,13 @@ private struct TodoRowView: View {
 struct TodoListView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \Todo.createdAt, order: .reverse) private var todos: [Todo]
-    @Query private var personas: [Persona]
+    @Query(sort: \Persona.updatedAt, order: .reverse) private var personas: [Persona]
+    @Query private var memoryAnalyses: [MemoryAnalysis]
+    @Query private var auditEvents: [TaskAuditEvent]
 
     @ObservedObject private var llmOrchestrator = LLMAutomationOrchestrator.shared
     @AppStorage("pieroot.todo.hasOnboarded") private var hasOnboarded = false
-    // "remove" = 이벤트 삭제 (기본), "silence" = 알람만 끄기
+    @AppStorage("pieroot.todo.iCloudSyncEnabled") private var iCloudSyncEnabled = false
     @AppStorage("pieroot.todo.calendarCompletionAction") private var calendarCompletionAction = "silence"
 
     @State private var showAddTodo = false
@@ -135,6 +137,17 @@ struct TodoListView: View {
     @State private var filter: TodoFilter = .active
     @State private var isPrioritizing = false
     @State private var showPrioritizingIndicator = false
+
+    // MARK: - iCloud Sync
+    @StateObject private var syncMonitor = CloudSyncMonitor()
+    @AppStorage("pieroot.todo.iCloudInitialSyncDone") private var initialSyncDone = false
+    @State private var showPostSyncPersonaSetup = false
+
+    /// @Query 4종 합계 — CloudSyncMonitor 라이브 카운트에 사용.
+    private var totalSyncedCount: Int {
+        todos.count + personas.count + memoryAnalyses.count + auditEvents.count
+    }
+
     // MARK: - Filter
 
     enum TodoFilter: String, CaseIterable {
@@ -204,8 +217,14 @@ struct TodoListView: View {
             .navigationTitle("할 일")
             .toolbar { toolbarContent }
             .overlay(alignment: .bottom) {
-                if showPrioritizingIndicator || llmOrchestrator.isRunning {
-                    prioritizingBanner
+                VStack(spacing: 8) {
+                    if syncMonitor.phase != .idle {
+                        iCloudSyncBanner
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                    }
+                    if showPrioritizingIndicator || llmOrchestrator.isRunning {
+                        prioritizingBanner
+                    }
                 }
             }
         }
@@ -225,12 +244,12 @@ struct TodoListView: View {
             NavigationStack { PersonaSettingsView() }
         }
         .task {
-            // 등록 대기열 만료 항목 자동 제거 (마감 지났지만 진행중으로 미등록된 항목)
+            // 등록 대기열 만료 항목 자동 제거
             let now = Date()
             for todo in todos where todo.triage == .review && !todo.isCompleted {
                 if let due = todo.dueDate, due < now { modelContext.delete(todo) }
             }
-            // 반복 일정 자동 승급: 1주일 이내 마감 → 등록 대기열에서 진행중으로
+            // 반복 일정 자동 승급: 1주일 이내 마감 → 진행중으로
             let weekAhead = now.addingTimeInterval(7 * 24 * 3600)
             for todo in todos where todo.triage == .review && todo.isFixedSchedule && !todo.isCompleted {
                 if let due = todo.dueDate, due >= now, due <= weekAhead {
@@ -238,9 +257,33 @@ struct TodoListView: View {
                 }
             }
             await NotificationService.shared.reschedule(todos: todos)
+            // 완료 항목이 있으면 행동 패턴 분석 (CD_MemoryAnalysis 클라우드 업로드 보장)
+            if todos.contains(where: { $0.isCompleted }) {
+                MemoryService.shared.analyze(todos: todos)
+            }
+            // iCloud 동기화 관찰 시작 (CloudSyncMonitor + 폴백 타이머)
+            startICloudSyncCheck()
         }
         .onChange(of: todos.count) {
             Task { await NotificationService.shared.reschedule(todos: todos) }
+        }
+        .onChange(of: totalSyncedCount) {
+            syncMonitor.updateCount(totalSyncedCount)
+        }
+        .onChange(of: syncMonitor.phase) { _, newPhase in
+            guard iCloudSyncEnabled else { return }
+            // 첫 동기화 완료/타임아웃 후 페르소나 유무 판정
+            if (newPhase == .idle || newPhase == .completed) && !initialSyncDone {
+                initialSyncDone = true
+                todoApp.deduplicatePersonas(context: modelContext)
+                if personas.isEmpty {
+                    showPostSyncPersonaSetup = true
+                }
+            }
+        }
+        .sheet(isPresented: $showPostSyncPersonaSetup) {
+            // 동기화 완료 후 페르소나가 없는 경우 초기 세팅 진행
+            OnboardingView(isPresented: $showPostSyncPersonaSetup, isResetup: true)
         }
     }
 
@@ -390,6 +433,60 @@ struct TodoListView: View {
         .shadow(color: .black.opacity(0.15), radius: 8, y: 4)
         .padding(.horizontal, 24)
         .padding(.bottom, 12)
+    }
+
+    // MARK: - iCloud Sync Banner
+
+    private var iCloudSyncBanner: some View {
+        HStack(spacing: 10) {
+            Group {
+                switch syncMonitor.phase {
+                case .importing:
+                    ProgressView()
+                        .controlSize(.small)
+                case .completed:
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                        .font(.body)
+                case .idle:
+                    EmptyView()
+                }
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                switch syncMonitor.phase {
+                case .importing:
+                    Text("iCloud 데이터 동기화 중…")
+                        .font(.subheadline.weight(.medium))
+                    if syncMonitor.importedCount > 0 {
+                        Text("불러온 항목 \(syncMonitor.importedCount)개")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("할 일, 페르소나, 설정 정보를 불러오고 있습니다")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                case .completed:
+                    Text("동기화 완료")
+                        .font(.subheadline.weight(.medium))
+                case .idle:
+                    EmptyView()
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+        .shadow(color: .black.opacity(0.15), radius: 8, y: 4)
+        .padding(.horizontal, 24)
+        .padding(.bottom, 4)
+    }
+
+    // MARK: - iCloud Sync Logic
+
+    private func startICloudSyncCheck() {
+        guard iCloudSyncEnabled else { return }
+        syncMonitor.startObserving(initialCount: totalSyncedCount)
     }
 
     // MARK: - Swipe Actions

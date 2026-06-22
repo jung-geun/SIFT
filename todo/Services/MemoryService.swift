@@ -1,9 +1,10 @@
 import Foundation
+import SwiftData
 
 /// 앱 내 할 일 완료 패턴을 분석해 AI 프롬프트용 메모리 요약을 생성합니다.
 ///
 /// 분석 항목: 완료 시간대 분포 / 태그별 처리 속도 / 완료율 / 마감 준수율
-/// 결과는 UserDefaults에 저장되어 AFM/Gemini/Claude 프롬프트에 자동 주입됩니다.
+/// 결과는 SwiftData(MemoryAnalysis)에 저장되어 AFM/Gemini/Claude 프롬프트에 자동 주입됩니다.
 /// BGProcessingTask(pieroot.todo.memoryAnalysis)로 2일 이상 간격 백그라운드 실행.
 
 /// 포그라운드 패턴 분석 결과를 사용자 확인 전까지 임시 보관하는 구조체.
@@ -15,52 +16,69 @@ struct MemoryAnalysisResult {
     let productiveHour: Int?
 }
 
-struct MemoryService {
+final class MemoryService {
 
     static let shared = MemoryService()
     private init() {}
-
-    private let summaryKey  = "pieroot.todo.memorySummary"
-    private let insightsKey = "pieroot.todo.memoryInsights"
-    private let dateKey     = "pieroot.todo.memoryDate"
+    
+    // MARK: - SwiftData Cache
+    
+    private let cacheLock = NSLock()
+    private var cachedAnalysis: MemoryAnalysis?
+    private var lastFetchTime: Date = .distantPast
+    
+    private var latestAnalysis: MemoryAnalysis? {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        
+        let now = Date()
+        if now.timeIntervalSince(lastFetchTime) < 5 {
+            return cachedAnalysis
+        }
+        
+        do {
+            let context = ModelContext(AppDataContainer.shared.container)
+            var descriptor = FetchDescriptor<MemoryAnalysis>(sortBy: [SortDescriptor(\.createdAt, order: .reverse)])
+            descriptor.fetchLimit = 1
+            cachedAnalysis = try context.fetch(descriptor).first
+            lastFetchTime = now
+        } catch {
+            print("[MemoryService] SwiftData fetch 실패: \(error)")
+        }
+        return cachedAnalysis
+    }
 
     // MARK: - Stored State
 
     var summary: String {
-        UserDefaults.standard.string(forKey: summaryKey) ?? ""
+        latestAnalysis?.summary ?? ""
     }
 
     var insights: [String] {
-        UserDefaults.standard.stringArray(forKey: insightsKey) ?? []
+        latestAnalysis?.insights ?? []
     }
 
     var lastAnalysisDate: Date? {
-        let t = UserDefaults.standard.double(forKey: dateKey)
-        return t > 0 ? Date(timeIntervalSince1970: t) : nil
+        latestAnalysis?.createdAt
     }
 
     /// HeuristicEngine이 소폭 부스트에 쓰는 "빠르게 처리하는 태그" 집합.
     /// analyze()가 실행된 적 없으면 빈 Set(부스트 없음).
     var fastTags: Set<String> {
-        UserDefaults.standard.stringArray(forKey: fastTagsKey).map(Set.init) ?? []
+        Set(latestAnalysis?.fastTags ?? [])
     }
-
-    private let fastTagsKey       = "pieroot.todo.memoryFastTags"
-    private let overdueRateKey    = "pieroot.todo.memoryOverdueRate"
-    private let productiveHourKey = "pieroot.todo.memoryProductiveHour"
 
     /// 마감 준수율 역지표: 완료된 항목 중 마감 이후 처리된 비율.
     /// 0.0이면 기록 없음 또는 모두 제때 완료.
     /// ScheduleWeights.adaptive()가 이 값을 바탕으로 deadline/urgency 가중치를 자동 조정한다.
     var overdueRate: Double {
-        UserDefaults.standard.double(forKey: overdueRateKey)
+        latestAnalysis?.overdueRate ?? 0.0
     }
 
     /// 가장 생산적인 시간대(0~23). nil이면 분석 데이터 없음.
     /// HeuristicEngine이 recommendedTime 산출 시 활용한다.
     var productiveHour: Int? {
-        guard UserDefaults.standard.object(forKey: productiveHourKey) != nil else { return nil }
-        return UserDefaults.standard.integer(forKey: productiveHourKey)
+        latestAnalysis?.productiveHour
     }
 
     // MARK: - Analysis
@@ -69,13 +87,15 @@ struct MemoryService {
     func analyze(todos: [Todo]) -> (summary: String, insights: [String]) {
         let completed = todos.filter { $0.isCompleted && $0.completedAt != nil }
         guard !completed.isEmpty else {
-            save(summary: "", insights: [])
-            return ("", [])
+            // 완료된 할 일이 없으면 기존 분석을 유지하기 위해 덮어쓰지 않습니다.
+            return (latestAnalysis?.summary ?? "", latestAnalysis?.insights ?? [])
         }
 
         let cal = Calendar.current
         var lines: [String] = []
         var insights: [String] = []
+
+        var detectedProductiveHour: Int?
 
         // 1. 완료 시간대 분포
         let hourCounts = Dictionary(
@@ -85,7 +105,7 @@ struct MemoryService {
 
         if let top = hourCounts.max(by: { $0.value < $1.value }) {
             let h = top.key
-            UserDefaults.standard.set(h, forKey: productiveHourKey)
+            detectedProductiveHour = h
             lines.append("가장 생산적인 시간대: \(h)시~\(h+1)시 (\(top.value)건 완료)")
             insights.append("\(h)시~\(h+1)시에 집중력이 가장 높음")
         }
@@ -136,7 +156,6 @@ struct MemoryService {
             return comp > due
         }.count
         let computedOverdueRate = completed.isEmpty ? 0.0 : Double(overdueCount) / Double(completed.count)
-        UserDefaults.standard.set(computedOverdueRate, forKey: overdueRateKey)
         if computedOverdueRate > 0.3 {
             let s = String(format: "완료 항목의 %.0f%%가 마감 이후에 처리됨", computedOverdueRate * 100)
             lines.append(s)
@@ -152,7 +171,7 @@ struct MemoryService {
         }
 
         let summary = lines.joined(separator: "\n")
-        save(summary: summary, insights: insights, fastTags: Array(fastTagSet))
+        save(summary: summary, insights: insights, fastTags: Array(fastTagSet), overdueRate: computedOverdueRate, productiveHour: detectedProductiveHour)
         return (summary, insights)
     }
 
@@ -181,7 +200,7 @@ struct MemoryService {
                 )
                 if !fmInsights.isEmpty {
                     // insights만 갱신 (summary·fastTags는 휴리스틱 값 유지)
-                    UserDefaults.standard.set(fmInsights, forKey: insightsKey)
+                    save(summary: summary, insights: fmInsights, fastTags: Array(latestAnalysis?.fastTags ?? []), overdueRate: latestAnalysis?.overdueRate ?? 0.0, productiveHour: latestAnalysis?.productiveHour)
                     return (summary, fmInsights)
                 }
             } catch {
@@ -309,22 +328,51 @@ struct MemoryService {
         )
     }
 
-    /// 미리보기로 생성된 분석 결과를 UserDefaults에 저장한다.
+    /// 미리보기로 생성된 분석 결과를 저장한다.
     /// 사용자가 "적용" 버튼을 누른 후에만 호출.
     func applyAnalysisResult(_ result: MemoryAnalysisResult) {
-        save(summary: result.summary, insights: result.insights, fastTags: Array(result.fastTags))
-        if let h = result.productiveHour {
-            UserDefaults.standard.set(h, forKey: productiveHourKey)
-        }
-        UserDefaults.standard.set(result.overdueRate, forKey: overdueRateKey)
+        save(
+            summary: result.summary,
+            insights: result.insights,
+            fastTags: Array(result.fastTags),
+            overdueRate: result.overdueRate,
+            productiveHour: result.productiveHour
+        )
     }
 
     // MARK: - Persistence
 
-    private func save(summary: String, insights: [String], fastTags: [String] = []) {
-        UserDefaults.standard.set(summary, forKey: summaryKey)
-        UserDefaults.standard.set(insights, forKey: insightsKey)
-        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: dateKey)
-        UserDefaults.standard.set(fastTags, forKey: fastTagsKey)
+    private func save(summary: String, insights: [String], fastTags: [String] = [], overdueRate: Double = 0.0, productiveHour: Int? = nil) {
+        let analysis = MemoryAnalysis(
+            summary: summary,
+            insights: insights,
+            fastTags: fastTags,
+            overdueRate: overdueRate,
+            productiveHour: productiveHour
+        )
+        
+        do {
+            let context = ModelContext(AppDataContainer.shared.container)
+            context.insert(analysis)
+            
+            // 기존 데이터가 너무 많이 쌓이지 않도록 오래된 분석 결과 정리 (최근 5개만 유지)
+            let descriptor = FetchDescriptor<MemoryAnalysis>(sortBy: [SortDescriptor(\.createdAt, order: .reverse)])
+            let allAnalyses = try context.fetch(descriptor)
+            if allAnalyses.count > 5 {
+                for old in allAnalyses.dropFirst(5) {
+                    context.delete(old)
+                }
+            }
+            try context.save()
+            
+            // 저장 성공 시 캐시 갱신
+            cacheLock.lock()
+            cachedAnalysis = analysis
+            lastFetchTime = Date()
+            cacheLock.unlock()
+            
+        } catch {
+            print("[MemoryService] SwiftData 저장 실패: \(error)")
+        }
     }
 }

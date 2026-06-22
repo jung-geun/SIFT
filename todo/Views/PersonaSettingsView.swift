@@ -108,7 +108,7 @@ extension View {
 // 1. 나의 페르소나
 struct PersonaDetailView: View {
     @Environment(\.modelContext) private var modelContext
-    @Query private var personas: [Persona]
+    @Query(sort: \Persona.updatedAt, order: .reverse) private var personas: [Persona]
     @Query private var todos: [Todo]
     
     @State private var isGenerating = false
@@ -166,6 +166,7 @@ struct PersonaDetailView: View {
                     } label: {
                         Label("페르소나 다시 설정", systemImage: "arrow.clockwise")
                     }
+                    .buttonStyle(.borderless)
                     
                     Button {
                         generationResult = nil
@@ -184,6 +185,7 @@ struct PersonaDetailView: View {
                             .fontWeight(.medium)
                         }
                     }
+                    .buttonStyle(.borderless)
                     .disabled(isGenerating || !afmAvailable)
                     
                     if !afmAvailable {
@@ -207,6 +209,17 @@ struct PersonaDetailView: View {
         .navigationTitle("나의 페르소나")
         .navigationBarTitleDisplayMode(.inline)
         .task {
+            // 중복된 페르소나 정리
+            todoApp.deduplicatePersonas(context: modelContext)
+            
+            // iCloud 활성화 시 CloudKit 동기화 도착을 최대 3초 대기한 뒤 Persona 생성
+            let useICloud = UserDefaults.standard.bool(forKey: todoApp.iCloudSyncKey)
+            if personas.isEmpty && useICloud {
+                for _ in 0..<30 {
+                    try? await Task.sleep(for: .milliseconds(100))
+                    if !personas.isEmpty { break }
+                }
+            }
             if personas.isEmpty {
                 let p = Persona()
                 modelContext.insert(p)
@@ -306,11 +319,18 @@ struct PersonaDetailView: View {
 // 2. 행동 패턴 분석
 struct MemoryDetailView: View {
     @Query private var todos: [Todo]
+    @Query(sort: \MemoryAnalysis.createdAt, order: .reverse) private var analyses: [MemoryAnalysis]
     
-    @State private var memoryInsights: [String] = []
-    @State private var memoryDate: Date?
     @State private var isAnalyzing = false
     @State private var pendingMemoryResult: MemoryAnalysisResult?
+    
+    private var memoryInsights: [String] {
+        analyses.first?.insights ?? []
+    }
+    
+    private var memoryDate: Date? {
+        analyses.first?.createdAt
+    }
     
     var body: some View {
         Form {
@@ -357,6 +377,7 @@ struct MemoryDetailView: View {
                         Label(pendingMemoryResult == nil ? "지금 패턴 분석" : "다시 분석", systemImage: "chart.bar.xaxis")
                     }
                 }
+                .buttonStyle(.borderless)
                 .disabled(isAnalyzing || todos.filter { $0.isCompleted }.isEmpty)
             } footer: {
                 Text("완료한 할 일의 시간대 · 태그별 처리 속도 · 완료율을 분석합니다. Apple Foundation Models가 사용자 친화적 패턴 인사이트를 재작성합니다(미가용 시 통계 기반). AI 우선순위와 페르소나 생성에 자동 반영됩니다. 백그라운드에서 2일 간격으로 자동 실행됩니다.")
@@ -364,10 +385,6 @@ struct MemoryDetailView: View {
         }
         .navigationTitle("행동 패턴 분석")
         .navigationBarTitleDisplayMode(.inline)
-        .task {
-            memoryInsights = MemoryService.shared.insights
-            memoryDate = MemoryService.shared.lastAnalysisDate
-        }
     }
     
     @ViewBuilder
@@ -431,8 +448,6 @@ struct MemoryDetailView: View {
     private func applyMemoryAnalysis() {
         guard let result = pendingMemoryResult else { return }
         MemoryService.shared.applyAnalysisResult(result)
-        memoryInsights = result.insights
-        memoryDate = MemoryService.shared.lastAnalysisDate
         pendingMemoryResult = nil
     }
 }
@@ -1255,6 +1270,9 @@ struct ICloudSyncDetailView: View {
                     get: { iCloudSyncEnabled },
                     set: { newValue in
                         iCloudSyncEnabled = newValue
+                        if newValue {
+                            SettingsStore.shared.uploadLocalSettingsToCloud()
+                        }
                         showSyncRestartAlert = true
                     }
                 ))
@@ -1353,6 +1371,7 @@ struct AppInfoDetailView: View {
                 } label: {
                     Label("개발 현황 및 예정 기능", systemImage: "list.bullet.clipboard")
                 }
+                .buttonStyle(.borderless)
             }
         }
         .navigationTitle("앱 정보")

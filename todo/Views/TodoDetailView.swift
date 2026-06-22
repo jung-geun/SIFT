@@ -47,7 +47,7 @@ struct TodoDetailView: View {
                     todo.title = newVal
                     todo.updatedAt = Date()
                     if todo.calendarEventID != nil {
-                        try? CalendarService.shared.registerOrUpdate(todo: todo)
+                        _ = try? CalendarService.shared.registerOrUpdate(todo: todo)
                     }
                 }
             ))
@@ -58,7 +58,7 @@ struct TodoDetailView: View {
                     todo.notes = newVal
                     todo.updatedAt = Date()
                     if todo.calendarEventID != nil {
-                        try? CalendarService.shared.registerOrUpdate(todo: todo)
+                        _ = try? CalendarService.shared.registerOrUpdate(todo: todo)
                     }
                 }
             ), axis: .vertical)
@@ -103,7 +103,7 @@ struct TodoDetailView: View {
                             todo.dueDate = newDate
                             todo.updatedAt = Date()
                             if todo.calendarEventID != nil {
-                                try? CalendarService.shared.registerOrUpdate(todo: todo)
+                                _ = try? CalendarService.shared.registerOrUpdate(todo: todo)
                             } else {
                                 CalendarService.shared.applyAutoRegistration(for: todo)
                             }

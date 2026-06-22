@@ -40,7 +40,7 @@ final class EmailLearningStore {
     /// 해당 messageID(sourceRef)가 이미 처리(삭제)된 적 있는지 확인
     func isDismissed(_ messageID: String) -> Bool {
         guard !messageID.isEmpty else { return false }
-        let list = UserDefaults.standard.stringArray(forKey: Key.dismissedIDs) ?? []
+        let list: [String] = SettingsStore.shared.get(Key.dismissedIDs, defaultValue: [])
         return list.contains(messageID)
     }
 
@@ -62,7 +62,8 @@ final class EmailLearningStore {
 
     /// 억제된 발신자 이메일 목록 반환 (설정 화면 표시용)
     func suppressedSenders() -> [String] {
-        (UserDefaults.standard.stringArray(forKey: Key.suppressedSenders) ?? []).sorted()
+        let list: [String] = SettingsStore.shared.get(Key.suppressedSenders, defaultValue: [])
+        return list.sorted()
     }
 
     /// 발신자 억제를 수동으로 해제 (설정 화면 해제 버튼)
@@ -70,7 +71,7 @@ final class EmailLearningStore {
         let lower = senderEmail.lowercased()
         var list = suppressedSendersSet()
         list.remove(lower)
-        UserDefaults.standard.set(Array(list), forKey: Key.suppressedSenders)
+        SettingsStore.shared.set(Key.suppressedSenders, value: Array(list))
 
         // 삭제 카운트도 리셋 — 해제 후 다시 임계치부터 카운트
         var counts = deletionCounts()
@@ -81,27 +82,28 @@ final class EmailLearningStore {
     // MARK: - Private Helpers
 
     private func suppressedSendersSet() -> Set<String> {
-        Set(UserDefaults.standard.stringArray(forKey: Key.suppressedSenders) ?? [])
+        let list: [String] = SettingsStore.shared.get(Key.suppressedSenders, defaultValue: [])
+        return Set(list)
     }
 
     private func deletionCounts() -> [String: Int] {
-        (UserDefaults.standard.dictionary(forKey: Key.deletionCounts) as? [String: Int]) ?? [:]
+        SettingsStore.shared.get(Key.deletionCounts, defaultValue: [:])
     }
 
     private func saveDeletionCounts(_ counts: [String: Int]) {
-        UserDefaults.standard.set(counts, forKey: Key.deletionCounts)
+        SettingsStore.shared.set(Key.deletionCounts, value: counts)
     }
 
     private func addDismissed(_ messageID: String) {
         guard !messageID.isEmpty else { return }
-        var list = UserDefaults.standard.stringArray(forKey: Key.dismissedIDs) ?? []
+        var list: [String] = SettingsStore.shared.get(Key.dismissedIDs, defaultValue: [])
         guard !list.contains(messageID) else { return }
         list.append(messageID)
         // FIFO 캡 — 오래된 것부터 제거
         if list.count > dismissedCap {
             list = Array(list.suffix(dismissedCap))
         }
-        UserDefaults.standard.set(list, forKey: Key.dismissedIDs)
+        SettingsStore.shared.set(Key.dismissedIDs, value: list)
     }
 
     private func incrementDeletionCount(for senderEmail: String) {
@@ -114,7 +116,7 @@ final class EmailLearningStore {
         if newCount >= suppressionThreshold {
             var suppressed = suppressedSendersSet()
             suppressed.insert(senderEmail)
-            UserDefaults.standard.set(Array(suppressed), forKey: Key.suppressedSenders)
+            SettingsStore.shared.set(Key.suppressedSenders, value: Array(suppressed))
         }
     }
 }

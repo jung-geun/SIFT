@@ -5,7 +5,7 @@ struct AddTodoView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
     @Query private var todos: [Todo]
-    @Query private var personas: [Persona]
+    @Query(sort: \Persona.updatedAt, order: .reverse) private var personas: [Persona]
 
     // MARK: - State
 
