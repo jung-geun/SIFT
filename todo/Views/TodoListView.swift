@@ -135,6 +135,7 @@ struct TodoListView: View {
     @State private var filter: TodoFilter = .active
     @State private var isPrioritizing = false
     @State private var showPrioritizingIndicator = false
+    @State private var isSyncingCalendar = false
     // MARK: - Filter
 
     enum TodoFilter: String, CaseIterable {
@@ -315,6 +316,9 @@ struct TodoListView: View {
             }
         }
         .listStyle(.insetGrouped)
+        .refreshable {
+            await CalendarService.shared.syncCalendarWithTodos(context: modelContext)
+        }
         .overlay {
             if filteredTodos.isEmpty {
                 emptyState
@@ -426,7 +430,23 @@ struct TodoListView: View {
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         ToolbarItem(placement: .navigationBarTrailing) {
-            HStack(spacing: 4) {
+            HStack(spacing: 12) {
+                Button {
+                    isSyncingCalendar = true
+                    Task {
+                        await CalendarService.shared.syncCalendarWithTodos(context: modelContext)
+                        isSyncingCalendar = false
+                    }
+                } label: {
+                    if isSyncingCalendar {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                    }
+                }
+                .disabled(isSyncingCalendar)
+
                 Button { showAddTodo = true } label: {
                     Image(systemName: "plus")
                         .fontWeight(.semibold)
@@ -451,6 +471,7 @@ struct TodoListView: View {
     private func toggleComplete(_ todo: Todo) {
         todo.isCompleted.toggle()
         todo.completedAt = todo.isCompleted ? Date() : nil
+        todo.updatedAt = Date()
         NotificationService.shared.cancel(todo: todo)
         if todo.isCompleted, let eventID = todo.calendarEventID {
             if calendarCompletionAction == "silence" {
@@ -465,7 +486,7 @@ struct TodoListView: View {
 
     private func deleteTodo(_ todo: Todo) {
         NotificationService.shared.cancel(todo: todo)
-        if let eventID = todo.calendarEventID {
+        if !todo.isCompleted, let eventID = todo.calendarEventID {
             try? CalendarService.shared.removeEvent(eventID: eventID)
         }
         // 이메일 출처 삭제 → 학습 기록 (단일 choke point)
@@ -507,18 +528,12 @@ struct TodoListView: View {
         let results = await service.prioritize(todos: activeTodos, events: events, persona: persona)
 
         for result in results {
-            if let todo = activeTodos.first(where: { $0.id == result.todoID }),
-               todo.manualPriority == nil {    // 수동 우선순위 절대 덮어쓰지 않음
-                todo.computedPriorityScore = result.score
-                todo.priorityReason        = result.reason
-                todo.aiEngine              = result.engine.rawValue
-                todo.aiDetail              = result.detail
-                todo.aiNeedsNotification   = result.needsNotification
-                todo.aiRecommendedTime     = result.recommendedTime
-                todo.aiPersonaFit          = result.personaFit
+            if let todo = activeTodos.first(where: { $0.id == result.todoID }) {
+                todo.apply(result)   // 수동 우선순위 보호는 Todo.apply() 내부에서 처리
 
                 // 알림 자동 스케줄: needsNotification + dueDate 있음 + reminderOffsets 미설정
-                if result.needsNotification && todo.dueDate != nil && todo.reminderOffsets.isEmpty {
+                if result.needsNotification && todo.dueDate != nil && todo.reminderOffsets.isEmpty
+                    && todo.manualPriority == nil {
                     if let rec = result.recommendedTime, let due = todo.dueDate {
                         // 추천 시각에 발화: offset = recommendedTime - dueDate
                         let offset = rec.timeIntervalSince(due)

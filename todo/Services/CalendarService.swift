@@ -369,4 +369,96 @@ extension CalendarService {
             }
         }
     }
+
+    /// 어플과 캘린더의 일정을 양방향으로 동기화하고, 충돌 시 최근 수정된 내용을 우선하여 갱신합니다.
+    @MainActor
+    func syncCalendarWithTodos(context: ModelContext) async {
+        guard isAuthorized else { return }
+
+        // 외부 캘린더 소스 실시간 리프레시 및 캐시 무효화
+        store.reset()
+        store.refreshSourcesIfNecessary()
+
+        let descriptor = FetchDescriptor<Todo>()
+        guard let todos = try? context.fetch(descriptor) else { return }
+
+        var hasChanges = false
+
+        for todo in todos {
+            // 캘린더에서 역수입한 todo는 이 메서드의 관리 대상이 아님
+            if todo.todoSource == .calendar { continue }
+
+            // 어플에서 생성된 할 일인데 마감이 설정되었지만 캘린더 ID가 없는 경우 -> 자동 등록
+            if todo.dueDate != nil && todo.calendarEventID == nil {
+                if let eventID = try? registerOrUpdate(todo: todo) {
+                    todo.calendarEventID = eventID
+                    // 저장 성공 후 이벤트의 수정 시간을 어플의 updatedAt과 정확히 싱크
+                    if let savedEvent = store.event(withIdentifier: eventID) {
+                        todo.updatedAt = savedEvent.lastModifiedDate ?? Date()
+                    } else {
+                        todo.updatedAt = Date()
+                    }
+                    hasChanges = true
+                }
+                continue
+            }
+
+            // 캘린더 ID가 매핑되어 있는 경우 -> 양방향 싱크 및 충돌 해결
+            if let eventID = todo.calendarEventID {
+                if let event = store.event(withIdentifier: eventID) {
+                    let todoUpdated = todo.updatedAt
+                    let eventUpdated = event.lastModifiedDate ?? event.creationDate ?? Date()
+
+                    // 실제 데이터 차이가 있는지 명시적으로 검증 (불필요한 동기화 루프 및 오판정 방지)
+                    let isTitleChanged = todo.title != (event.title ?? "")
+                    let isNotesChanged = todo.notes != (event.notes ?? "")
+                    let isDueDateChanged = todo.dueDate != event.startDate
+
+                    if isTitleChanged || isNotesChanged || isDueDateChanged {
+                        // 수정 시간 비교 (1초 미만 오차 허용)
+                        let timeDiff = todoUpdated.timeIntervalSince(eventUpdated)
+
+                        if timeDiff > 1.0 {
+                            // 어플의 수정 시각이 더 최신 -> 캘린더 이벤트를 어플 정보로 갱신
+                            event.title = todo.title.isEmpty ? "할 일 마감" : todo.title
+                            event.startDate = todo.dueDate ?? Date()
+                            event.endDate = (todo.dueDate ?? Date()).addingTimeInterval(3600)
+                            event.notes = todo.notes
+                            try? store.save(event, span: .thisEvent)
+                            
+                            // 동기화 루프 방지를 위해 어플의 updatedAt을 캘린더의 최종 수정 시각으로 정확하게 싱크
+                            todo.updatedAt = event.lastModifiedDate ?? Date()
+                            hasChanges = true
+                        } else if timeDiff < -1.0 {
+                            // 캘린더의 수정 시각이 더 최신 -> 어플 Todo를 캘린더 정보로 갱신
+                            todo.title = event.title ?? ""
+                            todo.dueDate = event.startDate
+                            todo.notes = event.notes ?? ""
+                            todo.updatedAt = eventUpdated
+                            hasChanges = true
+                        } else {
+                            // 만약 시각 차이가 1초 이내이고 데이터 불일치가 발생한다면,
+                            // 기본적으로 캘린더의 변경사항을 덮어써서 어플에 동기화해 줌 (캘린더 수정 반영력 극대화)
+                            todo.title = event.title ?? ""
+                            todo.dueDate = event.startDate
+                            todo.notes = event.notes ?? ""
+                            todo.updatedAt = eventUpdated
+                            hasChanges = true
+                        }
+                    }
+                } else {
+                    // 캘린더에서 이벤트가 삭제된 경우 -> 어플에서도 마감 정보 해제
+                    todo.calendarEventID = nil
+                    todo.dueDate = nil
+                    todo.updatedAt = Date()
+                    hasChanges = true
+                }
+            }
+        }
+
+        // 변경된 데이터가 있다면 SwiftData DB에 영속화하여 View 갱신
+        if hasChanges {
+            try? context.save()
+        }
+    }
 }

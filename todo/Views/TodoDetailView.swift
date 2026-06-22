@@ -41,9 +41,27 @@ struct TodoDetailView: View {
 
     private var titleSection: some View {
         Section("제목 및 메모") {
-            TextField("제목", text: $todo.title)
+            TextField("제목", text: Binding(
+                get: { todo.title },
+                set: { newVal in
+                    todo.title = newVal
+                    todo.updatedAt = Date()
+                    if todo.calendarEventID != nil {
+                        try? CalendarService.shared.registerOrUpdate(todo: todo)
+                    }
+                }
+            ))
                 .font(.body)
-            TextField("메모 (선택)", text: $todo.notes, axis: .vertical)
+            TextField("메모 (선택)", text: Binding(
+                get: { todo.notes },
+                set: { newVal in
+                    todo.notes = newVal
+                    todo.updatedAt = Date()
+                    if todo.calendarEventID != nil {
+                        try? CalendarService.shared.registerOrUpdate(todo: todo)
+                    }
+                }
+            ), axis: .vertical)
                 .lineLimit(3...8)
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
@@ -58,11 +76,17 @@ struct TodoDetailView: View {
                 set: { on in
                     if on {
                         todo.dueDate = Calendar.current.date(byAdding: .day, value: 1, to: Date())
+                        todo.updatedAt = Date()
                         // 마감 첫 설정 시 자동 등록 정책 적용 (강제 우선순위 포함)
                         CalendarService.shared.applyAutoRegistration(for: todo)
                     } else {
+                        if let eventID = todo.calendarEventID {
+                            try? CalendarService.shared.removeEvent(eventID: eventID)
+                            todo.calendarEventID = nil
+                        }
                         todo.dueDate = nil
                         todo.reminderOffsets = []   // 마감 없으면 알림도 제거
+                        todo.updatedAt = Date()
                         NotificationService.shared.cancel(todo: todo)
                     }
                 }
@@ -77,6 +101,12 @@ struct TodoDetailView: View {
                         get: { todo.dueDate ?? Date() },
                         set: { newDate in
                             todo.dueDate = newDate
+                            todo.updatedAt = Date()
+                            if todo.calendarEventID != nil {
+                                try? CalendarService.shared.registerOrUpdate(todo: todo)
+                            } else {
+                                CalendarService.shared.applyAutoRegistration(for: todo)
+                            }
                             Task { await NotificationService.shared.update(todo: todo) }
                         }
                     ),
@@ -104,11 +134,15 @@ struct TodoDetailView: View {
                         .foregroundStyle(.secondary)
                 }
                 Menu {
-                    Button("설정 안함") { todo.manualPriority = nil }
+                    Button("설정 안함") {
+                        todo.manualPriority = nil
+                        todo.updatedAt = Date()
+                    }
                     Divider()
                     ForEach(TodoPriority.allCases, id: \.rawValue) { p in
                         Button {
                             todo.manualPriority = p.rawValue
+                            todo.updatedAt = Date()
                             // 긴급/최우선 선택 시 강제 등록 (마감 있을 때만)
                             CalendarService.shared.applyAutoRegistration(for: todo)
                         } label: {
@@ -433,11 +467,13 @@ struct TodoDetailView: View {
     private func addOffset(_ offset: Double) {
         guard !todo.reminderOffsets.contains(offset) else { return }
         todo.reminderOffsets.append(offset)
+        todo.updatedAt = Date()
         Task { await NotificationService.shared.update(todo: todo) }
     }
 
     private func removeOffset(_ offset: Double) {
         todo.reminderOffsets.removeAll { $0 == offset }
+        todo.updatedAt = Date()
         Task { await NotificationService.shared.update(todo: todo) }
     }
 

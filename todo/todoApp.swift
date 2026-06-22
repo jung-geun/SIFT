@@ -1,68 +1,15 @@
 import SwiftUI
 import SwiftData
+import CloudKit
 import UserNotifications
 import BackgroundTasks
+import EventKit
 
 // MARK: - BGTask 식별자
 
 private let kEmailRefreshTaskID  = "pieroot.todo.emailRefresh"
 private let kMemoryAnalysisTaskID = "pieroot.todo.memoryAnalysis"
 
-// MARK: - Debug Overlay
-
-struct DebugOverlayView: View {
-    let swiftDataMode: String
-    @AppStorage("debugOverlayDismissed") private var dismissed = false
-
-    var body: some View {
-        if !dismissed {
-            VStack(alignment: .leading, spacing: 0) {
-                HStack {
-                    Label("Debug", systemImage: "wrench.and.screwdriver.fill")
-                        .font(.caption.bold())
-                        .foregroundStyle(.orange)
-                    Spacer()
-                    Button {
-                        dismissed = true
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .padding(.bottom, 6)
-
-                VStack(alignment: .leading, spacing: 3) {
-                    row("✅ main() 진입", "앱 코드 실행 중")
-                    row("iOS", ProcessInfo.processInfo.operatingSystemVersionString)
-                    row("기기", UIDevice.current.model)
-                    row("SwiftData", swiftDataMode)
-                    row("AI 제공자", UserDefaults.standard.string(forKey: "selectedAIProvider") ?? "미설정(AFM)")
-                    row("FoundationModels", "링크 제거됨 — iOS 27 beta XPC 크래시 대응")
-                    row("BGTask등록", ProcessInfo.processInfo.environment["XCODE_RUNNING_FOR_PREVIEWS"] == "1" ? "Preview 스킵" : "등록됨")
-                }
-            }
-            .padding(12)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
-            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.orange.opacity(0.4), lineWidth: 1))
-            .padding(.horizontal, 16)
-            .padding(.top, 60)
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
-    @ViewBuilder
-    private func row(_ label: String, _ value: String) -> some View {
-        HStack(alignment: .top, spacing: 4) {
-            Text("\(label):")
-                .font(.system(.caption2, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .frame(width: 100, alignment: .leading)
-            Text(value)
-                .font(.system(.caption2, design: .monospaced))
-                .foregroundStyle(.primary)
-        }
-    }
-}
 
 // MARK: - App Delegate
 
@@ -95,7 +42,18 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
                 Task { await self.handleMemoryAnalysis(task: task as! BGProcessingTask) }
             }
         }
+
+        // CloudKit 원격 알림 등록 (다른 디바이스 변경 시 silent push 수신)
+        application.registerForRemoteNotifications()
+
         return true
+    }
+
+    func application(_ application: UIApplication, didReceiveRemoteNotification userInfo: [AnyHashable: Any],
+                     fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void) {
+        // SwiftData+CloudKit이 자동으로 동기화를 처리하지만,
+        // 이 메서드가 있어야 OS가 silent push를 앱에 전달한다.
+        completionHandler(.newData)
     }
 
     // MARK: - BGAppRefreshTask 핸들러
@@ -233,25 +191,39 @@ struct todoApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @Environment(\.scenePhase) private var scenePhase
 
-    static private(set) var swiftDataMode = "초기화 중"
+    /// iCloud 동기화 설정 키. 기본값 false(로컬 전용).
+    /// 사용자가 설정에서 활성화하면 앱 재시작 후 CloudKit 동기화가 시작된다.
+    static let iCloudSyncKey = "pieroot.todo.iCloudSyncEnabled"
 
     let sharedModelContainer: ModelContainer = {
         let schema = Schema([Todo.self, Persona.self, TaskAuditEvent.self])
-        let config = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
+        let useICloud = UserDefaults.standard.bool(forKey: todoApp.iCloudSyncKey)
+        
+        let config: ModelConfiguration
+        if useICloud {
+            config = ModelConfiguration(
+                schema: schema,
+                isStoredInMemoryOnly: false,
+                cloudKitDatabase: .private("iCloud.pieroot.sift-todo")
+            )
+        } else {
+            config = ModelConfiguration(
+                schema: schema,
+                isStoredInMemoryOnly: false,
+                cloudKitDatabase: .none
+            )
+        }
+
         do {
-            let c = try ModelContainer(for: schema, configurations: [config])
-            todoApp.swiftDataMode = "영구 저장 ✅"
-            return c
+            return try ModelContainer(for: schema, configurations: [config])
         } catch {
             print("[SwiftData] 저장소 초기화 실패: \(error). 기존 파일 삭제 후 재시도.")
-            try? FileManager.default.removeItem(at: config.url)
+            let configURL = config.url
+            try? FileManager.default.removeItem(at: configURL)
             do {
-                let c = try ModelContainer(for: schema, configurations: [config])
-                todoApp.swiftDataMode = "재시도 후 영구 저장 ⚠️"
-                return c
+                return try ModelContainer(for: schema, configurations: [config])
             } catch {
                 print("[SwiftData] 재시도 실패: \(error). 메모리 전용 모드로 실행.")
-                todoApp.swiftDataMode = "메모리 전용 ❌ \(error.localizedDescription)"
                 let fallback = ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
                 return try! ModelContainer(for: schema, configurations: [fallback])
             }
@@ -260,25 +232,32 @@ struct todoApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ZStack(alignment: .top) {
-                TodoListView()
-                    .onAppear {
-                        appDelegate.modelContext = sharedModelContainer.mainContext
-                        // 앱 업데이트·재실행 후 캘린더 권한 복원 (다이얼로그 없이)
-                        CalendarService.shared.restoreAuthorizationIfGranted()
-                        scheduleEmailRefresh()
-                        scheduleMemoryAnalysis()
-                        // 콜드 런치: scenePhase는 이미 .active라 onChange가 발동하지 않음
-                        let ctx = sharedModelContainer.mainContext
+            TodoListView()
+                .onAppear {
+                    appDelegate.modelContext = sharedModelContainer.mainContext
+                    // 앱 업데이트·재실행 후 캘린더 권한 복원 (다이얼로그 없이)
+                    CalendarService.shared.restoreAuthorizationIfGranted()
+                    scheduleEmailRefresh()
+                    scheduleMemoryAnalysis()
+                    // 콜드 런치: scenePhase는 이미 .active라 onChange가 발동하지 않음
+                    let ctx = sharedModelContainer.mainContext
+                    Task {
+                        await LLMAutomationOrchestrator.shared.runIfEligible(context: ctx)
+                    }
+                    Task {
+                        await CalendarService.shared.runWeeklyImportIfDue(context: sharedModelContainer.mainContext)
+                    }
+                    Task {
+                        await CalendarService.shared.syncCalendarWithTodos(context: sharedModelContainer.mainContext)
+                    }
+                }
+                .onReceive(NotificationCenter.default.publisher(for: .EKEventStoreChanged)) { _ in
+                    if let ctx = appDelegate.modelContext {
                         Task {
-                            await LLMAutomationOrchestrator.shared.runIfEligible(context: ctx)
-                        }
-                        Task {
-                            await CalendarService.shared.runWeeklyImportIfDue(context: sharedModelContainer.mainContext)
+                            await CalendarService.shared.syncCalendarWithTodos(context: ctx)
                         }
                     }
-                DebugOverlayView(swiftDataMode: todoApp.swiftDataMode)
-            }
+                }
             .onChange(of: scenePhase) { _, newPhase in
                 switch newPhase {
                 case .active:
@@ -290,6 +269,9 @@ struct todoApp: App {
                         }
                         Task {
                             await CalendarService.shared.runWeeklyImportIfDue(context: ctx)
+                        }
+                        Task {
+                            await CalendarService.shared.syncCalendarWithTodos(context: ctx)
                         }
                     }
                 case .background:

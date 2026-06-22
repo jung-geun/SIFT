@@ -61,6 +61,7 @@ final class Todo {
     var title: String = ""
     var notes: String = ""
     var createdAt: Date = Date()
+    var updatedAt: Date = Date()
 
     // MARK: - Scheduling
     var dueDate: Date?
@@ -208,5 +209,19 @@ final class Todo {
         let formatter = RelativeDateTimeFormatter()
         formatter.unitsStyle = .short
         return formatter.localizedString(for: due, relativeTo: Date())
+    }
+
+    /// AI 분석 결과를 반영한다.
+    /// 수동 우선순위(manualPriority)가 있으면 덮어쓰지 않는다.
+    /// runPrioritize()와 QuickSortService 양쪽에서 공유.
+    func apply(_ result: PriorityResult) {
+        guard manualPriority == nil else { return }
+        computedPriorityScore = result.score
+        priorityReason        = result.reason
+        aiEngine              = result.engine.rawValue
+        aiDetail              = result.detail
+        aiNeedsNotification   = result.needsNotification
+        aiRecommendedTime     = result.recommendedTime
+        aiPersonaFit          = result.personaFit
     }
 }

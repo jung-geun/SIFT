@@ -1,0 +1,58 @@
+# GitHub Actions CI — Xcode 프로젝트 빌드 + Tier 1 파서 테스트
+#
+# ⚠️ 주의: 이 프로젝트는 SPM(Package.swift) 이 아닌 Xcode 프로젝트이므로
+#           `swift build` / `swift test` 대신 `xcodebuild` 를 사용합니다.
+#
+# ⚠️ Xcode 버전 경고: deployment target = iOS 26.5, Xcode 26.5 빌드 필요.
+#   GitHub 호스티드 러너(macos-15)에 Xcode 26.5 가 없으면 빌드가 실패할 수 있습니다.
+#   러너에 Xcode 26.5 가 추가되는 시점에 자동으로 통과됩니다.
+#
+# Tier 2 FM 스모크 테스트(FMSmokeTests)는 시뮬레이터에 Apple Intelligence 가 없어
+# `guard FoundationModelsService.isAvailable else { return }` 에서 자동 skip 됩니다(정상).
+
+name: CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build-test:
+    runs-on: macos-15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode (latest stable)
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Print Xcode version
+        run: xcodebuild -version
+
+      - name: Build
+        run: |
+          xcodebuild build \
+            -scheme todo \
+            -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
+            CODE_SIGNING_ALLOWED=NO \
+            | xcpretty || xcodebuild build \
+            -scheme todo \
+            -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Test (Tier 1 파서; FM 스모크 자동 skip)
+        run: |
+          xcodebuild test \
+            -scheme todo \
+            -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
+            -only-testing:todoTests \
+            CODE_SIGNING_ALLOWED=NO \
+            | xcpretty || xcodebuild test \
+            -scheme todo \
+            -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
+            -only-testing:todoTests \
+            CODE_SIGNING_ALLOWED=NO
