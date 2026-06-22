@@ -50,4 +50,22 @@ enum AppDateFormat {
         }
         return nil
     }
+
+    /// Date -> 남은 시간 자연어 설명 (예: "4시간 후 마감", "3일 후 마감")
+    static func remainingTimeDescription(for dueDate: Date) -> String {
+        let diff = dueDate.timeIntervalSinceNow
+        if diff < 0 {
+            return "마감 초과"
+        }
+        let hours = Int(diff / 3600)
+        if hours < 1 {
+            let minutes = max(1, Int(diff / 60))
+            return "\(minutes)분 후 마감"
+        } else if hours < 24 {
+            return "\(hours)시간 후 마감"
+        } else {
+            let days = hours / 24
+            return "\(days)일 후 마감"
+        }
+    }
 }

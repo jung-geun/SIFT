@@ -234,6 +234,10 @@ struct todoApp: App {
         WindowGroup {
             TodoListView()
                 .onAppear {
+                    // iCloud Key-Value Store 동기화 및 SettingsStore 초기화
+                    _ = SettingsStore.shared
+                    NSUbiquitousKeyValueStore.default.synchronize()
+
                     appDelegate.modelContext = sharedModelContainer.mainContext
                     // 앱 업데이트·재실행 후 캘린더 권한 복원 (다이얼로그 없이)
                     CalendarService.shared.restoreAuthorizationIfGranted()
@@ -249,6 +253,7 @@ struct todoApp: App {
                     }
                     Task {
                         await CalendarService.shared.syncCalendarWithTodos(context: sharedModelContainer.mainContext)
+                        await CalendarService.shared.cleanupOldCompletedTodos(context: sharedModelContainer.mainContext)
                     }
                 }
                 .onReceive(NotificationCenter.default.publisher(for: .EKEventStoreChanged)) { _ in
@@ -272,6 +277,7 @@ struct todoApp: App {
                         }
                         Task {
                             await CalendarService.shared.syncCalendarWithTodos(context: ctx)
+                            await CalendarService.shared.cleanupOldCompletedTodos(context: ctx)
                         }
                     }
                 case .background:

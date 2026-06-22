@@ -600,7 +600,10 @@ final class CloudIntelligenceEngine: IntelligenceService {
         lines.append("\n[우선순위 평가 대상 할 일]")
         for todo in todos {
             var ps = ["ID:\(todo.id.uuidString)", "제목:\(todo.title)"]
-            if let due = todo.dueDate { ps.append("마감:\(AppDateFormat.llmString(from: due))") }
+            if let due = todo.dueDate {
+                let remaining = AppDateFormat.remainingTimeDescription(for: due)
+                ps.append("마감:\(AppDateFormat.llmString(from: due)) (\(remaining))")
+            }
             if !todo.tags.isEmpty     { ps.append("태그:\(todo.tags.joined(separator: ","))") }
             let sourceLabel: String
             switch todo.todoSource {

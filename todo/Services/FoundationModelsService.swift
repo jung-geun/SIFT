@@ -387,7 +387,10 @@ struct FoundationModelsService {
             // E-2: 정수 번호, E-3: 제목 60자 절단
             let title = String(todo.title.prefix(60))
             var ps = ["번호:\(idx)", "제목:\(title)"]
-            if let due = todo.dueDate { ps.append("마감:\(AppDateFormat.llmString(from: due))") }
+            if let due = todo.dueDate {
+                let remaining = AppDateFormat.remainingTimeDescription(for: due)
+                ps.append("마감:\(AppDateFormat.llmString(from: due)) (\(remaining))")
+            }
             if !todo.tags.isEmpty     { ps.append("태그:\(todo.tags.joined(separator: ","))") }
             let src: String
             switch todo.todoSource {

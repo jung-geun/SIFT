@@ -11,13 +11,23 @@ struct OnboardingView: View {
     @Query private var personas: [Persona]
     @AppStorage("pieroot.todo.hasOnboarded") private var hasOnboarded = false
 
+    @AppStorage("pieroot.todo.iCloudSyncEnabled") private var iCloudSyncEnabled = false
+
     @Binding var isPresented: Bool
     var isResetup: Bool = false
 
-    @State private var step: Int = 0
+    @State private var step: Int
+    @State private var tempICloudSync: Bool = false
+    @State private var showRestartAlert: Bool = false
     @State private var selectedTypes: Set<PersonaType> = []
     @State private var selectedPresets: Set<String> = []
     @State private var customText: String = ""
+
+    init(isPresented: Binding<Bool>, isResetup: Bool = false) {
+        self._isPresented = isPresented
+        self.isResetup = isResetup
+        self._step = State(initialValue: isResetup ? 1 : 0)
+    }
 
     // 선택된 모든 유형의 프리셋 합집합
     private var combinedPresets: [String] {
@@ -30,6 +40,8 @@ struct OnboardingView: View {
         NavigationStack {
             Group {
                 if step == 0 {
+                    iCloudSyncStep
+                } else if step == 1 {
                     typeSelectionStep
                 } else {
                     descriptionStep
@@ -39,6 +51,13 @@ struct OnboardingView: View {
             .navigationBarTitleDisplayMode(.large)
             .toolbar { toolbarContent }
             .animation(.easeInOut(duration: 0.25), value: step)
+            .alert("앱 재시작 필요", isPresented: $showRestartAlert) {
+                Button("확인") {
+                    exit(0)
+                }
+            } message: {
+                Text("iCloud 동기화가 활성화되었습니다. 동기화된 데이터를 불러오기 위해 앱을 종료합니다. 다시 시작해 주세요.")
+            }
             .task {
                 // 재설정 모드: 유형 + 프리셋 칩 + 커스텀 텍스트 복원
                 guard isResetup, let p = personas.first else { return }
@@ -88,7 +107,7 @@ struct OnboardingView: View {
                 .padding(.horizontal, 16)
 
                 Button {
-                    withAnimation { step = 1 }
+                    withAnimation { step = 2 }
                 } label: {
                     Label("다음", systemImage: "arrow.right")
                         .frame(maxWidth: .infinity)
@@ -233,13 +252,127 @@ struct OnboardingView: View {
         .buttonStyle(.plain)
     }
 
+    // MARK: - Step 0: iCloud Sync Setup
+
+    private var iCloudSyncStep: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                Text("데이터 동기화 설정")
+                    .font(.title2.bold())
+                    .padding(.horizontal, 20)
+                
+                Text("할 일, 페르소나 등의 데이터를 iCloud에 동기화할지 선택해 주세요. 연동 시 다른 기기의 데이터가 즉시 로드됩니다.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 20)
+                
+                VStack(spacing: 16) {
+                    // Option 1: iCloud Sync
+                    Button {
+                        withAnimation(.spring(duration: 0.2)) {
+                            tempICloudSync = true
+                        }
+                    } label: {
+                        VStack(alignment: .leading, spacing: 12) {
+                            HStack {
+                                Label("iCloud 동기화 활성화", systemImage: "cloud.fill")
+                                    .font(.headline)
+                                    .foregroundStyle(tempICloudSync ? .white : .accentColor)
+                                Spacer()
+                                if tempICloudSync {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .foregroundStyle(.white)
+                                }
+                            }
+                            Text("페르소나, 할 일, 감사 기록을 iCloud를 통해 동일한 Apple ID의 모든 기기와 안전하게 동기화합니다. 기존 기기의 데이터가 있는 경우 자동으로 불러옵니다.")
+                                .font(.caption)
+                                .foregroundStyle(tempICloudSync ? .white.opacity(0.8) : .secondary)
+                                .multilineTextAlignment(.leading)
+                                .lineSpacing(4)
+                        }
+                        .padding()
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(
+                            tempICloudSync ? Color.accentColor : Color(.secondarySystemGroupedBackground),
+                            in: RoundedRectangle(cornerRadius: 16)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 16)
+                                .stroke(tempICloudSync ? Color.clear : Color(.separator), lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    
+                    // Option 2: Local Only
+                    Button {
+                        withAnimation(.spring(duration: 0.2)) {
+                            tempICloudSync = false
+                        }
+                    } label: {
+                        VStack(alignment: .leading, spacing: 12) {
+                            HStack {
+                                Label("이 기기에만 저장 (로컬)", systemImage: "folder")
+                                    .font(.headline)
+                                    .foregroundStyle(!tempICloudSync ? .white : .primary)
+                                Spacer()
+                                if !tempICloudSync {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .foregroundStyle(.white)
+                                }
+                            }
+                            Text("데이터를 클라우드에 업로드하지 않고 현재 기기에만 보관합니다. 추후 설정에서 언제든지 iCloud 동기화를 켤 수 있습니다.")
+                                .font(.caption)
+                                .foregroundStyle(!tempICloudSync ? .white.opacity(0.8) : .secondary)
+                                .multilineTextAlignment(.leading)
+                                .lineSpacing(4)
+                        }
+                        .padding()
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(
+                            !tempICloudSync ? Color.accentColor : Color(.secondarySystemGroupedBackground),
+                            in: RoundedRectangle(cornerRadius: 16)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 16)
+                                .stroke(!tempICloudSync ? Color.clear : Color(.separator), lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 20)
+                
+                Button {
+                    if tempICloudSync {
+                        iCloudSyncEnabled = true
+                        hasOnboarded = true
+                        showRestartAlert = true
+                    } else {
+                        withAnimation {
+                            step = 1
+                        }
+                    }
+                } label: {
+                    Text(tempICloudSync ? "iCloud 연동하고 시작하기" : "로컬 전용으로 다음 단계 진행")
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                        .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 14))
+                        .foregroundStyle(.white)
+                        .fontWeight(.semibold)
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 8)
+            }
+            .padding(.vertical, 24)
+        }
+    }
+
     // MARK: - Toolbar
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         ToolbarItem(placement: .navigationBarLeading) {
-            if step == 1 {
-                Button("이전") { withAnimation { step = 0 } }
+            if step == 2 || (step == 1 && !isResetup) {
+                Button("이전") { withAnimation { step -= 1 } }
             }
         }
         ToolbarItem(placement: .navigationBarTrailing) {

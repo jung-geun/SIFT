@@ -135,7 +135,6 @@ struct TodoListView: View {
     @State private var filter: TodoFilter = .active
     @State private var isPrioritizing = false
     @State private var showPrioritizingIndicator = false
-    @State private var isSyncingCalendar = false
     // MARK: - Filter
 
     enum TodoFilter: String, CaseIterable {
@@ -178,7 +177,8 @@ struct TodoListView: View {
                     }
                 }
         case .completed:
-            return todos.filter { $0.isCompleted }
+            let oneMonthAgo = Calendar.current.date(byAdding: .day, value: -30, to: Date()) ?? Date().addingTimeInterval(-30 * 86400)
+            return todos.filter { $0.isCompleted && ($0.completedAt == nil || $0.completedAt! >= oneMonthAgo) }
                 .sorted { $0.effectivePriority > $1.effectivePriority }
         }
     }
@@ -430,23 +430,7 @@ struct TodoListView: View {
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         ToolbarItem(placement: .navigationBarTrailing) {
-            HStack(spacing: 12) {
-                Button {
-                    isSyncingCalendar = true
-                    Task {
-                        await CalendarService.shared.syncCalendarWithTodos(context: modelContext)
-                        isSyncingCalendar = false
-                    }
-                } label: {
-                    if isSyncingCalendar {
-                        ProgressView()
-                            .controlSize(.small)
-                    } else {
-                        Image(systemName: "arrow.triangle.2.circlepath")
-                    }
-                }
-                .disabled(isSyncingCalendar)
-
+            HStack(spacing: 4) {
                 Button { showAddTodo = true } label: {
                     Image(systemName: "plus")
                         .fontWeight(.semibold)

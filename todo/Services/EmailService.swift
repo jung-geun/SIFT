@@ -481,7 +481,8 @@ final class EmailService: NSObject, MailProvider {
         let query: [String: Any] = [
             kSecClass as String:       kSecClassGenericPassword,
             kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: key
+            kSecAttrAccount as String: key,
+            kSecAttrSynchronizable as String: kCFBooleanTrue as Any
         ]
         SecItemDelete(query as CFDictionary)
         var attrs = query
@@ -495,7 +496,8 @@ final class EmailService: NSObject, MailProvider {
             kSecAttrService as String: keychainService,
             kSecAttrAccount as String: key,
             kSecReturnData as String:  true,
-            kSecMatchLimit as String:  kSecMatchLimitOne
+            kSecMatchLimit as String:  kSecMatchLimitOne,
+            kSecAttrSynchronizable as String: kCFBooleanTrue as Any
         ]
         var result: AnyObject?
         guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
@@ -507,7 +509,8 @@ final class EmailService: NSObject, MailProvider {
         let query: [String: Any] = [
             kSecClass as String:       kSecClassGenericPassword,
             kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: key
+            kSecAttrAccount as String: key,
+            kSecAttrSynchronizable as String: kCFBooleanTrue as Any
         ]
         SecItemDelete(query as CFDictionary)
     }

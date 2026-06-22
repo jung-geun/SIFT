@@ -225,21 +225,27 @@ enum CalendarAutoPolicy {
 
     /// 사용자가 아직 선택하지 않았으면 false
     static var choiceMade: Bool {
-        UserDefaults.standard.bool(forKey: choiceKey)
+        SettingsStore.shared.get(choiceKey, defaultValue: false)
     }
     /// 자동 등록 ON 여부 (choiceMade == false이면 의미 없음)
     static var isAuto: Bool {
-        UserDefaults.standard.bool(forKey: valueKey)
+        SettingsStore.shared.get(valueKey, defaultValue: false)
     }
     /// 사용자가 선택한 값을 저장. choiceMade도 동시에 true로 설정.
     static func setChoice(auto: Bool) {
-        UserDefaults.standard.set(true,  forKey: choiceKey)
-        UserDefaults.standard.set(auto,  forKey: valueKey)
+        let store = SettingsStore.shared
+        let useGlobal = UserDefaults.standard.bool(forKey: "pieroot.todo.iCloudSyncEnabled")
+        if useGlobal {
+            store.setGlobal(choiceKey, value: true)
+            store.setGlobal(valueKey, value: auto)
+        } else {
+            store.setLocal(choiceKey, value: true)
+            store.setLocal(valueKey, value: auto)
+        }
     }
     /// 설정에서 값만 변경(이미 선택됐다고 간주).
     static func setValue(auto: Bool) {
-        UserDefaults.standard.set(true,  forKey: choiceKey)
-        UserDefaults.standard.set(auto,  forKey: valueKey)
+        setChoice(auto: auto)
     }
 }
 
@@ -403,48 +409,23 @@ extension CalendarService {
                 continue
             }
 
-            // 캘린더 ID가 매핑되어 있는 경우 -> 양방향 싱크 및 충돌 해결
+            // 캘린더 ID가 매핑되어 있는 경우 -> 캘린더 변경분을 어플로 갱신 (단방향 동기화)
+            // 어플에서의 수정사항은 이미 UI단에서 캘린더로 즉시 내보내졌으므로, 
+            // 전역 동기화 시점에는 캘린더가 항상 신뢰할 수 있는 소스입니다.
             if let eventID = todo.calendarEventID {
                 if let event = store.event(withIdentifier: eventID) {
-                    let todoUpdated = todo.updatedAt
-                    let eventUpdated = event.lastModifiedDate ?? event.creationDate ?? Date()
-
-                    // 실제 데이터 차이가 있는지 명시적으로 검증 (불필요한 동기화 루프 및 오판정 방지)
+                    // 실제 데이터 차이가 있는지 명시적으로 검증
                     let isTitleChanged = todo.title != (event.title ?? "")
                     let isNotesChanged = todo.notes != (event.notes ?? "")
                     let isDueDateChanged = todo.dueDate != event.startDate
 
                     if isTitleChanged || isNotesChanged || isDueDateChanged {
-                        // 수정 시간 비교 (1초 미만 오차 허용)
-                        let timeDiff = todoUpdated.timeIntervalSince(eventUpdated)
-
-                        if timeDiff > 1.0 {
-                            // 어플의 수정 시각이 더 최신 -> 캘린더 이벤트를 어플 정보로 갱신
-                            event.title = todo.title.isEmpty ? "할 일 마감" : todo.title
-                            event.startDate = todo.dueDate ?? Date()
-                            event.endDate = (todo.dueDate ?? Date()).addingTimeInterval(3600)
-                            event.notes = todo.notes
-                            try? store.save(event, span: .thisEvent)
-                            
-                            // 동기화 루프 방지를 위해 어플의 updatedAt을 캘린더의 최종 수정 시각으로 정확하게 싱크
-                            todo.updatedAt = event.lastModifiedDate ?? Date()
-                            hasChanges = true
-                        } else if timeDiff < -1.0 {
-                            // 캘린더의 수정 시각이 더 최신 -> 어플 Todo를 캘린더 정보로 갱신
-                            todo.title = event.title ?? ""
-                            todo.dueDate = event.startDate
-                            todo.notes = event.notes ?? ""
-                            todo.updatedAt = eventUpdated
-                            hasChanges = true
-                        } else {
-                            // 만약 시각 차이가 1초 이내이고 데이터 불일치가 발생한다면,
-                            // 기본적으로 캘린더의 변경사항을 덮어써서 어플에 동기화해 줌 (캘린더 수정 반영력 극대화)
-                            todo.title = event.title ?? ""
-                            todo.dueDate = event.startDate
-                            todo.notes = event.notes ?? ""
-                            todo.updatedAt = eventUpdated
-                            hasChanges = true
-                        }
+                        // 캘린더의 수정 시각이 변경되었거나 데이터에 차이가 있다면 어플 Todo를 캘린더 정보로 갱신
+                        todo.title = event.title ?? ""
+                        todo.dueDate = event.startDate
+                        todo.notes = event.notes ?? ""
+                        todo.updatedAt = event.lastModifiedDate ?? event.creationDate ?? Date()
+                        hasChanges = true
                     }
                 } else {
                     // 캘린더에서 이벤트가 삭제된 경우 -> 어플에서도 마감 정보 해제
@@ -460,5 +441,66 @@ extension CalendarService {
         if hasChanges {
             try? context.save()
         }
+    }
+
+    /// Application Support 폴더 내 SQLite 관련 파일들의 크기 총합을 바이트 단위로 반환합니다.
+    private func getDatabaseSize() -> Int64 {
+        let fileManager = FileManager.default
+        guard let appSupportURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return 0 }
+        
+        var totalSize: Int64 = 0
+        let keys: [URLResourceKey] = [.fileSizeKey]
+        
+        // default.sqlite 및 shm, wal 등 데이터베이스 파일 전체의 실제 점유 크기 측정
+        if let enumerator = fileManager.enumerator(at: appSupportURL, includingPropertiesForKeys: keys) {
+            for case let fileURL as URL in enumerator {
+                let filename = fileURL.lastPathComponent
+                if fileURL.pathExtension == "sqlite" || filename.contains("default.sqlite") {
+                    if let resources = try? fileURL.resourceValues(forKeys: Set(keys)),
+                       let fileSize = resources.fileSize {
+                        totalSize += Int64(fileSize)
+                    }
+                }
+            }
+        }
+        return totalSize
+    }
+
+    /// 데이터베이스 파일 용량이 500MB를 초과하는 경우, 완료된 항목 중 가장 오래된 것부터 순차적으로 삭제합니다.
+    @MainActor
+    func cleanupOldCompletedTodos(context: ModelContext) async {
+        let maxSizeLimit: Int64 = 500 * 1024 * 1024 // 500MB
+        
+        var currentSize = getDatabaseSize()
+        guard currentSize > maxSizeLimit else { return }
+        
+        // 완료된 할 일 중 완료일(completedAt)이 오래된 순으로 정렬하여 조회
+        let descriptor = FetchDescriptor<Todo>(
+            predicate: #Predicate<Todo> { $0.isCompleted },
+            sortBy: [SortDescriptor(\.completedAt, order: .forward)]
+        )
+        
+        guard let completedTodos = try? context.fetch(descriptor), !completedTodos.isEmpty else { return }
+        
+        var deletedCount = 0
+        for todo in completedTodos {
+            context.delete(todo)
+            deletedCount += 1
+            
+            // 50개 삭제할 때마다 임시 저장 및 실제 용량 재평가 (과도한 파일 I/O 방지)
+            if deletedCount % 50 == 0 {
+                try? context.save()
+                currentSize = getDatabaseSize()
+                if currentSize <= maxSizeLimit {
+                    break
+                }
+            }
+        }
+        
+        if deletedCount % 50 != 0 {
+            try? context.save()
+        }
+        
+        print("[Database Cleanup] 용량 초과로 완료된 할 일 \(deletedCount)개 삭제 완료. 현재 용량: \(getDatabaseSize() / 1024 / 1024)MB")
     }
 }
