@@ -200,8 +200,10 @@ SIFT는 스케줄 관리를 잘하는 사람을 위한 앱이라기보다, **스
 
 <div align="center">
 
-**개발자** jung-geun &nbsp;·&nbsp; **연락처** [pieroot.02@gmail.com](mailto:pieroot.02@gmail.com)
+<strong>개발자</strong> jung-geun &nbsp;·&nbsp; <strong>연락처</strong> <a href="mailto:pieroot.02@gmail.com">pieroot.02@gmail.com</a>
 
-[개인정보 처리방침](./privacy-policy.html) &nbsp;·&nbsp; [서비스 약관](./terms-of-service.html)
+<br>
+
+<a href="./privacy-policy.html">개인정보 처리방침</a> &nbsp;·&nbsp; <a href="./terms-of-service.html">서비스 약관</a>
 
 </div>
