@@ -7,13 +7,13 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		AE58F1D22FDEFA3D00690FA6 /* privacy-policy.md in Resources */ = {isa = PBXBuildFile; fileRef = AE58F1D02FDEFA3D00690FA6 /* privacy-policy.md */; };
+		AE58F1D32FDEFA3D00690FA6 /* terms-of-service.md in Resources */ = {isa = PBXBuildFile; fileRef = AE58F1D12FDEFA3D00690FA6 /* terms-of-service.md */; };
 		AEDC6C872FE3E978006E59B5 /* MLXEmbedders in Frameworks */ = {isa = PBXBuildFile; productRef = AEDC6C862FE3E978006E59B5 /* MLXEmbedders */; };
 		AEDC6C892FE3E978006E59B5 /* MLXHuggingFace in Frameworks */ = {isa = PBXBuildFile; productRef = AEDC6C882FE3E978006E59B5 /* MLXHuggingFace */; };
 		AEDC6C8B2FE3E978006E59B5 /* MLXLLM in Frameworks */ = {isa = PBXBuildFile; productRef = AEDC6C8A2FE3E978006E59B5 /* MLXLLM */; };
 		AEDC6C8D2FE3E978006E59B5 /* MLXLMCommon in Frameworks */ = {isa = PBXBuildFile; productRef = AEDC6C8C2FE3E978006E59B5 /* MLXLMCommon */; };
 		AEDC6C8F2FE3E978006E59B5 /* MLXVLM in Frameworks */ = {isa = PBXBuildFile; productRef = AEDC6C8E2FE3E978006E59B5 /* MLXVLM */; };
-		AE58F1D22FDEFA3D00690FA6 /* privacy-policy.md in Resources */ = {isa = PBXBuildFile; fileRef = AE58F1D02FDEFA3D00690FA6 /* privacy-policy.md */; };
-		AE58F1D32FDEFA3D00690FA6 /* terms-of-service.md in Resources */ = {isa = PBXBuildFile; fileRef = AE58F1D12FDEFA3D00690FA6 /* terms-of-service.md */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */

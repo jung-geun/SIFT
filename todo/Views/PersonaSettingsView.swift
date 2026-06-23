@@ -812,33 +812,14 @@ struct IntelligenceDetailView: View {
     
     private func saveAPIKey() {
         guard !apiKeyInput.isEmpty else { return }
-        let service = selectedProvider.keychainKey
-        let query: [String: Any] = [
-            kSecClass as String:       kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrSynchronizable as String: kCFBooleanTrue as Any
-        ]
-        SecItemDelete(query as CFDictionary)
-        var attrs = query
-        attrs[kSecValueData as String] = Data(apiKeyInput.utf8)
-        SecItemAdd(attrs as CFDictionary, nil)
+        KeychainStore.set(service: selectedProvider.keychainKey, value: apiKeyInput)
         storedAPIKey = apiKeyInput
         apiKeyInput  = ""
     }
-    
+
     private func loadAPIKey() {
         guard selectedProvider.requiresAPIKey else { storedAPIKey = ""; return }
-        let query: [String: Any] = [
-            kSecClass as String:       kSecClassGenericPassword,
-            kSecAttrService as String: selectedProvider.keychainKey,
-            kSecReturnData as String:  true,
-            kSecMatchLimit as String:  kSecMatchLimitOne,
-            kSecAttrSynchronizable as String: kCFBooleanTrue as Any
-        ]
-        var result: AnyObject?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
-              let data = result as? Data else { storedAPIKey = ""; return }
-        storedAPIKey = String(data: data, encoding: .utf8) ?? ""
+        storedAPIKey = KeychainStore.get(service: selectedProvider.keychainKey) ?? ""
     }
     
     private func loadModel() {
@@ -1190,20 +1171,31 @@ struct CalendarDetailView: View {
 
     @ViewBuilder
     private var defaultCalendarSection: some View {
-        let sources = CalendarService.shared.availableCalendars()
-        if CalendarService.shared.isAuthorized && !sources.isEmpty {
+        if CalendarService.shared.isAuthorized {
             Section {
-                Picker("기본 캘린더", selection: Binding(
-                    get: { CalendarService.shared.defaultCalendarID },
-                    set: { CalendarService.shared.defaultCalendarID = $0 }
-                )) {
-                    ForEach(sources) { source in
-                        ForEach(source.calendars) { cal in
-                            Text("\(cal.title) (\(source.title))").tag(cal.id)
-                        }
+                let currentID    = CalendarService.shared.defaultCalendarID
+                let currentColor: Color = {
+                    guard let cal = CalendarService.shared.ekCalendar(withIdentifier: currentID)
+                    else { return .accentColor }
+                    return Color(cgColor: cal.cgColor)
+                }()
+                let currentTitle: String = CalendarService.shared
+                    .availableCalendars()
+                    .flatMap { $0.calendars }
+                    .first { $0.id == currentID }
+                    .map { $0.title } ?? "기본"
+
+                NavigationLink(destination: DefaultCalendarPickerView()) {
+                    HStack(spacing: 10) {
+                        Text("기본 캘린더")
+                        Spacer()
+                        Circle()
+                            .fill(currentColor)
+                            .frame(width: 10, height: 10)
+                        Text(currentTitle)
+                            .foregroundStyle(.secondary)
                     }
                 }
-                .pickerStyle(.menu)
             } header: {
                 Text("기본 캘린더")
             } footer: {
@@ -1343,6 +1335,11 @@ struct ICloudSyncDetailView: View {
                         if newValue {
                             SettingsStore.shared.uploadLocalSettingsToCloud()
                         }
+                        // @AppStorage가 UserDefaults에 newValue를 반영한 직후 호출 →
+                        // KeychainStore.shouldSync가 올바른 값을 읽어 시크릿 동기화 정책 재적용.
+                        // ON: 시크릿 → synchronizable (iCloud Keychain 동기화 시작)
+                        // OFF: 시크릿 → ThisDeviceOnly (타 기기 iCloud Keychain에서 회수)
+                        KeychainStore.applySyncPolicy()
                         showSyncRestartAlert = true
                     }
                 ))

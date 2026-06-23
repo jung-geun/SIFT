@@ -138,8 +138,8 @@ struct TodoListView: View {
     @State private var isPrioritizing = false
     @State private var showPrioritizingIndicator = false
 
-    // MARK: - iCloud Sync
-    @StateObject private var syncMonitor = CloudSyncMonitor()
+    // MARK: - iCloud Sync (앱 레벨에서 주입받음 — todoApp.swift의 @StateObject)
+    @EnvironmentObject private var syncMonitor: CloudSyncMonitor
     @AppStorage("pieroot.todo.iCloudInitialSyncDone") private var initialSyncDone = false
     @State private var showPostSyncPersonaSetup = false
 
@@ -261,8 +261,8 @@ struct TodoListView: View {
             if todos.contains(where: { $0.isCompleted }) {
                 MemoryService.shared.analyze(todos: todos)
             }
-            // iCloud 동기화 관찰 시작 (CloudSyncMonitor + 폴백 타이머)
-            startICloudSyncCheck()
+            // 앱 레벨에서 initialCount: 0으로 startObserving한 경우 기준치 보정
+            syncMonitor.updateBaseline(totalSyncedCount)
         }
         .onChange(of: todos.count) {
             Task { await NotificationService.shared.reschedule(todos: todos) }
@@ -480,13 +480,6 @@ struct TodoListView: View {
         .shadow(color: .black.opacity(0.15), radius: 8, y: 4)
         .padding(.horizontal, 24)
         .padding(.bottom, 4)
-    }
-
-    // MARK: - iCloud Sync Logic
-
-    private func startICloudSyncCheck() {
-        guard iCloudSyncEnabled else { return }
-        syncMonitor.startObserving(initialCount: totalSyncedCount)
     }
 
     // MARK: - Swipe Actions

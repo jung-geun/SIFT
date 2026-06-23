@@ -85,12 +85,18 @@ final class EmailService: NSObject, MailProvider {
 
     private let keychainService = "pieroot.todo.gmail"
 
+    // ASWebAuthenticationSession은 완료까지 강한 참조를 유지해야 합니다.
+    // withCheckedThrowingContinuation 클로저 리턴 후 로컬 변수가 해제되는 것을 방지합니다.
+    private var authSession: ASWebAuthenticationSession?
+
     // MARK: - Authorization State
 
     var isAuthenticated: Bool { loadTokens().accessToken != nil }
 
     // MARK: - OAuth 2.0 (ASWebAuthenticationSession)
 
+    // ASWebAuthenticationSession은 반드시 메인 스레드에서 실행해야 합니다.
+    @MainActor
     func authenticate() async throws {
         guard let authURL = buildAuthURL() else {
             throw EmailError.invalidConfiguration
@@ -101,7 +107,8 @@ final class EmailService: NSObject, MailProvider {
             let session = ASWebAuthenticationSession(
                 url: authURL,
                 callbackURLScheme: callbackScheme
-            ) { callbackURL, error in
+            ) { [weak self] callbackURL, error in
+                self?.authSession = nil
                 if let error {
                     continuation.resume(throwing: error)
                     return
@@ -117,14 +124,17 @@ final class EmailService: NSObject, MailProvider {
             }
             session.prefersEphemeralWebBrowserSession = true
             session.presentationContextProvider = WindowProvider.shared
+            authSession = session  // 인증 완료까지 세션 유지
             session.start()
         }
 
         try await exchangeCodeForTokens(code: code)
+        NotificationCenter.default.post(name: .gmailAuthChanged, object: true)
     }
 
     func signOut() {
         deleteTokens()
+        NotificationCenter.default.post(name: .gmailAuthChanged, object: false)
     }
 
     /// MailProvider 프로토콜 구현 — 최근 메시지 목록 반환.
@@ -241,7 +251,9 @@ final class EmailService: NSObject, MailProvider {
         let precedence     = headers.first { $0.name.lowercased() == "precedence" }?.value.lowercased() ?? ""
         let isBulk         = hasUnsubscribe || precedence.contains("bulk") || precedence.contains("list")
 
-        let date     = parseRFC2822Date(dateStr) ?? Date()
+        // internalDate(epoch-ms 문자열)를 1순위 수신 시각으로 사용 — Date 헤더는 발신자 주장이라 신뢰도 낮음
+        let date     = raw.internalDate.flatMap { Double($0).map { Date(timeIntervalSince1970: $0 / 1000) } }
+                     ?? parseRFC2822Date(dateStr) ?? Date()
         let snippet  = raw.snippet ?? ""
         let body     = extractPlainText(from: raw.payload)
         let labelIds = raw.labelIds ?? []
@@ -258,6 +270,54 @@ final class EmailService: NSObject, MailProvider {
             labelIds: labelIds,
             isBulk: isBulk
         )
+    }
+
+    // MARK: - 이메일 뷰어: 최근 메일 전체 fetch
+
+    /// 읽음/안읽음 관계없이 최근 메일 전체를 가져옴.
+    /// `is:unread` 필터 제거 — `emailLookbackDays` 기간 내 수신 메일 최대 100건.
+    /// 이메일 뷰어(MailTabView) pull-to-refresh에서 호출.
+    /// 스코프 `gmail.readonly` + `format=full` 확인됨 → 읽은 메일 본문도 조회 가능.
+    func fetchAllRecentMessages() async throws -> [GmailMessage] {
+        try await refreshTokenIfNeeded()
+        return try await listAllMessages()
+    }
+
+    private func listAllMessages() async throws -> [GmailMessage] {
+        guard let token = loadTokens().accessToken else { throw EmailError.notAuthenticated }
+        let lookbackDays: Int = {
+            let v = UserDefaults.standard.integer(forKey: "pieroot.todo.emailLookbackDays")
+            return v > 0 ? min(max(v, 1), 30) : 7  // 뷰어 기본값 7일
+        }()
+        var urlComponents = URLComponents(
+            string: "https://gmail.googleapis.com/gmail/v1/users/me/messages"
+        )!
+        urlComponents.queryItems = [
+            URLQueryItem(name: "q",          value: "newer_than:\(lookbackDays)d"),  // is:unread 제거
+            URLQueryItem(name: "maxResults", value: "100")
+        ]
+        var request = URLRequest(url: urlComponents.url!)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+            throw EmailError.apiFailed
+        }
+        let list = try JSONDecoder().decode(MessageListResponse.self, from: data)
+        guard let messageIDs = list.messages else { return [] }
+
+        return try await withThrowingTaskGroup(of: GmailMessage?.self) { group in
+            for item in messageIDs.prefix(100) {
+                group.addTask { [weak self] in
+                    try await self?.fetchMessage(id: item.id, token: token)
+                }
+            }
+            var messages: [GmailMessage] = []
+            for try await msg in group {
+                if let m = msg { messages.append(m) }
+            }
+            return messages.sorted { $0.receivedAt > $1.receivedAt }
+        }
     }
 
     // MARK: - On-Device Extraction (NSDataDetector)
@@ -384,13 +444,26 @@ final class EmailService: NSObject, MailProvider {
 
     private func stripHTML(_ html: String) -> String {
         var text = html
-        // 블록 태그 → 줄바꿈
+        // ① style/script/주석 블록 전체 제거 — [\s\S] 는 개행 포함 (.은 개행 미처리)
+        let blockPatterns = [
+            "<style[^>]*>[\\s\\S]*?</style>",
+            "<script[^>]*>[\\s\\S]*?</script>",
+            "<!--[\\s\\S]*?-->",
+        ]
+        for pat in blockPatterns {
+            if let re = try? NSRegularExpression(pattern: pat, options: .caseInsensitive) {
+                text = re.stringByReplacingMatches(
+                    in: text, range: NSRange(text.startIndex..., in: text), withTemplate: ""
+                )
+            }
+        }
+        // ② 블록 태그 → 줄바꿈
         let blockTags = ["</p>", "</div>", "<br>", "<br/>", "<br />", "</li>",
                          "</h1>", "</h2>", "</h3>", "</h4>", "</tr>"]
         for tag in blockTags {
             text = text.replacingOccurrences(of: tag, with: "\n", options: .caseInsensitive)
         }
-        // 나머지 태그 제거
+        // ③ 나머지 태그 제거
         if let re = try? NSRegularExpression(pattern: "<[^>]+>") {
             text = re.stringByReplacingMatches(
                 in: text, range: NSRange(text.startIndex..., in: text), withTemplate: ""
@@ -440,7 +513,12 @@ final class EmailService: NSObject, MailProvider {
         let body = "grant_type=refresh_token&refresh_token=\(refresh)&client_id=\(clientID)&client_secret=\(clientSecret)"
         request.httpBody = body.data(using: .utf8)
 
-        let (data, _) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+            // 400 invalid_grant 등: refresh token 만료 → 키체인 삭제 후 재인증 안내
+            deleteTokens()
+            throw EmailError.notAuthenticated
+        }
         let tokens = try JSONDecoder().decode(TokenResponse.self, from: data)
         saveTokens(accessToken: tokens.access_token, refreshToken: refresh)
     }
@@ -458,70 +536,48 @@ final class EmailService: NSObject, MailProvider {
         return components.url
     }
 
-    // MARK: - Keychain
+    // MARK: - Keychain (KeychainStore 위임)
 
     private func saveTokens(accessToken: String, refreshToken: String?) {
-        setKeychainItem(key: "access_token",  value: accessToken)
+        KeychainStore.set(service: keychainService, account: "access_token", value: accessToken)
         if let rt = refreshToken {
-            setKeychainItem(key: "refresh_token", value: rt)
+            KeychainStore.set(service: keychainService, account: "refresh_token", value: rt)
         }
     }
 
     private func loadTokens() -> (accessToken: String?, refreshToken: String?) {
-        (getKeychainItem(key: "access_token"), getKeychainItem(key: "refresh_token"))
+        (KeychainStore.get(service: keychainService, account: "access_token"),
+         KeychainStore.get(service: keychainService, account: "refresh_token"))
     }
 
     private func deleteTokens() {
-        deleteKeychainItem(key: "access_token")
-        deleteKeychainItem(key: "refresh_token")
-    }
-
-    private func setKeychainItem(key: String, value: String) {
-        guard let data = value.data(using: .utf8) else { return }
-        let query: [String: Any] = [
-            kSecClass as String:       kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: key,
-            kSecAttrSynchronizable as String: kCFBooleanTrue as Any
-        ]
-        SecItemDelete(query as CFDictionary)
-        var attrs = query
-        attrs[kSecValueData as String] = data
-        SecItemAdd(attrs as CFDictionary, nil)
-    }
-
-    private func getKeychainItem(key: String) -> String? {
-        let query: [String: Any] = [
-            kSecClass as String:       kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: key,
-            kSecReturnData as String:  true,
-            kSecMatchLimit as String:  kSecMatchLimitOne,
-            kSecAttrSynchronizable as String: kCFBooleanTrue as Any
-        ]
-        var result: AnyObject?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
-              let data = result as? Data else { return nil }
-        return String(data: data, encoding: .utf8)
-    }
-
-    private func deleteKeychainItem(key: String) {
-        let query: [String: Any] = [
-            kSecClass as String:       kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: key,
-            kSecAttrSynchronizable as String: kCFBooleanTrue as Any
-        ]
-        SecItemDelete(query as CFDictionary)
+        KeychainStore.deleteAny(service: keychainService, account: "access_token")
+        KeychainStore.deleteAny(service: keychainService, account: "refresh_token")
     }
 
     // MARK: - Date Parsing
 
     private func parseRFC2822Date(_ string: String) -> Date? {
+        // Gmail Date 헤더는 여러 RFC2822 변형을 사용 — 포맷 순서대로 시도
+        let formats = [
+            "EEE, dd MMM yyyy HH:mm:ss Z",   // 표준: Mon, 01 Jan 2024 12:00:00 +0900
+            "EEE, d MMM yyyy HH:mm:ss Z",    // 날짜 단자리: Mon, 1 Jan 2024 ...
+            "dd MMM yyyy HH:mm:ss Z",         // 요일 생략: 01 Jan 2024 12:00:00 +0900
+            "d MMM yyyy HH:mm:ss Z",          // 요일+날짜 단자리 생략
+            "EEE, dd MMM yyyy HH:mm Z",       // 초 생략: Mon, 01 Jan 2024 12:00 +0900
+            "EEE, d MMM yyyy HH:mm Z",
+            "dd MMM yyyy HH:mm Z",
+        ]
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss Z"
-        return formatter.date(from: string)
+        // 타임존 약어(GMT, UTC 등)까지 처리하려면 zone 파서가 필요
+        let cleaned = string.trimmingCharacters(in: .whitespaces)
+                            .components(separatedBy: " (").first ?? string  // "(KST)" 등 제거
+        for fmt in formats {
+            formatter.dateFormat = fmt
+            if let date = formatter.date(from: cleaned) { return date }
+        }
+        return nil
     }
 
     // MARK: - RFC2047 Header Decoder
@@ -617,6 +673,13 @@ final class EmailService: NSObject, MailProvider {
     }
 }
 
+// MARK: - Notifications
+
+extension Notification.Name {
+    /// Gmail 인증 상태 변경(연결/해제)시 발송 — `object: Bool` (true=연결, false=해제)
+    static let gmailAuthChanged = Notification.Name("pieroot.todo.gmailAuthChanged")
+}
+
 // MARK: - Error
 
 enum EmailError: LocalizedError {
@@ -659,6 +722,8 @@ private struct RawGmailMessage: Decodable {
     let payload: Payload
     /// Gmail 카테고리 라벨 (예: ["INBOX", "CATEGORY_PROMOTIONS", "UNREAD"])
     let labelIds: [String]?
+    /// epoch-ms 문자열 — Date 헤더(발신자 주장)보다 신뢰도 높은 실제 수신 시각
+    let internalDate: String?
 }
 
 private struct TokenResponse: Decodable {

@@ -346,6 +346,9 @@ struct OnboardingView: View {
                     if tempICloudSync {
                         iCloudSyncEnabled = true
                         SettingsStore.shared.uploadLocalSettingsToCloud()
+                        // iCloudSyncEnabled=true가 UserDefaults에 반영된 직후 호출 →
+                        // 시크릿(Gmail 토큰·API 키)을 synchronizable=true로 승격
+                        KeychainStore.applySyncPolicy()
                         hasOnboarded = true
                         // 재시작 없이 동적 전환 — TodoListView에서 sync 배너 + 페르소나 체크
                         AppDataContainer.shared.rebuild(useICloud: true)

@@ -143,7 +143,7 @@ final class LLMAutomationOrchestrator: ObservableObject {
         }
 
         let todos    = (try? context.fetch(FetchDescriptor<Todo>())) ?? []
-        var personaDescriptor = FetchDescriptor<Persona>(sortBy: [SortDescriptor(\.updatedAt, order: .reverse)])
+        let personaDescriptor = FetchDescriptor<Persona>(sortBy: [SortDescriptor(\.updatedAt, order: .reverse)])
         let personas = (try? context.fetch(personaDescriptor)) ?? []
         let existing = personas.first?.descriptionText ?? ""
 

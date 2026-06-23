@@ -1,6 +1,7 @@
 import Foundation
 import CoreData
 import Combine
+import SwiftUI
 
 // MARK: - iCloud 동기화 페이즈
 
@@ -83,6 +84,14 @@ final class CloudSyncMonitor: ObservableObject {
         guard phase == .importing else { return }
         let arrived = max(0, total - baselineCount)
         importedCount = arrived
+    }
+
+    /// 앱 레벨에서 initialCount: 0으로 시작한 경우, TodoListView가 실제 @Query 총수를
+    /// 알게 된 시점에 기준치를 보정한다. importing 중 최초 1회만 동작.
+    func updateBaseline(_ count: Int) {
+        guard phase == .importing, baselineCount == 0, count > 0 else { return }
+        baselineCount = count
+        importedCount = 0
     }
 
     // MARK: - CloudKit Event 처리

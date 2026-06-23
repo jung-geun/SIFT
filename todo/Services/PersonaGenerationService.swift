@@ -1,5 +1,4 @@
 import Foundation
-import Security
 
 // MARK: - Provider
 
@@ -48,18 +47,9 @@ enum PersonaAIProvider: String, CaseIterable, Identifiable {
     /// Keychain 저장 키
     var keychainKey: String { "pieroot.todo.persona.key.\(rawValue)" }
 
-    /// Keychain에서 저장된 API 키 읽기
+    /// Keychain에서 저장된 API 키 읽기 (KeychainStore 위임 — SynchronizableAny로 항상 찾음)
     func storedAPIKey() -> String? {
-        let query: [String: Any] = [
-            kSecClass as String:       kSecClassGenericPassword,
-            kSecAttrService as String: keychainKey,
-            kSecReturnData as String:  true,
-            kSecMatchLimit as String:  kSecMatchLimitOne
-        ]
-        var result: AnyObject?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
-              let data = result as? Data else { return nil }
-        return String(data: data, encoding: .utf8)
+        KeychainStore.get(service: keychainKey)
     }
 }
 

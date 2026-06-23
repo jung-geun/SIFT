@@ -199,6 +199,20 @@ struct todoApp: App {
     /// 서비스 레이어(MemoryService 등)도 AppDataContainer.shared.container로 접근 가능.
     @StateObject private var appData = AppDataContainer()
 
+    /// iCloud 동기화 모니터 — 앱 레벨로 승격하여 어느 탭에서든 알림 수신.
+    @StateObject private var syncMonitor = CloudSyncMonitor()
+
+    /// 선택된 탭 (lastUsed 복원용).
+    @AppStorage("pieroot.todo.selectedTab") private var selectedTab = 0
+
+    /// 시작 화면 정책: "lastUsed"(마지막 화면) | "fixed"(고정 탭)
+    @AppStorage("pieroot.todo.launchBehavior") private var launchBehavior = "lastUsed"
+
+    /// 고정 탭 인덱스 (launchBehavior == "fixed" 일 때 사용)
+    @AppStorage("pieroot.todo.launchTab") private var launchTab = 0
+
+    @AppStorage("pieroot.todo.iCloudSyncEnabled") private var iCloudSyncEnabled = false
+
     // MARK: - 페르소나 중복 제거 (PersonaSettingsView에서도 참조)
 
     static func deduplicatePersonas(context: ModelContext) {
@@ -234,7 +248,19 @@ struct todoApp: App {
 
     var body: some Scene {
         WindowGroup {
-            TodoListView()
+            TabView(selection: $selectedTab) {
+                TodoListView()
+                    .tabItem { Label("할 일", systemImage: "checklist") }
+                    .tag(0)
+                CalendarTabView()
+                    .tabItem { Label("캘린더", systemImage: "calendar") }
+                    .tag(1)
+                MailTabView()
+                    .modelContainer(appData.emailContainer)
+                    .tabItem { Label("메일", systemImage: "envelope") }
+                    .tag(2)
+            }
+            .environmentObject(syncMonitor)
                 .onAppear {
                     NSUbiquitousKeyValueStore.default.synchronize()
 
@@ -245,6 +271,16 @@ struct todoApp: App {
                     CalendarService.shared.restoreAuthorizationIfGranted()
                     scheduleEmailRefresh()
                     scheduleMemoryAnalysis()
+
+                    // 시작 화면 정책: fixed면 지정 탭으로 강제 이동
+                    if launchBehavior == "fixed" {
+                        selectedTab = launchTab
+                    }
+
+                    // 어느 탭이든 앱 실행 시 iCloud 동기화 시작
+                    if iCloudSyncEnabled {
+                        syncMonitor.startObserving(initialCount: 0)
+                    }
 
                     // 콜드 런치: scenePhase는 이미 .active라 onChange가 발동하지 않음
                     Task {
@@ -273,6 +309,10 @@ struct todoApp: App {
             .onChange(of: scenePhase) { _, newPhase in
                 switch newPhase {
                 case .active:
+                    // 포그라운드 전환 시에도 동기화 시작 (탭 무관)
+                    if iCloudSyncEnabled {
+                        syncMonitor.startObserving(initialCount: 0)
+                    }
                     if let ctx = appDelegate.modelContext {
                         Task {
                             await LLMAutomationOrchestrator.shared.runIfEligible(context: ctx)

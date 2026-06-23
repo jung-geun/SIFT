@@ -12,6 +12,7 @@ final class CalendarService {
 
     private let store = EKEventStore()
     private(set) var isAuthorized = false
+    private var lastStoreRefresh: Date = .distantPast
 
     // MARK: - Authorization
 
@@ -42,8 +43,10 @@ final class CalendarService {
         let startDate: Date
         let endDate: Date
         let isRecurring: Bool
+        let isAllDay: Bool
         let identifier: String
         let calendarTitle: String
+        let calendarID: String
     }
 
     /// 향후 N일 이내 이벤트 목록 (반복 일정 자동 전개 포함)
@@ -58,8 +61,10 @@ final class CalendarService {
                 startDate: event.startDate,
                 endDate: event.endDate,
                 isRecurring: event.hasRecurrenceRules,
+                isAllDay: event.isAllDay,
                 identifier: event.eventIdentifier ?? "",
-                calendarTitle: event.calendar?.title ?? ""
+                calendarTitle: event.calendar?.title ?? "",
+                calendarID: event.calendar?.calendarIdentifier ?? ""
             )
         }.sorted { $0.startDate < $1.startDate }
     }
@@ -94,7 +99,7 @@ final class CalendarService {
         event.startDate = dueDate
         event.endDate = dueDate.addingTimeInterval(3600)
         event.notes = todo.notes
-        event.calendar = store.defaultCalendarForNewEvents
+        event.calendar = preferredDefaultCalendar
         try store.save(event, span: .thisEvent)
         return event.eventIdentifier
     }
@@ -200,7 +205,7 @@ final class CalendarService {
         if !location.isEmpty { event.location = location }
         if !notes.isEmpty    { event.notes    = notes }
         event.url       = URL(string: "x-todoapp-email://\(sourceRef.addingPercentEncoding(withAllowedCharacters: .urlHostAllowed) ?? sourceRef)")
-        event.calendar  = store.defaultCalendarForNewEvents
+        event.calendar  = preferredDefaultCalendar
         try store.save(event, span: .thisEvent)
 
         var mapping = emailEventMapping
@@ -519,5 +524,268 @@ extension CalendarService {
         }
         
         print("[Database Cleanup] 용량 초과로 완료된 할 일 \(deletedCount)개 삭제 완료. 현재 용량: \(getDatabaseSize() / 1024 / 1024)MB")
+    }
+}
+
+// MARK: - 캘린더 소스 관리 + 이벤트 CRUD
+
+extension CalendarService {
+
+    // MARK: 중첩 타입
+
+    struct CalendarSourceGroup: Identifiable {
+        let id: String       // EKSource.sourceIdentifier
+        let title: String
+        let calendars: [CalendarInfo]
+    }
+
+    struct CalendarInfo: Identifiable {
+        let id: String       // EKCalendar.calendarIdentifier
+        let title: String
+        let sourceTitle: String
+    }
+
+    struct CalendarEventDetail: Identifiable {
+        let identifier: String
+        var title: String
+        var startDate: Date
+        var endDate: Date
+        var notes: String
+        var calendarID: String
+        /// 반복 일정의 특정 발생분인 경우 해당 startDate, nil이면 단일/첫 발생분 경로
+        var occurrenceDate: Date?
+
+        var id: String {
+            if let occ = occurrenceDate {
+                return "\(identifier)-\(occ.timeIntervalSince1970)"
+            }
+            return identifier
+        }
+    }
+
+    // MARK: 기본 캘린더 설정 (기기별 로컬 영속)
+
+    var defaultCalendarID: String {
+        get { UserDefaults.standard.string(forKey: "pieroot.todo.defaultCalendarID") ?? "" }
+        set { UserDefaults.standard.set(newValue, forKey: "pieroot.todo.defaultCalendarID") }
+    }
+
+    /// 앱 기본 캘린더. 설정 저장값 조회 실패 시 시스템 기본 캘린더로 폴백.
+    var preferredDefaultCalendar: EKCalendar? {
+        let id = defaultCalendarID
+        if !id.isEmpty, let cal = store.calendar(withIdentifier: id) { return cal }
+        return store.defaultCalendarForNewEvents
+    }
+
+    // MARK: 비활성 캘린더 ID 집합 (기기별 로컬 영속)
+
+    private var disabledCalendarIDsKey: String { "pieroot.todo.disabledCalendarIDs" }
+
+    var disabledCalendarIDs: Set<String> {
+        get {
+            Set(UserDefaults.standard.stringArray(forKey: disabledCalendarIDsKey) ?? [])
+        }
+        set {
+            UserDefaults.standard.set(Array(newValue), forKey: disabledCalendarIDsKey)
+        }
+    }
+
+    func setCalendar(_ id: String, enabled: Bool) {
+        var disabled = disabledCalendarIDs
+        if enabled { disabled.remove(id) } else { disabled.insert(id) }
+        disabledCalendarIDs = disabled
+    }
+
+    // MARK: 활성 캘린더 필터링
+
+    /// 활성화된 EKCalendar 배열. 전체 활성이면 nil (predicateForEvents 최적화).
+    var activeEKCalendars: [EKCalendar]? {
+        let disabled = disabledCalendarIDs
+        guard !disabled.isEmpty else { return nil }
+        let filtered = store.calendars(for: .event).filter {
+            !disabled.contains($0.calendarIdentifier)
+        }
+        return filtered.isEmpty ? nil : filtered
+    }
+
+    // MARK: 캘린더 소스 목록
+
+    /// EKSource별로 그룹핑된 캘린더 목록 반환 (CalendarSourceSheet 전용).
+    func availableCalendars() -> [CalendarSourceGroup] {
+        guard isAuthorized else { return [] }
+        store.refreshSourcesIfNecessary()
+        return store.sources
+            .sorted { $0.title < $1.title }
+            .compactMap { source -> CalendarSourceGroup? in
+                let cals = source.calendars(for: .event)
+                    .sorted { $0.title < $1.title }
+                guard !cals.isEmpty else { return nil }
+                let infos = cals.map {
+                    CalendarInfo(
+                        id: $0.calendarIdentifier,
+                        title: $0.title,
+                        sourceTitle: source.title
+                    )
+                }
+                return CalendarSourceGroup(
+                    id: source.sourceIdentifier,
+                    title: source.title,
+                    calendars: infos
+                )
+            }
+    }
+
+    // MARK: 임의 날짜 범위 이벤트 조회 (활성 캘린더 필터 적용)
+
+    /// 과도한 호출을 막는 throttle — 30초에 한 번만 소스를 리프레시.
+    private func refreshStoreIfNeeded() {
+        guard Date().timeIntervalSince(lastStoreRefresh) > 30 else { return }
+        store.refreshSourcesIfNecessary()
+        lastStoreRefresh = Date()
+    }
+
+    /// CalendarTabView 전용 — 활성화된 캘린더만 쿼리.
+    /// 백그라운드 sync(`upcomingEvents`, `syncCalendarTodos`)는 filter 미적용.
+    func events(from start: Date, to end: Date) -> [CalendarEventSummary] {
+        guard isAuthorized else { return [] }
+        refreshStoreIfNeeded()
+        let predicate = store.predicateForEvents(
+            withStart: start, end: end, calendars: activeEKCalendars
+        )
+        return store.events(matching: predicate).map { event in
+            CalendarEventSummary(
+                title: event.title ?? "",
+                startDate: event.startDate,
+                endDate: event.endDate,
+                isRecurring: event.hasRecurrenceRules,
+                isAllDay: event.isAllDay,
+                identifier: event.eventIdentifier ?? "",
+                calendarTitle: event.calendar?.title ?? "",
+                calendarID: event.calendar?.calendarIdentifier ?? ""
+            )
+        }.sorted { $0.startDate < $1.startDate }
+    }
+
+    // MARK: 이벤트 메타데이터
+
+    func eventDetail(identifier: String) -> CalendarEventDetail? {
+        guard let event = store.event(withIdentifier: identifier) else { return nil }
+        return CalendarEventDetail(
+            identifier: identifier,
+            title: event.title ?? "",
+            startDate: event.startDate,
+            endDate: event.endDate,
+            notes: event.notes ?? "",
+            calendarID: event.calendar?.calendarIdentifier ?? "",
+            occurrenceDate: nil
+        )
+    }
+
+    /// 반복 일정의 특정 발생분 메타데이터.
+    /// ±60초 윈도우 스캔으로 해당 날짜의 EKEvent 인스턴스를 찾아 반환.
+    /// occurrenceDate가 non-nil이면 EventEditSheet 저장 시 updateOccurrence로 분기됨.
+    func occurrenceDetail(identifier: String, on date: Date) -> CalendarEventDetail? {
+        guard isAuthorized else { return nil }
+        let scanStart = date.addingTimeInterval(-60)
+        let scanEnd   = date.addingTimeInterval(60)
+        let pred = store.predicateForEvents(withStart: scanStart, end: scanEnd, calendars: nil)
+        if let occurrence = store.events(matching: pred)
+            .first(where: { $0.eventIdentifier == identifier }) {
+            return CalendarEventDetail(
+                identifier: identifier,
+                title: occurrence.title ?? "",
+                startDate: occurrence.startDate,
+                endDate: occurrence.endDate,
+                notes: occurrence.notes ?? "",
+                calendarID: occurrence.calendar?.calendarIdentifier ?? "",
+                occurrenceDate: date
+            )
+        }
+        // ±60초 스캔 실패 시 첫 발생분 폴백 (occurrenceDate: nil)
+        return eventDetail(identifier: identifier)
+    }
+
+    func ekCalendar(withIdentifier id: String) -> EKCalendar? {
+        store.calendar(withIdentifier: id)
+    }
+
+    // MARK: 이벤트 CRUD (CalendarTabView 전용)
+
+    @discardableResult
+    func createEvent(
+        title: String,
+        startDate: Date,
+        endDate: Date,
+        notes: String,
+        calendarID: String?
+    ) throws -> String {
+        guard isAuthorized else { throw CalendarError.notAuthorized }
+        let event       = EKEvent(eventStore: store)
+        event.title     = title.isEmpty ? "(제목 없음)" : title
+        event.startDate = startDate
+        event.endDate   = endDate
+        event.notes     = notes.isEmpty ? nil : notes
+        if let cid = calendarID, let cal = store.calendar(withIdentifier: cid) {
+            event.calendar = cal
+        } else {
+            event.calendar = preferredDefaultCalendar
+        }
+        try store.save(event, span: .thisEvent)
+        return event.eventIdentifier ?? ""
+    }
+
+    func updateEvent(
+        identifier: String,
+        title: String,
+        startDate: Date,
+        endDate: Date,
+        notes: String
+    ) throws {
+        guard isAuthorized,
+              let event = store.event(withIdentifier: identifier) else { return }
+        event.title     = title.isEmpty ? "(제목 없음)" : title
+        event.startDate = startDate
+        event.endDate   = endDate
+        event.notes     = notes.isEmpty ? nil : notes
+        try store.save(event, span: .thisEvent)
+    }
+
+    func deleteEvent(identifier: String) throws {
+        guard isAuthorized,
+              let event = store.event(withIdentifier: identifier) else { return }
+        try store.remove(event, span: .thisEvent)
+    }
+
+    /// 반복 일정의 특정 발생분만 수정 (span: .thisEvent).
+    /// occurrenceDate ±60초 윈도우 스캔으로 정확한 EKEvent 인스턴스를 찾아 저장.
+    func updateOccurrence(
+        identifier: String,
+        on occurrenceDate: Date,
+        title: String,
+        startDate: Date,
+        endDate: Date,
+        notes: String
+    ) throws {
+        guard isAuthorized else { throw CalendarError.notAuthorized }
+        let scanStart = occurrenceDate.addingTimeInterval(-60)
+        let scanEnd   = occurrenceDate.addingTimeInterval(60)
+        let pred = store.predicateForEvents(withStart: scanStart, end: scanEnd, calendars: nil)
+        if let occurrence = store.events(matching: pred)
+            .first(where: { $0.eventIdentifier == identifier }) {
+            occurrence.title     = title.isEmpty ? "(제목 없음)" : title
+            occurrence.startDate = startDate
+            occurrence.endDate   = endDate
+            occurrence.notes     = notes.isEmpty ? nil : notes
+            try store.save(occurrence, span: .thisEvent)
+        } else {
+            // ±60초 스캔 실패 시 표준 경로로 폴백
+            try updateEvent(
+                identifier: identifier,
+                title: title,
+                startDate: startDate,
+                endDate: endDate,
+                notes: notes
+            )
+        }
     }
 }

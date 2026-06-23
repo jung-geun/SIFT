@@ -108,6 +108,32 @@ final class AppDataContainer: ObservableObject {
         MemoryAnalysis.self
     ])
 
+    // MARK: - Email Container (로컬 전용, CloudKit 절대 금지)
+
+    /// 이메일 본문 저장 전용 스키마. appSchema와 철저히 분리하여
+    /// iCloud 토글 여부와 무관하게 항상 기기 로컬에만 저장.
+    static let emailSchema = Schema([EmailMessage.self])
+
+    /// iCloud 설정과 무관하게 항상 로컬(cloudKitDatabase: .none)로 고정되는 컨테이너.
+    /// MailTabView 서브트리에만 주입 — 메인 appSchema에 EmailMessage 포함 금지.
+    lazy var emailContainer: ModelContainer = {
+        let config = ModelConfiguration(
+            schema: AppDataContainer.emailSchema,
+            url: AppDataContainer.getStoreURL(name: "email_local.store"),
+            cloudKitDatabase: .none   // iCloud 토글과 무관하게 항상 로컬
+        )
+        do {
+            return try ModelContainer(for: AppDataContainer.emailSchema, configurations: [config])
+        } catch {
+            print("[EmailContainer] 초기화 실패: \(error). 메모리 전용 모드로 실행.")
+            let fallback = ModelConfiguration(
+                schema: AppDataContainer.emailSchema,
+                isStoredInMemoryOnly: true
+            )
+            return try! ModelContainer(for: AppDataContainer.emailSchema, configurations: [fallback])
+        }
+    }()
+
     // MARK: - Migration (로컬 → iCloud)
 
     /// 로컬 데이터가 있고 iCloud 스토어가 없으면 깊은 복사 이관 실행.

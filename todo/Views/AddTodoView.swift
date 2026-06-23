@@ -17,6 +17,11 @@ struct AddTodoView: View {
     @State private var selectedReminderPresets: Set<Double> = []
     @State private var tagsText = ""
 
+    // 캘린더 등록
+    @State private var registerToCalendar = false
+    @State private var selectedCalendarID = ""
+    @State private var calendarSources: [CalendarService.CalendarSourceGroup] = []
+
     @FocusState private var isTitleFocused: Bool
 
     // MARK: - Body
@@ -49,6 +54,34 @@ struct AddTodoView: View {
                             displayedComponents: [.date, .hourAndMinute]
                         )
                         .datePickerStyle(.graphical)
+                    }
+                }
+
+                // 캘린더 등록 (캘린더 권한 있을 때만 표시)
+                if CalendarService.shared.isAuthorized {
+                    Section {
+                        Toggle(isOn: $registerToCalendar.animation()) {
+                            Label("캘린더에 등록", systemImage: "calendar.badge.plus")
+                        }
+                        if registerToCalendar {
+                            if !calendarSources.isEmpty {
+                                Picker("캘린더", selection: $selectedCalendarID) {
+                                    ForEach(calendarSources) { source in
+                                        ForEach(source.calendars) { calInfo in
+                                            Text(calInfo.title).tag(calInfo.id)
+                                        }
+                                    }
+                                }
+                                .pickerStyle(.menu)
+                            }
+                            if !hasDueDate {
+                                Label("날짜를 설정해야 캘린더에 등록할 수 있습니다.", systemImage: "info.circle")
+                                    .font(.caption)
+                                    .foregroundStyle(.orange)
+                            }
+                        }
+                    } header: {
+                        Text("캘린더 등록")
                     }
                 }
 
@@ -130,10 +163,23 @@ struct AddTodoView: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("추가") { addTodo() }
                         .fontWeight(.semibold)
-                        .disabled(title.trimmingCharacters(in: .whitespaces).isEmpty)
+                        .disabled(
+                            title.trimmingCharacters(in: .whitespaces).isEmpty
+                            || (registerToCalendar && !hasDueDate)
+                        )
                 }
             }
             .onAppear { isTitleFocused = true }
+            .task {
+                calendarSources = CalendarService.shared.availableCalendars()
+                // 기본 캘린더 설정값 → 없으면 첫 번째 캘린더
+                let defaultID = CalendarService.shared.defaultCalendarID
+                if !defaultID.isEmpty {
+                    selectedCalendarID = defaultID
+                } else {
+                    selectedCalendarID = calendarSources.first?.calendars.first?.id ?? ""
+                }
+            }
         }
     }
 
@@ -165,8 +211,23 @@ struct AddTodoView: View {
 
         modelContext.insert(todo)
 
-        // 캘린더 자동 등록 (정책 또는 긴급/최우선 강제)
-        CalendarService.shared.applyAutoRegistration(for: todo)
+        // 캘린더 등록 처리
+        if registerToCalendar && hasDueDate && CalendarService.shared.isAuthorized {
+            // 사용자가 명시적으로 선택한 캘린더에 등록
+            let calID = selectedCalendarID.isEmpty ? nil : selectedCalendarID
+            if let eventID = try? CalendarService.shared.createEvent(
+                title: trimmedTitle,
+                startDate: dueDate,
+                endDate: dueDate.addingTimeInterval(3600),
+                notes: notes.trimmingCharacters(in: .whitespaces),
+                calendarID: calID
+            ) {
+                todo.calendarEventID = eventID
+            }
+        } else {
+            // 기존 자동 등록 정책 적용 (우선순위·정책 기반)
+            CalendarService.shared.applyAutoRegistration(for: todo)
+        }
 
         // 알림 등록
         if hasDueDate && !offsets.isEmpty {
