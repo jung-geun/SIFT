@@ -2,6 +2,7 @@ import SwiftUI
 import SwiftData
 import Security
 import Combine
+import EventKit
 
 struct PersonaSettingsView: View {
     @Environment(\.dismiss) private var dismiss
@@ -29,7 +30,11 @@ struct PersonaSettingsView: View {
                 NavigationLink(destination: CalendarDetailView()) {
                     Label("캘린더 설정", systemImage: "calendar")
                 }
-                
+
+                NavigationLink(destination: LaunchScreenDetailView()) {
+                    Label("시작 화면", systemImage: "rectangle.on.rectangle")
+                }
+
                 NavigationLink(destination: SystemStatusDetailView()) {
                     Label("시스템 권한 및 상태", systemImage: "shield")
                 }
@@ -1168,11 +1173,45 @@ struct CalendarDetailView: View {
             } footer: {
                 Text("마감 시각이 있는 모든 할 일(수동·이메일 모두)을 시스템 캘린더에 자동으로 등록합니다. 긴급·최우선 항목은 이 설정과 무관하게 항상 등록됩니다. '알람만 끄기'는 이벤트는 캘린더에 남기고 리마인더만 제거합니다.")
             }
+
+            defaultCalendarSection
         }
         .navigationTitle("캘린더 설정")
         .navigationBarTitleDisplayMode(.inline)
+        .task {
+            // 기본 캘린더 설정이 비어있으면 시스템 기본값 ID를 초기화
+            if CalendarService.shared.isAuthorized
+                && CalendarService.shared.defaultCalendarID.isEmpty,
+               let sysDefault = CalendarService.shared.preferredDefaultCalendar {
+                CalendarService.shared.defaultCalendarID = sysDefault.calendarIdentifier
+            }
+        }
     }
-    
+
+    @ViewBuilder
+    private var defaultCalendarSection: some View {
+        let sources = CalendarService.shared.availableCalendars()
+        if CalendarService.shared.isAuthorized && !sources.isEmpty {
+            Section {
+                Picker("기본 캘린더", selection: Binding(
+                    get: { CalendarService.shared.defaultCalendarID },
+                    set: { CalendarService.shared.defaultCalendarID = $0 }
+                )) {
+                    ForEach(sources) { source in
+                        ForEach(source.calendars) { cal in
+                            Text("\(cal.title) (\(source.title))").tag(cal.id)
+                        }
+                    }
+                }
+                .pickerStyle(.menu)
+            } header: {
+                Text("기본 캘린더")
+            } footer: {
+                Text("새 할 일·이벤트를 추가할 때 기본으로 사용할 캘린더입니다. 개별 추가 시 변경할 수 있습니다.")
+            }
+        }
+    }
+
     private func saveSetting<T>(key: String, value: T, onChange: ((T) -> Void)? = nil) {
         let isLocal = !iCloudSyncEnabled || SettingsStore.shared.isLocal(key: key)
         if isLocal {
@@ -1197,7 +1236,38 @@ struct CalendarDetailView: View {
     }
 }
 
-// 6. 시스템 권한 및 상태
+// 6. 시작 화면 설정
+struct LaunchScreenDetailView: View {
+    @AppStorage("pieroot.todo.launchBehavior") private var launchBehavior = "lastUsed"
+    @AppStorage("pieroot.todo.launchTab")     private var launchTab = 0
+
+    var body: some View {
+        Form {
+            Section {
+                Picker("시작 방식", selection: $launchBehavior) {
+                    Text("마지막 화면").tag("lastUsed")
+                    Text("고정 탭").tag("fixed")
+                }
+                .pickerStyle(.menu)
+
+                if launchBehavior == "fixed" {
+                    Picker("기본 탭", selection: $launchTab) {
+                        Text("할 일").tag(0)
+                        Text("캘린더").tag(1)
+                        Text("메일").tag(2)
+                    }
+                    .pickerStyle(.menu)
+                }
+            } footer: {
+                Text("'마지막 화면'은 앱 종료 시 보던 탭으로 돌아옵니다. '고정 탭'은 항상 지정한 탭으로 시작합니다.")
+            }
+        }
+        .navigationTitle("시작 화면")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+// 7. 시스템 권한 및 상태
 struct SystemStatusDetailView: View {
     @State private var notificationStatus = "확인 중…"
     @State private var calendarStatus     = "확인 중…"
@@ -1365,13 +1435,22 @@ struct AppInfoDetailView: View {
             Section {
                 LabeledContent("버전") { Text("1.0") }
                 LabeledContent("이메일 연동") { Text("Gmail (1계정)") }
-                
+
                 Button {
                     showDevChanges = true
                 } label: {
                     Label("개발 현황 및 예정 기능", systemImage: "list.bullet.clipboard")
                 }
                 .buttonStyle(.borderless)
+            }
+
+            Section(header: Text("약관 및 정책")) {
+                NavigationLink(destination: LegalDocumentView(document: .privacy)) {
+                    Label("개인정보 처리방침", systemImage: "hand.raised.fill")
+                }
+                NavigationLink(destination: LegalDocumentView(document: .terms)) {
+                    Label("서비스 약관", systemImage: "doc.text")
+                }
             }
         }
         .navigationTitle("앱 정보")

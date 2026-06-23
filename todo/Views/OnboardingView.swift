@@ -218,6 +218,14 @@ struct OnboardingView: View {
                 }
                 .padding(.horizontal, 20)
                 .padding(.top, 8)
+
+                // 약관 동의 안내 (App Store 요건)
+                Text("계속하면 [개인정보 처리방침](https://jung-geun.github.io/SIFT/privacy-policy.html)과 [서비스 약관](https://jung-geun.github.io/SIFT/terms-of-service.html)에 동의한 것으로 간주합니다.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 4)
             }
             .padding(.vertical, 24)
         }

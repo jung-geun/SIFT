@@ -12,6 +12,8 @@
 		AEDC6C8B2FE3E978006E59B5 /* MLXLLM in Frameworks */ = {isa = PBXBuildFile; productRef = AEDC6C8A2FE3E978006E59B5 /* MLXLLM */; };
 		AEDC6C8D2FE3E978006E59B5 /* MLXLMCommon in Frameworks */ = {isa = PBXBuildFile; productRef = AEDC6C8C2FE3E978006E59B5 /* MLXLMCommon */; };
 		AEDC6C8F2FE3E978006E59B5 /* MLXVLM in Frameworks */ = {isa = PBXBuildFile; productRef = AEDC6C8E2FE3E978006E59B5 /* MLXVLM */; };
+		AE58F1D22FDEFA3D00690FA6 /* privacy-policy.md in Resources */ = {isa = PBXBuildFile; fileRef = AE58F1D02FDEFA3D00690FA6 /* privacy-policy.md */; };
+		AE58F1D32FDEFA3D00690FA6 /* terms-of-service.md in Resources */ = {isa = PBXBuildFile; fileRef = AE58F1D12FDEFA3D00690FA6 /* terms-of-service.md */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -35,6 +37,8 @@
 		AE58F1A22FDEFA3B00690FA6 /* todo.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = todo.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		AE58F1B32FDEFA3C00690FA6 /* todoTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = todoTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		AE58F1BD2FDEFA3C00690FA6 /* todoUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = todoUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		AE58F1D02FDEFA3D00690FA6 /* privacy-policy.md */ = {isa = PBXFileReference; lastKnownFileType = text; name = "privacy-policy.md"; path = "docs/privacy-policy.md"; sourceTree = SOURCE_ROOT; };
+		AE58F1D12FDEFA3D00690FA6 /* terms-of-service.md */ = {isa = PBXFileReference; lastKnownFileType = text; name = "terms-of-service.md"; path = "docs/terms-of-service.md"; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -105,6 +109,8 @@
 				AE58F1B62FDEFA3C00690FA6 /* todoTests */,
 				AE58F1C02FDEFA3C00690FA6 /* todoUITests */,
 				AE58F1A32FDEFA3B00690FA6 /* Products */,
+				AE58F1D02FDEFA3D00690FA6 /* privacy-policy.md */,
+				AE58F1D12FDEFA3D00690FA6 /* terms-of-service.md */,
 			);
 			sourceTree = "<group>";
 		};
@@ -255,6 +261,8 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				AE58F1D22FDEFA3D00690FA6 /* privacy-policy.md in Resources */,
+				AE58F1D32FDEFA3D00690FA6 /* terms-of-service.md in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -335,7 +343,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0;
+				MARKETING_VERSION = 1.0.1;
 				PRODUCT_BUNDLE_IDENTIFIER = "pieroot.sift-todo";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -371,7 +379,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0;
+				MARKETING_VERSION = 1.0.1;
 				PRODUCT_BUNDLE_IDENTIFIER = "pieroot.sift-todo";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
