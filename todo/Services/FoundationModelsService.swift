@@ -45,7 +45,7 @@ struct FMPriorityRanking {
     @Guide(description: "40자 이내 한국어 우선순위 이유")
     var reason: String
 
-    @Guide(description: "세부 설명. 빈 문자열 가능.")
+    @Guide(description: "항상 빈 문자열.")
     var detail: String
 
     @Guide(description: "오늘 마감·임박·중요 키워드 있으면 true")
@@ -110,15 +110,21 @@ struct FMEmailOutput {
 struct FoundationModelsService {
 
     // E-1: 배치 크기 — FM 컨텍스트 창(~4096 토큰, 입력+출력 합산)에 맞게 분할.
-    // 배치당 transcript 추정: 입력 ~1100 + 출력 ~560 = ~1700 토큰 (4096 대비 충분한 여유).
-    private let fmBatchSize = 8
+    // 배치당 추정: instructions ~400 + schema ~400 + prompt ~300 + output(4×~100) = ~1500 토큰.
+    private let fmBatchSize = 4
 
-    // E-4: 가변 길이 입력 방어 캡 (현재 유한하나 페르소나·메모리 누적 시 미래 보호).
-    private let inputCharCap = 600
+    // E-4: 가변 길이 입력 방어 캡 — 페르소나·메모리 누적에 의한 instructions 비대화 방지.
+    private let inputCharCap = 200
 
     /// Apple Intelligence가 현재 기기에서 사용 가능한지 여부.
+    /// 시뮬레이터에서는 SensitiveContentAnalysisML(오류 15) 미지원으로 AFM 세션 해제 시
+    /// libc++ Hardening assertion 크래시가 발생하므로 명시적으로 비활성화.
     static var isAvailable: Bool {
-        SystemLanguageModel.default.availability == .available
+        #if targetEnvironment(simulator)
+        return false
+        #else
+        return SystemLanguageModel.default.availability == .available
+        #endif
     }
 
     // MARK: - 페르소나 생성·개선
@@ -181,10 +187,15 @@ struct FoundationModelsService {
         let instructions = buildRankingInstructions(persona: persona)
         var allResults   = [PriorityResult]()
 
+        // E-5: 배치당 출력 토큰 캡 — 4-item 배치 × ~100 토큰/항목 = 400, 25% 여유 = 500.
+        // 4096 총 한도에서 instructions(~250) + schema(~500) + prompt(~210) ≈ 960 소비 → 출력 여유 3136.
+        // 그러나 schema가 예상보다 크면 캡이 안전망 역할. 생성 중단 시 output.rankings가 빈 배열 → 폴백.
+        let genOptions = GenerationOptions(maximumResponseTokens: 500)
+
         for batch in batches {
             let prompt   = buildRankingPrompt(indexedBatch: batch, events: events)
             let session  = LanguageModelSession(instructions: instructions)
-            let response = try await session.respond(to: prompt, generating: FMPriorityRankingList.self)
+            let response = try await session.respond(to: prompt, generating: FMPriorityRankingList.self, options: genOptions)
             let output   = response.content
 
             for r in output.rankings {
@@ -380,7 +391,7 @@ struct FoundationModelsService {
         var lines = ["현재 시각: \(AppDateFormat.llmString(from: Date()))"]
         if !events.isEmpty {
             lines.append("\n[캘린더 이벤트 (향후 7일)]")
-            for e in events.prefix(10) { lines.append("• \(e.title) — \(AppDateFormat.llmString(from: e.startDate))") }
+            for e in events.prefix(5) { lines.append("• \(e.title) — \(AppDateFormat.llmString(from: e.startDate))") }
         }
         lines.append("\n[우선순위 평가 대상 할 일]")
         for (idx, todo) in indexedBatch {

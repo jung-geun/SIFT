@@ -137,6 +137,7 @@ struct TodoListView: View {
     @State private var filter: TodoFilter = .active
     @State private var isPrioritizing = false
     @State private var showPrioritizingIndicator = false
+    @State private var showAFMError = false
 
     // MARK: - iCloud Sync (앱 레벨에서 주입받음 — todoApp.swift의 @StateObject)
     @EnvironmentObject private var syncMonitor: CloudSyncMonitor
@@ -284,6 +285,12 @@ struct TodoListView: View {
         .sheet(isPresented: $showPostSyncPersonaSetup) {
             // 동기화 완료 후 페르소나가 없는 경우 초기 세팅 진행
             OnboardingView(isPresented: $showPostSyncPersonaSetup, isResetup: true)
+        }
+        .alert("분석 오류", isPresented: $showAFMError) {
+            Button("다시 시도") { Task { await runPrioritize() } }
+            Button("취소", role: .cancel) {}
+        } message: {
+            Text("우선순위 분석 중 오류가 발생했습니다.")
         }
     }
 
@@ -560,7 +567,9 @@ struct TodoListView: View {
 
     private func deleteTodo(_ todo: Todo) {
         NotificationService.shared.cancel(todo: todo)
-        if !todo.isCompleted, let eventID = todo.calendarEventID {
+        // 대기열(review) 항목은 캘린더 이벤트 보존 — 큐에서 제거해도 이벤트는 유지
+        // 태스크(todo)로 승격된 항목만 함께 삭제
+        if !todo.isCompleted && todo.triage == .todo, let eventID = todo.calendarEventID {
             if todo.isFixedSchedule, let due = todo.dueDate {
                 // 반복 이벤트: dueDate 기준 해당 발생분만 제거
                 try? CalendarService.shared.removeEventOccurrence(eventID: eventID, on: due)
@@ -604,7 +613,13 @@ struct TodoListView: View {
             : []
 
         let service = IntelligenceServiceFactory.makeService()
-        let results = await service.prioritize(todos: activeTodos, events: events, persona: persona)
+        let results: [PriorityResult]
+        do {
+            results = try await service.prioritize(todos: activeTodos, events: events, persona: persona)
+        } catch {
+            showAFMError = true
+            return
+        }
 
         for result in results {
             if let todo = activeTodos.first(where: { $0.id == result.todoID }) {

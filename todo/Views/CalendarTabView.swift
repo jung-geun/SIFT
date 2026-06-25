@@ -1,6 +1,12 @@
 import SwiftUI
 import SwiftData
 import EventKit
+import Combine
+
+// MARK: - Notification Names
+extension Notification.Name {
+    static let calendarScrollToToday = Notification.Name("pieroot.todo.calendarScrollToToday")
+}
 
 // ─────────────────────────────────────────────────────────────
 // MARK: - 파일 수준 공유 헬퍼
@@ -32,7 +38,7 @@ private func calendarEventColor(for id: String) -> Color {
 }
 
 // ─────────────────────────────────────────────────────────────
-// MARK: - 타임라인 공유 타입 (DayDetailSheet / MultiDayTimelineView)
+// MARK: - 타임라인 공유 타입 (DayDetailSheet)
 // ─────────────────────────────────────────────────────────────
 
 private enum CalTimelineItem {
@@ -105,9 +111,7 @@ struct CalendarTabView: View {
     @Environment(\.scenePhase) private var scenePhase
     @Query private var allTodos: [Todo]
 
-    @State private var viewMode: CalViewMode = .month
     @State private var displayMonth: Date = CalendarTabView.currentMonthStart
-    @State private var anchorDate: Date = Date()        // 주/3일 기준일
     @State private var selectedDate: Date?
     @State private var activeSheet: CalendarActiveSheet?
     @State private var showSourceSheet = false
@@ -118,13 +122,14 @@ struct CalendarTabView: View {
     @State private var initialScrollDone = false
     @State private var scrollToTodayTrigger = 0
 
-    enum CalViewMode: String, CaseIterable {
-        case month = "월"
-        case week  = "주"
-        case day   = "일"
-    }
-
     private let cal = Calendar.current
+
+    // 오늘이 현재 월에 표시되는지 여부 — "오늘" 버튼 강조에 사용
+    private var isTodayVisible: Bool {
+        let today = cal.dateComponents([.year, .month], from: Date())
+        let disp  = cal.dateComponents([.year, .month], from: displayMonth)
+        return today.year == disp.year && today.month == disp.month
+    }
 
     static var currentMonthStart: Date {
         let comps = Calendar.current.dateComponents([.year, .month], from: Date())
@@ -178,6 +183,11 @@ struct CalendarTabView: View {
         .onChange(of: scenePhase) { _, newPhase in
             if newPhase == .active && authorized { reloadAllEvents() }
         }
+        // 캘린더 탭 재탭 시 오늘로 이동
+        .onReceive(NotificationCenter.default.publisher(for: .calendarScrollToToday)) { _ in
+            displayMonth = Self.currentMonthStart
+            scrollToTodayTrigger += 1
+        }
     }
 
     // MARK: Permission Placeholder
@@ -193,22 +203,7 @@ struct CalendarTabView: View {
     // MARK: Main Content
 
     private var mainContent: some View {
-        switch viewMode {
-        case .month:
-            AnyView(monthGridView)
-        case .week:
-            AnyView(MultiDayTimelineView(dayCount: 3,
-                                         anchorDate: $anchorDate,
-                                         allEvents: allEvents,
-                                         todos: Array(allTodos),
-                                         onDataChanged: reloadAllEvents))
-        case .day:
-            AnyView(MultiDayTimelineView(dayCount: 1,
-                                         anchorDate: $anchorDate,
-                                         allEvents: allEvents,
-                                         todos: Array(allTodos),
-                                         onDataChanged: reloadAllEvents))
-        }
+        monthGridView
     }
 
     // MARK: Toolbar
@@ -226,41 +221,14 @@ struct CalendarTabView: View {
             .disabled(!authorized)
         }
         // 네비게이션 타이틀 영역 — 현재 뷰 모드를 드롭다운 Menu로 표시
-        ToolbarItem(placement: .principal) {
-            Menu {
-                ForEach(CalViewMode.allCases, id: \.self) { mode in
-                    Button {
-                        viewMode = mode
-                    } label: {
-                        if viewMode == mode {
-                            Label(mode.rawValue, systemImage: "checkmark")
-                        } else {
-                            Text(mode.rawValue)
-                        }
-                    }
-                }
-            } label: {
-                HStack(spacing: 3) {
-                    Text(viewMode.rawValue)
-                        .font(.headline)
-                        .foregroundStyle(Color(.label))
-                    Image(systemName: "chevron.down")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .disabled(!authorized)
-        }
         ToolbarItem(placement: .navigationBarTrailing) {
-            Button("오늘") {
-                // 현재 모드에 따라 동작 분리
-                switch viewMode {
-                case .month:
-                    displayMonth = Self.currentMonthStart   // 월 보기 유지, 이번 달로
-                    scrollToTodayTrigger += 1
-                case .week, .day:
-                    anchorDate = Date()                      // 현재 모드 유지, 오늘로
-                }
+            Button {
+                displayMonth = Self.currentMonthStart
+                scrollToTodayTrigger += 1
+            } label: {
+                Text("오늘")
+                    .fontWeight(isTodayVisible ? .regular : .semibold)
+                    .foregroundStyle(isTodayVisible ? Color.accentColor : Color.red)
             }
             .disabled(!authorized)
         }
@@ -721,389 +689,6 @@ private struct DayNumCell: View {
 }
 
 // ─────────────────────────────────────────────────────────────
-// MARK: - MultiDayTimelineView  (주/3일 보기)
-// ─────────────────────────────────────────────────────────────
-
-struct MultiDayTimelineView: View {
-    let dayCount: Int
-    @Binding var anchorDate: Date
-    let allEvents: [CalendarService.CalendarEventSummary]
-    let todos: [Todo]
-    let onDataChanged: () -> Void
-
-    @State private var editingDetail: CalendarService.CalendarEventDetail?
-    @State private var editingTodo: Todo?
-    /// 스크롤 기준일 (LazyHStack offset=0 이 이 날에 해당). onAppear에서 anchorDate 기준으로 설정.
-    @State private var baseDate: Date = Calendar.current.startOfDay(for: Date())
-    /// 현재 LazyHStack 리딩 가장자리에 보이는 dayOffset (baseDate 기준 일수)
-    @State private var scrollPositionDayOffset: Int? = 0
-    /// 헤더 동기화용 — body 수평 ScrollView의 contentOffset.x를 실시간 반영
-    @State private var headerScrollOffset: CGFloat = 0
-
-    private let cal = Calendar.current
-    private let hourH: CGFloat = 60
-    private let gutterW: CGFloat = 44
-
-    // MARK: Period
-
-    private var periodStart: Date {
-        cal.startOfDay(for: anchorDate)
-    }
-
-    private var days: [Date] {
-        (0..<dayCount).compactMap { cal.date(byAdding: .day, value: $0, to: periodStart) }
-    }
-
-    private var periodEnd: Date {
-        cal.date(byAdding: .day, value: dayCount, to: periodStart) ?? periodStart
-    }
-
-    // MARK: Events
-
-    private var periodEvents: [CalendarService.CalendarEventSummary] {
-        allEvents.filter { $0.startDate < periodEnd && $0.endDate > periodStart }
-    }
-
-    private var allDayBandEvents: [CalendarService.CalendarEventSummary] {
-        periodEvents.filter { eventIsAllDayStyle($0) }
-    }
-
-    private var timedEventsByCol: [[CalendarService.CalendarEventSummary]] {
-        days.map { day in periodEvents.filter { !eventIsAllDayStyle($0) && eventOccupiesDay($0, day: day) } }
-    }
-
-    private func todosForDay(_ day: Date) -> [Todo] {
-        todos.filter { t in
-            guard !t.isCompleted, let due = t.dueDate else { return false }
-            return cal.isDate(due, inSameDayAs: day)
-        }
-    }
-
-    private var initialScrollHour: Int {
-        let hours = timedEventsByCol.flatMap { $0 }.map { cal.component(.hour, from: $0.startDate) }
-        return max(0, (hours.min() ?? cal.component(.hour, from: Date())) - 1)
-    }
-
-    // MARK: Body
-
-    var body: some View {
-        GeometryReader { fullGeo in
-            let availW = fullGeo.size.width
-            let colW   = (availW - gutterW - 0.5) / CGFloat(max(dayCount, 1))
-
-            VStack(spacing: 0) {
-                smoothColumnHeader(colW: colW, scrollOffset: headerScrollOffset)
-                Divider()
-                if !allDayBandEvents.isEmpty {
-                    allDayBand.padding(.vertical, 4)
-                    Divider()
-                }
-                ScrollViewReader { vProxy in
-                    ScrollView(.vertical) {
-                        HStack(alignment: .top, spacing: 0) {
-                            timeGutterStrip
-                            Rectangle().fill(Color(.separator)).frame(width: 0.5)
-                            // 수평 스크롤: 하루 단위 LazyHStack, viewAligned 스냅
-                            ScrollView(.horizontal) {
-                                LazyHStack(spacing: 0) {
-                                    ForEach(-365...365, id: \.self) { offset in
-                                        singleDayColumn(dayOffset: offset, colW: colW)
-                                    }
-                                }
-                                .scrollTargetLayout()
-                            }
-                            .scrollTargetBehavior(.viewAligned)
-                            .frame(width: availW - gutterW - 0.5)
-                            .scrollPosition(id: $scrollPositionDayOffset)
-                            .onScrollGeometryChange(for: CGFloat.self) { $0.contentOffset.x } action: { _, x in
-                                headerScrollOffset = x
-                            }
-                        }
-                        .padding(.bottom, 24)
-                    }
-                    .onAppear {
-                        let dayDiff = cal.dateComponents(
-                            [.day], from: baseDate, to: cal.startOfDay(for: anchorDate)).day ?? 0
-                        scrollPositionDayOffset = dayDiff
-                        let h = initialScrollHour
-                        DispatchQueue.main.async { vProxy.scrollTo("mdhour-\(h)", anchor: .top) }
-                    }
-                }
-            }
-        }
-        .onAppear { baseDate = cal.startOfDay(for: anchorDate) }
-        .onChange(of: anchorDate) { _, newAnchor in
-            // 외부(오늘 버튼 등)에 의한 anchorDate 변경 → scrollPosition 동기화
-            let newDay = cal.startOfDay(for: newAnchor)
-            let currentDay = cal.date(byAdding: .day, value: scrollPositionDayOffset ?? 0, to: baseDate)
-                               .map { cal.startOfDay(for: $0) }
-            if currentDay != newDay {
-                scrollPositionDayOffset = cal.dateComponents([.day], from: baseDate, to: newDay).day
-            }
-        }
-        .onChange(of: scrollPositionDayOffset) { _, newOffset in
-            guard let offset = newOffset else { return }
-            if let newDay = cal.date(byAdding: .day, value: offset, to: baseDate) {
-                let newDayStart = cal.startOfDay(for: newDay)
-                if cal.startOfDay(for: anchorDate) != newDayStart { anchorDate = newDayStart }
-            }
-        }
-        .sheet(item: $editingDetail) { detail in
-            EventEditSheet(mode: .edit(detail: detail)) { onDataChanged() }
-        }
-        .sheet(item: $editingTodo) { todo in
-            NavigationStack { TodoDetailView(todo: todo) }
-        }
-    }
-
-    // MARK: Column Header (smooth — mirrors horizontal scroll offset)
-
-    /// headerScrollOffset 을 반영하여 day 헤더 셀이 body 수평 스크롤과 함께 움직임.
-    /// baseDate+offset i에 해당하는 셀의 x 위치 = (i + 365) * colW - scrollOffset
-    @ViewBuilder
-    private func smoothColumnHeader(colW: CGFloat, scrollOffset: CGFloat) -> some View {
-        HStack(spacing: 0) {
-            Color.clear.frame(width: gutterW, height: 48)
-            if colW > 0 {
-                let firstIdx = Int(floor(scrollOffset / colW)) - 366  // 버퍼 1칸 여유
-                let lastIdx  = firstIdx + dayCount + 2
-                ZStack(alignment: .topLeading) {
-                    ForEach(firstIdx...lastIdx, id: \.self) { idx in
-                        let xPos = CGFloat(idx + 365) * colW - scrollOffset
-                        if let day = cal.date(byAdding: .day, value: idx, to: baseDate) {
-                            dayHeaderCell(day: day)
-                                .frame(width: colW)
-                                .offset(x: xPos)
-                        }
-                    }
-                }
-                .frame(width: CGFloat(dayCount) * colW)
-                .clipped()
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func dayHeaderCell(day: Date) -> some View {
-        let isToday = cal.isDateInToday(day)
-        VStack(spacing: 2) {
-            Text(weekdayLabel(day))
-                .font(.caption2)
-                .foregroundStyle(isToday ? Color.accentColor : .secondary)
-            ZStack {
-                if isToday { Circle().fill(Color.accentColor).frame(width: 28, height: 28) }
-                Text("\(cal.component(.day, from: day))")
-                    .font(.callout.weight(isToday ? .semibold : .regular))
-                    .foregroundStyle(isToday ? .white : Color(.label))
-            }
-        }
-        .padding(.vertical, 4)
-    }
-
-    private func weekdayLabel(_ date: Date) -> String {
-        let labels = ["일","월","화","수","목","금","토"]
-        return labels[(cal.component(.weekday, from: date) - 1) % 7]
-    }
-
-    // MARK: All-day Band
-
-    private var allDayBand: some View {
-        HStack(alignment: .top, spacing: 0) {
-            Text("종일").font(.caption2).foregroundStyle(.secondary)
-                .frame(width: gutterW, alignment: .center).padding(.top, 2)
-            GeometryReader { geo in
-                let cw = geo.size.width / CGFloat(dayCount)
-                let lanes = assignAllDayLanes()
-                let count = max(1, (lanes.map { $0.lane }.max() ?? 0) + 1)
-                ZStack(alignment: .topLeading) {
-                    ForEach(Array(lanes.enumerated()), id: \.offset) { _, item in
-                        allDayBarView(item: item, cw: cw)
-                            .offset(y: CGFloat(item.lane) * 22)
-                    }
-                }
-                .frame(height: CGFloat(count) * 22)
-            }
-            .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-
-    private struct AllDayLaneItem {
-        let event: CalendarService.CalendarEventSummary
-        let lane: Int
-        let colStart: Int
-        let colEnd: Int
-    }
-
-    private func assignAllDayLanes() -> [AllDayLaneItem] {
-        let sorted = allDayBandEvents.sorted {
-            let a = colRange($0); let b = colRange($1)
-            let aL = a.1-a.0; let bL = b.1-b.0
-            return aL != bL ? aL > bL : $0.startDate < $1.startDate
-        }
-        var laneEnds: [Int: Int] = [:]
-        var result: [AllDayLaneItem] = []
-        for event in sorted {
-            let (cs, ce) = colRange(event)
-            guard cs <= ce else { continue }
-            var lane = 0
-            while (laneEnds[lane] ?? -1) >= cs { lane += 1 }
-            laneEnds[lane] = ce
-            result.append(AllDayLaneItem(event: event, lane: lane, colStart: cs, colEnd: ce))
-        }
-        return result
-    }
-
-    private func colRange(_ event: CalendarService.CalendarEventSummary) -> (Int, Int) {
-        var cs = dayCount, ce = -1
-        for (i, day) in days.enumerated() {
-            if eventOccupiesDay(event, day: day) { cs = min(cs, i); ce = max(ce, i) }
-        }
-        return (max(0, cs), max(0, ce))
-    }
-
-    @ViewBuilder
-    private func allDayBarView(item: AllDayLaneItem, cw: CGFloat) -> some View {
-        let color = calendarEventColor(for: item.event.calendarID)
-        let x = CGFloat(item.colStart) * cw
-        let barW = CGFloat(item.colEnd - item.colStart + 1) * cw - 2
-        let contL = item.event.startDate < periodStart
-        let contR = item.event.endDate > periodEnd
-
-        HStack(spacing: 2) {
-            if contL {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: 8, weight: .bold)).foregroundStyle(.white).padding(.leading, 1)
-            }
-            Text(item.event.title.isEmpty ? "(제목 없음)" : item.event.title)
-                .font(.system(size: 11, weight: .medium)).foregroundStyle(.white)
-                .lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
-            if contR {
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 8, weight: .bold)).foregroundStyle(.white).padding(.trailing, 1)
-            }
-        }
-        .padding(.horizontal, 4)
-        .frame(width: barW, height: 18)
-        .background(color.opacity(0.9), in: RoundedRectangle(cornerRadius: 4))
-        .offset(x: x + 1)
-    }
-
-    // MARK: Time Gutter Strip (수직 고정, 수평 스크롤 밖)
-
-    private var timeGutterStrip: some View {
-        VStack(alignment: .trailing, spacing: 0) {
-            ForEach(0..<24, id: \.self) { h in
-                Text(String(format: "%02d", h))
-                    .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
-                    .frame(width: gutterW, height: hourH, alignment: .top)
-                    .padding(.top, 3)
-                    .id("mdhour-\(h)")
-            }
-        }
-    }
-
-    // MARK: Single Day Column (LazyHStack 아이템)
-
-    /// dayOffset: baseDate 기준 일수 (예: 0=baseDate, 1=내일, -1=어제)
-    @ViewBuilder
-    private func singleDayColumn(dayOffset: Int, colW: CGFloat) -> some View {
-        if let day = cal.date(byAdding: .day, value: dayOffset, to: baseDate) {
-            let dayTimedEvents = allEvents.filter { !eventIsAllDayStyle($0) && eventOccupiesDay($0, day: day) }
-            let dayTodos       = todosForDay(day)
-            let items: [CalTimelineItem] = dayTimedEvents.map { .event($0) } + dayTodos.map { .todo($0) }
-            let columned       = layoutCalColumns(items)
-
-            ZStack(alignment: .topLeading) {
-                // 시간 그리드 라인
-                VStack(spacing: 0) {
-                    ForEach(0..<24, id: \.self) { _ in
-                        Divider()
-                        Spacer().frame(height: hourH - 0.5)
-                    }
-                }
-                // 이벤트·할일 블록
-                ForEach(Array(columned.enumerated()), id: \.offset) { _, ci in
-                    mdColumnItemView(ci, trackWidth: colW)
-                }
-            }
-            .frame(width: colW, height: CGFloat(24) * hourH)
-            // 열 오른쪽 구분선 (오버레이 — 레이아웃 폭 불변)
-            .overlay(alignment: .trailing) {
-                Rectangle().fill(Color(.separator)).frame(width: 0.5)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func mdColumnItemView(_ ci: CalColumnedItem, trackWidth: CGFloat) -> some View {
-        let gap: CGFloat = 1
-        let colWidth = (trackWidth - gap * CGFloat(max(ci.columnCount-1, 0)) - 4) / CGFloat(ci.columnCount)
-        let xOffset  = CGFloat(ci.column) * (colWidth + gap) + 2
-        switch ci.item {
-        case .event(let event):
-            mdEventBlock(event)
-                .frame(width: colWidth)
-                .offset(x: xOffset, y: yOffset(event.startDate))
-        case .todo(let todo):
-            mdTodoBlock(todo)
-                .frame(width: colWidth)
-                .offset(x: xOffset, y: todo.dueDate.map { yOffset($0) } ?? 0)
-        }
-    }
-
-    @ViewBuilder
-    private func mdEventBlock(_ event: CalendarService.CalendarEventSummary) -> some View {
-        let color = calendarEventColor(for: event.calendarID)
-        let dur   = max(event.endDate.timeIntervalSince(event.startDate), 1800)
-        let bh    = max(CGFloat(dur / 3600) * hourH, 24)
-        Button {
-            let d = event.isRecurring
-                ? CalendarService.shared.occurrenceDetail(identifier: event.identifier, on: event.startDate)
-                : CalendarService.shared.eventDetail(identifier: event.identifier)
-            editingDetail = d
-        } label: {
-            VStack(alignment: .leading, spacing: 1) {
-                Text(event.title.isEmpty ? "(제목 없음)" : event.title)
-                    .font(.system(size: 10, weight: .semibold))
-                    .lineLimit(bh > 36 ? 2 : 1)
-                    .foregroundStyle(Color(.label))
-                if bh > 32 {
-                    Text(event.startDate, style: .time)
-                        .font(.system(size: 9)).foregroundStyle(.secondary)
-                }
-            }
-            .padding(3)
-            .frame(height: bh, alignment: .top)
-            .background(color.opacity(0.13), in: RoundedRectangle(cornerRadius: 4))
-            .overlay(alignment: .leading) {
-                RoundedRectangle(cornerRadius: 2).fill(color).frame(width: 2)
-            }
-        }
-        .buttonStyle(.plain)
-    }
-
-    @ViewBuilder
-    private func mdTodoBlock(_ todo: Todo) -> some View {
-        Button { editingTodo = todo } label: {
-            HStack(spacing: 3) {
-                Image(systemName: "circle").font(.system(size: 8)).foregroundStyle(.orange)
-                Text(todo.title.isEmpty ? "(없음)" : todo.title)
-                    .font(.system(size: 10)).lineLimit(1).foregroundStyle(Color(.label))
-            }
-            .padding(.horizontal, 4).padding(.vertical, 3)
-            .frame(minHeight: 24, alignment: .center)
-            .background(Color.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 4))
-        }
-        .buttonStyle(.plain)
-    }
-
-    private func yOffset(_ date: Date) -> CGFloat {
-        let c = cal.dateComponents([.hour, .minute], from: date)
-        return CGFloat(c.hour ?? 0) * hourH + CGFloat(c.minute ?? 0) / 60 * hourH
-    }
-}
-
-// ─────────────────────────────────────────────────────────────
 // MARK: - DayDetailSheet  (24h 타임라인)
 // ─────────────────────────────────────────────────────────────
 
@@ -1113,8 +698,11 @@ struct DayDetailSheet: View {
     let todos: [Todo]
     var onDataChanged: () -> Void = {}
 
+    @Environment(\.dismiss) private var dismiss
     @State private var editingDetail: CalendarService.CalendarEventDetail?
     @State private var editingTodo: Todo?
+    /// 현재 시각 (1분 타이머로 갱신)
+    @State private var now: Date = Date()
 
     private let hourHeight: CGFloat = 64
     private let labelWidth: CGFloat = 44
@@ -1134,13 +722,18 @@ struct DayDetailSheet: View {
         }
     }
 
-    /// 종일 밴드: isAllDay 또는 다일 이벤트
+    /// Todo와 연동된 캘린더 이벤트 ID 집합 — 중복 표시 방지용
+    private var linkedEventIDs: Set<String> {
+        Set(dayTodos.compactMap { $0.calendarEventID })
+    }
+
+    /// 종일 밴드: isAllDay 또는 다일 이벤트 (연동된 Todo가 있는 이벤트는 숨김)
     private var allDayEvents: [CalendarService.CalendarEventSummary] {
-        dayEvents.filter { eventIsAllDayStyle($0) }
+        dayEvents.filter { eventIsAllDayStyle($0) && !linkedEventIDs.contains($0.identifier) }
     }
 
     private var timedEvents: [CalendarService.CalendarEventSummary] {
-        dayEvents.filter { !eventIsAllDayStyle($0) }
+        dayEvents.filter { !eventIsAllDayStyle($0) && !linkedEventIDs.contains($0.identifier) }
     }
 
     private var dateTitle: String {
@@ -1185,13 +778,24 @@ struct DayDetailSheet: View {
                     }
                 }
             }
-            .navigationTitle(dateTitle)
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .principal) {
+                    Text(dateTitle).font(.headline)
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("닫기") { dismiss() }
+                }
+            }
             .sheet(item: $editingDetail) { detail in
                 EventEditSheet(mode: .edit(detail: detail)) { onDataChanged() }
             }
             .sheet(item: $editingTodo) { todo in
                 NavigationStack { TodoDetailView(todo: todo) }
+            }
+            // 1분 타이머 — 현재 시각 표시줄 갱신
+            .onReceive(Timer.publish(every: 60, on: .main, in: .common).autoconnect()) { _ in
+                now = Date()
             }
         }
     }
@@ -1239,7 +843,7 @@ struct DayDetailSheet: View {
                         .font(.system(size: 8, weight: .bold)).foregroundStyle(.white)
                 }
             }
-            .padding(.horizontal, 8).padding(.vertical, 4)
+            .padding(.horizontal, 8).padding(.vertical, 7)
             .background(color.opacity(0.9), in: Capsule())
         }
         .buttonStyle(.plain)
@@ -1271,6 +875,18 @@ struct DayDetailSheet: View {
                     }
                     ForEach(Array(columned.enumerated()), id: \.offset) { _, ci in
                         columnedItemView(ci, trackWidth: geo.size.width)
+                    }
+                    // 현재 시각 표시줄 (오늘만)
+                    if cal.isDateInToday(date) {
+                        let lineY = yOffset(for: now)
+                        Rectangle()
+                            .fill(Color.red)
+                            .frame(height: 1.5)
+                            .offset(y: lineY)
+                        Circle()
+                            .fill(Color.red)
+                            .frame(width: 6, height: 6)
+                            .position(x: 3, y: lineY)
                     }
                 }
             }
@@ -1392,6 +1008,7 @@ struct EventEditSheet: View {
     @State private var calendarID: String
     @State private var calendarSources: [CalendarService.CalendarSourceGroup] = []
     @State private var errorMessage: String?
+    @State private var showDeleteConfirm = false
 
     init(mode: EventEditMode, onSave: @escaping () -> Void) {
         self.mode   = mode
@@ -1458,7 +1075,21 @@ struct EventEditSheet: View {
                         .fontWeight(.semibold)
                         .disabled(title.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
+                if !mode.isCreate {
+                    ToolbarItem(placement: .bottomBar) {
+                        Button(role: .destructive) {
+                            showDeleteConfirm = true
+                        } label: {
+                            Label("이벤트 삭제", systemImage: "trash")
+                                .foregroundStyle(.red)
+                        }
+                    }
+                }
             }
+        }
+        .confirmationDialog("이벤트를 삭제하시겠습니까?", isPresented: $showDeleteConfirm, titleVisibility: .visible) {
+            Button("삭제", role: .destructive) { deleteEvent() }
+            Button("취소", role: .cancel) { }
         }
         .task {
             calendarSources = CalendarService.shared.availableCalendars()
@@ -1503,6 +1134,21 @@ struct EventEditSheet: View {
                         identifier: detail.identifier,
                         title: title, startDate: startDate, endDate: endDate, notes: notes)
                 }
+            }
+            onSave()
+            dismiss()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func deleteEvent() {
+        guard case .edit(let detail) = mode else { return }
+        do {
+            if let occurrenceDate = detail.occurrenceDate {
+                try CalendarService.shared.removeEventOccurrence(eventID: detail.identifier, on: occurrenceDate)
+            } else {
+                try CalendarService.shared.removeEvent(eventID: detail.identifier)
             }
             onSave()
             dismiss()

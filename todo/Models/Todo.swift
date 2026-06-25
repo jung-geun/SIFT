@@ -111,6 +111,9 @@ final class Todo {
 
     /// EKEvent.eventIdentifier — 캘린더 등록 후 저장, 중복 방지에 사용
     var calendarEventID: String?
+    /// EKEvent.calendarItemExternalIdentifier — iCloud 동기화 후에도 변하지 않는 안정 식별자.
+    /// eventIdentifier는 기기마다 다르지만 externalIdentifier는 동일 → 다른 기기에서 중복 등록 방지.
+    var calendarEventExternalID: String = ""
 
     // MARK: - v3 Forward-Compat
 

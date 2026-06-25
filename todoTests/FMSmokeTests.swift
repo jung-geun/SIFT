@@ -140,6 +140,7 @@ struct FMEmailSmokeTests {
                 from: "김팀장 <manager@company.com>",
                 snippet: "이번 주 금요일까지 제출 부탁드립니다",
                 body: "안녕하세요. 프로젝트 제안서를 이번 주 금요일(2026년 6월 26일)까지 제출해 주시기 바랍니다. 감사합니다.",
+                htmlBody: nil,
                 receivedAt: now,
                 labelIds: [], isBulk: false
             )
@@ -163,6 +164,7 @@ struct FMEmailSmokeTests {
                 from: "동료 <colleague@company.com>",
                 snippet: "오늘 점심 뭐 먹을까요?",
                 body: "오늘 점심 메뉴 추천해주세요. 한식? 중식?",
+                htmlBody: nil,
                 receivedAt: now,
                 labelIds: [], isBulk: false
             )

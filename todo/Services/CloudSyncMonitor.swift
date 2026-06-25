@@ -59,10 +59,10 @@ final class CloudSyncMonitor: ObservableObject {
         fallbackTask = Task {
             try? await Task.sleep(for: .seconds(3))
             guard !Task.isCancelled, !gotRealEvent else { return }
-            // 실제 이벤트 없음 — 타이머 기반 폴백
+            // 실제 이벤트 없음 — 타이머 기반 완료 처리 (변경사항이 없으면 이벤트가 오지 않을 수 있음)
             try? await Task.sleep(for: .seconds(5))
             guard !Task.isCancelled, phase == .importing else { return }
-            print("[CloudSyncMonitor] 폴백: 실제 이벤트 미도착, 완료로 처리")
+            print("[CloudSyncMonitor] CloudKit 이벤트 미도착 (변경사항 없음 혹은 오프라인), 상태 완료로 전환")
             finishImport()
         }
     }
@@ -114,6 +114,19 @@ final class CloudSyncMonitor: ObservableObject {
             // Import 완료
             print("[CloudSyncMonitor] CloudKit import 완료 (succeeded: \(event.succeeded))")
             finishImport()
+        }
+    }
+
+    // MARK: - 완료 대기
+
+    /// iCloud import가 완료될 때까지 대기 (최대 timeout 초).
+    /// phase가 .importing이 아니면 즉시 반환.
+    /// 타임아웃 시에도 반환 — 캘린더 동기화가 다소 늦게 실행되는 것보다 안전함.
+    func waitForCompletion(timeout: TimeInterval = 12) async {
+        guard phase == .importing else { return }
+        let deadline = Date().addingTimeInterval(timeout)
+        while phase == .importing, Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(300))
         }
     }
 

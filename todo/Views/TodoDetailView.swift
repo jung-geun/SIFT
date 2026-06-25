@@ -10,6 +10,9 @@ struct TodoDetailView: View {
     @State private var showReminderPicker = false
     @State private var calendarError: String?
     @State private var isRegisteringCalendar = false
+    @State private var showDeleteConfirm = false
+    /// 앱 내 메일 상세 시트 — 로컬 EmailMessage가 있을 때 표시
+    @State private var showingEmail: EmailMessage?
 
     // MARK: - Body
 
@@ -23,17 +26,34 @@ struct TodoDetailView: View {
             tagSection
             metaSection
         }
+        .listSectionSpacing(.compact)
         .navigationTitle(todo.title.isEmpty ? "새 할 일" : todo.title)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
                 completeButton
             }
+            ToolbarItem(placement: .bottomBar) {
+                Button(role: .destructive) {
+                    showDeleteConfirm = true
+                } label: {
+                    Label("삭제", systemImage: "trash")
+                        .foregroundStyle(.red)
+                }
+            }
         }
         .alert("캘린더 오류", isPresented: .constant(calendarError != nil)) {
             Button("확인") { calendarError = nil }
         } message: {
             Text(calendarError ?? "")
+        }
+        .confirmationDialog("할일을 삭제하시겠습니까?", isPresented: $showDeleteConfirm, titleVisibility: .visible) {
+            Button("삭제", role: .destructive) { deleteTodo() }
+            Button("취소", role: .cancel) { }
+        }
+        .sheet(item: $showingEmail) { email in
+            MailDetailView(email: email)
+                .modelContainer(AppDataContainer.shared.emailContainer)
         }
     }
 
@@ -376,13 +396,22 @@ struct TodoDetailView: View {
     }
 
     /// 원본 메일을 엽니다.
-    /// 1순위: googlegmail:///cv={id} — Gmail 앱 딥링크 (올바른 포맷, 슬래시 3개).
-    ///         과거 googlegmail://show?thread= 는 잘못된 포맷이라 파싱 실패했음 — 수정됨.
-    /// 2순위: message://%3C{Message-ID}%3E — Mail.app 딥링크 (iOS 7+).
-    ///         전제조건: 동일 계정이 시스템 Mail.app에 추가·동기화돼 있어야 함.
-    /// 3순위: Gmail 웹 threadId 직접 URL.
-    /// 폴백: rfc822msgid 검색 URL → Gmail 웹 받은편지함.
+    /// 1순위: 로컬 EmailMessage 캐시 → 앱 내 MailDetailView 시트로 표시.
+    /// 2순위: googlegmail:///cv={id} — Gmail 앱 딥링크.
+    /// 3순위: message:// — Mail.app 딥링크.
+    /// 4순위: Gmail 웹 URL 폴백.
     private func openOriginalEmail() {
+        let ref = todo.sourceRef
+        if !ref.isEmpty {
+            let emailCtx = AppDataContainer.shared.emailContainer.mainContext
+            let descriptor = FetchDescriptor<EmailMessage>(
+                predicate: #Predicate { $0.id == ref }
+            )
+            if let found = try? emailCtx.fetch(descriptor).first {
+                showingEmail = found
+                return
+            }
+        }
         for url in mailDeepLinkCandidates() {
             if UIApplication.shared.canOpenURL(url) {
                 UIApplication.shared.open(url)
@@ -493,6 +522,16 @@ struct TodoDetailView: View {
         guard let eventID = todo.calendarEventID else { return }
         try? CalendarService.shared.removeEvent(eventID: eventID)
         todo.calendarEventID = nil
+    }
+
+    private func deleteTodo() {
+        // 대기열(review) 항목은 캘린더 이벤트 보존 — 태스크(todo)로 승격된 경우만 함께 삭제
+        if todo.triage == .todo, let eventID = todo.calendarEventID {
+            try? CalendarService.shared.removeEvent(eventID: eventID)
+        }
+        NotificationService.shared.cancel(todo: todo)
+        modelContext.delete(todo)
+        dismiss()
     }
 }
 

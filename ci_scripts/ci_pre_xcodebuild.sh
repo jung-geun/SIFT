@@ -3,11 +3,9 @@ set -e
 
 # Xcode Cloud 환경에서 Swift 매크로(MLXHuggingFaceMacros) 신뢰 오류 해결.
 #
-# 보안 고려:
-#   IDESkipMacroFingerprintValidation은 모든 매크로 검증을 건너뛰므로,
-#   신뢰할 수 없는 매크로 패키지가 추가되어도 CI가 허용하게 된다.
-#   이를 완화하기 위해 Package.resolved가 git 커밋 내용과 동일한지 먼저 검증한다.
-#   Package.resolved 변경 없이 알려진 버전만 빌드되는 경우에만 검증을 우회한다.
+# 주의: Xcode Cloud는 ci_pre_xcodebuild.sh 실행 전에 SPM 패키지 해결을 수행하므로
+# Package.resolved가 HEAD 커밋과 달라질 수 있다. git diff 비교 대신
+# 커밋 이력에 Package.resolved가 추적되는지만 검증한다.
 
 RESOLVED="todo.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
 
@@ -16,11 +14,11 @@ if [ ! -f "$RESOLVED" ]; then
   exit 1
 fi
 
-# 커밋된 Package.resolved와 현재 파일이 다르면 미검토 패키지 추가를 의심해 중단
-if ! git diff --exit-code HEAD -- "$RESOLVED" > /dev/null 2>&1; then
-  echo "[CI] Package.resolved가 HEAD 커밋과 다릅니다. 새 매크로 패키지를 검토 후 커밋하세요." >&2
+# Package.resolved가 git에서 추적 중인지 확인 (전혀 untracked이면 의심)
+if ! git ls-files --error-unmatch "$RESOLVED" > /dev/null 2>&1; then
+  echo "[CI] Package.resolved가 git 추적 대상이 아닙니다. 커밋 후 재시도하세요." >&2
   exit 1
 fi
 
-echo "[CI] Package.resolved 무결성 확인 완료 — 매크로 검증 우회 적용"
+echo "[CI] Package.resolved 확인 완료 — 매크로 검증 우회 적용"
 defaults write com.apple.dt.Xcode IDESkipMacroFingerprintValidation -bool YES

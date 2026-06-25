@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationModels)
+import FoundationModels
+#endif
 
 // MARK: - Engine Source
 
@@ -58,7 +61,60 @@ protocol IntelligenceService: Sendable {
         todos: [Todo],
         events: [CalendarService.CalendarEventSummary],
         persona: PersonaContext
-    ) async -> [PriorityResult]
+    ) async throws -> [PriorityResult]
+}
+
+// MARK: - Heuristic Weights (페르소나·행동 패턴 기반 하이퍼파라미터)
+
+struct HeuristicWeights {
+    var urgencyKeywordBoost: Double  = 2.0   // 긴급 키워드 감지 시 urgency += 이 값
+    var emailSourceBoost: Double     = 1.0   // 이메일 출처 urgency boost
+    var importantTagBoost: Double    = 2.0   // 중요 태그 importance boost
+    var personaKeywordBoost: Double  = 1.5   // 제목/태그 내 페르소나 키워드 importance boost
+    var notesPersonaBoost: Double    = 1.0   // 메모 내 페르소나 키워드 importance boost (제목보다 낮게)
+    var fastTagBoost: Double         = 0.5   // 행동 패턴 빠른 태그 importance boost
+    var deadlineMultiplier: Double   = 1.0   // 생산적 시간대 활성 시 ~1.15
+
+    /// 페르소나 타입과 행동 패턴(MemoryService)에서 적응형 가중치를 도출한다.
+    static func adaptive(persona: PersonaContext, memory: MemoryService) -> HeuristicWeights {
+        var w = HeuristicWeights()
+        for ptype in persona.types {
+            switch ptype {
+            case .officeWorker:
+                w.emailSourceBoost    = max(w.emailSourceBoost,    1.5)
+                w.personaKeywordBoost = max(w.personaKeywordBoost, 2.0)
+                w.importantTagBoost   = max(w.importantTagBoost,   2.5)
+            case .freelancer:
+                w.urgencyKeywordBoost = max(w.urgencyKeywordBoost, 2.5)
+                w.personaKeywordBoost = max(w.personaKeywordBoost, 2.0)
+                w.emailSourceBoost    = max(w.emailSourceBoost,    1.3)
+            case .student:
+                w.personaKeywordBoost = max(w.personaKeywordBoost, 2.0)
+                w.urgencyKeywordBoost = max(w.urgencyKeywordBoost, 2.0)
+            case .jobSeeker:
+                w.personaKeywordBoost = max(w.personaKeywordBoost, 2.5)
+                w.urgencyKeywordBoost = max(w.urgencyKeywordBoost, 2.0)
+            case .selfEmployed:
+                w.personaKeywordBoost = max(w.personaKeywordBoost, 2.0)
+                w.emailSourceBoost    = max(w.emailSourceBoost,    1.3)
+            case .homemaker:
+                w.personaKeywordBoost = max(w.personaKeywordBoost, 1.8)
+            case .other, .unspecified:
+                break
+            }
+        }
+        if let ph = memory.productiveHour {
+            let hour = Calendar.current.component(.hour, from: Date())
+            if abs(hour - ph) <= 2 {
+                w.deadlineMultiplier  = 1.15
+                w.urgencyKeywordBoost = min(w.urgencyKeywordBoost * 1.2, 3.0)
+            }
+        }
+        if memory.overdueRate > 0.3 {
+            w.urgencyKeywordBoost = min(w.urgencyKeywordBoost * 1.1, 3.0)
+        }
+        return w
+    }
 }
 
 // MARK: - Heuristic Engine (항상 동작하는 규칙 기반 fallback)
@@ -70,12 +126,13 @@ struct HeuristicEngine: IntelligenceService {
         todos: [Todo],
         events: [CalendarService.CalendarEventSummary],
         persona: PersonaContext
-    ) async -> [PriorityResult] {
-        let weights = ScheduleWeights.adaptive()
-        let memory  = MemoryService.shared
+    ) async throws -> [PriorityResult] {
+        let hw     = HeuristicWeights.adaptive(persona: persona, memory: MemoryService.shared)
+        let schedW = ScheduleWeights.adaptive()
+        let memory = MemoryService.shared
         return todos.map { todo in
-            let axes  = heuristicAxes(todo: todo, persona: persona, memory: memory, allTodos: todos)
-            let score = ScheduleScorer.normalizedScore(axes, weights: weights)
+            let axes  = heuristicAxes(todo: todo, persona: persona, memory: memory, allTodos: todos, weights: hw)
+            let score = ScheduleScorer.normalizedScore(axes, weights: schedW)
             return PriorityResult(
                 todoID:            todo.id,
                 score:             score,
@@ -97,26 +154,28 @@ struct HeuristicEngine: IntelligenceService {
         todo: Todo,
         persona: PersonaContext,
         memory: MemoryService,
-        allTodos: [Todo]
+        allTodos: [Todo],
+        weights: HeuristicWeights
     ) -> AxisScores {
 
-        // 1. deadlineProximity (0~10): 잔여 시간 기반
-        let deadlineProximity: Double
+        // 1. deadlineProximity (0~10): 잔여 시간 기반 × deadlineMultiplier
+        let rawDeadline: Double
         if let dueDate = todo.dueDate {
             let hours = dueDate.timeIntervalSinceNow / 3600
             switch hours {
-            case ..<0:   deadlineProximity = 10.0
-            case ..<1:   deadlineProximity = 9.7
-            case ..<6:   deadlineProximity = 9.0
-            case ..<24:  deadlineProximity = 7.8
-            case ..<72:  deadlineProximity = 6.0
-            case ..<168: deadlineProximity = 4.0
-            case ..<720: deadlineProximity = 2.5
-            default:     deadlineProximity = 1.5
+            case ..<0:   rawDeadline = 10.0
+            case ..<1:   rawDeadline = 9.7
+            case ..<6:   rawDeadline = 9.0
+            case ..<24:  rawDeadline = 7.8
+            case ..<72:  rawDeadline = 6.0
+            case ..<168: rawDeadline = 4.0
+            case ..<720: rawDeadline = 2.5
+            default:     rawDeadline = 1.5
             }
         } else {
-            deadlineProximity = 2.0
+            rawDeadline = 2.0
         }
+        let deadlineProximity = min(10.0, rawDeadline * weights.deadlineMultiplier)
 
         // 2. urgency (0~10): 즉시성 신호 (마감근접과 의도적으로 분리)
         let urgencyKeywords = ["긴급", "즉시", "오늘", "마감", "asap", "urgent", "지금", "바로"]
@@ -126,23 +185,26 @@ struct HeuristicEngine: IntelligenceService {
         })
         let isEmailSource = todo.todoSource == .email
         var urgency = deadlineProximity * 0.7
-        if hasUrgentKeyword { urgency += 2.0 }
-        if isEmailSource    { urgency += 1.0 }
+        if hasUrgentKeyword { urgency += weights.urgencyKeywordBoost }
+        if isEmailSource    { urgency += weights.emailSourceBoost }
         urgency = min(10.0, urgency)
 
-        // 3. importance (0~10): 태그·페르소나·fastTags
-        let importantTags   = ["업무", "work", "마감", "중요", "긴급"]
+        // 3. importance (0~10): 태그·페르소나(제목+메모)·fastTags
+        let importantTags  = ["업무", "work", "마감", "중요", "긴급"]
         let personaKeywords = persona.weightedKeywords
-        let personaMatch    = !personaKeywords.isEmpty && (
+        let titleTagMatch  = !personaKeywords.isEmpty && (
             todo.tags.contains(where: { personaKeywords.contains($0) }) ||
             personaKeywords.contains(where: { todo.title.localizedCaseInsensitiveContains($0) })
         )
+        let notesMatch     = !personaKeywords.isEmpty &&
+            personaKeywords.contains(where: { todo.notes.localizedCaseInsensitiveContains($0) })
         let fastTags = memory.fastTags
         var importance = 5.0
-        if todo.tags.contains(where: importantTags.contains) { importance += 2.0 }
-        if personaMatch                                       { importance += 1.5 }
+        if todo.tags.contains(where: importantTags.contains) { importance += weights.importantTagBoost }
+        if titleTagMatch  { importance += weights.personaKeywordBoost }
+        else if notesMatch { importance += weights.notesPersonaBoost }
         if !fastTags.isEmpty && todo.tags.contains(where: { fastTags.contains($0) }) {
-            importance += 0.5
+            importance += weights.fastTagBoost
         }
         importance = min(10.0, importance)
 
@@ -178,13 +240,15 @@ struct HeuristicEngine: IntelligenceService {
         guard !kw.isEmpty else { return false }
         return todo.tags.contains(where: { kw.contains($0) })
             || kw.contains(where: { todo.title.localizedCaseInsensitiveContains($0) })
+            || kw.contains(where: { todo.notes.localizedCaseInsensitiveContains($0) })
     }
 
     private func heuristicReason(todo: Todo, persona: PersonaContext) -> String {
         let personaKeywords = persona.weightedKeywords
         let personaMatch    = !personaKeywords.isEmpty && (
             todo.tags.contains(where: { personaKeywords.contains($0) }) ||
-            personaKeywords.contains(where: { todo.title.localizedCaseInsensitiveContains($0) })
+            personaKeywords.contains(where: { todo.title.localizedCaseInsensitiveContains($0) }) ||
+            personaKeywords.contains(where: { todo.notes.localizedCaseInsensitiveContains($0) })
         )
         let personaSuffix = personaMatch && !persona.displayNames.isEmpty
             ? " · 페르소나(\(persona.displayNames)) 관련" : ""
@@ -235,7 +299,7 @@ final class FoundationModelsEngine: IntelligenceService {
         todos: [Todo],
         events: [CalendarService.CalendarEventSummary],
         persona: PersonaContext
-    ) async -> [PriorityResult] {
+    ) async throws -> [PriorityResult] {
         #if canImport(FoundationModels)
         if #available(iOS 26.0, *), FoundationModelsService.isAvailable {
             let sorted = todos.filter { !$0.isCompleted }.sorted {
@@ -253,12 +317,21 @@ final class FoundationModelsEngine: IntelligenceService {
                     events: events,
                     persona: persona
                 )
+            } catch let genErr as LanguageModelSession.GenerationError {
+                if case .exceededContextWindowSize(let tokenCount) = genErr {
+                    print("[FoundationModelsEngine] 컨텍스트 초과 (\(tokenCount) 토큰 / 4096 한도)")
+                } else {
+                    print("[FoundationModelsEngine] FM GenerationError: \(genErr.localizedDescription)")
+                }
+                throw genErr
             } catch {
-                print("[FoundationModelsEngine] FM 실패 (\(error.localizedDescription)) — Heuristic fallback 사용")
+                print("[FoundationModelsEngine] FM 실패: \(error.localizedDescription)")
+                throw error
             }
         }
         #endif
-        return await fallback.prioritize(todos: todos, events: events, persona: persona)
+        // AFM 미가용 기기 → 휴리스틱 (알림 없음)
+        return try await fallback.prioritize(todos: todos, events: events, persona: persona)
     }
 }
 
@@ -409,13 +482,13 @@ final class OnDeviceLLMIntelligenceEngine: IntelligenceService {
         todos: [Todo],
         events: [CalendarService.CalendarEventSummary],
         persona: PersonaContext
-    ) async -> [PriorityResult] {
+    ) async throws -> [PriorityResult] {
         let service = OnDeviceLLMService.shared
         if !service.isModelLoaded && service.isModelCachedOnDisk {
             await service.loadModelIfNeeded()
         }
         guard service.isModelLoaded else {
-            return await fallback.prioritize(todos: todos, events: events, persona: persona)
+            return try await fallback.prioritize(todos: todos, events: events, persona: persona)
         }
 
         let sortedActive = todos.filter { !$0.isCompleted }.sorted {
@@ -443,7 +516,7 @@ final class OnDeviceLLMIntelligenceEngine: IntelligenceService {
             }
         } catch {}
 
-        return await fallback.prioritize(todos: todos, events: events, persona: persona)
+        return try await fallback.prioritize(todos: todos, events: events, persona: persona)
     }
 }
 
@@ -468,7 +541,7 @@ final class CloudIntelligenceEngine: IntelligenceService {
         todos: [Todo],
         events: [CalendarService.CalendarEventSummary],
         persona: PersonaContext
-    ) async -> [PriorityResult] {
+    ) async throws -> [PriorityResult] {
         let active = todos.filter { !$0.isCompleted }
         guard !active.isEmpty else { return [] }
 
@@ -479,11 +552,11 @@ final class CloudIntelligenceEngine: IntelligenceService {
             let text   = try await callAPI(instructions: instructions, prompt: prompt)
             let parsed = parseRankings(text: text)
             return parsed.isEmpty
-                ? await fallback.prioritize(todos: todos, events: events, persona: persona)
+                ? try await fallback.prioritize(todos: todos, events: events, persona: persona)
                 : parsed
         } catch {
             print("[CloudIntelligence] 오류: \(error.localizedDescription) — fallback 사용")
-            return await fallback.prioritize(todos: todos, events: events, persona: persona)
+            return (try? await fallback.prioritize(todos: todos, events: events, persona: persona)) ?? []
         }
     }
 

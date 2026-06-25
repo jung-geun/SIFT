@@ -1,6 +1,15 @@
 import Foundation
 import AuthenticationServices
 import Security
+import OSLog
+
+extension Array {
+    func chunked(into size: Int) -> [[Element]] {
+        stride(from: 0, to: count, by: size).map {
+            Array(self[$0 ..< Swift.min($0 + size, count)])
+        }
+    }
+}
 
 // MARK: - Email Extraction Models (Codable — @Generable 제거, iOS 27 호환)
 
@@ -38,6 +47,7 @@ struct GmailMessage: Sendable {
     let from: String
     let snippet: String     // Gmail 제공 ~200자 미리보기 (메모용)
     let body: String        // MIME 디코딩 전체 평문 (날짜 감지용)
+    let htmlBody: String?   // 원본 HTML 본문 (WKWebView 렌더링용)
     let receivedAt: Date
     /// Gmail 카테고리 라벨 (예: CATEGORY_SOCIAL, CATEGORY_PROMOTIONS, CATEGORY_FORUMS)
     let labelIds: [String]
@@ -84,8 +94,12 @@ final class EmailService: NSObject, MailProvider {
     private let scope        = "https://www.googleapis.com/auth/gmail.readonly"
 
     private let keychainService = "pieroot.todo.gmail"
+    private let logger = Logger(subsystem: "pieroot.todo", category: "GmailOAuth")
+    
+    var session: URLSession = .shared
 
     // ASWebAuthenticationSession은 완료까지 강한 참조를 유지해야 합니다.
+
     // withCheckedThrowingContinuation 클로저 리턴 후 로컬 변수가 해제되는 것을 방지합니다.
     private var authSession: ASWebAuthenticationSession?
 
@@ -98,7 +112,9 @@ final class EmailService: NSObject, MailProvider {
     // ASWebAuthenticationSession은 반드시 메인 스레드에서 실행해야 합니다.
     @MainActor
     func authenticate() async throws {
+        logger.info("Starting Gmail OAuth authentication")
         guard let authURL = buildAuthURL() else {
+            logger.error("Failed to build auth URL: invalid configuration")
             throw EmailError.invalidConfiguration
         }
         let callbackScheme = "com.googleusercontent.apps.746219534143-ij6p50gff6as4hn2bbhdc9a1u6os3jmp"
@@ -110,6 +126,7 @@ final class EmailService: NSObject, MailProvider {
             ) { [weak self] callbackURL, error in
                 self?.authSession = nil
                 if let error {
+                    self?.logger.error("ASWebAuthenticationSession failed: \(error.localizedDescription)")
                     continuation.resume(throwing: error)
                     return
                 }
@@ -117,11 +134,14 @@ final class EmailService: NSObject, MailProvider {
                       let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
                       let code = components.queryItems?.first(where: { $0.name == "code" })?.value
                 else {
+                    self?.logger.error("Authorization failed: missing code in callback URL")
                     continuation.resume(throwing: EmailError.authorizationFailed)
                     return
                 }
+                self?.logger.info("OAuth code received successfully")
                 continuation.resume(returning: code)
             }
+
             session.prefersEphemeralWebBrowserSession = true
             session.presentationContextProvider = WindowProvider.shared
             authSession = session  // 인증 완료까지 세션 유지
@@ -129,6 +149,7 @@ final class EmailService: NSObject, MailProvider {
         }
 
         try await exchangeCodeForTokens(code: code)
+        logger.info("Gmail authentication completed successfully")
         NotificationCenter.default.post(name: .gmailAuthChanged, object: true)
     }
 
@@ -187,14 +208,21 @@ final class EmailService: NSObject, MailProvider {
     // MARK: - Gmail API
 
     private func listNewMessages(after historyID: String?) async throws -> [GmailMessage] {
-        guard let token = loadTokens().accessToken else { throw EmailError.notAuthenticated }
+        guard let token = loadTokens().accessToken else { 
+            logger.error("listNewMessages failed: not authenticated")
+            throw EmailError.notAuthenticated 
+        }
 
         // 최근 수신 메일 ID 목록 조회
         let lookbackDays = {
             let v = UserDefaults.standard.integer(forKey: "pieroot.todo.emailLookbackDays")
             return v > 0 ? min(max(v, 1), 30) : 3
         }()
+
+        logger.info("Listing new messages, lookbackDays: \(lookbackDays)")
+
         var urlComponents = URLComponents(string: "https://gmail.googleapis.com/gmail/v1/users/me/messages")!
+
         urlComponents.queryItems = [
             URLQueryItem(name: "q", value: "is:unread newer_than:\(lookbackDays)d"),
             URLQueryItem(name: "maxResults", value: "50")
@@ -206,41 +234,63 @@ final class EmailService: NSObject, MailProvider {
         var request = URLRequest(url: urlComponents.url!)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
 
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+        let (data, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            logger.error("Request failed: No HTTP response")
             throw EmailError.apiFailed
         }
 
-        let list = try JSONDecoder().decode(MessageListResponse.self, from: data)
-        guard let messageIDs = list.messages else { return [] }
+        logger.info("Response status: \(httpResponse.statusCode)")
 
-        // 각 메시지 본문 조회 (병렬)
-        return try await withThrowingTaskGroup(of: GmailMessage?.self) { group in
-            let cap = min(50, max(10, lookbackDays * 3))
-            for item in messageIDs.prefix(cap) {
-                group.addTask { [weak self] in
-                    try await self?.fetchMessage(id: item.id, token: token)
-                }
-            }
-            var messages: [GmailMessage] = []
-            for try await msg in group {
-                if let m = msg { messages.append(m) }
-            }
-            return messages
+        guard httpResponse.statusCode == 200 else {
+            let errorBody = String(data: data, encoding: .utf8) ?? "no body"
+            logger.error("Request failed: \(errorBody)")
+            throw EmailError.apiFailed
         }
+
+
+        let list = try JSONDecoder().decode(MessageListResponse.self, from: data)
+        guard let messageIDs = list.messages else { 
+            logger.info("No new messages found")
+            return [] 
+        }
+
+        logger.info("Found \(messageIDs.count) message IDs")
+        
+        // 각 메시지 본문 조회 (배치 처리로 429 방지)
+        let cap = min(50, max(10, lookbackDays * 3))
+        let targetIDs = messageIDs.prefix(cap).map { $0.id }
+        let messages = try await fetchMessagesInBatches(ids: targetIDs, token: token)
+        logger.info("Successfully fetched \(messages.count) messages")
+        return messages
     }
 
     private func fetchMessage(id: String, token: String) async throws -> GmailMessage? {
+        logger.debug("Fetching message: \(id)")
         // format=full: 모든 헤더 + MIME 트리 + snippet 포함 (format=metadata보다 크지만 본문 파싱 가능)
         let url = URL(string: "https://gmail.googleapis.com/gmail/v1/users/me/messages/\(id)?format=full")!
         var request = URLRequest(url: url)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
 
-        let (data, _) = try await URLSession.shared.data(for: request)
-        let raw = try JSONDecoder().decode(RawGmailMessage.self, from: data)
+        let (data, response) = try await session.data(for: request)
+
+        if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode != 200 {
+            let errorBody = String(data: data, encoding: .utf8) ?? "no body"
+            logger.error("fetchMessage failed for \(id): status \(httpResponse.statusCode), body: \(errorBody)")
+            return nil
+        }
+
+        let raw: RawGmailMessage
+        do {
+            raw = try JSONDecoder().decode(RawGmailMessage.self, from: data)
+        } catch {
+            logger.error("Failed to decode message \(id): \(error.localizedDescription)")
+            throw error
+        }
 
         let headers   = raw.payload.headers ?? []
         // RFC2047 encoded-word 디코딩 적용 (예: =?UTF-8?B?7L+g7Yyh?= → 쿠팡)
+
         let subject   = decodeRFC2047(headers.first { $0.name == "Subject" }?.value ?? "(제목 없음)")
         let from      = decodeRFC2047(headers.first { $0.name == "From" }?.value ?? "")
         let dateStr   = headers.first { $0.name == "Date" }?.value ?? ""
@@ -256,6 +306,7 @@ final class EmailService: NSObject, MailProvider {
                      ?? parseRFC2822Date(dateStr) ?? Date()
         let snippet  = raw.snippet ?? ""
         let body     = extractPlainText(from: raw.payload)
+        let htmlBody = extractHTML(from: raw.payload)
         let labelIds = raw.labelIds ?? []
 
         return GmailMessage(
@@ -266,10 +317,85 @@ final class EmailService: NSObject, MailProvider {
             from: from,
             snippet: snippet,
             body: body,
+            htmlBody: htmlBody,
             receivedAt: date,
             labelIds: labelIds,
             isBulk: isBulk
         )
+    }
+
+    /// 헤더+스니펫만 가져오는 경량 fetch (format=metadata) — 목록 표시용.
+    /// 응답 크기: ~500B (format=full 대비 100× 감소). 본문은 상세 화면에서 lazy-load.
+    private func fetchMessageMetadata(id: String, token: String) async throws -> GmailMessage? {
+        let urlStr = "https://gmail.googleapis.com/gmail/v1/users/me/messages/\(id)?format=metadata"
+            + "&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date"
+            + "&metadataHeaders=Message-ID&metadataHeaders=List-Unsubscribe&metadataHeaders=Precedence"
+        var request = URLRequest(url: URL(string: urlStr)!)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+
+        let (data, response) = try await session.data(for: request)
+        if let http = response as? HTTPURLResponse, http.statusCode != 200 {
+            logger.error("fetchMessageMetadata failed for \(id): status \(http.statusCode)")
+            return nil
+        }
+        guard let raw = try? JSONDecoder().decode(RawGmailMessage.self, from: data) else { return nil }
+
+        let headers   = raw.payload.headers ?? []
+        let subject   = decodeRFC2047(headers.first { $0.name == "Subject"    }?.value ?? "(제목 없음)")
+        let from      = decodeRFC2047(headers.first { $0.name == "From"       }?.value ?? "")
+        let dateStr   = headers.first { $0.name == "Date"       }?.value ?? ""
+        let messageID = headers.first { $0.name == "Message-ID" }?.value ?? ""
+
+        let hasUnsubscribe = headers.contains { $0.name.lowercased() == "list-unsubscribe" }
+        let precedence     = headers.first { $0.name.lowercased() == "precedence" }?.value.lowercased() ?? ""
+        let isBulk         = hasUnsubscribe || precedence.contains("bulk") || precedence.contains("list")
+        let date           = raw.internalDate.flatMap { Double($0).map { Date(timeIntervalSince1970: $0 / 1000) } }
+                           ?? parseRFC2822Date(dateStr) ?? Date()
+
+        return GmailMessage(
+            id: raw.id, threadID: raw.threadId ?? "", messageID: messageID,
+            subject: subject, from: from, snippet: raw.snippet ?? "",
+            body: "", htmlBody: nil,          // lazy-load on demand
+            receivedAt: date, labelIds: raw.labelIds ?? [], isBulk: isBulk
+        )
+    }
+
+    /// 특정 메시지의 전체 본문(format=full)을 가져옴. 상세 화면 lazy-load용.
+    func fetchFullMessage(id: String) async throws -> GmailMessage? {
+        try await refreshTokenIfNeeded()
+        guard let token = loadTokens().accessToken else { throw EmailError.notAuthenticated }
+        return try await fetchMessage(id: id, token: token)
+    }
+
+    /// 메시지 목록을 배치로 나누어 조회하여 429(Too Many Requests) 방지.
+    /// isMetadata=true 이면 format=metadata(경량), false 이면 format=full(전체 본문).
+    private func fetchMessagesInBatches(
+        ids: [String], token: String, batchSize: Int = 10, isMetadata: Bool = false
+    ) async throws -> [GmailMessage] {
+        var results: [GmailMessage] = []
+        let chunks = ids.chunked(into: batchSize)
+        for (index, chunk) in chunks.enumerated() {
+            logger.info("Fetching batch \(index + 1)/\(chunks.count) (\(chunk.count) messages)\(isMetadata ? " [metadata]" : "")")
+            let chunkMessages = try await withThrowingTaskGroup(of: GmailMessage?.self) { group in
+                for id in chunk {
+                    group.addTask { [weak self] in
+                        guard let self else { return nil }
+                        return isMetadata
+                            ? try await self.fetchMessageMetadata(id: id, token: token)
+                            : try await self.fetchMessage(id: id, token: token)
+                    }
+                }
+                var batchResults: [GmailMessage] = []
+                for try await msg in group { if let m = msg { batchResults.append(m) } }
+                return batchResults
+            }
+            results.append(contentsOf: chunkMessages)
+            if index < chunks.count - 1 {
+                // 메타데이터 요청은 응답이 작아 딜레이 단축 (50ms), 전체 본문은 100ms 유지
+                try? await Task.sleep(nanoseconds: isMetadata ? 50_000_000 : 100_000_000)
+            }
+        }
+        return results
     }
 
     // MARK: - 이메일 뷰어: 최근 메일 전체 fetch
@@ -299,25 +425,28 @@ final class EmailService: NSObject, MailProvider {
         var request = URLRequest(url: urlComponents.url!)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
 
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+        let (data, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            logger.error("Request failed: No HTTP response")
             throw EmailError.apiFailed
         }
+
+        logger.info("Response status: \(httpResponse.statusCode)")
+
+        guard httpResponse.statusCode == 200 else {
+            let errorBody = String(data: data, encoding: .utf8) ?? "no body"
+            logger.error("Request failed: \(errorBody)")
+            throw EmailError.apiFailed
+        }
+
         let list = try JSONDecoder().decode(MessageListResponse.self, from: data)
+        
         guard let messageIDs = list.messages else { return [] }
 
-        return try await withThrowingTaskGroup(of: GmailMessage?.self) { group in
-            for item in messageIDs.prefix(100) {
-                group.addTask { [weak self] in
-                    try await self?.fetchMessage(id: item.id, token: token)
-                }
-            }
-            var messages: [GmailMessage] = []
-            for try await msg in group {
-                if let m = msg { messages.append(m) }
-            }
-            return messages.sorted { $0.receivedAt > $1.receivedAt }
-        }
+        // 메타데이터만 가져와 목록 표시 — 본문은 상세 화면에서 lazy-load
+        let targetIDs = messageIDs.prefix(100).map { $0.id }
+        let messages = try await fetchMessagesInBatches(ids: targetIDs, token: token, isMetadata: true)
+        return messages.sorted { $0.receivedAt > $1.receivedAt }
     }
 
     // MARK: - On-Device Extraction (NSDataDetector)
@@ -389,6 +518,32 @@ final class EmailService: NSObject, MailProvider {
     }
 
     // MARK: - MIME Body Extraction
+
+    /// MIME 트리에서 text/html 파트를 우선 추출 (WKWebView 렌더링용).
+    /// multipart/alternative → text/html 우선, mixed/related → 재귀 탐색.
+    private func extractHTML(from payload: RawGmailMessage.Payload) -> String? {
+        let mime = payload.mimeType ?? ""
+
+        if mime.hasPrefix("text/html"),
+           let data = payload.body?.data, !data.isEmpty {
+            return decodeBase64URL(data)
+        }
+
+        guard let parts = payload.parts, !parts.isEmpty else { return nil }
+
+        if mime.hasPrefix("multipart/alternative") {
+            // alternative: text/html 우선
+            if let html = parts.first(where: { $0.mimeType?.hasPrefix("text/html") == true }),
+               let data = html.body?.data, !data.isEmpty {
+                return decodeBase64URL(data)
+            }
+        }
+
+        for part in parts {
+            if let html = extractHTML(from: part) { return html }
+        }
+        return nil
+    }
 
     /// MIME 페이로드 트리를 재귀 탐색해 text/plain 우선, 없으면 text/html 태그 제거 반환.
     private func extractPlainText(from payload: RawGmailMessage.Payload) -> String {
@@ -487,42 +642,68 @@ final class EmailService: NSObject, MailProvider {
     // MARK: - Token Exchange
 
     private func exchangeCodeForTokens(code: String) async throws {
+        logger.info("Exchanging code for tokens")
         var request = URLRequest(url: URL(string: "https://oauth2.googleapis.com/token")!)
         request.httpMethod = "POST"
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        let body = [
+        let bodyParts = [
             "code": code,
             "client_id": clientID,
             "client_secret": clientSecret,
             "redirect_uri": redirectURI,
             "grant_type": "authorization_code"
-        ].map { "\($0.key)=\($0.value.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "")" }
-         .joined(separator: "&")
-        request.httpBody = body.data(using: .utf8)
+        ]
+        let bodyString = bodyParts.map { "\($0.key)=\($0.value.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "")" }
+            .joined(separator: "&")
+        request.httpBody = bodyString.data(using: .utf8)
 
-        let (data, _) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await session.data(for: request)
+        
+        if let httpResponse = response as? HTTPURLResponse {
+            logger.info("Token exchange response status: \(httpResponse.statusCode)")
+            if httpResponse.statusCode != 200 {
+                let errorBody = String(data: data, encoding: .utf8) ?? "no body"
+                logger.error("Token exchange failed: \(errorBody)")
+            }
+        }
+
         let tokens = try JSONDecoder().decode(TokenResponse.self, from: data)
         saveTokens(accessToken: tokens.access_token, refreshToken: tokens.refresh_token)
+        logger.info("Tokens saved successfully")
     }
-
     private func refreshTokenIfNeeded() async throws {
-        guard let refresh = loadTokens().refreshToken else { throw EmailError.notAuthenticated }
+        guard let refresh = loadTokens().refreshToken else { 
+            logger.debug("No refresh token available, skipping refresh")
+            throw EmailError.notAuthenticated 
+        }
+        
+        logger.info("Refreshing access token")
         var request = URLRequest(url: URL(string: "https://oauth2.googleapis.com/token")!)
         request.httpMethod = "POST"
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
         let body = "grant_type=refresh_token&refresh_token=\(refresh)&client_id=\(clientID)&client_secret=\(clientSecret)"
         request.httpBody = body.data(using: .utf8)
 
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+        let (data, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            logger.error("Refresh token failed: No HTTP response")
+            throw EmailError.apiFailed
+        }
+
+        logger.info("Refresh token response status: \(httpResponse.statusCode)")
+        
+        guard httpResponse.statusCode == 200 else {
             // 400 invalid_grant 등: refresh token 만료 → 키체인 삭제 후 재인증 안내
+            let errorBody = String(data: data, encoding: .utf8) ?? "no body"
+            logger.error("Refresh token failed: \(errorBody)")
             deleteTokens()
             throw EmailError.notAuthenticated
         }
+        
         let tokens = try JSONDecoder().decode(TokenResponse.self, from: data)
         saveTokens(accessToken: tokens.access_token, refreshToken: refresh)
+        logger.info("Access token refreshed successfully")
     }
-
     private func buildAuthURL() -> URL? {
         var components = URLComponents(string: "https://accounts.google.com/o/oauth2/v2/auth")!
         components.queryItems = [
@@ -555,6 +736,38 @@ final class EmailService: NSObject, MailProvider {
         KeychainStore.deleteAny(service: keychainService, account: "refresh_token")
     }
 
+    // MARK: - Read State Sync
+
+    /// Gmail 서버에서 UNREAD 라벨을 제거하여 읽음 처리.
+    /// `gmail.modify` 스코프 필요 — 이전 `gmail.readonly` 토큰이면 403으로 무음 실패.
+    func markAsRead(messageID: String) async throws {
+        logger.info("Marking message as read: \(messageID)")
+        try await refreshTokenIfNeeded()
+        guard let token = loadTokens().accessToken else { 
+            logger.error("markAsRead failed: not authenticated")
+            throw EmailError.notAuthenticated 
+        }
+        let url = URL(string: "https://gmail.googleapis.com/gmail/v1/users/me/messages/\(messageID)/modify")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(["removeLabelIds": ["UNREAD"]])
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            logger.error("markAsRead failed: No HTTP response")
+            throw EmailError.apiFailed
+        }
+        
+        logger.info("markAsRead response status: \(http.statusCode)")
+        
+        if !(200...299).contains(http.statusCode) {
+            let errorBody = String(data: data, encoding: .utf8) ?? "no body"
+            logger.error("markAsRead failed for \(messageID): \(errorBody)")
+            throw EmailError.apiFailed
+        }
+        logger.info("Message \(messageID) marked as read successfully")
+    }
     // MARK: - Date Parsing
 
     private func parseRFC2822Date(_ string: String) -> Date? {

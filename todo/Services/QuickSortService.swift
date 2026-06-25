@@ -30,7 +30,7 @@ enum QuickSortService {
 
         // 항상 온디바이스: FoundationModelsEngine(AFM ANE) → Heuristic 폴백 체인
         let engine  = FoundationModelsEngine()
-        let results = await engine.prioritize(todos: [todo], events: [], persona: persona)
+        let results = (try? await engine.prioritize(todos: [todo], events: [], persona: persona)) ?? []
 
         guard let result = results.first else { return }
 

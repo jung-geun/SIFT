@@ -78,11 +78,13 @@ final class CalendarService {
 
     /// todo의 dueDate를 캘린더 이벤트로 등록하고 eventIdentifier를 반환.
     /// 이미 등록된 이벤트(calendarEventID 있음)가 있으면 업데이트.
+    /// todo의 dueDate를 캘린더 이벤트로 등록/업데이트.
+    /// - preferredCalendarID: 신규 생성 시 사용할 캘린더 ID (nil이면 기본 캘린더 사용).
     @discardableResult
-    func registerOrUpdate(todo: Todo) throws -> String? {
+    func registerOrUpdate(todo: Todo, preferredCalendarID: String? = nil) throws -> String? {
         guard isAuthorized, let dueDate = todo.dueDate else { return nil }
 
-        // 기존 이벤트 업데이트
+        // 기존 이벤트 업데이트 — 1순위: 이 기기의 eventIdentifier로 조회
         if let existingID = todo.calendarEventID,
            let event = store.event(withIdentifier: existingID) {
             event.title = todo.title.isEmpty ? "할 일 마감" : todo.title
@@ -93,14 +95,36 @@ final class CalendarService {
             return existingID
         }
 
+        // 2순위: eventIdentifier가 stale한 경우 externalIdentifier로 재탐색 (store.reset() 후 무효화 방어)
+        if !todo.calendarEventExternalID.isEmpty {
+            let items = store.calendarItems(withExternalIdentifier: todo.calendarEventExternalID)
+            if let found = items.compactMap({ $0 as? EKEvent }).first {
+                found.title = todo.title.isEmpty ? "할 일 마감" : todo.title
+                found.startDate = dueDate
+                found.endDate = dueDate.addingTimeInterval(3600)
+                found.notes = todo.notes
+                try store.save(found, span: .thisEvent)
+                todo.calendarEventID = found.eventIdentifier
+                return found.eventIdentifier
+            }
+        }
+
         // 신규 등록
         let event = EKEvent(eventStore: store)
         event.title = todo.title.isEmpty ? "할 일 마감" : todo.title
         event.startDate = dueDate
         event.endDate = dueDate.addingTimeInterval(3600)
         event.notes = todo.notes
-        event.calendar = preferredDefaultCalendar
+        if let cid = preferredCalendarID, let cal = store.calendar(withIdentifier: cid) {
+            event.calendar = cal
+        } else {
+            event.calendar = preferredDefaultCalendar
+        }
+        // todo.id(UUID)를 URL에 심어 캘린더→할일 역방향 연결 마커로 사용
+        event.url = URL(string: "sift-todo://todo/\(todo.id.uuidString)")
         try store.save(event, span: .thisEvent)
+        // iCloud 동기화 후에도 유지되는 안정 식별자 저장
+        todo.calendarEventExternalID = event.calendarItemExternalIdentifier ?? ""
         return event.eventIdentifier
     }
 
@@ -227,8 +251,25 @@ extension CalendarService {
     func applyAutoRegistration(for todo: Todo) -> Bool {
         // 캘린더 출처 todo는 재등록하지 않음 (역방향 중복 방지)
         guard todo.todoSource != .calendar else { return false }
-        // 권한 없음·마감 없음·이미 등록됨이면 무시
-        guard isAuthorized, todo.dueDate != nil, todo.calendarEventID == nil else { return false }
+        guard isAuthorized, todo.dueDate != nil else { return false }
+
+        // 1) 이 기기의 eventIdentifier로 이벤트 존재 확인
+        if let id = todo.calendarEventID, store.event(withIdentifier: id) != nil {
+            return false  // 이미 등록됨
+        }
+
+        // 2) 크로스-기기 dedup: calendarItemExternalIdentifier로 조회
+        //    iCloud 동기화 후 eventIdentifier가 바뀌어도 externalIdentifier는 동일 → 중복 등록 방지
+        if !todo.calendarEventExternalID.isEmpty {
+            let items = store.calendarItems(withExternalIdentifier: todo.calendarEventExternalID)
+            if let event = items.compactMap({ $0 as? EKEvent }).first {
+                // 다른 기기에서 등록한 이벤트가 이미 이 기기에 동기화됨 → 로컬 ID만 갱신
+                todo.calendarEventID = event.eventIdentifier
+                return false
+            }
+        }
+
+        // 3) 이벤트가 없음 → 새로 등록
         if let id = try? registerOrUpdate(todo: todo) {
             todo.calendarEventID = id
             return true
@@ -403,12 +444,15 @@ extension CalendarService {
     func syncCalendarWithTodos(context: ModelContext) async {
         guard isAuthorized else { return }
 
-        // 외부 캘린더 소스 실시간 리프레시 및 캐시 무효화
-        store.reset()
-        store.refreshSourcesIfNecessary()
-
+        // SwiftData fetch를 EK store 조작보다 먼저 수행.
+        // store.reset()이 EKEventStoreChangedNotification을 동기 트리거할 수 있어
+        // CloudKit import 중 fetch와 충돌 시 EXC_BREAKPOINT 트랩 발생.
         let descriptor = FetchDescriptor<Todo>()
         guard let todos = try? context.fetch(descriptor) else { return }
+
+        // fetch 완료 후 EK 캐시 리프레시 (for 루프 이전에 최신 이벤트 데이터 확보)
+        store.reset()
+        store.refreshSourcesIfNecessary()
 
         var hasChanges = false
 
@@ -450,11 +494,32 @@ extension CalendarService {
                         hasChanges = true
                     }
                 } else {
-                    // 캘린더에서 이벤트가 삭제된 경우 -> 어플에서도 마감 정보 해제
-                    todo.calendarEventID = nil
-                    todo.dueDate = nil
-                    todo.updatedAt = Date()
-                    hasChanges = true
+                    // eventIdentifier 무효화 방어: externalIdentifier로 재탐색
+                    var recovered = false
+                    if !todo.calendarEventExternalID.isEmpty {
+                        let items = store.calendarItems(withExternalIdentifier: todo.calendarEventExternalID)
+                        if let found = items.compactMap({ $0 as? EKEvent }).first {
+                            todo.calendarEventID = found.eventIdentifier
+                            let isTitleChanged   = todo.title    != (found.title  ?? "")
+                            let isDueDateChanged = todo.dueDate  != found.startDate
+                            let isNotesChanged   = todo.notes    != (found.notes  ?? "")
+                            if isTitleChanged || isDueDateChanged || isNotesChanged {
+                                todo.title     = found.title     ?? ""
+                                todo.dueDate   = found.startDate
+                                todo.notes     = found.notes     ?? ""
+                                todo.updatedAt = found.lastModifiedDate ?? found.creationDate ?? Date()
+                                hasChanges = true
+                            }
+                            recovered = true
+                        }
+                    }
+                    if !recovered {
+                        // 캘린더에서 진짜 삭제된 경우 → 마감 정보 해제
+                        todo.calendarEventID = nil
+                        todo.dueDate = nil
+                        todo.updatedAt = Date()
+                        hasChanges = true
+                    }
                 }
             }
         }

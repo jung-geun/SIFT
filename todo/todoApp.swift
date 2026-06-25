@@ -248,7 +248,17 @@ struct todoApp: App {
 
     var body: some Scene {
         WindowGroup {
-            TabView(selection: $selectedTab) {
+            // 캘린더 탭(tag 1) 재탭 시 오늘로 이동하는 커스텀 바인딩
+            let tabBinding = Binding<Int>(
+                get: { selectedTab },
+                set: { newTab in
+                    if newTab == 1 && selectedTab == 1 {
+                        NotificationCenter.default.post(name: .calendarScrollToToday, object: nil)
+                    }
+                    selectedTab = newTab
+                }
+            )
+            TabView(selection: tabBinding) {
                 TodoListView()
                     .tabItem { Label("할 일", systemImage: "checklist") }
                     .tag(0)
@@ -290,6 +300,9 @@ struct todoApp: App {
                         await CalendarService.shared.runWeeklyImportIfDue(context: ctx)
                     }
                     Task {
+                        // iCloud 동기화가 진행 중이면 완료 후 캘린더 동기화
+                        // (iCloud에 먼저 도착한 캘린더 이벤트를 Todo 없는 신규로 오인하는 경쟁 조건 방지)
+                        if iCloudSyncEnabled { await syncMonitor.waitForCompletion() }
                         await CalendarService.shared.syncCalendarWithTodos(context: ctx)
                         await CalendarService.shared.cleanupOldCompletedTodos(context: ctx)
                     }
@@ -302,6 +315,7 @@ struct todoApp: App {
                 .onReceive(NotificationCenter.default.publisher(for: .EKEventStoreChanged)) { _ in
                     if let ctx = appDelegate.modelContext {
                         Task {
+                            if iCloudSyncEnabled { await syncMonitor.waitForCompletion() }
                             await CalendarService.shared.syncCalendarWithTodos(context: ctx)
                         }
                     }
@@ -321,6 +335,7 @@ struct todoApp: App {
                             await CalendarService.shared.runWeeklyImportIfDue(context: ctx)
                         }
                         Task {
+                            if iCloudSyncEnabled { await syncMonitor.waitForCompletion() }
                             await CalendarService.shared.syncCalendarWithTodos(context: ctx)
                             await CalendarService.shared.cleanupOldCompletedTodos(context: ctx)
                         }

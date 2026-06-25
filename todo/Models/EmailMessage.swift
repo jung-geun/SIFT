@@ -12,7 +12,8 @@ final class EmailMessage {
     var subject: String = ""
     var from: String = ""
     var snippet: String = ""
-    var body: String = ""         // 본문 — 온디바이스 전용, 기기 밖 전송 금지
+    var body: String = ""         // 세니타이징된 평문 본문 — 온디바이스 전용
+    var htmlBody: String? = nil   // 원본 HTML 본문 (WKWebView 렌더링용) — 온디바이스 전용
     var receivedAt: Date = Date.distantPast
     var isRead: Bool = false
 
@@ -23,6 +24,7 @@ final class EmailMessage {
         from: String = "",
         snippet: String = "",
         body: String = "",
+        htmlBody: String? = nil,
         receivedAt: Date = Date.distantPast
     ) {
         self.id = id
@@ -31,6 +33,7 @@ final class EmailMessage {
         self.from = from
         self.snippet = snippet
         self.body = body
+        self.htmlBody = htmlBody
         self.receivedAt = receivedAt
         self.isRead = false
     }
