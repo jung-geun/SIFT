@@ -17,14 +17,14 @@ final class EmailLearningStore {
     // MARK: - UserDefaults Keys
 
     private enum Key {
-        static let dismissedIDs      = "pieroot.todo.dismissedMessageIDs"   // [String]
-        static let deletionCounts    = "pieroot.todo.senderDeletionCounts"  // [String: Int]
-        static let suppressedSenders = "pieroot.todo.suppressedSenders"     // [String]
+        static let dismissedIDs = "pieroot.todo.dismissedMessageIDs"     // [String]
+        static let analyzedIDs  = "pieroot.todo.analyzedMessageIDs"      // [String]
+        static let deletionCounts = "pieroot.todo.senderDeletionCounts"   // [String: Int]
+        static let suppressedSenders = "pieroot.todo.suppressedSenders"  // [String]
     }
-
-    // MARK: - Configuration
-
-    /// 같은 발신자를 이 횟수 이상 삭제하면 자동 억제
+    /// analyzed ID 목록 최대 보존 개수 (FIFO — UserDefaults 무한 증가 방지)
+    private let analyzedCap = 1_000
+    /// 발신자 삭제 횟수 임계치(반복 미승인 메일 자동 억제)
     private let suppressionThreshold = 2
     /// dismissed ID 목록 최대 보존 개수 (FIFO — UserDefaults 무한 증가 방지)
     private let dismissedCap = 500
@@ -37,14 +37,51 @@ final class EmailLearningStore {
         return suppressedSendersSet().contains(senderEmail.lowercased())
     }
 
+    /// 이미 분석한 messageID 집합.
+    func analyzedMessageIDs() -> Set<String> {
+        Set(SettingsStore.shared.get(Key.analyzedIDs, defaultValue: []))
+    }
+
+    /// 해당 messageID(sourceRef)가 이미 분석된 적 있는지 확인
+    func hasAnalyzed(_ messageID: String) -> Bool {
+        guard !messageID.isEmpty else { return false }
+        return analyzedMessageIDs().contains(messageID)
+    }
+
+    /// dismissed(삭제 반영) messageID 집합.
+    func dismissedMessageIDs() -> Set<String> {
+        Set(SettingsStore.shared.get(Key.dismissedIDs, defaultValue: []))
+    }
+
     /// 해당 messageID(sourceRef)가 이미 처리(삭제)된 적 있는지 확인
     func isDismissed(_ messageID: String) -> Bool {
         guard !messageID.isEmpty else { return false }
-        let list: [String] = SettingsStore.shared.get(Key.dismissedIDs, defaultValue: [])
-        return list.contains(messageID)
+        return dismissedMessageIDs().contains(messageID)
     }
 
     // MARK: - Public Mutation API
+
+    /// 이메일 분석 결과 messageID 기록.
+    /// - messageIDs: 분석 대상으로 조회된 Gmail messageID 목록.
+    ///
+    /// 동작:
+    ///   1. 비어있지 않은 messageID만 정리
+    ///   2. 기존 목록 뒤에 중복 없이 append
+    ///   3. FIFO 기준으로 analyzedCap만 유지 (가장 오래된 값 제거)
+    func recordAnalyzed(messageIDs: [String]) {
+        let normalized = messageIDs.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !normalized.isEmpty else { return }
+
+        var list: [String] = SettingsStore.shared.get(Key.analyzedIDs, defaultValue: [])
+        for messageID in normalized where !list.contains(messageID) {
+            list.append(messageID)
+        }
+        if list.count > analyzedCap {
+            list = Array(list.suffix(analyzedCap))
+        }
+        SettingsStore.shared.set(Key.analyzedIDs, value: list)
+    }
 
     /// 이메일 할 일 삭제 시 호출.
     /// - messageID: Todo.sourceRef (Gmail API message ID)

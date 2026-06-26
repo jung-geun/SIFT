@@ -205,7 +205,8 @@ final class CalendarService {
         isAllDay: Bool,
         location: String,
         notes: String,
-        sourceRef: String
+        sourceRef: String,
+        calendarID: String? = nil
     ) throws -> String {
         guard isAuthorized else { throw CalendarError.notAuthorized }
 
@@ -229,7 +230,11 @@ final class CalendarService {
         if !location.isEmpty { event.location = location }
         if !notes.isEmpty    { event.notes    = notes }
         event.url       = URL(string: "x-todoapp-email://\(sourceRef.addingPercentEncoding(withAllowedCharacters: .urlHostAllowed) ?? sourceRef)")
-        event.calendar  = preferredDefaultCalendar
+        if let cid = calendarID, let cal = store.calendar(withIdentifier: cid) {
+            event.calendar = cal
+        } else {
+            event.calendar = preferredDefaultCalendar
+        }
         try store.save(event, span: .thisEvent)
 
         var mapping = emailEventMapping

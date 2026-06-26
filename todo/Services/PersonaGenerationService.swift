@@ -4,9 +4,6 @@ import Foundation
 
 enum PersonaAIProvider: String, CaseIterable, Identifiable {
     case foundationModels = "apple"
-    case claude           = "claude"
-    case openai           = "openai"
-    case gemini           = "gemini"
     case onDevice         = "onDevice"
 
     var id: String { rawValue }
@@ -14,9 +11,6 @@ enum PersonaAIProvider: String, CaseIterable, Identifiable {
     var displayName: String {
         switch self {
         case .foundationModels: "Apple Foundation Models (AFM)"
-        case .claude:           "Claude (Anthropic)"
-        case .openai:           "GPT (OpenAI)"
-        case .gemini:           "Gemini (Google)"
         case .onDevice:         "온디바이스 AI (Qwen)"
         }
     }
@@ -24,32 +18,8 @@ enum PersonaAIProvider: String, CaseIterable, Identifiable {
     var systemImage: String {
         switch self {
         case .foundationModels: "apple.logo"
-        case .claude:           "a.circle.fill"
-        case .openai:           "sparkle"
-        case .gemini:           "g.circle.fill"
         case .onDevice:         "cpu"
         }
-    }
-
-    var requiresAPIKey: Bool { self != .foundationModels && self != .onDevice }
-
-    /// 기본 모델 식별자
-    var defaultModel: String {
-        switch self {
-        case .foundationModels: ""
-        case .claude:           "claude-haiku-4-5-20251001"
-        case .openai:           "gpt-5-mini"
-        case .gemini:           "gemini-2.0-flash"
-        case .onDevice:         ""
-        }
-    }
-
-    /// Keychain 저장 키
-    var keychainKey: String { "pieroot.todo.persona.key.\(rawValue)" }
-
-    /// Keychain에서 저장된 API 키 읽기 (KeychainStore 위임 — SynchronizableAny로 항상 찾음)
-    func storedAPIKey() -> String? {
-        KeychainStore.get(service: keychainKey)
     }
 }
 

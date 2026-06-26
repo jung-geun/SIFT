@@ -12,7 +12,6 @@ import Foundation
 //   4. PersonaFM       → FoundationModelsService.swift — buildPersonaInstructions()
 //   5. PersonaCloud    → PersonaGenerationService.swift — buildInstructions() (Qwen 폴백)
 //   6. RankingFM       → FoundationModelsService.swift — buildRankingInstructions()
-//   7. RankingCloud    → IntelligenceService.swift — CloudIntelligenceEngine.buildInstructions()
 
 enum Prompts {
 
@@ -153,6 +152,19 @@ enum Prompts {
         - deadlineSentence: 마감 관련 핵심 문장 1~2개 한국어 요약 (없으면 빈 문자열).
         - notes: 이메일 핵심 내용 1~3줄 한국어 (없으면 빈 문자열).
         """
+
+        /// 이메일 수동 등록 초안용 추가 요청.
+        ///
+        /// 규칙:
+        /// - dueDateISO는 명시적 마감일만 채우고, 과거/추측은 비워야 함.
+        /// - notes는 아래 템플릿으로 고정:
+        ///   [메일 요약], (AI 요약), [발신자] 또는 [발신자 이메일].
+        static let draftTodoRequestSuffix = """
+        위 지침대로 아래 형식만 출력하고 외부 설명은 작성하지 마세요.
+        마감일이 없다면 dueDateISO는 빈 문자열로 두고 제목/메모도 추측 금지.
+        isAllDay는 마감이 날짜-only면 true, 시간만 주어지면 false.
+        notes는 1~3줄 이내로 작성하고 마감이 없더라도 "[메일 요약]" 태그를 유지하세요.
+        """
     }
 
     // MARK: - 4. 페르소나 생성 — AFM (Guided Generation)
@@ -220,28 +232,4 @@ enum Prompts {
         """
     }
 
-    // MARK: - 7. 우선순위 랭킹 — 클라우드 (4축 JSON)
-
-    enum RankingCloud {
-        /// 기본 역할 지시 — 동적 페르소나·메모리는 호출 시 추가.
-        static let baseInstruction = """
-        당신은 개인 스케줄 비서입니다. 할 일 목록의 우선순위를 4축 점수로 분석하세요.
-        반드시 아래 JSON 형식으로만 답하세요 (Markdown 없이 순수 JSON):
-        """
-
-        /// 출력 JSON 형식 예시 (단일 항목).
-        // swiftlint:disable:next line_length
-        static let jsonFormatExample = #"{"scheduled_tasks":[{"task_id":"<UUID>","scoring":{"deadline_proximity":5.0,"urgency":5.0,"task_importance":5.0,"task_chaining":2},"reasoning":{"summary":"<1~2문장 근거>","chaining_detail":""},"recommended_schedule":{"start_time":"<ISO8601 또는 빈문자>"},"needs_notification":false,"persona_fit":false}]}"#
-
-        /// 스코어링 규칙 상세.
-        static let scoringRules = """
-        scoring 각 축 0~10: deadline_proximity(마감임박도), urgency(긴급도), task_importance(중요도), task_chaining(2=독립/6=최종체인/9=비최종체인).
-        절대 0.0으로 두지 말 것 — 마감 없어도 사용자 페르소나·핵심 업무 키워드에 부합하는 항목은 3.0 이상 부여.
-        페르소나 및 핵심 업무 키워드 부합 시 task_importance 높게, persona_fit:true.
-        이유(reasoning.summary)에는 단순히 '개발 관련 핵심 업무'라는 동일한 문장을 복사-붙여넣기 하듯 반복하지 말고, 태스크 본질에 부합하는 구체적인 사유를 작성하십시오.
-        마감 기한 정보 옆에 괄호로 주어지는 남은 시간 힌트를 토대로 사실에 맞는 기한 사유를 기술하십시오.
-        needs_notification: 오늘 마감/마감 임박/중요 키워드 있으면 true.
-        start_time: 처리 추천 시각(ISO8601). 확실하지 않으면 빈문자.
-        """
-    }
 }

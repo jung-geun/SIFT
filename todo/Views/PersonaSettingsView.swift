@@ -328,7 +328,8 @@ struct MemoryDetailView: View {
     
     @State private var isAnalyzing = false
     @State private var pendingMemoryResult: MemoryAnalysisResult?
-    
+    @State private var afmAvailable = false
+
     private var memoryInsights: [String] {
         analyses.first?.insights ?? []
     }
@@ -376,7 +377,7 @@ struct MemoryDetailView: View {
                     if isAnalyzing {
                         HStack(spacing: 8) {
                             ProgressView().controlSize(.small)
-                            Text("패턴 분석 중…")
+                            Text(afmAvailable ? "Apple Foundation Models로 분석 중…" : "통계 기반으로 분석 중…")
                         }
                     } else {
                         Label(pendingMemoryResult == nil ? "지금 패턴 분석" : "다시 분석", systemImage: "chart.bar.xaxis")
@@ -390,14 +391,39 @@ struct MemoryDetailView: View {
         }
         .navigationTitle("행동 패턴 분석")
         .navigationBarTitleDisplayMode(.inline)
+        .task {
+            #if canImport(FoundationModels)
+            if #available(iOS 26.0, *) {
+                afmAvailable = FoundationModelsService.isAvailable
+            }
+            #endif
+        }
     }
     
     @ViewBuilder
     private func memoryAnalysisResultCard(_ result: MemoryAnalysisResult) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            Label("새 분석 결과", systemImage: "sparkles")
-                .font(.subheadline.bold())
-                .foregroundStyle(.blue)
+            HStack(spacing: 6) {
+                Label("새 분석 결과", systemImage: "sparkles")
+                    .font(.subheadline.bold())
+                    .foregroundStyle(.blue)
+                Spacer()
+                if result.usedAFM {
+                    Label("AFM", systemImage: "cpu")
+                        .font(.caption2.bold())
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(.blue, in: Capsule())
+                } else {
+                    Label("통계 기반", systemImage: "chart.bar")
+                        .font(.caption2.bold())
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(.quaternary, in: Capsule())
+                }
+            }
             
             if !result.summary.isEmpty {
                 Text(result.summary)
@@ -465,9 +491,6 @@ struct IntelligenceDetailView: View {
     @ObservedObject private var settingsStore = SettingsStore.shared
     @ObservedObject private var llmService: OnDeviceLLMService = .shared
     
-    @State private var apiKeyInput = ""
-    @State private var modelInput = ""
-    @State private var storedAPIKey = ""
     @State private var showDownloadConfirm = false
     @State private var afmAvailable = false
     
@@ -488,11 +511,7 @@ struct IntelligenceDetailView: View {
                 return PersonaAIProvider(rawValue: raw) ?? .foundationModels
             },
             set: { newValue in
-                saveSetting(key: "selectedAIProvider", value: newValue.rawValue) { _ in
-                    apiKeyInput = ""
-                    loadAPIKey()
-                    loadModel()
-                }
+                saveSetting(key: "selectedAIProvider", value: newValue.rawValue)
             }
         )
     }
@@ -527,50 +546,7 @@ struct IntelligenceDetailView: View {
                 .pickerStyle(.menu)
                 scopeBadge(for: "selectedAIProvider", iCloudSyncEnabled: iCloudSyncEnabled)
                 
-                if selectedProvider.requiresAPIKey {
-                    HStack(spacing: 8) {
-                        Image(systemName: "key.fill")
-                            .foregroundStyle(.secondary)
-                            .frame(width: 20)
-                        SecureField("API 키 입력", text: $apiKeyInput)
-                            .autocorrectionDisabled()
-                        if !apiKeyInput.isEmpty {
-                            Button("저장") { saveAPIKey() }
-                                .font(.caption)
-                                .buttonStyle(.bordered)
-                                .controlSize(.small)
-                        }
-                    }
-                    if !storedAPIKey.isEmpty {
-                        Label("저장된 키 있음", systemImage: "checkmark.circle.fill")
-                            .font(.caption)
-                            .foregroundStyle(.green)
-                    } else {
-                        let hint: String = {
-                            switch selectedProvider {
-                            case .gemini: return "Google AI Studio (aistudio.google.com)"
-                            case .claude: return "Anthropic Console (console.anthropic.com)"
-                            default:      return "OpenAI Platform (platform.openai.com)"
-                            }
-                        }()
-                        Text("\(hint)에서 API 키를 발급받아 입력하세요.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    
-                    HStack(spacing: 8) {
-                        Image(systemName: "cpu")
-                            .foregroundStyle(.secondary)
-                            .frame(width: 20)
-                        TextField(selectedProvider.defaultModel, text: $modelInput)
-                            .autocorrectionDisabled()
-                            .textInputAutocapitalization(.never)
-                            .font(.system(.body, design: .monospaced))
-                            .onChange(of: modelInput) { _, v in
-                                UserDefaults.standard.set(v, forKey: "aiModel.\(selectedProvider.rawValue)")
-                            }
-                    }
-                }
+                
                 
                 if selectedProvider == .onDevice && !llmService.isModelCachedOnDisk {
                     Label("온디바이스 모델을 먼저 다운로드하세요 (아래 모델 관리 섹션)", systemImage: "exclamationmark.triangle")
@@ -739,6 +715,11 @@ struct IntelligenceDetailView: View {
         .navigationTitle("TODO 자동 정렬 및 AI")
         .navigationBarTitleDisplayMode(.inline)
         .task {
+            let raw: String = SettingsStore.shared.get("selectedAIProvider", defaultValue: PersonaAIProvider.foundationModels.rawValue)
+            if PersonaAIProvider(rawValue: raw) == nil {
+                saveSetting(key: "selectedAIProvider", value: PersonaAIProvider.foundationModels.rawValue)
+            }
+
             #if canImport(FoundationModels)
             if #available(iOS 26.0, *) {
                 afmAvailable = FoundationModelsService.isAvailable
@@ -748,26 +729,23 @@ struct IntelligenceDetailView: View {
             #else
             afmAvailable = false
             #endif
-            loadAPIKey()
-            loadModel()
         }
     }
     
     private var intelligenceFooter: String {
         switch selectedProvider {
         case .foundationModels:
-            return "Apple Foundation Models(온디바이스)가 할 일을 정렬합니다. 다른 모델을 선택하면 해당 모델이 AFM보다 먼저 동작합니다."
+            return "Apple Foundation Models(온디바이스)가 할 일을 정렬합니다. Qwen을 선택하면 해당 모델이 AFM보다 먼저 동작합니다.\n\n\(credentialStorageHint)"
         case .onDevice:
-            return "Qwen 온디바이스 모델이 우선 정렬하고, 미로드 시 Apple Foundation Models로 폴백합니다."
-        default:
-            return isCloudReady
-                ? "\(selectedProvider.displayName)이 우선 정렬하고, 키 없음 시 Apple Foundation Models로 폴백합니다."
-                : "API 키를 설정하면 \(selectedProvider.displayName)으로 정렬합니다. 미설정 시 Apple Foundation Models."
+            return "Qwen 온디바이스 모델이 우선 정렬하고, 미로드 시 Apple Foundation Models로 폴백합니다.\n\n\(credentialStorageHint)"
         }
     }
     
-    private var isCloudReady: Bool {
-        selectedProvider.requiresAPIKey && !storedAPIKey.isEmpty
+    private var credentialStorageHint: String {
+        if iCloudSyncEnabled {
+            return "인증정보와 보안정보들은 사용자의 iCloud Keychain에 안전하게 저장됩니다."
+        }
+        return "인증정보와 보안정보들은 사용자의 Keychain에 안전하게 저장됩니다."
     }
     
     @ViewBuilder
@@ -810,22 +788,6 @@ struct IntelligenceDetailView: View {
         )
     }
     
-    private func saveAPIKey() {
-        guard !apiKeyInput.isEmpty else { return }
-        KeychainStore.set(service: selectedProvider.keychainKey, value: apiKeyInput)
-        storedAPIKey = apiKeyInput
-        apiKeyInput  = ""
-    }
-
-    private func loadAPIKey() {
-        guard selectedProvider.requiresAPIKey else { storedAPIKey = ""; return }
-        storedAPIKey = KeychainStore.get(service: selectedProvider.keychainKey) ?? ""
-    }
-    
-    private func loadModel() {
-        guard selectedProvider.requiresAPIKey else { modelInput = ""; return }
-        modelInput = UserDefaults.standard.string(forKey: "aiModel.\(selectedProvider.rawValue)") ?? ""
-    }
 }
 
 // 4. 이메일 연동
@@ -1065,7 +1027,12 @@ struct EmailDetailView: View {
             isGmailAuthenticated = true
             lastFetchMessage = "Gmail 연결 완료"
         } catch {
-            errorMessage = error.localizedDescription
+            let nsError = error as NSError
+            if nsError.domain == "com.apple.AuthenticationServices.WebAuthenticationSession" && nsError.code == 1 {
+                errorMessage = "로그인이 취소되었습니다."
+            } else {
+                errorMessage = error.localizedDescription
+            }
             showError = true
         }
     }
@@ -1074,10 +1041,11 @@ struct EmailDetailView: View {
         isFetchingEmails = true
         defer { isFetchingEmails = false }
         do {
-            let (newTodos, extractedEvents) = try await EmailService.shared.fetchAndExtractAll()
-            
             let existing = (try? modelContext.fetch(FetchDescriptor<Todo>())) ?? []
             let existingRefs = Set(existing.map { $0.sourceRef })
+            let (newTodos, extractedEvents) = try await EmailService.shared.fetchAndExtractAll(
+                excludingAlreadyHandledMessageIDs: existingRefs
+            )
             var todoCount = 0
             for todo in newTodos where !existingRefs.contains(todo.sourceRef) {
                 modelContext.insert(todo)
@@ -1430,7 +1398,11 @@ struct AppInfoDetailView: View {
     var body: some View {
         Form {
             Section {
-                LabeledContent("버전") { Text("1.0") }
+                LabeledContent("버전") {
+                    let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "-"
+                    let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "-"
+                    Text("\(version) (\(build))")
+                }
                 LabeledContent("이메일 연동") { Text("Gmail (1계정)") }
 
                 Button {

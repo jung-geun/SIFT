@@ -19,7 +19,6 @@ SIFT는 사용자의 개인정보를 소중히 여깁니다. 본 방침은 앱�
 |------|------|
 | 할 일 제목·메모·마감일·태그·우선순위 | 할 일 관리 |
 | 페르소나 유형·설명 | AI 우선순위 개인화 |
-| 직접 입력한 AI API 키 (선택) | 외부 AI 기능 이용 (사용자 비용 부담) |
 
 ### 1-2. 자동 생성·수집 정보
 
@@ -33,7 +32,7 @@ SIFT는 사용자의 개인정보를 소중히 여깁니다. 본 방침은 앱�
 
 - **수집 항목**: 받은편지함 메시지 제목·발신자·스니펫·본문 (읽기 전용, `gmail.readonly` 권한)
 - **목적**: 마감·일정 관련 이메일에서 할 일 자동 추출
-- **저장 위치**: 기기 내 별도 로컬 전용 저장소 (이메일 본문은 iCloud 동기화 및 외부 AI 서비스로 **전송되지 않습니다**)
+- **저장 위치**: 기기 내 별도 로컬 전용 저장소 (이메일 본문은 iCloud 동기화 및 외부 전송되지 않습니다)
 - **OAuth 토큰**: 기기의 Keychain에만 저장
 - **Google API**: Google LLC가 운영하는 Gmail REST API (`gmail.googleapis.com`)를 통해 데이터를 읽습니다.
 
@@ -43,18 +42,11 @@ SIFT는 사용자의 개인정보를 소중히 여깁니다. 본 방침은 앱�
 - **목적**: 마감일이 있는 할 일을 시스템 캘린더에 자동 등록하고, 캘린더 일정을 할 일로 가져오기
 - **처리 위치**: 기기 내 시스템 캘린더 프레임워크(EventKit). 앱 외부 서버로 전송하지 않습니다.
 
-### 1-5. 선택적 외부 AI 연동
-
-사용자가 본인의 API 키를 직접 입력한 경우에 한해, 아래 서비스로 **할 일 요약 정보(제목·마감·태그 등)**를 전송합니다. **이메일 본문은 전송하지 않습니다.**
-
-| 서비스 | 제공사 | 전송 데이터 |
-|--------|--------|-------------|
-| Claude API | Anthropic, PBC | 할 일 목록 요약·페르소나 정보 |
-| OpenAI API | OpenAI, LLC | 할 일 목록 요약·페르소나 정보 |
-| Gemini API | Google LLC | 할 일 목록 요약·페르소나 정보 |
+### 1-5. 할 일 우선순위 정렬 AI
 
 - 기본값: **온디바이스 AI**(Apple Foundation Models 또는 MLX Qwen)만 사용하며 외부 전송 없음
-- 각 제공사의 개인정보 처리방침이 함께 적용됩니다
+- **처리 데이터**: 할 일 목록·페르소나 정보는 기기 내에서만 분석
+- **이메일 본문**: 기기 밖으로 전송하지 않음
 
 ---
 
@@ -66,10 +58,10 @@ SIFT는 사용자의 개인정보를 소중히 여깁니다. 본 방침은 앱�
 | 기기 내 로컬 전용(별도 emailContainer) | Gmail 메시지 전체 (iCloud 동기화 완전 제외) |
 | Apple iCloud CloudKit 비공개 DB (선택) | 할 일, 페르소나, Audit 이벤트, 분석 결과 (iCloud 활성 시) |
 | iCloud Key-Value Store (선택) | 앱 설정값 (AI 제공자 선택 등) |
-| 기기 Keychain | Gmail OAuth 액세스 토큰·리프레시 토큰, 외부 AI API 키 |
+| 기기 Keychain | Gmail OAuth 액세스 토큰·리프레시 토큰 |
 | 기기 UserDefaults | 캐시된 설정값 |
 
-**이메일 본문 관련 명확화**: 이메일 메시지(본문 포함)는 기기 내 별도 로컬 저장소에만 보관되며, iCloud 동기화 및 외부 AI 서비스로 전송되지 않습니다. iCloud를 활성화하면 할 일 등 동기화 항목은 사용자의 **비공개** CloudKit 데이터베이스에 저장됩니다.
+**이메일 본문 관련 명확화**: 이메일 메시지(본문 포함)는 기기 내 별도 로컬 저장소에만 보관되며, iCloud 동기화 및 외부 전송되지 않습니다. iCloud를 활성화하면 할 일 등 동기화 항목은 사용자의 **비공개** CloudKit 데이터베이스에 저장됩니다.
 
 ---
 
@@ -81,9 +73,6 @@ SIFT는 아래 서비스를 이용하며, 이 과정에서 일부 데이터가 �
 |--------|-----------|-----------|------|-----------|
 | Apple Inc. | 미국 외 다수 | 할 일·페르소나·설정값 (iCloud 활성 시) | 기기 간 동기화 | [Apple Privacy Policy](https://www.apple.com/legal/privacy/) |
 | Google LLC | 미국 외 다수 | Gmail 메시지 목록 (읽기 전용) / OAuth 토큰 교환 | 이메일 연동 | [Google Privacy Policy](https://policies.google.com/privacy) |
-| Anthropic, PBC | 미국 | 할 일 요약 (사용자 API 키 입력 시) | AI 우선순위 | [Anthropic Privacy Policy](https://www.anthropic.com/privacy) |
-| OpenAI, LLC | 미국 | 할 일 요약 (사용자 API 키 입력 시) | AI 우선순위 | [OpenAI Privacy Policy](https://openai.com/policies/privacy-policy) |
-| Google LLC (Gemini) | 미국 외 다수 | 할 일 요약 (사용자 API 키 입력 시) | AI 우선순위 | [Google Privacy Policy](https://policies.google.com/privacy) |
 
 ---
 
@@ -105,8 +94,8 @@ SIFT의 Google API로부터 받은 정보의 사용 및 다른 앱·서비스로
 | 할 일·페르소나 등 앱 데이터 | 앱 삭제 또는 사용자 직접 삭제 시까지 | 기기 데이터 삭제 / iCloud 컨테이너 삭제 |
 | 이메일 메시지 (로컬) | Gmail 연동 해제 시 앱 내에서 삭제 가능 | 앱 데이터 삭제 |
 | Gmail OAuth 토큰 | Gmail 연동 해제 시 즉시 삭제 (Keychain) | SecItemDelete |
-| 외부 AI API 키 | 사용자가 삭제하거나 앱 삭제 시 | Keychain 삭제 |
 | iCloud 데이터 | iCloud 동기화 해제 및 iCloud.com에서 직접 삭제 시 | Apple CloudKit 삭제 |
+| 로컬 앱 데이터 | 앱 삭제 또는 사용자가 직접 삭제 시 | 기기 저장소에서 삭제 |
 
 ---
 
@@ -118,7 +107,6 @@ SIFT의 Google API로부터 받은 정보의 사용 및 다른 앱·서비스로
 - **Gmail 연동 해제**: 설정 → 이메일 연동 → 연결 해제 (토큰 즉시 삭제)
 - **캘린더 권한 철회**: iOS 설정 → 개인정보 보호 → 캘린더 → SIFT 비활성화
 - **iCloud 동기화 해제**: 설정 → iCloud 동기화 → 비활성화
-- **AI API 키 삭제**: 설정 → TODO 자동 정렬 및 AI → API 키 삭제
 - **모든 데이터 삭제**: 앱 삭제 시 로컬 데이터 전체 삭제 (iCloud 데이터는 iCloud.com에서 추가 삭제 필요)
 
 정보 열람·정정·삭제·처리정지 요청은 **pieroot.02@gmail.com**으로 연락하시면 지체 없이 처리하겠습니다.
@@ -127,7 +115,7 @@ SIFT의 Google API로부터 받은 정보의 사용 및 다른 앱·서비스로
 
 ## 7. 데이터 보안
 
-- Gmail OAuth 토큰 및 AI API 키는 iOS **Keychain**에 암호화 저장
+- Gmail OAuth 토큰 등 보안정보는 iOS **Keychain**에 암호화 저장
 - 이메일 본문은 온디바이스 전용 저장소에 보관, 네트워크 전송 없음
 - iCloud 데이터는 Apple이 제공하는 암호화 인프라(전송 중·저장 시 암호화) 이용
 - 앱은 비보안 암호화를 사용하지 않음 (`ITSAppUsesNonExemptEncryption = NO`)

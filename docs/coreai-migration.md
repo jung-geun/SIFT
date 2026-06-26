@@ -22,7 +22,7 @@ GPU 백그라운드 제약·메모리 경고·idleTimer 레이스로 인한 **Ca
 | 주요 API | `SystemLanguageModel`, `LanguageModelSession`, `@Generable`, `@Guide` |
 | 특징 | Guided Generation으로 타입 안전 출력, 비전 첨부파일, Dynamic Profiles |
 | 시스템 도구 | OCRTool, BarcodeReaderTool, Spotlight RAG (iOS 26.4+) |
-| 파트너 모델 | `PrivateCloudComputeLanguageModel`, Anthropic/Google 패키지 (iOS 27+) |
+| 파트너 모델 | `PrivateCloudComputeLanguageModel`, 파트너 모델 패키지 (iOS 27+) |
 | 배포 타깃 호환 | ✅ iOS 26.5 배포 타깃 유지 가능 |
 
 **WWDC 2026 주요 신규 기능:**
@@ -141,7 +141,7 @@ let logits = try await backend.forward(inputTokenIDs: tokens)
 | FM 온디바이스 (AFM) | **26.0** | FoundationModels | Apple Intelligence 필요 |
 | FM API 확장 (contextSize 등) | 26.4 | FoundationModels | 백포트 |
 | Core AI | **27.0** | CoreAI | Xcode 27 필요 |
-| FM 파트너 모델 (Anthropic 등) | 27.0 | FoundationModels | 2026 가을 |
+| FM 파트너 모델 | 27.0 | FoundationModels | 2026 가을 |
 
 ---
 

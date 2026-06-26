@@ -93,7 +93,7 @@ SIFT는 이메일·캘린더·수동 입력으로 쌓이는 할 일들을 온디
 
 - 포그라운드: Apple Foundation Models (ANE 온디바이스) 또는 MLX Qwen (기기 내 DRAM)
 - 백그라운드: NSDataDetector (Apple 시스템 프레임워크, 온디바이스)
-- Cloud AI(OpenAI·Gemini·Claude)는 **TODO 자동 정렬 기능에만** 선택적으로 사용 가능하며, 이 경우에도 이메일 본문은 전송하지 않고 제목·마감·태그 등 요약 데이터만 사용
+- TODO 자동 정렬은 온디바이스 AI만 사용하며, 이메일 본문은 기기 밖으로 전송하지 않음
 
 ---
 

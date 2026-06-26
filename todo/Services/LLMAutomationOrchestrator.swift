@@ -45,39 +45,37 @@ final class LLMAutomationOrchestrator: ObservableObject {
     /// 조건 충족 시 LLM 자동화 파이프라인을 실행한다.
     /// 조건 미충족 시 즉시 반환(no-op). UI 스레드를 차단하지 않으며 실패는 조용히 삼킨다.
     func runIfEligible(context: ModelContext) async {
-        guard isEligible() else { return }
+        let allowFoundationModels = UserDefaults.standard.bool(forKey: "pieroot.todo.onDeviceLLMEnabled")
+        let emailAutoEnabled = UserDefaults.standard.bool(forKey: "pieroot.todo.emailAutoAnalysisEnabled")
+
+        guard canRunAutomation() else { return }
+        guard emailAutoEnabled || allowFoundationModels else { return }
 
         isRunning = true
         defer { isRunning = false }
 
-        // E: Qwen 하드 게이트 제거 — AFM(ANE)으로 직접 실행.
-        // Qwen 로드는 TODO 정렬(리스트 화면)에서만 makeService() 경유로 발생.
-
         // 실행 시각 저장 (쿨다운 시작)
         UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: Self.lastRunKey)
 
-        // 1. 이메일 → 할 일 + 캘린더 LLM 자동 등록
-        // 메일 자동 분석 토글(emailAutoAnalysisEnabled) AND 마스터(isEligible) 모두 충족 시 실행
-        if UserDefaults.standard.bool(forKey: "pieroot.todo.emailAutoAnalysisEnabled") {
-            _ = await runEmailPipeline(context: context)
+        // 1. 이메일 → 할 일 + 캘린더 등록 (메일 자동 분석 토글이 켜진 경우만)
+        if emailAutoEnabled {
+            _ = await runEmailPipeline(context: context, allowFoundationModels: allowFoundationModels)
         }
 
-        // 2. 페르소나 자동 갱신 (주기 경과 시)
+        // 2. 페르소나 자동 갱신 (주기 행위) — AI 토글이 켜진 경우만 실행
+        guard allowFoundationModels else { return }
         await maybeUpdatePersona(context: context)
     }
 
+
     // MARK: - 게이팅
 
-    private func isEligible() -> Bool {
-        // ① AI 자동화 토글 활성 (UI: "AI 자동화", UserDefaults: onDeviceLLMEnabled)
-        // E: Qwen 기기/캐시 게이트 제거 — AFM은 Qwen 미설치 상태에서도 동작함
-        guard UserDefaults.standard.bool(forKey: "pieroot.todo.onDeviceLLMEnabled") else { return false }
-
-        // ② 쿨다운: 마지막 실행 후 6시간 미경과 시 스킵
+    private func canRunAutomation() -> Bool {
+        // ① 쿨다운: 마지막 실행 후 6시간 미경과 시 스킵
         let lastRun = UserDefaults.standard.double(forKey: Self.lastRunKey)
         if lastRun > 0, Date().timeIntervalSince1970 - lastRun < cooldownInterval { return false }
 
-        // ③ 배터리 (시뮬레이터는 .unknown → 허용)
+        // ② 배터리 (시뮬레이터는 .unknown → 허용)
         UIDevice.current.isBatteryMonitoringEnabled = true
         let state = UIDevice.current.batteryState
         let level = UIDevice.current.batteryLevel
@@ -89,20 +87,25 @@ final class LLMAutomationOrchestrator: ObservableObject {
         return true
     }
 
+
     // MARK: - 이메일 파이프라인
 
     /// EmailService로 이메일을 가져와 온디바이스 분석 후 Todo + 캘린더에 등록한다.
-    /// 포그라운드: FoundationModelsEmailEngine (AFM, 미가용 시 NSDataDetector 폴백).
+    /// FM 토글이 꺼져 있으면 FoundationModels 분석 대신 규칙 기반 경로로 폴백한다.
     @discardableResult
-    private func runEmailPipeline(context: ModelContext) async -> Bool {
+    private func runEmailPipeline(context: ModelContext, allowFoundationModels: Bool) async -> Bool {
         guard EmailService.shared.isAuthenticated else { return false }
         do {
-            let (todos, events) = try await EmailService.shared.fetchAndExtractAll()
-
-            // 중복 방지: sourceRef로 기존 항목 비교
             let existing     = (try? context.fetch(FetchDescriptor<Todo>())) ?? []
             let existingRefs = Set(existing.map { $0.sourceRef })
-            for todo in todos where !existingRefs.contains(todo.sourceRef) {
+            let (todos, events) = try await EmailService.shared.fetchAndExtractAll(
+                allowFoundationModels: allowFoundationModels,
+                excludingAlreadyHandledMessageIDs: existingRefs
+            )
+
+            // 중복 방지: sourceRef로 기존 항목 비교
+            let freshTodos = todos.filter { !existingRefs.contains($0.sourceRef) }
+            for todo in freshTodos {
                 context.insert(todo)
                 // 긴급·최우선 항목 캘린더 자동 등록 정책 적용
                 CalendarService.shared.applyAutoRegistration(for: todo)

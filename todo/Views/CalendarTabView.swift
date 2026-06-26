@@ -121,6 +121,7 @@ struct CalendarTabView: View {
     @State private var authorized: Bool = false
     @State private var initialScrollDone = false
     @State private var scrollToTodayTrigger = 0
+    @State private var isSyncing = false
 
     private let cal = Calendar.current
 
@@ -234,6 +235,18 @@ struct CalendarTabView: View {
         }
         ToolbarItem(placement: .navigationBarTrailing) {
             Button {
+                Task { await performSync() }
+            } label: {
+                if isSyncing {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                }
+            }
+            .disabled(!authorized || isSyncing)
+        }
+        ToolbarItem(placement: .navigationBarTrailing) {
+            Button {
                 activeSheet = .newEvent(date: selectedDate ?? Date())
             } label: {
                 Image(systemName: "plus")
@@ -291,7 +304,10 @@ struct CalendarTabView: View {
                         proxy.scrollTo(monthID(Self.currentMonthStart), anchor: .top)
                     }
                 }
-                .refreshable { reloadAllEvents() }
+                .refreshable {
+                    reloadAllEvents()
+                    await performSync()
+                }
             }
         }
     }
@@ -311,6 +327,15 @@ struct CalendarTabView: View {
     }
 
     // MARK: Data
+
+    @MainActor
+    func performSync() async {
+        guard !isSyncing else { return }
+        isSyncing = true
+        defer { isSyncing = false }
+        await CalendarService.shared.syncCalendarTodos(context: modelContext)
+        reloadAllEvents()
+    }
 
     func reloadAllEvents() {
         guard let start = cal.date(byAdding: .month, value: -13, to: Self.currentMonthStart),
@@ -422,9 +447,15 @@ private struct WeekRowView: View {
         return allEvents.filter { $0.startDate < we && $0.endDate > ws }
     }
 
-    /// 스팬 바 이벤트 — 긴 것 먼저
+    /// Todo와 연동된 캘린더 이벤트 ID 집합 — 중복 표시 방지용
+    private var linkedEventIDs: Set<String> {
+        Set(allTodos.compactMap { $0.calendarEventID })
+    }
+
+    /// 스팬 바 이벤트 — 긴 것 먼저 (연동된 Todo가 있는 이벤트는 숨김)
     private var spanBarEvents: [CalendarService.CalendarEventSummary] {
-        weekEvents.filter { eventIsAllDayStyle($0) }
+        let linked = linkedEventIDs
+        return weekEvents.filter { eventIsAllDayStyle($0) && !linked.contains($0.identifier) }
             .sorted { a, b in
                 let (acs, ace) = spanCols(a); let (bcs, bce) = spanCols(b)
                 let aL = ace - acs; let bL = bce - bcs
@@ -432,10 +463,11 @@ private struct WeekRowView: View {
             }
     }
 
-    /// 단일일 타임드 이벤트 (컬럼별)
+    /// 단일일 타임드 이벤트 (컬럼별, 연동된 Todo가 있는 이벤트는 숨김)
     private var timedByCol: [Int: [CalendarService.CalendarEventSummary]] {
+        let linked = linkedEventIDs
         var d: [Int: [CalendarService.CalendarEventSummary]] = [:]
-        for e in weekEvents where !eventIsAllDayStyle(e) {
+        for e in weekEvents where !eventIsAllDayStyle(e) && !linked.contains(e.identifier) {
             if let col = colIndex(for: e.startDate) { d[col, default: []].append(e) }
         }
         return d
@@ -543,7 +575,7 @@ private struct WeekRowView: View {
         let wLast  = weekEnd
 
         return GeometryReader { geo in
-            let cw = geo.size.width / 7
+            let cw = max(geo.size.width / 7, 0)
 
             ZStack(alignment: .topLeading) {
 
@@ -583,7 +615,7 @@ private struct WeekRowView: View {
 
                     ForEach(Array(paired.enumerated()), id: \.offset) { pairIdx, laneChip in
                         chipView(chip: laneChip.1)
-                            .frame(width: cw - 2, height: laneH)
+                            .frame(width: max(cw - 2, 0), height: laneH)
                             .offset(x: CGFloat(col) * cw + 1,
                                     y: dayH + CGFloat(laneChip.0) * (laneH + laneGap))
                             .allowsHitTesting(false)
@@ -594,7 +626,7 @@ private struct WeekRowView: View {
                         Text("+\(ov)")
                             .font(.system(size: 9, weight: .medium))
                             .foregroundStyle(.secondary)
-                            .frame(width: cw, alignment: .leading)
+                            .frame(width: max(cw, 0), alignment: .leading)
                             .offset(x: CGFloat(col) * cw + 3,
                                     y: dayH + CGFloat(maxLanes) * (laneH + laneGap) + 1)
                             .allowsHitTesting(false)
@@ -612,7 +644,8 @@ private struct WeekRowView: View {
                               weekFirst: Date?, weekLast: Date?) -> some View {
         let color = calendarEventColor(for: item.event.calendarID)
         let x = CGFloat(item.colStart) * cw
-        let barW = CGFloat(item.colEnd - item.colStart + 1) * cw
+        let rawBarW = CGFloat(item.colEnd - item.colStart + 1) * cw
+        let barW = max(rawBarW, 0)
         let contL: Bool = {
             guard let wf = weekFirst else { return false }
             return item.event.startDate < cal.startOfDay(for: wf)
@@ -623,6 +656,7 @@ private struct WeekRowView: View {
         }()
         let lRad: CGFloat = contL ? 0 : 4
         let rRad: CGFloat = contR ? 0 : 4
+        let frameWidth = max(barW - (contL ? 0 : 1) - (contR ? 0 : 1), 0)
 
         HStack(spacing: 2) {
             if contL {
@@ -644,7 +678,7 @@ private struct WeekRowView: View {
             }
         }
         .padding(.horizontal, contL || contR ? 0 : 3)
-        .frame(width: barW - (contL ? 0 : 1) - (contR ? 0 : 1), height: laneH)
+        .frame(width: frameWidth, height: laneH)
         .background(color, in: UnevenRoundedRectangle(
             topLeadingRadius: lRad, bottomLeadingRadius: lRad,
             bottomTrailingRadius: rRad, topTrailingRadius: rRad
@@ -661,6 +695,7 @@ private struct WeekRowView: View {
         }
         .frame(height: laneH)
     }
+
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -707,6 +742,8 @@ struct DayDetailSheet: View {
     private let hourHeight: CGFloat = 64
     private let labelWidth: CGFloat = 44
     private let cal = Calendar.current
+    private var dayStart: Date { cal.startOfDay(for: date) }
+    private var dayEnd: Date { cal.date(byAdding: .day, value: 1, to: dayStart) ?? dayStart }
 
     // MARK: Filtered data
 
@@ -744,15 +781,28 @@ struct DayDetailSheet: View {
     }
 
     private func yOffset(for time: Date) -> CGFloat {
-        let c = cal.dateComponents([.hour, .minute], from: time)
-        return CGFloat(c.hour ?? 0) * hourHeight + CGFloat(c.minute ?? 0) / 60 * hourHeight
+        let daySpan = dayEnd.timeIntervalSince(dayStart)
+        guard daySpan.isFinite, daySpan > 0 else { return 0 }
+        let rawOffset = time.timeIntervalSince(dayStart)
+        let finiteOffset = rawOffset.isFinite ? rawOffset : 0
+        let clippedSeconds = min(max(finiteOffset, 0), daySpan)
+        return CGFloat(clippedSeconds / 60) * (hourHeight / 60)
+    }
+
+    private func clippedEventRange(for event: CalendarService.CalendarEventSummary) -> (start: Date, end: Date) {
+        let start = max(event.startDate, dayStart)
+        let end = min(event.endDate, dayEnd)
+        if end <= start { return (start: start, end: start) }
+        return (start: start, end: end)
     }
 
     private var initialScrollHour: Int {
-        let hours = timedEvents.map { cal.component(.hour, from: $0.startDate) }
-                  + dayTodos.compactMap { $0.dueDate.map { cal.component(.hour, from: $0) } }
+        let hours = timedEvents
+            .map { cal.component(.hour, from: clippedEventRange(for: $0).start) }
+            + dayTodos.compactMap { $0.dueDate.map { cal.component(.hour, from: $0) } }
         return max(0, (hours.min() ?? cal.component(.hour, from: Date())) - 1)
     }
+
 
     // MARK: Body
 
@@ -851,6 +901,7 @@ struct DayDetailSheet: View {
 
     // MARK: Timeline
 
+
     private var timelineGrid: some View {
         HStack(alignment: .top, spacing: 0) {
             VStack(alignment: .trailing, spacing: 0) {
@@ -870,7 +921,7 @@ struct DayDetailSheet: View {
                     VStack(spacing: 0) {
                         ForEach(0..<24, id: \.self) { _ in
                             Divider()
-                            Spacer().frame(height: hourHeight - 0.5)
+                            Spacer().frame(height: max(hourHeight - 0.5, 0))
                         }
                     }
                     ForEach(Array(columned.enumerated()), id: \.offset) { _, ci in
@@ -897,26 +948,36 @@ struct DayDetailSheet: View {
     @ViewBuilder
     private func columnedItemView(_ ci: CalColumnedItem, trackWidth: CGFloat) -> some View {
         let gap: CGFloat = 2
-        let colWidth = (trackWidth - gap * CGFloat(max(ci.columnCount-1, 0)) - 6) / CGFloat(ci.columnCount)
-        let xOffset  = CGFloat(ci.column) * (colWidth + gap) + 3
-        switch ci.item {
-        case .event(let event):
-            eventBlock(event)
-                .frame(width: colWidth)
-                .offset(x: xOffset, y: yOffset(for: event.startDate))
-        case .todo(let todo):
-            todoBlock(todo)
-                .frame(width: colWidth)
-                .offset(x: xOffset, y: todo.dueDate.map { yOffset(for: $0) } ?? 0)
+        let columns = max(ci.columnCount, 1)
+        let safeTrackWidth: CGFloat = {
+            guard trackWidth.isFinite else { return 0 }
+            return max(trackWidth, 0)
+        }()
+        let reserved = gap * CGFloat(columns - 1) + 6
+        let rawWidth = safeTrackWidth - reserved
+        if rawWidth.isFinite && rawWidth > 0 {
+            let colWidth = max(rawWidth / CGFloat(columns), 1)
+            let xOffset  = CGFloat(ci.column) * (colWidth + gap) + 3
+            switch ci.item {
+            case .event(let event):
+                let range = clippedEventRange(for: event)
+                eventBlock(event, start: range.start, end: range.end)
+                    .frame(width: colWidth)
+                    .offset(x: xOffset, y: yOffset(for: range.start))
+            case .todo(let todo):
+                todoBlock(todo)
+                    .frame(width: colWidth)
+                    .offset(x: xOffset, y: todo.dueDate.map { yOffset(for: $0) } ?? 0)
+            }
         }
     }
 
-    @ViewBuilder
-    private func eventBlock(_ event: CalendarService.CalendarEventSummary) -> some View {
+    private func eventBlock(_ event: CalendarService.CalendarEventSummary, start: Date, end: Date) -> some View {
         let color = calendarEventColor(for: event.calendarID)
-        let dur   = max(event.endDate.timeIntervalSince(event.startDate), 1800)
-        let bh    = max(CGFloat(dur / 3600) * hourHeight, 30)
-        Button { openEventEdit(event) } label: {
+        let spanDuration = end.timeIntervalSince(start)
+        let dh = spanDuration.isFinite ? max(spanDuration, 1800) : 1800
+        let bh    = max(CGFloat(dh / 3600) * hourHeight, 30)
+        return Button { openEventEdit(event) } label: {
             HStack(alignment: .top, spacing: 4) {
                 RoundedRectangle(cornerRadius: 2).fill(color).frame(width: 3)
                 VStack(alignment: .leading, spacing: 1) {

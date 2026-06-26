@@ -61,26 +61,6 @@ struct PersonaJSONParserTests {
     }
 }
 
-// MARK: -
-
-@Suite("CloudIntelligenceEngine 랭킹 파서")
-@MainActor
-struct RankingParserTests {
-
-    /// CloudIntelligenceEngine은 API 호출 없이 parseRankings만 테스트
-    private let sut = CloudIntelligenceEngine(provider: .claude, apiKey: "test-key", model: "claude-haiku-4-5-20251001")
-
-    @Test("정상 4축 JSON → PriorityResult 반환")
-    func normal() {
-        let uuid = UUID().uuidString
-        let json = """
-        {"scheduled_tasks":[{"task_id":"\(uuid)","scoring":{"deadline_proximity":8.0,"urgency":7.0,"task_importance":9.0,"task_chaining":2.0},"reasoning":{"summary":"중요 업무","chaining_detail":""},"recommended_schedule":{"start_time":""},"needs_notification":true,"persona_fit":true}]}
-        """
-        let results = sut.parseRankings(text: json)
-        #expect(results.count == 1)
-        #expect(results.first?.todoID == UUID(uuidString: uuid))
-    }
-}
 
 // MARK: -
 

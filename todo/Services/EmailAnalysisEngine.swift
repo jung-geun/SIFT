@@ -8,7 +8,7 @@ import Foundation
 /// 백그라운드: OnDeviceDetectorEngine (NSDataDetector, 결정론적).
 ///
 /// ⚠️ 프라이버시 불변식 — 메일 본문은 온디바이스 엔진에만 전달.
-/// 절대 외부 서드파티 클라우드(Claude·OpenAI·Gemini 등)로 전달하지 않는다.
+/// 절대 외부 서비스로 전달하지 않는다.
 protocol EmailAnalysisEngine {
     /// GmailMessage를 분석해 마감일을 추출한다.
     /// - Parameters:
@@ -38,8 +38,8 @@ struct OnDeviceDetectorEngine: EmailAnalysisEngine {
 /// 포그라운드 전용 — makeEngine(allowFoundationModels: false) 경로(백그라운드)에서는 미사용.
 ///
 /// ⚠️ 프라이버시 불변식:
-///   - AFM은 Apple 온디바이스 / PCC — 외부 서드파티 미라우팅.
-///   - 이메일 본문은 이 엔진에만 전달 가능. CloudIntelligenceEngine 금지.
+///   - AFM은 Apple 온디바이스 / PCC — 외부 서비스 미라우팅.
+///   - 이메일 본문은 이 엔진에만 전달 가능.
 struct FoundationModelsEmailEngine: EmailAnalysisEngine {
     private let fallback = OnDeviceDetectorEngine()
 

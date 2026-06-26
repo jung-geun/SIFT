@@ -111,7 +111,7 @@ SIFT는 *"TODO를 열심히 관리하게 만드는 앱"* 이 아니라, **TODO �
 - ✅ 기본 분석: 온디바이스 LLM (Apple Foundation Models / MLX Qwen)
 - ✅ 데이터 저장: 기기 로컬 또는 본인의 iCloud Private DB
 - ✅ **이메일 본문**: 기기 밖으로 절대 전송하지 않음
-- ⚙️ 외부 AI (Claude / GPT / Gemini): 사용자가 직접 API 키를 입력한 경우에만, 이메일 본문 제외한 요약만 전송
+- ✅ **TODO 자동 정렬**: 온디바이스 AI만 사용
 
 ---
 

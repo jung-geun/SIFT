@@ -4,7 +4,7 @@ import SwiftData
 /// 앱 내 할 일 완료 패턴을 분석해 AI 프롬프트용 메모리 요약을 생성합니다.
 ///
 /// 분석 항목: 완료 시간대 분포 / 태그별 처리 속도 / 완료율 / 마감 준수율
-/// 결과는 SwiftData(MemoryAnalysis)에 저장되어 AFM/Gemini/Claude 프롬프트에 자동 주입됩니다.
+/// 결과는 SwiftData(MemoryAnalysis)에 저장되어 온디바이스 우선순위/페르소나 분석에 자동 주입됩니다.
 /// BGProcessingTask(pieroot.todo.memoryAnalysis)로 2일 이상 간격 백그라운드 실행.
 
 /// 포그라운드 패턴 분석 결과를 사용자 확인 전까지 임시 보관하는 구조체.
@@ -14,6 +14,7 @@ struct MemoryAnalysisResult {
     let fastTags: Set<String>
     let overdueRate: Double
     let productiveHour: Int?
+    var usedAFM: Bool = false
 }
 
 final class MemoryService {
@@ -303,6 +304,7 @@ final class MemoryService {
 
         // FM으로 insights 재작성 시도 (저장하지 않음)
         var finalInsights = insights
+        var usedAFM = false
         #if canImport(FoundationModels)
         if #available(iOS 26.0, *), FoundationModelsService.isAvailable {
             do {
@@ -312,6 +314,7 @@ final class MemoryService {
                 )
                 if !fmInsights.isEmpty {
                     finalInsights = fmInsights
+                    usedAFM = true
                 }
             } catch {
                 print("[MemoryService] FM 패턴 미리보기 분석 실패 — 휴리스틱 사용: \(error.localizedDescription)")
@@ -324,7 +327,8 @@ final class MemoryService {
             insights: finalInsights,
             fastTags: fastTagSet,
             overdueRate: computedOverdueRate,
-            productiveHour: detectedProductiveHour
+            productiveHour: detectedProductiveHour,
+            usedAFM: usedAFM
         )
     }
 

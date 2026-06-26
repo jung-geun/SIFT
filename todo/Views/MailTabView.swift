@@ -14,9 +14,11 @@ struct MailTabView: View {
     @State private var isConnecting = false
     @State private var errorMessage: String?
     @State private var showError = false
+    @State private var alertTitle = "Gmail 연결 오류"
     @State private var selectedEmail: EmailMessage?
-    @State private var registerEmail: EmailMessage?   // 할일·일정 등록 대상
     @State private var isAuthenticated = false
+    @State private var isAnalyzing = false
+    @State private var autoRegisteringEmailID: String?
 
     var body: some View {
         NavigationStack {
@@ -32,9 +34,33 @@ struct MailTabView: View {
             .navigationTitle("메일")
             .navigationBarTitleDisplayMode(.large)
             .toolbar {
-                if isRefreshing {
-                    ToolbarItem(placement: .navigationBarTrailing) {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    if isRefreshing || isAnalyzing {
                         ProgressView().controlSize(.small)
+                    } else {
+                        Button {
+                            Task { await fullSync() }
+                        } label: {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                        .disabled(!isAuthenticated)
+                    }
+                }
+            }
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if isAuthenticated && (isRefreshing || isAnalyzing) {
+                    VStack(spacing: 0) {
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small)
+                            Text(isAnalyzing ? "메일 분석 및 태스크 등록 중..." : "메일을 불러오는 중...")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                        }
+                        .padding(.horizontal)
+                        .padding(.vertical, 8)
+                        .background(.bar)
+                        Divider()
                     }
                 }
             }
@@ -45,19 +71,16 @@ struct MailTabView: View {
                 MailDetailView(email: email)
                     .modelContainer(modelContext.container)
             }
-            .sheet(item: $registerEmail) { email in
-                MailRegisterSheet(email: email)
-            }
-            .alert("Gmail 연결 오류", isPresented: $showError) {
+            .alert(alertTitle, isPresented: $showError) {
                 Button("확인") {}
             } message: {
                 if let msg = errorMessage { Text(msg) }
             }
-        }
-        .task {
-            isAuthenticated = EmailService.shared.isAuthenticated
-            if emails.isEmpty && isAuthenticated {
-                await syncEmails()
+            .task {
+                isAuthenticated = EmailService.shared.isAuthenticated
+                if emails.isEmpty && isAuthenticated {
+                    await syncEmails()
+                }
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .gmailAuthChanged)) { note in
@@ -112,29 +135,36 @@ struct MailTabView: View {
                 .buttonStyle(.plain)
                 // 오른쪽 스와이프 → 할일·일정 등록
                 .swipeActions(edge: .leading, allowsFullSwipe: true) {
-                    Button {
-                        registerEmail = email
-                    } label: {
-                        Label("할일 등록", systemImage: "checkmark.circle.fill")
+                    if autoRegisteringEmailID == email.id {
+                        ProgressView().controlSize(.mini)
+                    } else {
+                        Button {
+                            Task { await autoRegisterTodo(from: email) }
+                        } label: {
+                            Label("할일 등록", systemImage: "checkmark.circle.fill")
+                        }
+                        .tint(.green)
                     }
-                    .tint(.green)
                 }
             }
             .onDelete(perform: deleteEmails)
         }
         .listStyle(.plain)
     }
-
-    // MARK: - Actions
-
-    @MainActor
     private func connectGmail() async {
         isConnecting = true
         defer { isConnecting = false }
         do {
             try await EmailService.shared.authenticate()
         } catch {
-            errorMessage = error.localizedDescription
+            let nsError = error as NSError
+            if nsError.domain == "com.apple.AuthenticationServices.WebAuthenticationSession" && nsError.code == 1 {
+                alertTitle = "알림"
+                errorMessage = "로그인이 취소되었습니다."
+            } else {
+                alertTitle = "Gmail 연결 오류"
+                errorMessage = error.localizedDescription
+            }
             showError = true
         }
     }
@@ -180,6 +210,108 @@ struct MailTabView: View {
             isAuthenticated = false
             errorMessage = nil
         } catch {
+            errorMessage = error.localizedDescription
+            showError = true
+        }
+    }
+
+    @MainActor
+    private func fullSync() async {
+        await syncEmails()
+        guard !isAnalyzing else { return }
+        isAnalyzing = true
+        defer { isAnalyzing = false }
+        do {
+            let appContext = ModelContext(AppDataContainer.shared.container)
+            let existing = (try? appContext.fetch(FetchDescriptor<Todo>())) ?? []
+            let existingRefs = Set(existing.map { $0.sourceRef })
+            let (newTodos, events) = try await EmailService.shared.fetchAndExtractAll(
+                excludingAlreadyHandledMessageIDs: existingRefs
+            )
+            for todo in newTodos where !existingRefs.contains(todo.sourceRef) {
+                appContext.insert(todo)
+                CalendarService.shared.applyAutoRegistration(for: todo)
+            }
+            if CalendarService.shared.isAuthorized && CalendarAutoPolicy.isAuto {
+                let iso = ISO8601DateFormatter()
+                for (event, sourceRef) in events {
+                    guard !CalendarService.shared.hasEvent(forEmailRef: sourceRef),
+                          let start = iso.date(from: event.startISO) else { continue }
+                    let end = event.endISO.isEmpty ? nil : iso.date(from: event.endISO)
+                    _ = try? CalendarService.shared.createEventFromEmail(
+                        title: event.title, start: start, end: end,
+                        isAllDay: event.isAllDay, location: event.location,
+                        notes: event.notes, sourceRef: sourceRef
+                    )
+                }
+            }
+            try? appContext.save()
+        } catch {
+            alertTitle = "메일 분석 오류"
+            errorMessage = error.localizedDescription
+            showError = true
+        }
+    }
+
+    @MainActor
+    private func autoRegisterTodo(from email: EmailMessage) async {
+        guard autoRegisteringEmailID == nil else { return }
+        autoRegisteringEmailID = email.id
+        defer { autoRegisteringEmailID = nil }
+
+        let appContext = ModelContext(AppDataContainer.shared.container)
+        let targetSourceRef = email.id
+        let existingPredicate = #Predicate { (todo: Todo) in
+            todo.sourceRef == targetSourceRef
+        }
+        let existing = (try? appContext.fetch(FetchDescriptor<Todo>(predicate: existingPredicate))) ?? []
+        guard existing.isEmpty else {
+            alertTitle = "이미 등록됨"
+            errorMessage = "이 메일은 이미 할 일로 등록되어 있습니다."
+            showError = true
+            return
+        }
+
+        var syntheticThreadID = email.threadID
+        var syntheticMessageID = ""
+        if email.body.isEmpty && email.htmlBody == nil {
+            if let full = try? await EmailService.shared.fetchFullMessage(id: email.id) {
+                email.body = full.body
+                if !full.threadID.isEmpty { email.threadID = full.threadID }
+                if !full.threadID.isEmpty { syntheticThreadID = full.threadID }
+                if !full.messageID.isEmpty { syntheticMessageID = full.messageID }
+                if let html = full.htmlBody { email.htmlBody = html }
+                try? modelContext.save()
+            }
+        }
+
+        let synthetic = GmailMessage(
+            id: email.id,
+            threadID: syntheticThreadID,
+            messageID: syntheticMessageID,
+            subject: email.subject,
+            from: email.from,
+            snippet: email.snippet,
+            body: email.body,
+            htmlBody: email.htmlBody,
+            receivedAt: email.receivedAt,
+            labelIds: [],
+            isBulk: false
+        )
+
+        let todo = await EmailService.shared.makeManualTodo(from: synthetic)
+
+        do {
+            appContext.insert(todo)
+            try appContext.save()
+            _ = CalendarService.shared.applyAutoRegistration(for: todo)
+            try appContext.save()
+            EmailLearningStore.shared.recordAnalyzed(messageIDs: [email.id])
+            alertTitle = "할 일 등록됨"
+            errorMessage = "메일 요약을 바탕으로 할 일을 등록했습니다."
+            showError = true
+        } catch {
+            alertTitle = "할 일 등록 실패"
             errorMessage = error.localizedDescription
             showError = true
         }
@@ -460,9 +592,9 @@ struct EmailWebView: UIViewRepresentable {
 /// 메일에서 할일 + 캘린더 일정을 동시 등록하는 프리필 확인 시트.
 ///
 /// ⚠️ 프라이버시 보장:
-/// - EmailContentAnalyzer는 온디바이스(NSDataDetector) 전용 — 외부 API 호출 없음.
+/// - Gmail 본문은 온디바이스에서만 분석.
 /// - Todo는 AppDataContainer.shared.container(main)에 저장, 절대 CloudKit emailContainer에 넣지 않음.
-/// - 자동 추출 notes에 "(본문 발췌 — AI 요약 아님)" 표기 유지.
+/// - 자동 추출은 `EmailService.makeManualTodo(from:)` 기반으로 동일한 메타데이터 경로 사용.
 struct MailRegisterSheet: View {
     let email: EmailMessage
 
@@ -473,6 +605,11 @@ struct MailRegisterSheet: View {
     @State private var isAllDay: Bool = false
     @State private var notes: String = ""
     @State private var calendarID: String = ""
+    @State private var sourceRef: String = ""
+    @State private var sourceMessageID: String = ""
+    @State private var sourceThreadID: String = ""
+    @State private var sourceSender: String = ""
+    @State private var sourceSenderEmail: String = ""
     @State private var calendarSources: [CalendarService.CalendarSourceGroup] = []
     @State private var isAnalyzing = true
     @State private var errorMessage: String?
@@ -558,23 +695,29 @@ struct MailRegisterSheet: View {
 
     // MARK: - Auto-Fill
 
-    /// EmailMessage → GmailMessage 합성 후 온디바이스 EmailContentAnalyzer 실행.
-    /// 마감일 감지 성공 시 폼을 채우고, 실패 시 수신일 기준 폴백.
+    /// EmailMessage를 GmailMessage로 합성한 뒤 `makeManualTodo(from:)`로 프리필을 생성.
     @MainActor
     private func analyzeAndPrefill() async {
         // 본문이 아직 없으면(metadata-only 로드) 전체 메시지를 먼저 가져옴
-        if email.body.isEmpty && email.htmlBody == nil {
+        var syntheticThreadID = email.threadID
+        var syntheticMessageID = ""
+        if email.body.isEmpty || email.htmlBody == nil || syntheticMessageID.isEmpty {
             if let full = try? await EmailService.shared.fetchFullMessage(id: email.id) {
                 email.body = full.body
                 if let html = full.htmlBody { email.htmlBody = html }
+                if !full.messageID.isEmpty {
+                    syntheticMessageID = full.messageID
+                }
+                if !full.threadID.isEmpty {
+                    syntheticThreadID = full.threadID
+                }
             }
         }
 
-        // GmailMessage 합성 (온디바이스 전용, 네트워크 호출 없음)
         let synthetic = GmailMessage(
             id: email.id,
-            threadID: email.threadID,
-            messageID: "",          // EmailMessage에 RFC822 ID 없음 → 빈값
+            threadID: syntheticThreadID,
+            messageID: syntheticMessageID,
             subject: email.subject,
             from: email.from,
             snippet: email.snippet,
@@ -585,19 +728,27 @@ struct MailRegisterSheet: View {
             isBulk: false
         )
 
-        let extraction = EmailContentAnalyzer().analyze(synthetic, now: Date())
+        let draftTodo = await EmailService.shared.makeManualTodo(from: synthetic, allowFoundationModels: false)
+        let analyzed = EmailContentAnalyzer().analyze(synthetic, now: Date())
 
-        title = email.subject.isEmpty ? "(제목 없음)" : email.subject
+        title = draftTodo.title
+        notes = draftTodo.notes
+        sourceRef = draftTodo.sourceRef
+        sourceMessageID = draftTodo.sourceMessageID
+        sourceThreadID = draftTodo.sourceThreadID
+        sourceSender = draftTodo.sourceSender
+        sourceSenderEmail = draftTodo.sourceSenderEmail
 
-        if let ext = extraction {
-            dueDate  = ext.dueDate
-            isAllDay = ext.isAllDay
-            notes    = ext.notes   // buildNotes에서 "(본문 발췌 — AI 요약 아님)" 이미 포함
+        if let parsedDueDate = draftTodo.dueDate {
+            dueDate = parsedDueDate
+            isAllDay = isManualTodoAllDay(parsedDueDate)
+        } else if let extracted = analyzed {
+            dueDate = extracted.dueDate
+            isAllDay = extracted.isAllDay
         } else {
-            // 날짜 감지 실패 → 수신일 + 1일 폴백, snippet 사용
-            dueDate  = email.receivedAt.addingTimeInterval(86_400)
+            // 날짜 미감지 → 수신일 + 1일 폴백, 종일로 표시.
+            dueDate = email.receivedAt.addingTimeInterval(86_400)
             isAllDay = true
-            notes    = email.snippet
         }
 
         isAnalyzing = false
@@ -606,34 +757,24 @@ struct MailRegisterSheet: View {
     // MARK: - Register
 
     /// 할일(메인 앱 컨테이너)과 캘린더 일정을 동시 생성.
-    /// sourceRef == email.id로 중복 등록 방지.
+    /// sourceRef == 합성 메일(sourceRef) 기준으로 중복 등록 방지.
     private func register() {
         let cleanTitle = title.trimmingCharacters(in: .whitespaces)
         guard !cleanTitle.isEmpty else { return }
 
         // ── 할일 등록 (main app container) ──────────────────────────────
         let appContext = ModelContext(AppDataContainer.shared.container)
-        let ref = email.id
+        let ref = sourceRef.isEmpty ? email.id : sourceRef
         let existingDescriptor = FetchDescriptor<Todo>(
             predicate: #Predicate { $0.sourceRef == ref }
         )
         let existing = (try? appContext.fetch(existingDescriptor)) ?? []
 
-        if existing.isEmpty {
-            let todo = Todo(
-                title: cleanTitle,
-                notes: notes,
-                dueDate: dueDate,
-                source: .email,
-                sourceRef: email.id
-            )
-            todo.sourceSender = EmailContentAnalyzer().parseSender(from: email.from)
-            todo.sourceSenderEmail = EmailContentAnalyzer().parseSenderEmail(from: email.from)
-            appContext.insert(todo)
-            try? appContext.save()
+        guard existing.isEmpty else {
+            errorMessage = "이미 등록된 메일입니다."
+            return
         }
 
-        // ── 캘린더 일정 등록 ───────────────────────────────────────────
         let eventStart: Date
         let eventEnd: Date
         if isAllDay {
@@ -645,19 +786,41 @@ struct MailRegisterSheet: View {
         }
 
         do {
-            try CalendarService.shared.createEvent(
+            let eventID = try CalendarService.shared.createEventFromEmail(
                 title: cleanTitle,
-                startDate: eventStart,
-                endDate: eventEnd,
+                start: eventStart,
+                end: eventEnd,
+                isAllDay: isAllDay,
+                location: "",
                 notes: notes,
+                sourceRef: ref,
                 calendarID: calendarID.isEmpty ? nil : calendarID
             )
+
+            let todo = Todo(
+                title: cleanTitle,
+                notes: notes,
+                dueDate: dueDate,
+                source: .email,
+                sourceRef: ref
+            )
+            todo.sourceSender = sourceSender.isEmpty ? EmailContentAnalyzer().parseSender(from: email.from) : sourceSender
+            todo.sourceSenderEmail = sourceSenderEmail.isEmpty ? EmailContentAnalyzer().parseSenderEmail(from: email.from) : sourceSenderEmail
+            todo.sourceMessageID = sourceMessageID
+            todo.sourceThreadID = sourceThreadID
+            if !eventID.isEmpty { todo.calendarEventID = eventID }
+            appContext.insert(todo)
+            try appContext.save()
+            dismiss()
         } catch {
             errorMessage = error.localizedDescription
             return
         }
+    }
 
-        dismiss()
+    private func isManualTodoAllDay(_ date: Date) -> Bool {
+        let components = cal.dateComponents([.hour, .minute, .second], from: date)
+        return components.hour == 23 && components.minute == 59 && (components.second ?? 0) == 0
     }
 
     // MARK: - Helpers

@@ -103,11 +103,13 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         guard UserDefaults.standard.bool(forKey: "pieroot.todo.emailAutoAnalysisEnabled") else { return false }
         do {
             // C: 백그라운드 BGTask → allowFoundationModels:false (ANE 백그라운드 미사용)
-            let (todos, events) = try await EmailService.shared.fetchAndExtractAll(allowFoundationModels: false)
-
-            // Todo 삽입 (sourceRef로 중복 방지)
             let existing = (try? context.fetch(FetchDescriptor<Todo>())) ?? []
             let existingRefs = Set(existing.map { $0.sourceRef })
+            let (todos, events) = try await EmailService.shared.fetchAndExtractAll(
+                allowFoundationModels: false,
+                excludingAlreadyHandledMessageIDs: existingRefs
+            )
+            // Todo 삽입 (sourceRef로 중복 방지)
             for todo in todos where !existingRefs.contains(todo.sourceRef) {
                 context.insert(todo)
                 // 캘린더 자동 등록 정책 적용 (긴급/최우선 강제 포함)

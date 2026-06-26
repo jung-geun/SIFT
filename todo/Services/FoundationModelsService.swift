@@ -98,6 +98,28 @@ struct FMEmailOutput {
     var notes: String
 }
 
+/// 이메일 수동 등록용 요약/마감 초안 출력.
+@Generable
+struct FMEmailTodoDraftOutput {
+    @Guide(description: "할 일 제목. 사용자가 해야 할 일을 40자 이내 한국어 동사형으로 요약. 없으면 이메일 제목을 정리.")
+    var title: String
+
+    @Guide(description: "이메일 핵심 내용과 액션 아이템. 1-3줄 한국어. 인사말 제외.")
+    var notes: String
+
+    @Guide(description: "명시적 마감일 ISO8601. 없으면 빈 문자열. 추측 금지.")
+    var dueDateISO: String
+
+    @Guide(description: "날짜만 있고 시간이 없으면 true.")
+    var isAllDay: Bool
+
+    @Guide(description: "발신자 표시 이름. 없으면 빈 문자열.")
+    var sender: String
+
+    @Guide(description: "발신자 이메일 주소. 없으면 빈 문자열.")
+    var senderEmail: String
+}
+
 // MARK: - Service
 
 /// WWDC 2026 Foundation Models(`SystemLanguageModel`) 기반 서비스.
@@ -294,6 +316,80 @@ struct FoundationModelsService {
             keywordScore:     output.keywordScore,
             deadlineSentence: output.deadlineSentence,
             notes:            notesLines.joined(separator: "\n")
+        )
+    }
+    /// 이메일에서 제목/메모/마감일 초안을 생성한다.
+    /// 본문 캡 ~1500자, AFM 전용(온디바이스) 처리.
+    /// 추론 실패 시 throws -> 상위 계층에서 결정적 폴백 수행.
+    func draftTodoFromEmail(_ msg: GmailMessage, now: Date) async throws -> EmailTodoDraft {
+        let bodyPreview = String(msg.body.prefix(1500))
+
+        let instructions = Prompts.EmailFM.systemInstruction
+        let prompt = """
+        현재 시각: \(AppDateFormat.llmString(from: now))
+        발신자: \(msg.from)
+        제목: \(msg.subject)
+        본문: \(bodyPreview.isEmpty ? "(본문 없음)" : bodyPreview)
+
+        추가 출력 요구: title은 사용자가 수행할 일을 40자 이내 한국어 동사형으로 작성하세요. notes는 인사말 없이 핵심 내용과 액션 아이템만 1-3줄로 작성하세요.
+        """
+
+        let session = LanguageModelSession(instructions: instructions)
+        let response = try await session.respond(to: prompt, generating: FMEmailTodoDraftOutput.self)
+        let output = response.content
+
+        let normalizedTitle = output.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let title: String
+        if !normalizedTitle.isEmpty {
+            title = normalizedTitle
+        } else if !msg.subject.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            title = msg.subject.trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            title = "메일 확인"
+        }
+
+        var dueDate: Date?
+        var isAllDay = false
+        if !output.dueDateISO.isEmpty, let parsed = AppDateFormat.parseLLMDate(output.dueDateISO), parsed > now {
+            var finalDate = parsed
+            isAllDay = output.isAllDay
+            let comps = Calendar.current.dateComponents([.hour, .minute, .second], from: parsed)
+            if comps.hour == 0 && comps.minute == 0 && (comps.second ?? 0) == 0 {
+                isAllDay = true
+                var eod = Calendar.current.dateComponents([.year, .month, .day], from: parsed)
+                eod.hour = 23
+                eod.minute = 59
+                finalDate = Calendar.current.date(from: eod) ?? parsed
+            }
+            dueDate = finalDate
+        }
+
+        let cleanNotes = output.notes.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sender = output.sender.trimmingCharacters(in: .whitespacesAndNewlines)
+        let parsedSender = sender.isEmpty
+            ? EmailContentAnalyzer().parseSender(from: msg.from)
+            : sender
+        let senderEmail = output.senderEmail.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        var notesLines = ["[메일 요약]"]
+        if !cleanNotes.isEmpty {
+            notesLines.append(cleanNotes)
+        } else if !msg.snippet.isEmpty {
+            notesLines.append(msg.snippet.trimmingCharacters(in: .whitespacesAndNewlines))
+        } else if !bodyPreview.isEmpty {
+            notesLines.append(String(bodyPreview.prefix(500)).trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        notesLines.append("(AI 요약)")
+        notesLines.append("")
+        notesLines.append("[발신자] \(parsedSender)")
+
+        return EmailTodoDraft(
+            title: title,
+            notes: notesLines.joined(separator: "\n"),
+            dueDate: dueDate,
+            isAllDay: isAllDay,
+            sender: parsedSender,
+            senderEmail: senderEmail
         )
     }
 

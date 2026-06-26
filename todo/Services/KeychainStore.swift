@@ -2,11 +2,11 @@ import Foundation
 import Security
 import OSLog
 
-/// 앱의 모든 민감 정보(Gmail 토큰, AI API 키) Keychain 접근을 단일화.
+/// 앱의 모든 민감 정보(Gmail 토큰 등 보안정보) Keychain 접근을 단일화.
 ///
 /// **정책 요약:**
 /// - 동기화 가능 여부: 앱 iCloud 토글(`pieroot.todo.iCloudSyncEnabled`)에 연동.
-///   ON → `synchronizable=true` (iCloud Keychain, E2E 암호화, 사용자 기기 전용)
+///   ON → `synchronizable=true` (iCloud Keychain, E2E 암호화, 같은 Apple ID 기기 동기화)
 ///   OFF → `synchronizable=false` (ThisDeviceOnly, 완전 로컬)
 /// - 접근성: 배경 BGTask 메인 스레드에서 토큰을 읽을 수 있도록
 ///   `AfterFirstUnlock` 계열 사용 (기본값 `WhenUnlocked` 대신).
@@ -116,13 +116,9 @@ enum KeychainStore {
 
     /// 정책 재적용 대상 시크릿 목록.
     private static func knownSecretItems() -> [(service: String, account: String?)] {
-        var items: [(service: String, account: String?)] = [
+        [
             (service: "pieroot.todo.gmail", account: "access_token"),
             (service: "pieroot.todo.gmail", account: "refresh_token")
         ]
-        for p in PersonaAIProvider.allCases where p.requiresAPIKey {
-            items.append((service: p.keychainKey, account: nil))
-        }
-        return items
     }
 }
