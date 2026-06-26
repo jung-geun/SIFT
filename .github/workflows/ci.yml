@@ -33,6 +33,9 @@ jobs:
       - name: Print Xcode version
         run: xcodebuild -version
 
+      - name: Verify Package.resolved integrity
+        run: sh ci_scripts/ci_pre_xcodebuild.sh
+
       - name: Build
         run: |
           xcodebuild build \
