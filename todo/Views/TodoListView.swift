@@ -47,7 +47,7 @@ private struct TodoRowView: View {
                                 .font(.caption2)
                                 .foregroundStyle(.purple)
                         }
-                        // 산출 엔진 배지 — "휴리스틱"이면 LLM 경로가 메모리 부족 등으로 폴백됐음을 명시
+                        // 산출 엔진 배지 — "휴리스틱"이면 LLM 경로가 실패로 폴백됐음을 의미
                         if !todo.aiEngine.isEmpty {
                             let isHeuristic = todo.aiEngine == PriorityEngine.heuristic.rawValue
                             Text(todo.aiEngine)
@@ -59,6 +59,11 @@ private struct TodoRowView: View {
                                     (isHeuristic ? Color.orange : Color.blue).opacity(0.1)
                                 )
                                 .clipShape(RoundedRectangle(cornerRadius: 3))
+                        }
+                        if !todo.aiFallbackReason.isEmpty {
+                            Label("폴백", systemImage: "exclamationmark.triangle.fill")
+                                .font(.caption2.weight(.medium))
+                                .foregroundStyle(.orange)
                         }
                         Text(todo.priorityReason)
                             .font(.caption2)
@@ -129,6 +134,7 @@ struct TodoListView: View {
 
     @ObservedObject private var llmOrchestrator = LLMAutomationOrchestrator.shared
     @AppStorage("pieroot.todo.hasOnboarded") private var hasOnboarded = false
+    @AppStorage("pieroot.todo.hasCompletedTutorial") private var hasCompletedTutorial = false
     @AppStorage("pieroot.todo.iCloudSyncEnabled") private var iCloudSyncEnabled = false
     @AppStorage("pieroot.todo.calendarCompletionAction") private var calendarCompletionAction = "silence"
 
@@ -137,16 +143,78 @@ struct TodoListView: View {
     @State private var filter: TodoFilter = .active
     @State private var isPrioritizing = false
     @State private var showPrioritizingIndicator = false
+    @State private var prioritizingStatusText = "AI 우선순위 정리 중…"
+    @State private var prioritizingProgressValue: Double? = nil
     @State private var showAFMError = false
+    @State private var lastNotificationSignature = ""
+    @State private var lastMemoryAnalysisSignature = ""
+    @State private var replayTutorialAfterSettingsDismiss = false
 
     // MARK: - iCloud Sync (앱 레벨에서 주입받음 — todoApp.swift의 @StateObject)
     @EnvironmentObject private var syncMonitor: CloudSyncMonitor
+    @Environment(\.appTutorialState) private var tutorial
     @AppStorage("pieroot.todo.iCloudInitialSyncDone") private var initialSyncDone = false
     @State private var showPostSyncPersonaSetup = false
 
     /// @Query 4종 합계 — CloudSyncMonitor 라이브 카운트에 사용.
     private var totalSyncedCount: Int {
         todos.count + personas.count + memoryAnalyses.count + auditEvents.count
+    }
+
+    private var notificationSignature: String {
+        let futureTodos = todos
+            .filter { !$0.isCompleted && ($0.dueDate ?? .distantPast) > Date() }
+            .sorted { $0.id.uuidString < $1.id.uuidString }
+
+        return futureTodos.map { todo in
+            let dueDate = todo.dueDate?.timeIntervalSince1970 ?? 0
+            let offsets = todo.reminderOffsets.sorted().map { String($0) }.joined(separator: ",")
+            return [
+                todo.id.uuidString,
+                todo.title,
+                String(dueDate),
+                offsets,
+                String(todo.effectivePriority),
+                String(todo.updatedAt.timeIntervalSince1970)
+            ].joined(separator: "|")
+        }.joined(separator: "\n")
+    }
+
+    private var memoryAnalysisSignature: String {
+        let completedTodos = todos
+            .filter { $0.isCompleted && $0.completedAt != nil }
+            .sorted { $0.id.uuidString < $1.id.uuidString }
+
+        let completedLines = completedTodos.map { todo in
+            let completedAt = todo.completedAt?.timeIntervalSince1970 ?? 0
+            let dueDate = todo.dueDate?.timeIntervalSince1970 ?? 0
+            let tags = todo.tags.sorted().joined(separator: ",")
+            return [
+                todo.id.uuidString,
+                String(completedAt),
+                String(todo.createdAt.timeIntervalSince1970),
+                String(todo.updatedAt.timeIntervalSince1970),
+                tags,
+                String(dueDate)
+            ].joined(separator: "|")
+        }
+
+        return ([String(todos.count)] + completedLines).joined(separator: "\n")
+    }
+
+    private func rescheduleNotificationsIfNeeded(force: Bool = false) async {
+        let signature = notificationSignature
+        guard force || signature != lastNotificationSignature else { return }
+        lastNotificationSignature = signature
+        await NotificationService.shared.reschedule(todos: todos)
+    }
+
+    private func analyzeMemoryIfNeeded(force: Bool = false) {
+        let signature = memoryAnalysisSignature
+        guard force || signature != lastMemoryAnalysisSignature else { return }
+        lastMemoryAnalysisSignature = signature
+        guard todos.contains(where: { $0.isCompleted && $0.completedAt != nil }) else { return }
+        MemoryService.shared.analyze(todos: todos)
     }
 
     // MARK: - Filter
@@ -227,22 +295,59 @@ struct TodoListView: View {
                         prioritizingBanner
                     }
                 }
+                .padding(.bottom, 8)
+                .allowsHitTesting(false)
             }
         }
-        .fullScreenCover(isPresented: Binding(
-            get: { !hasOnboarded },
-            set: { if !$0 { hasOnboarded = true } }
-        )) {
+        .fullScreenCover(
+            isPresented: Binding(
+                get: { !hasOnboarded },
+                set: { if !$0 { hasOnboarded = true } }
+            ),
+            onDismiss: {
+                guard hasOnboarded, !hasCompletedTutorial else { return }
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(name: .appTutorialRequested, object: nil)
+                }
+            }
+        ) {
             OnboardingView(isPresented: Binding(
                 get: { !hasOnboarded },
                 set: { if !$0 { hasOnboarded = true } }
             ))
         }
-        .sheet(isPresented: $showAddTodo) {
+        .sheet(isPresented: $showAddTodo, onDismiss: {
+            tutorial?.handleAddTodoDismissed()
+        }) {
             AddTodoView()
         }
-        .sheet(isPresented: $showSettings) {
+        .sheet(isPresented: $showSettings, onDismiss: {
+            guard replayTutorialAfterSettingsDismiss else { return }
+            replayTutorialAfterSettingsDismiss = false
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: .appTutorialRequested, object: nil)
+            }
+        }) {
             NavigationStack { PersonaSettingsView() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .settingsDismissRequested)) { _ in
+            replayTutorialAfterSettingsDismiss = true
+            showSettings = false
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .tutorialRunPrioritizeRequested)) { _ in
+            let activeTodos = TodoAISortScope.candidates(from: todos)
+            guard !isPrioritizing, !activeTodos.isEmpty else { return }
+            Task { await runPrioritize() }
+        }
+        .safeAreaInset(edge: .bottom, spacing: 12) {
+            if let tutorial, let hint = tutorial.hint(for: .todoList) {
+                AppTutorialHintCard(hint: hint)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 12)
+            }
+        }
+        .onAppear {
+            tutorial?.handleTodoListAppeared()
         }
         .task {
             // 등록 대기열 만료 항목 자동 제거
@@ -257,16 +362,16 @@ struct TodoListView: View {
                     todo.triageStatus = TodoTriage.todo.rawValue
                 }
             }
-            await NotificationService.shared.reschedule(todos: todos)
-            // 완료 항목이 있으면 행동 패턴 분석 (CD_MemoryAnalysis 클라우드 업로드 보장)
-            if todos.contains(where: { $0.isCompleted }) {
-                MemoryService.shared.analyze(todos: todos)
-            }
+            await rescheduleNotificationsIfNeeded(force: true)
+            analyzeMemoryIfNeeded(force: true)
             // 앱 레벨에서 initialCount: 0으로 startObserving한 경우 기준치 보정
             syncMonitor.updateBaseline(totalSyncedCount)
         }
-        .onChange(of: todos.count) {
-            Task { await NotificationService.shared.reschedule(todos: todos) }
+        .onChange(of: notificationSignature) {
+            Task { await rescheduleNotificationsIfNeeded() }
+        }
+        .onChange(of: memoryAnalysisSignature) {
+            analyzeMemoryIfNeeded()
         }
         .onChange(of: totalSyncedCount) {
             syncMonitor.updateCount(totalSyncedCount)
@@ -282,7 +387,12 @@ struct TodoListView: View {
                 }
             }
         }
-        .sheet(isPresented: $showPostSyncPersonaSetup) {
+        .sheet(isPresented: $showPostSyncPersonaSetup, onDismiss: {
+            guard hasOnboarded, !hasCompletedTutorial else { return }
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: .appTutorialRequested, object: nil)
+            }
+        }) {
             // 동기화 완료 후 페르소나가 없는 경우 초기 세팅 진행
             OnboardingView(isPresented: $showPostSyncPersonaSetup, isResetup: true)
         }
@@ -424,11 +534,20 @@ struct TodoListView: View {
 
     private var prioritizingBanner: some View {
         HStack(spacing: 10) {
-            ProgressView()
-                .controlSize(.small)
+            Group {
+                if let prioritizingProgressValue {
+                    ProgressView(value: prioritizingProgressValue)
+                        .controlSize(.small)
+                } else {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+            }
+            .frame(width: 28)
             VStack(alignment: .leading, spacing: 2) {
-                Text("AI 우선순위 정리 중…")
+                Text(prioritizingStatusText)
                     .font(.subheadline.weight(.medium))
+                    .lineLimit(1)
                 Text("앱을 나가거나 화면을 끄면 분석이 중단됩니다")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
@@ -439,7 +558,6 @@ struct TodoListView: View {
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
         .shadow(color: .black.opacity(0.15), radius: 8, y: 4)
         .padding(.horizontal, 24)
-        .padding(.bottom, 12)
     }
 
     // MARK: - iCloud Sync Banner
@@ -486,7 +604,6 @@ struct TodoListView: View {
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
         .shadow(color: .black.opacity(0.15), radius: 8, y: 4)
         .padding(.horizontal, 24)
-        .padding(.bottom, 4)
     }
 
     // MARK: - Swipe Actions
@@ -527,18 +644,26 @@ struct TodoListView: View {
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         ToolbarItem(placement: .navigationBarTrailing) {
-            HStack(spacing: 4) {
-                Button { showAddTodo = true } label: {
-                    Image(systemName: "plus")
-                        .fontWeight(.semibold)
-                }
-                Button { showSettings = true } label: {
-                    Image(systemName: "gear")
-                }
+            Button {
+                showSettings = true
+            } label: {
+                Image(systemName: "gear")
             }
+            .accessibilityLabel("설정")
+            .accessibilityIdentifier("todo.settingsButton")
+        }
+        ToolbarItem(placement: .topBarTrailing) {
+            Button {
+                showAddTodo = true
+            } label: {
+                Image(systemName: "plus")
+                    .fontWeight(.semibold)
+            }
+            .accessibilityLabel("새 할 일 추가")
         }
         ToolbarItem(placement: .navigationBarLeading) {
             Button {
+                tutorial?.handlePrioritizeTriggered()
                 Task { await runPrioritize() }
             } label: {
                 Label("AI 정리", systemImage: "sparkles")
@@ -595,15 +720,35 @@ struct TodoListView: View {
         for index in offsets { deleteTodo(filteredTodos[index]) }
     }
 
+    private func applyPriorityResult(_ result: PriorityResult, in activeTodos: [Todo]) {
+        guard let todo = TodoAISortScope.apply(result, in: activeTodos) else { return }
+        if result.needsNotification && todo.dueDate != nil && todo.reminderOffsets.isEmpty
+            && todo.manualPriority == nil {
+            if let rec = result.recommendedTime, let due = todo.dueDate {
+                let offset = rec.timeIntervalSince(due)
+                todo.reminderOffsets = [offset]
+            } else {
+                todo.reminderOffsets = [-3600]
+            }
+            Task { await NotificationService.shared.update(todo: todo) }
+        }
+    }
+
     private func runPrioritize() async {
+        let requestedProvider = SettingsStore.selectedProvider()
+        let activeTodos = TodoAISortScope.candidates(from: todos)
+        
         isPrioritizing = true
+        prioritizingStatusText = "\(requestedProvider.displayName) 시작 중…"
+        prioritizingProgressValue = nil
+        print("[TodoListView] AI 정리 tapped, provider=\(requestedProvider.rawValue), activeTodos=\(activeTodos.count)")
         withAnimation { showPrioritizingIndicator = true }
         defer {
             isPrioritizing = false
+            prioritizingProgressValue = nil
             withAnimation { showPrioritizingIndicator = false }
         }
 
-        let activeTodos = todos.filter { !$0.isCompleted }
         let persona = PersonaContext(
             types: personas.first?.personaTypes ?? [],
             description: personas.first?.descriptionText ?? ""
@@ -612,33 +757,51 @@ struct TodoListView: View {
             ? CalendarService.shared.upcomingEvents()
             : []
 
-        let service = IntelligenceServiceFactory.makeService()
+        var appliedResultIDs = Set<UUID>()
+        let service = RoutedIntelligenceEngine(requestedProvider: requestedProvider)
         let results: [PriorityResult]
         do {
-            results = try await service.prioritize(todos: activeTodos, events: events, persona: persona)
+            results = try await service.prioritize(
+                todos: activeTodos,
+                events: events,
+                persona: persona,
+                progress: { event in
+                    switch event {
+                    case .preparing(let total, let requestedProvider):
+                        prioritizingProgressValue = total > 0 ? 0 : nil
+                        prioritizingStatusText = "\(requestedProvider) 준비 중…"
+                    case .requesting(let index, let total, let title, let provider):
+                        prioritizingProgressValue = total > 0 ? Double(max(0, index - 1)) / Double(total) : nil
+                        prioritizingStatusText = "\(provider) 요청 \(index)/\(total): \(title)"
+                    case .received(let index, let total, let title, let provider):
+                        prioritizingProgressValue = total > 0 ? Double(index) / Double(total) : nil
+                        prioritizingStatusText = "\(provider) 응답 \(index)/\(total): \(title)"
+                    case .fallback(let from, let to, let reason):
+                        prioritizingStatusText = "\(from) 실패 → \(to): \(reason)"
+                    case .applying(let index, let total, let title):
+                        prioritizingProgressValue = total > 0 ? Double(index) / Double(total) : nil
+                        prioritizingStatusText = "결과 적용 \(index)/\(total): \(title)"
+                    case .result(let result, let index, let total, let title):
+                        prioritizingProgressValue = total > 0 ? Double(index) / Double(total) : nil
+                        prioritizingStatusText = "\(result.engine.rawValue) 반영 \(index)/\(total): \(title)"
+                        if !appliedResultIDs.contains(result.todoID) {
+                            applyPriorityResult(result, in: activeTodos)
+                            appliedResultIDs.insert(result.todoID)
+                        }
+                    case .completed(let finalProvider, let total):
+                        prioritizingProgressValue = total > 0 ? 1 : nil
+                        prioritizingStatusText = "\(finalProvider) 완료 (\(total)개)"
+                    }
+                }
+            )
         } catch {
             showAFMError = true
             return
         }
 
-        for result in results {
-            if let todo = activeTodos.first(where: { $0.id == result.todoID }) {
-                todo.apply(result)   // 수동 우선순위 보호는 Todo.apply() 내부에서 처리
-
-                // 알림 자동 스케줄: needsNotification + dueDate 있음 + reminderOffsets 미설정
-                if result.needsNotification && todo.dueDate != nil && todo.reminderOffsets.isEmpty
-                    && todo.manualPriority == nil {
-                    if let rec = result.recommendedTime, let due = todo.dueDate {
-                        // 추천 시각에 발화: offset = recommendedTime - dueDate
-                        let offset = rec.timeIntervalSince(due)
-                        todo.reminderOffsets = [offset]
-                    } else {
-                        // 기본: 1시간 전
-                        todo.reminderOffsets = [-3600]
-                    }
-                    Task { await NotificationService.shared.update(todo: todo) }
-                }
-            }
+        for result in results where !appliedResultIDs.contains(result.todoID) {
+            applyPriorityResult(result, in: activeTodos)
+            appliedResultIDs.insert(result.todoID)
         }
     }
 }

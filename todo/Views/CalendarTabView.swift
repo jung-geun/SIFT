@@ -31,10 +31,7 @@ private func eventIsAllDayStyle(_ event: CalendarService.CalendarEventSummary) -
 
 /// 캘린더 ID → 대표 Color
 private func calendarEventColor(for id: String) -> Color {
-    if let ek = CalendarService.shared.ekCalendar(withIdentifier: id) {
-        return Color(cgColor: ek.cgColor)
-    }
-    return .accentColor
+    CalendarPresentation.color(forCalendarID: id)
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -109,8 +106,8 @@ private func layoutCalColumns(_ items: [CalTimelineItem]) -> [CalColumnedItem] {
 struct CalendarTabView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.appTutorialState) private var tutorial
     @Query private var allTodos: [Todo]
-
     @State private var displayMonth: Date = CalendarTabView.currentMonthStart
     @State private var selectedDate: Date?
     @State private var activeSheet: CalendarActiveSheet?
@@ -169,9 +166,6 @@ struct CalendarTabView: View {
         }
         .task {
             authorized = CalendarService.shared.isAuthorized
-            if !authorized {
-                authorized = await CalendarService.shared.requestAccess()
-            }
             if authorized {
                 disabledIDs = CalendarService.shared.disabledCalendarIDs
                 calendarSources = CalendarService.shared.availableCalendars()
@@ -188,6 +182,16 @@ struct CalendarTabView: View {
         .onReceive(NotificationCenter.default.publisher(for: .calendarScrollToToday)) { _ in
             displayMonth = Self.currentMonthStart
             scrollToTodayTrigger += 1
+        }
+        .safeAreaInset(edge: .bottom, spacing: 12) {
+            if let tutorial, let hint = tutorial.hint(for: .calendarTab) {
+                AppTutorialHintCard(hint: hint)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 12)
+            }
+        }
+        .onAppear {
+            tutorial?.handleCalendarTabAppeared()
         }
     }
 
@@ -232,18 +236,6 @@ struct CalendarTabView: View {
                     .foregroundStyle(isTodayVisible ? Color.accentColor : Color.red)
             }
             .disabled(!authorized)
-        }
-        ToolbarItem(placement: .navigationBarTrailing) {
-            Button {
-                Task { await performSync() }
-            } label: {
-                if isSyncing {
-                    ProgressView().controlSize(.small)
-                } else {
-                    Image(systemName: "arrow.triangle.2.circlepath")
-                }
-            }
-            .disabled(!authorized || isSyncing)
         }
         ToolbarItem(placement: .navigationBarTrailing) {
             Button {
@@ -1165,12 +1157,7 @@ struct EventEditSheet: View {
 
     @ViewBuilder
     private func calendarLabel(_ info: CalendarService.CalendarInfo) -> some View {
-        let color: Color = {
-            if let ek = CalendarService.shared.ekCalendar(withIdentifier: info.id) {
-                return Color(cgColor: ek.cgColor)
-            }
-            return .accentColor
-        }()
+        let color = CalendarPresentation.color(forCalendarID: info.id)
         Label {
             Text(info.title)
         } icon: {
@@ -1256,12 +1243,7 @@ struct CalendarSourceSheet: View {
 
     @ViewBuilder
     private func calendarToggleRow(_ info: CalendarService.CalendarInfo) -> some View {
-        let color: Color = {
-            if let ek = CalendarService.shared.ekCalendar(withIdentifier: info.id) {
-                return Color(cgColor: ek.cgColor)
-            }
-            return .accentColor
-        }()
+        let color = CalendarPresentation.color(forCalendarID: info.id)
         HStack {
             Circle().fill(color).frame(width: 12, height: 12)
             Text(info.title)
@@ -1307,12 +1289,7 @@ struct DefaultCalendarPickerView: View {
 
     @ViewBuilder
     private func calendarRow(_ info: CalendarService.CalendarInfo) -> some View {
-        let color: Color = {
-            if let ek = CalendarService.shared.ekCalendar(withIdentifier: info.id) {
-                return Color(cgColor: ek.cgColor)
-            }
-            return .accentColor
-        }()
+        let color = CalendarPresentation.color(forCalendarID: info.id)
         Button {
             selectedID = info.id
             CalendarService.shared.defaultCalendarID = info.id

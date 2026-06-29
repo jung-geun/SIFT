@@ -4,6 +4,7 @@ import SwiftData
 struct AddTodoView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.appTutorialState) private var tutorial
     @Query private var todos: [Todo]
     @Query(sort: \Persona.updatedAt, order: .reverse) private var personas: [Persona]
 
@@ -173,6 +174,13 @@ struct AddTodoView: View {
                 } else {
                     selectedCalendarID = calendarSources.first?.calendars.first?.id ?? ""
                 }
+            }
+        }
+        .safeAreaInset(edge: .bottom, spacing: 12) {
+            if let tutorial, let hint = tutorial.hint(for: .addTodo) {
+                AppTutorialHintCard(hint: hint)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 12)
             }
         }
     }

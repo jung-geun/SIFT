@@ -118,7 +118,8 @@ enum KeychainStore {
     private static func knownSecretItems() -> [(service: String, account: String?)] {
         [
             (service: "pieroot.todo.gmail", account: "access_token"),
-            (service: "pieroot.todo.gmail", account: "refresh_token")
+            (service: "pieroot.todo.gmail", account: "refresh_token"),
+            (service: GeminiProviderService.keychainService, account: GeminiProviderService.apiKeyAccount)
         ]
     }
 }

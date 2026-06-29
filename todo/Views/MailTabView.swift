@@ -2,11 +2,13 @@ import SwiftUI
 import SwiftData
 import WebKit
 import EventKit
+import MSAL
 
 // MARK: - MailTabView
 
 struct MailTabView: View {
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.appTutorialState) private var tutorial
     @Query(sort: \EmailMessage.receivedAt, order: .reverse)
     private var emails: [EmailMessage]
 
@@ -14,16 +16,21 @@ struct MailTabView: View {
     @State private var isConnecting = false
     @State private var errorMessage: String?
     @State private var showError = false
-    @State private var alertTitle = "Gmail 연결 오류"
+    @State private var alertTitle = "메일 연결 오류"
     @State private var selectedEmail: EmailMessage?
-    @State private var isAuthenticated = false
+    @State private var isGmailAuthenticated = false
+    @State private var isOutlookAuthenticated = false
     @State private var isAnalyzing = false
     @State private var autoRegisteringEmailID: String?
+
+    private var isAnyMailAuthenticated: Bool {
+        isGmailAuthenticated || isOutlookAuthenticated
+    }
 
     var body: some View {
         NavigationStack {
             Group {
-                if !isAuthenticated {
+                if !isAnyMailAuthenticated {
                     notConnectedView
                 } else if emails.isEmpty && !isRefreshing {
                     emptyView
@@ -43,12 +50,12 @@ struct MailTabView: View {
                         } label: {
                             Image(systemName: "arrow.clockwise")
                         }
-                        .disabled(!isAuthenticated)
+                        .disabled(!isAnyMailAuthenticated)
                     }
                 }
             }
             .safeAreaInset(edge: .top, spacing: 0) {
-                if isAuthenticated && (isRefreshing || isAnalyzing) {
+                if isAnyMailAuthenticated && (isRefreshing || isAnalyzing) {
                     VStack(spacing: 0) {
                         HStack(spacing: 8) {
                             ProgressView().controlSize(.small)
@@ -77,18 +84,43 @@ struct MailTabView: View {
                 if let msg = errorMessage { Text(msg) }
             }
             .task {
-                isAuthenticated = EmailService.shared.isAuthenticated
-                if emails.isEmpty && isAuthenticated {
+                await refreshAuthenticationState()
+                if emails.isEmpty && isAnyMailAuthenticated {
                     await syncEmails()
                 }
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .gmailAuthChanged)) { note in
-            let connected = note.object as? Bool ?? EmailService.shared.isAuthenticated
-            isAuthenticated = connected
-            if connected {
+            isGmailAuthenticated = note.object as? Bool ?? EmailService.shared.isAuthenticated
+            if isGmailAuthenticated {
                 Task { await syncEmails() }
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .outlookAuthChanged)) { note in
+            guard OutlookMailService.shared.isConfigured else {
+                isOutlookAuthenticated = false
+                return
+            }
+            if note.object as? Bool == false {
+                isOutlookAuthenticated = false
+                return
+            }
+            Task {
+                isOutlookAuthenticated = await OutlookMailService.shared.canAccessMailSilently()
+                if isOutlookAuthenticated {
+                    await syncEmails()
+                }
+            }
+        }
+        .safeAreaInset(edge: .bottom, spacing: 12) {
+            if let tutorial, let hint = tutorial.hint(for: .mailTab) {
+                AppTutorialHintCard(hint: hint)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 12)
+            }
+        }
+        .onAppear {
+            tutorial?.handleMailTabAppeared()
         }
     }
 
@@ -96,21 +128,23 @@ struct MailTabView: View {
 
     private var notConnectedView: some View {
         ContentUnavailableView {
-            Label("Gmail 미연결", systemImage: "envelope.badge.shield.half.filled")
+            Label("메일 계정 미연결", systemImage: "envelope.badge.shield.half.filled")
         } description: {
-            Text("Gmail 계정을 연결하면\n최근 메일을 이 앱에서 바로 읽을 수 있습니다.")
+            Text("Gmail 계정을 연결하면\n최근 메일을 이 앱에서 바로 읽고 할 일로 등록할 수 있습니다.\n베타/개발 중에는 Google이 “확인하지 않은 앱” 경고를 표시할 수 있습니다. 테스트 사용자로 등록된 계정은 고급/Advanced를 눌러 계속 진행할 수 있고, 일반 사용자 경고 제거는 Google OAuth 검증 완료 후 가능합니다.")
         } actions: {
-            Button {
-                Task { await connectGmail() }
-            } label: {
-                if isConnecting {
-                    ProgressView().controlSize(.small)
-                } else {
-                    Label("Gmail 연결", systemImage: "plus.circle.fill")
+            VStack(spacing: 12) {
+                Button {
+                    Task { await connectGmail() }
+                } label: {
+                    if isConnecting {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Label("Gmail 연결", systemImage: "plus.circle.fill")
+                    }
                 }
+                .buttonStyle(.borderedProminent)
+                .disabled(isConnecting)
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(isConnecting)
         }
     }
 
@@ -126,16 +160,15 @@ struct MailTabView: View {
 
     private var mailList: some View {
         List {
-            ForEach(emails) { email in
+            ForEach(emails, id: \.localListID) { email in
                 Button {
                     selectedEmail = email
                 } label: {
                     MailMessageRow(email: email)
                 }
                 .buttonStyle(.plain)
-                // 오른쪽 스와이프 → 할일·일정 등록
                 .swipeActions(edge: .leading, allowsFullSwipe: true) {
-                    if autoRegisteringEmailID == email.id {
+                    if autoRegisteringEmailID == email.localListID {
                         ProgressView().controlSize(.mini)
                     } else {
                         Button {
@@ -151,6 +184,7 @@ struct MailTabView: View {
         }
         .listStyle(.plain)
     }
+
     private func connectGmail() async {
         isConnecting = true
         defer { isConnecting = false }
@@ -169,48 +203,69 @@ struct MailTabView: View {
         }
     }
 
+    private func connectOutlook() async {
+        isConnecting = true
+        defer { isConnecting = false }
+        do {
+            try await OutlookMailService.shared.authenticate()
+        } catch OutlookMailError.missingClientID {
+            alertTitle = "Outlook 연결 오류"
+            errorMessage = OutlookMailError.missingClientID.localizedDescription
+            showError = true
+        } catch {
+            let nsError = error as NSError
+            if nsError.domain == MSALErrorDomain && nsError.code == MSALError.userCanceled.rawValue {
+                alertTitle = "알림"
+                errorMessage = "로그인이 취소되었습니다."
+            } else {
+                alertTitle = "Outlook 연결 오류"
+                errorMessage = error.localizedDescription
+            }
+            showError = true
+        }
+    }
+
     @MainActor
     private func syncEmails() async {
         guard !isRefreshing else { return }
+        await refreshAuthenticationState()
+        guard isAnyMailAuthenticated else { return }
+
         isRefreshing = true
         defer { isRefreshing = false }
-        do {
-            let messages = try await EmailService.shared.fetchAllRecentMessages()
-            let existing = (try? modelContext.fetch(FetchDescriptor<EmailMessage>())) ?? []
-            let existingByID = Dictionary(uniqueKeysWithValues: existing.map { ($0.id, $0) })
-            var changed = 0
-            for msg in messages {
-                let serverIsRead = !msg.labelIds.contains("UNREAD")
-                if let em = existingByID[msg.id] {
-                    // 기존 메시지: 서버 읽음 상태 동기화
-                    if em.isRead != serverIsRead {
-                        em.isRead = serverIsRead
-                        changed += 1
-                    }
-                } else {
-                    // 신규 메시지
-                    let em = EmailMessage(
-                        id: msg.id,
-                        threadID: msg.threadID,
-                        subject: msg.subject,
-                        from: msg.from,
-                        snippet: msg.snippet,
-                        body: msg.body,
-                        htmlBody: msg.htmlBody,
-                        receivedAt: msg.receivedAt
-                    )
-                    em.isRead = serverIsRead
-                    modelContext.insert(em)
-                    changed += 1
-                }
+
+        let appContext = ModelContext(AppDataContainer.shared.container)
+        var failures: [String] = []
+
+        if isGmailAuthenticated {
+            do {
+                _ = try await EmailService.shared.syncRecentMessageCache(
+                    emailContext: modelContext,
+                    todoContext: appContext
+                )
+            } catch EmailError.notAuthenticated {
+                isGmailAuthenticated = false
+            } catch {
+                failures.append("Gmail: \(error.localizedDescription)")
             }
-            if changed > 0 { try? modelContext.save() }
-        } catch EmailError.notAuthenticated {
-            // refresh token 만료 → 로컬 인증 상태 갱신 후 재연결 안내 표시
-            isAuthenticated = false
-            errorMessage = nil
-        } catch {
-            errorMessage = error.localizedDescription
+        }
+
+        if isOutlookAuthenticated {
+            do {
+                _ = try await OutlookMailService.shared.syncRecentMessageCache(
+                    emailContext: modelContext,
+                    todoContext: appContext
+                )
+            } catch OutlookMailError.notAuthenticated {
+                isOutlookAuthenticated = false
+            } catch {
+                failures.append("Outlook: \(error.localizedDescription)")
+            }
+        }
+
+        if !failures.isEmpty {
+            alertTitle = "메일 동기화 오류"
+            errorMessage = failures.joined(separator: "\n")
             showError = true
         }
     }
@@ -219,36 +274,44 @@ struct MailTabView: View {
     private func fullSync() async {
         await syncEmails()
         guard !isAnalyzing else { return }
+        guard isAnyMailAuthenticated else { return }
+
         isAnalyzing = true
         defer { isAnalyzing = false }
-        do {
-            let appContext = ModelContext(AppDataContainer.shared.container)
-            let existing = (try? appContext.fetch(FetchDescriptor<Todo>())) ?? []
-            let existingRefs = Set(existing.map { $0.sourceRef })
-            let (newTodos, events) = try await EmailService.shared.fetchAndExtractAll(
-                excludingAlreadyHandledMessageIDs: existingRefs
-            )
-            for todo in newTodos where !existingRefs.contains(todo.sourceRef) {
-                appContext.insert(todo)
-                CalendarService.shared.applyAutoRegistration(for: todo)
+
+        let appContext = ModelContext(AppDataContainer.shared.container)
+        var failures: [String] = []
+        var didChange = false
+
+        if isGmailAuthenticated {
+            do {
+                _ = try await EmailService.shared.fetchAndStoreExtractedItems(context: appContext)
+                didChange = true
+            } catch EmailError.notAuthenticated {
+                isGmailAuthenticated = false
+            } catch {
+                failures.append("Gmail: \(error.localizedDescription)")
             }
-            if CalendarService.shared.isAuthorized && CalendarAutoPolicy.isAuto {
-                let iso = ISO8601DateFormatter()
-                for (event, sourceRef) in events {
-                    guard !CalendarService.shared.hasEvent(forEmailRef: sourceRef),
-                          let start = iso.date(from: event.startISO) else { continue }
-                    let end = event.endISO.isEmpty ? nil : iso.date(from: event.endISO)
-                    _ = try? CalendarService.shared.createEventFromEmail(
-                        title: event.title, start: start, end: end,
-                        isAllDay: event.isAllDay, location: event.location,
-                        notes: event.notes, sourceRef: sourceRef
-                    )
-                }
+        }
+
+        if isOutlookAuthenticated {
+            do {
+                _ = try await OutlookMailService.shared.fetchAndStoreExtractedItems(context: appContext)
+                didChange = true
+            } catch OutlookMailError.notAuthenticated {
+                isOutlookAuthenticated = false
+            } catch {
+                failures.append("Outlook: \(error.localizedDescription)")
             }
+        }
+
+        if didChange {
             try? appContext.save()
-        } catch {
+        }
+
+        if !failures.isEmpty {
             alertTitle = "메일 분석 오류"
-            errorMessage = error.localizedDescription
+            errorMessage = failures.joined(separator: "\n")
             showError = true
         }
     }
@@ -256,11 +319,11 @@ struct MailTabView: View {
     @MainActor
     private func autoRegisterTodo(from email: EmailMessage) async {
         guard autoRegisteringEmailID == nil else { return }
-        autoRegisteringEmailID = email.id
+        autoRegisteringEmailID = email.localListID
         defer { autoRegisteringEmailID = nil }
 
         let appContext = ModelContext(AppDataContainer.shared.container)
-        let targetSourceRef = email.id
+        let targetSourceRef = email.todoSourceRef
         let existingPredicate = #Predicate { (todo: Todo) in
             todo.sourceRef == targetSourceRef
         }
@@ -275,7 +338,7 @@ struct MailTabView: View {
         var syntheticThreadID = email.threadID
         var syntheticMessageID = ""
         if email.body.isEmpty && email.htmlBody == nil {
-            if let full = try? await EmailService.shared.fetchFullMessage(id: email.id) {
+            if let full = try? await fetchFullMessage(for: email) {
                 email.body = full.body
                 if !full.threadID.isEmpty { email.threadID = full.threadID }
                 if !full.threadID.isEmpty { syntheticThreadID = full.threadID }
@@ -286,7 +349,7 @@ struct MailTabView: View {
         }
 
         let synthetic = GmailMessage(
-            id: email.id,
+            id: email.todoSourceRef,
             threadID: syntheticThreadID,
             messageID: syntheticMessageID,
             subject: email.subject,
@@ -306,7 +369,7 @@ struct MailTabView: View {
             try appContext.save()
             _ = CalendarService.shared.applyAutoRegistration(for: todo)
             try appContext.save()
-            EmailLearningStore.shared.recordAnalyzed(messageIDs: [email.id])
+            EmailLearningStore.shared.recordAnalyzed(messageIDs: [email.todoSourceRef])
             alertTitle = "할 일 등록됨"
             errorMessage = "메일 요약을 바탕으로 할 일을 등록했습니다."
             showError = true
@@ -318,10 +381,67 @@ struct MailTabView: View {
     }
 
     private func deleteEmails(at offsets: IndexSet) {
-        for index in offsets {
-            modelContext.delete(emails[index])
+        let targets = offsets.compactMap { emails.indices.contains($0) ? emails[$0] : nil }
+        Task { await trashEmails(targets) }
+    }
+
+    @MainActor
+    private func trashEmails(_ targets: [EmailMessage]) async {
+        for email in targets {
+            do {
+                try await trashRemote(email)
+                modelContext.delete(email)
+                try modelContext.save()
+            } catch {
+                alertTitle = "메일 삭제 오류"
+                errorMessage = error.localizedDescription
+                showError = true
+                return
+            }
         }
-        try? modelContext.save()
+    }
+
+    private func refreshAuthenticationState() async {
+        isGmailAuthenticated = EmailService.shared.isAuthenticated
+        isOutlookAuthenticated = await OutlookMailService.shared.canAccessMailSilently()
+    }
+
+    private func fetchFullMessage(for email: EmailMessage) async throws -> GmailMessage {
+        try await providerFetchFullMessage(for: email)
+    }
+
+    private func trashRemote(_ email: EmailMessage) async throws {
+        try await providerTrashRemote(email)
+    }
+}
+
+private func providerFetchFullMessage(for email: EmailMessage) async throws -> GmailMessage {
+    switch email.provider {
+    case .gmail:
+        guard let message = try await EmailService.shared.fetchFullMessage(id: email.providerMessageID) else {
+            throw EmailError.apiFailed
+        }
+        return message
+    case .outlook:
+        return try await OutlookMailService.shared.fetchFullMessage(id: email.providerMessageID)
+    }
+}
+
+private func providerMarkAsRead(_ email: EmailMessage) async throws {
+    switch email.provider {
+    case .gmail:
+        try await EmailService.shared.markAsRead(messageID: email.providerMessageID)
+    case .outlook:
+        try await OutlookMailService.shared.markAsRead(messageID: email.providerMessageID)
+    }
+}
+
+private func providerTrashRemote(_ email: EmailMessage) async throws {
+    switch email.provider {
+    case .gmail:
+        try await EmailService.shared.trashMessage(messageID: email.providerMessageID)
+    case .outlook:
+        try await OutlookMailService.shared.trashMessage(messageID: email.providerMessageID)
     }
 }
 
@@ -337,6 +457,13 @@ struct MailMessageRow: View {
                     .font(.subheadline)
                     .fontWeight(email.isRead ? .regular : .semibold)
                     .lineLimit(1)
+                Text(email.provider == .gmail ? "Gmail" : "Outlook")
+                    .font(.caption2)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(.quaternary, in: Capsule())
                 Spacer()
                 Text(email.receivedAt.formatted(.dateTime.month(.abbreviated).day().hour().minute()))
                     .font(.caption)
@@ -365,6 +492,7 @@ struct MailMessageRow: View {
     }
 }
 
+
 // MARK: - MailDetailView
 
 struct MailDetailView: View {
@@ -374,12 +502,14 @@ struct MailDetailView: View {
     @State private var webViewHeight: CGFloat = 300
     @State private var showRegisterSheet = false
     @State private var isLoadingBody = false
+    @State private var isTrashing = false
+    @State private var errorMessage: String?
+    @State private var showError = false
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
-                    // 헤더
                     VStack(alignment: .leading, spacing: 6) {
                         Text(email.subject.isEmpty ? "(제목 없음)" : email.subject)
                             .font(.title3)
@@ -402,8 +532,6 @@ struct MailDetailView: View {
 
                     Divider()
 
-                    // 본문: HTML이 있으면 WKWebView, 없으면 Text fallback
-                    // body/htmlBody가 비어있는 동안(metadata-only 로드)은 snippet 표시 + 로딩 인디케이터
                     if let html = email.htmlBody, !html.isEmpty {
                         EmailWebView(htmlBody: html, contentHeight: $webViewHeight)
                             .frame(height: webViewHeight)
@@ -441,6 +569,14 @@ struct MailDetailView: View {
                     }
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
+                    Button(role: .destructive) {
+                        Task { await trashCurrentEmail() }
+                    } label: {
+                        Label("휴지통", systemImage: "trash")
+                    }
+                    .disabled(isTrashing)
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
                     Button("닫기") { dismiss() }
                 }
             }
@@ -451,24 +587,47 @@ struct MailDetailView: View {
                 if !email.isRead {
                     email.isRead = true
                     try? modelContext.save()
-                    // Gmail 서버에도 읽음 처리 (gmail.modify 스코프 필요)
-                    Task { try? await EmailService.shared.markAsRead(messageID: email.id) }
+                    Task { try? await providerMarkAsRead(email) }
                 }
             }
             .task {
-                // metadata-only로 로드된 경우 전체 본문 lazy-fetch
                 guard email.body.isEmpty && email.htmlBody == nil && !isLoadingBody else { return }
                 isLoadingBody = true
                 defer { isLoadingBody = false }
-                if let full = try? await EmailService.shared.fetchFullMessage(id: email.id) {
+                if let full = try? await providerFetchFullMessage(for: email) {
                     email.body = full.body
                     if let html = full.htmlBody { email.htmlBody = html }
                     try? modelContext.save()
                 }
             }
         }
+        .alert("메일 삭제 오류", isPresented: $showError) {
+            Button("확인", role: .cancel) {
+                errorMessage = nil
+            }
+        } message: {
+            Text(errorMessage ?? "")
+        }
+    }
+
+    @MainActor
+    private func trashCurrentEmail() async {
+        guard !isTrashing else { return }
+        isTrashing = true
+        defer { isTrashing = false }
+
+        do {
+            try await providerTrashRemote(email)
+            modelContext.delete(email)
+            try modelContext.save()
+            dismiss()
+        } catch {
+            errorMessage = error.localizedDescription
+            showError = true
+        }
     }
 }
+
 
 // MARK: - EmailWebView
 
@@ -619,7 +778,6 @@ struct MailRegisterSheet: View {
     var body: some View {
         NavigationStack {
             Form {
-                // 분석 중 표시
                 if isAnalyzing {
                     Section {
                         HStack(spacing: 10) {
@@ -693,16 +851,12 @@ struct MailRegisterSheet: View {
         }
     }
 
-    // MARK: - Auto-Fill
-
-    /// EmailMessage를 GmailMessage로 합성한 뒤 `makeManualTodo(from:)`로 프리필을 생성.
     @MainActor
     private func analyzeAndPrefill() async {
-        // 본문이 아직 없으면(metadata-only 로드) 전체 메시지를 먼저 가져옴
         var syntheticThreadID = email.threadID
         var syntheticMessageID = ""
         if email.body.isEmpty || email.htmlBody == nil || syntheticMessageID.isEmpty {
-            if let full = try? await EmailService.shared.fetchFullMessage(id: email.id) {
+            if let full = try? await providerFetchFullMessage(for: email) {
                 email.body = full.body
                 if let html = full.htmlBody { email.htmlBody = html }
                 if !full.messageID.isEmpty {
@@ -715,7 +869,7 @@ struct MailRegisterSheet: View {
         }
 
         let synthetic = GmailMessage(
-            id: email.id,
+            id: email.todoSourceRef,
             threadID: syntheticThreadID,
             messageID: syntheticMessageID,
             subject: email.subject,
@@ -746,7 +900,6 @@ struct MailRegisterSheet: View {
             dueDate = extracted.dueDate
             isAllDay = extracted.isAllDay
         } else {
-            // 날짜 미감지 → 수신일 + 1일 폴백, 종일로 표시.
             dueDate = email.receivedAt.addingTimeInterval(86_400)
             isAllDay = true
         }
@@ -754,17 +907,12 @@ struct MailRegisterSheet: View {
         isAnalyzing = false
     }
 
-    // MARK: - Register
-
-    /// 할일(메인 앱 컨테이너)과 캘린더 일정을 동시 생성.
-    /// sourceRef == 합성 메일(sourceRef) 기준으로 중복 등록 방지.
     private func register() {
         let cleanTitle = title.trimmingCharacters(in: .whitespaces)
         guard !cleanTitle.isEmpty else { return }
 
-        // ── 할일 등록 (main app container) ──────────────────────────────
         let appContext = ModelContext(AppDataContainer.shared.container)
-        let ref = sourceRef.isEmpty ? email.id : sourceRef
+        let ref = sourceRef.isEmpty ? email.todoSourceRef : sourceRef
         let existingDescriptor = FetchDescriptor<Todo>(
             predicate: #Predicate { $0.sourceRef == ref }
         )
@@ -822,8 +970,6 @@ struct MailRegisterSheet: View {
         let components = cal.dateComponents([.hour, .minute, .second], from: date)
         return components.hour == 23 && components.minute == 59 && (components.second ?? 0) == 0
     }
-
-    // MARK: - Helpers
 
     @ViewBuilder
     private func calendarLabel(_ info: CalendarService.CalendarInfo) -> some View {

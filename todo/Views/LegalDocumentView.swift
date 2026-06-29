@@ -236,7 +236,7 @@ private struct PrivacyPolicyContent: View {
                 headers: ["항목", "수집 경위", "목적"],
                 rows: [
                     ["Audit 이벤트 (등록·완료·삭제 시각·출처)", "할 일 처리 시 자동 기록", "행동 패턴 분석"],
-                    ["행동 패턴 분석 결과 (시간대·태그별 완료율)", "온디바이스 AI 분석", "AI 우선순위 조정"],
+                    ["행동 패턴 분석 결과 (시간대·태그별 완료율)", "온디바이스 AI 또는 사용자가 선택한 Gemini", "AI 우선순위 조정"],
                     ["앱 설정값 (AI 제공자, 이메일·캘린더 옵션 등)", "설정 저장", "기능 동작"],
                 ]
             )
@@ -245,8 +245,9 @@ private struct PrivacyPolicyContent: View {
             LegalBullets([
                 "수집 항목: 메시지 제목·발신자·스니펫·본문 (읽기 전용, gmail.readonly)",
                 "목적: 마감·일정 관련 이메일에서 할 일 자동 추출",
-                "저장 위치: 기기 내 별도 로컬 전용 저장소 — iCloud 동기화 및 외부 전송 완전 차단",
+                "저장 위치: 기기 내 별도 로컬 전용 저장소 — 기본적으로 iCloud 동기화 및 외부 전송 차단",
                 "OAuth 토큰: 기기 Keychain에만 저장",
+                "Gemini 메일 본문 분석은 사용자가 별도 토글을 켠 경우에만 활성화",
             ])
 
             LegalSubTitle(text: "1-4. 캘린더 연동 (선택, 시스템 권한 허용 후 활성화)")
@@ -259,8 +260,8 @@ private struct PrivacyPolicyContent: View {
             LegalSubTitle(text: "1-5. 할 일 우선순위 정렬 AI")
             LegalBullets([
                 "기본값: 온디바이스 AI (Apple Foundation Models 또는 MLX Qwen)",
-                "할 일 우선순위 정렬 데이터는 외부 서비스로 전송하지 않음",
-                "이메일 본문은 전송하지 않음",
+                "Gemini를 선택하면 할 일 제목·메모·마감·페르소나·캘린더 컨텍스트가 Google Gemini API로 전송될 수 있음",
+                "이메일 본문은 별도 동의가 없으면 전송하지 않음",
             ])
         }
 
@@ -275,14 +276,14 @@ private struct PrivacyPolicyContent: View {
                     ["기기 Keychain", "Gmail OAuth 토큰"],
                 ]
             )
-            InfoBox(text: "이메일 본문은 기기 내 별도 로컬 저장소에만 보관됩니다. iCloud를 활성화하면 할 일 등 동기화 항목은 사용자의 비공개 CloudKit 데이터베이스에 저장됩니다.")
+            InfoBox(text: "기본적으로 이메일 본문은 기기 내 별도 로컬 저장소에만 보관됩니다. 사용자가 Gemini 제공자 또는 Gemini 메일 본문 분석을 명시적으로 켠 경우에만 선택된 TODO·페르소나·캘린더 컨텍스트와 선택적 Gmail 본문이 사용자의 API 키로 Google Gemini API에 전송될 수 있습니다. iCloud를 활성화하면 할 일 등 동기화 항목은 사용자의 비공개 CloudKit 데이터베이스에 저장됩니다.")
                 .padding(.top, 6)
         }
 
         LegalCard(number: 3, title: "제3자 처리위탁 및 데이터 국외 이전") {
             VStack(spacing: 6) {
                 ThirdPartyCard(name: "Apple Inc.", provider: "미국 외 다수", items: "할 일·페르소나·설정값 (iCloud 활성 시) — 기기 간 동기화", url: URL(string: "https://www.apple.com/legal/privacy/")!)
-                ThirdPartyCard(name: "Google LLC", provider: "미국 외 다수", items: "Gmail 메시지 목록 읽기, OAuth 토큰 교환 — 이메일 연동", url: URL(string: "https://policies.google.com/privacy")!)
+                ThirdPartyCard(name: "Google LLC", provider: "미국 외 다수", items: "Gmail 메시지 목록 읽기 / OAuth 토큰 교환 / 사용자가 선택한 Gemini API 호출", url: URL(string: "https://policies.google.com/privacy")!)
             }
         }
 
@@ -290,6 +291,7 @@ private struct PrivacyPolicyContent: View {
             LegalBody(text: "SIFT의 Google API로부터 받은 정보의 사용 및 다른 앱·서비스로의 전송은, Limited Use 요건을 포함한 Google API Services User Data Policy를 준수합니다.")
             LegalBullets([
                 "Gmail 데이터는 앱 내 할 일 추출 기능에만 사용",
+                "사용자가 Gemini 제공자 또는 Gemini 메일 본문 분석을 켠 경우에만 관련 데이터가 Gemini API 호출에 사용될 수 있음",
                 "광고 또는 제3자 마케팅 목적으로 사용하지 않음",
                 "AI 모델 학습에 사용하지 않음",
             ])
@@ -327,8 +329,8 @@ private struct PrivacyPolicyContent: View {
 
         LegalCard(number: 7, title: "데이터 보안") {
             LegalBullets([
-                "Gmail OAuth 토큰은 iOS Keychain에 암호화 저장",
-                "이메일 본문은 온디바이스 전용 저장소에 보관, 네트워크 전송 없음",
+                "Gmail OAuth 토큰과 Gemini API 키는 iOS Keychain에 암호화 저장",
+                "이메일 본문은 기본적으로 온디바이스 전용 저장소에 보관되며, Gemini 메일 본문 분석 opt-in 시에만 외부 전송 가능",
                 "iCloud 데이터는 Apple의 전송 중·저장 시 암호화 인프라 이용",
                 "앱은 비보안 암호화를 사용하지 않음 (ITSAppUsesNonExemptEncryption = NO)",
             ])
@@ -356,7 +358,7 @@ private struct PrivacyPolicyContent: View {
 private struct TermsOfServiceContent: View {
     var body: some View {
         LegalCard(number: 1, title: "서비스 정의") {
-            LegalBody(text: "SIFT는 이메일·캘린더·수동 입력으로 수집한 할 일을 온디바이스 AI로 분류·정리하는 iOS/macOS 개인 생산성 앱입니다. 운영자가 개인적으로 개발·배포하는 무료 서비스입니다.")
+            LegalBody(text: "SIFT는 이메일·캘린더·수동 입력으로 수집한 할 일을 기본적으로 온디바이스 AI로 분류·정리하는 iOS/macOS 개인 생산성 앱이며, 사용자가 선택하면 자신의 API 키로 Google Gemini API를 보조 제공자로 사용할 수 있습니다. 운영자가 개인적으로 개발·배포하는 무료 서비스입니다.")
         }
 
         LegalCard(number: 2, title: "이용 조건") {
@@ -370,7 +372,7 @@ private struct TermsOfServiceContent: View {
         LegalCard(number: 3, title: "제3자 서비스") {
             LegalBody(text: "서비스는 아래 제3자 서비스와 연동됩니다. 각 서비스의 독자적인 이용약관 및 개인정보 처리방침이 함께 적용됩니다.")
             VStack(spacing: 6) {
-                ThirdPartyCard(name: "Gmail API", provider: "Google LLC", items: "받은편지함 읽기 전용 연동", url: URL(string: "https://policies.google.com/terms")!)
+                ThirdPartyCard(name: "Gmail API / Gemini API", provider: "Google LLC", items: "받은편지함 읽기 전용 연동 및 사용자가 선택한 Gemini 호출", url: URL(string: "https://policies.google.com/terms")!)
                 ThirdPartyCard(name: "iCloud / CloudKit", provider: "Apple Inc.", items: "할 일 데이터 기기 간 동기화", url: URL(string: "https://www.apple.com/legal/internet-services/icloud/")!)
             }
             .padding(.top, 6)
@@ -382,7 +384,7 @@ private struct TermsOfServiceContent: View {
             LegalBullets([
                 "서비스는 현재 상태 그대로(as-is) 무료로 제공됩니다.",
                 "운영자는 사전 통보 없이 기능을 변경·중단·종료할 수 있습니다.",
-                "온디바이스 AI 및 Apple/Google 시스템 서비스의 가용성은 OS·기기 상태에 따라 달라질 수 있습니다.",
+                "온디바이스 AI 및 Apple/Google 시스템 서비스의 가용성은 OS·기기 상태, 사용자의 Gemini API 키 구성 여부에 따라 달라질 수 있습니다.",
                 "iOS 26.5 이상, 특정 기기 성능을 요구하는 온디바이스 AI 기능은 구형 기기에서 이용이 제한될 수 있습니다.",
             ])
         }

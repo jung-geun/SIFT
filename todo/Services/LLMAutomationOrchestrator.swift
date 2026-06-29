@@ -96,38 +96,11 @@ final class LLMAutomationOrchestrator: ObservableObject {
     private func runEmailPipeline(context: ModelContext, allowFoundationModels: Bool) async -> Bool {
         guard EmailService.shared.isAuthenticated else { return false }
         do {
-            let existing     = (try? context.fetch(FetchDescriptor<Todo>())) ?? []
-            let existingRefs = Set(existing.map { $0.sourceRef })
-            let (todos, events) = try await EmailService.shared.fetchAndExtractAll(
-                allowFoundationModels: allowFoundationModels,
-                excludingAlreadyHandledMessageIDs: existingRefs
+            let result = try await EmailService.shared.fetchAndStoreExtractedItems(
+                context: context,
+                allowFoundationModels: allowFoundationModels
             )
-
-            // 중복 방지: sourceRef로 기존 항목 비교
-            let freshTodos = todos.filter { !existingRefs.contains($0.sourceRef) }
-            for todo in freshTodos {
-                context.insert(todo)
-                // 긴급·최우선 항목 캘린더 자동 등록 정책 적용
-                CalendarService.shared.applyAutoRegistration(for: todo)
-            }
-
-            // 이메일에서 추출한 캘린더 이벤트 자동 등록
-            if CalendarService.shared.isAuthorized && CalendarAutoPolicy.isAuto {
-                let iso = ISO8601DateFormatter()
-                for (event, sourceRef) in events {
-                    guard !CalendarService.shared.hasEvent(forEmailRef: sourceRef),
-                          let start = iso.date(from: event.startISO) else { continue }
-                    let end = event.endISO.isEmpty ? nil : iso.date(from: event.endISO)
-                    _ = try? CalendarService.shared.createEventFromEmail(
-                        title: event.title, start: start, end: end,
-                        isAllDay: event.isAllDay, location: event.location,
-                        notes: event.notes, sourceRef: sourceRef
-                    )
-                }
-            }
-
-            UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "pieroot.todo.lastEmailFetchDate")
-            print("[LLMOrchestrator] 이메일 파이프라인 완료 (\(todos.count)개 처리)")
+            print("[LLMOrchestrator] 이메일 파이프라인 완료 (할 일 \(result.todoCount)개, 일정 \(result.eventCount)개)")
             return true
         } catch {
             print("[LLMOrchestrator] 이메일 파이프라인 실패: \(error.localizedDescription)")
@@ -151,9 +124,11 @@ final class LLMAutomationOrchestrator: ObservableObject {
         let existing = personas.first?.descriptionText ?? ""
 
         do {
-            let result = try await PersonaGenerationService().generateWithOnDeviceLLM(
+            let provider = SettingsStore.selectedProvider()
+            let result = try await PersonaGenerationService().generate(
                 existingPersona: existing,
-                todos: todos
+                todos: todos,
+                provider: provider
             )
             // SwiftData upsert: 기존 페르소나 업데이트 또는 신규 삽입
             if let persona = personas.first {

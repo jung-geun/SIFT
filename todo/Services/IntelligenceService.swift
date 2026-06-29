@@ -6,17 +6,17 @@ import FoundationModels
 // MARK: - Engine Source
 
 /// 우선순위 산출 실제 주체. Todo.aiEngine에 rawValue로 저장되어 UI 배지에 표시된다.
-/// "휴리스틱"이면 LLM 경로가 실패(메모리 경고·미설치 등)해 규칙 기반으로 폴백됐음을 의미한다.
+/// "휴리스틱"이면 LLM 경로가 실패해 규칙 기반으로 폴백됐음을 의미한다.
 enum PriorityEngine: String, Sendable {
-    case foundationModels = "Apple AI"    // ANE 실행 — 메모리 경고 없음
-    case onDeviceMLX      = "Qwen AI"     // GPU/MLX 실행 — 메모리 경고 가능
-    case cloud            = "클라우드 AI"  // REST API
-    case heuristic        = "휴리스틱"    // LLM 실패 폴백 — 규칙 기반
+    case foundationModels = "Apple AI"   // ANE 실행
+    case onDeviceMLX      = "Qwen AI"    // GPU/MLX 실행
+    case gemini           = "Gemini AI"  // Gemini API 실행
+    case heuristic        = "휴리스틱"   // LLM 실패 폴백 — 규칙 기반
 }
 
 // MARK: - Result
 
-struct PriorityResult: Sendable {
+struct PriorityResult: Sendable, Equatable {
     let todoID: UUID
     let score: Double          // 0.0 ~ 1.0 (axes 있으면 ScheduleScorer 재산출, 없으면 레거시)
     let reason: String         // 40자 이내 한 줄 요약
@@ -28,7 +28,21 @@ struct PriorityResult: Sendable {
     // 4축 (nil = 레거시 단일 score 경로, 하위호환)
     var axes: AxisScores? = nil
     var chainingDetail: String = ""
+    var requestedProviderRawValue: String = ""
+    var fallbackReason: String = ""
 }
+
+enum IntelligenceProgressEvent: Equatable, Sendable {
+    case preparing(total: Int, requestedProvider: String)
+    case requesting(index: Int, total: Int, title: String, provider: String)
+    case received(index: Int, total: Int, title: String, provider: String)
+    case fallback(from: String, to: String, reason: String)
+    case result(PriorityResult, index: Int, total: Int, title: String)
+    case applying(index: Int, total: Int, title: String)
+    case completed(finalProvider: String, total: Int)
+}
+
+typealias IntelligenceProgressHandler = @MainActor @Sendable (IntelligenceProgressEvent) -> Void
 
 // MARK: - Persona Context
 
@@ -43,25 +57,88 @@ struct PersonaContext: Sendable {
 
     /// 모든 선택 유형의 가중 키워드 합집합
     var weightedKeywords: [String] {
-        Array(Set(types.flatMap(\.weightedKeywords)))
+        Array(Set(types.flatMap { $0.weightedKeywords }))
     }
 
     var displayNames: String {
-        types.isEmpty ? "" : types.map(\.displayName).joined(separator: ", ")
+        types.isEmpty ? "" : types.map { $0.displayName }.joined(separator: ", ")
     }
 }
 
 // MARK: - Protocol
 
 /// 페르소나·캘린더 컨텍스트 기반 할 일 우선순위 산출 서비스.
-/// HeuristicEngine ↔ FoundationModelsEngine 교체 가능.
 @MainActor
 protocol IntelligenceService: Sendable {
     func prioritize(
         todos: [Todo],
         events: [CalendarService.CalendarEventSummary],
-        persona: PersonaContext
+        persona: PersonaContext,
+        progress: IntelligenceProgressHandler?
     ) async throws -> [PriorityResult]
+}
+
+extension IntelligenceService {
+    func prioritize(
+        todos: [Todo],
+        events: [CalendarService.CalendarEventSummary],
+        persona: PersonaContext
+    ) async throws -> [PriorityResult] {
+        try await prioritize(todos: todos, events: events, persona: persona, progress: nil)
+    }
+}
+
+enum IntelligenceRoutingError: LocalizedError, Sendable {
+    case backendUnavailable(provider: PersonaAIProvider, reason: String)
+    case backendNotConfigured(provider: PersonaAIProvider, reason: String)
+    case generationFailed(provider: PersonaAIProvider, reason: String)
+    case parseFailed(provider: PersonaAIProvider, reason: String)
+
+    var errorDescription: String? {
+        switch self {
+        case .backendUnavailable(_, let reason),
+             .backendNotConfigured(_, let reason),
+             .generationFailed(_, let reason),
+             .parseFailed(_, let reason):
+            return reason
+        }
+    }
+}
+
+private func normalizeRequestedProvider(_ rawValue: String?) -> PersonaAIProvider {
+    guard let rawValue, let provider = PersonaAIProvider(rawValue: rawValue) else {
+        return .foundationModels
+    }
+    return provider
+}
+
+private func emitResultEvents(
+    _ results: [PriorityResult],
+    todos: [Todo],
+    progress: IntelligenceProgressHandler?
+) {
+    let total = results.count
+    for (offset, result) in results.enumerated() {
+        let title = todos.first(where: { $0.id == result.todoID })?.title ?? "(제목 없음)"
+        progress?(.applying(index: offset + 1, total: total, title: title))
+        progress?(.result(result, index: offset + 1, total: total, title: title))
+    }
+}
+
+private func annotateResults(
+    _ results: [PriorityResult],
+    requestedProvider: PersonaAIProvider,
+    fallbackReason: String
+) -> [PriorityResult] {
+    results.map { result in
+        var updated = result
+        updated.requestedProviderRawValue = requestedProvider.rawValue
+        let combinedReasons = [fallbackReason, updated.fallbackReason]
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        updated.fallbackReason = combinedReasons.joined(separator: " → ")
+        return updated
+    }
 }
 
 // MARK: - Heuristic Weights (페르소나·행동 패턴 기반 하이퍼파라미터)
@@ -125,12 +202,13 @@ struct HeuristicEngine: IntelligenceService {
     func prioritize(
         todos: [Todo],
         events: [CalendarService.CalendarEventSummary],
-        persona: PersonaContext
+        persona: PersonaContext,
+        progress: IntelligenceProgressHandler?
     ) async throws -> [PriorityResult] {
         let hw     = HeuristicWeights.adaptive(persona: persona, memory: MemoryService.shared)
         let schedW = ScheduleWeights.adaptive()
         let memory = MemoryService.shared
-        return todos.map { todo in
+        let results = todos.map { todo in
             let axes  = heuristicAxes(todo: todo, persona: persona, memory: memory, allTodos: todos, weights: hw)
             let score = ScheduleScorer.normalizedScore(axes, weights: schedW)
             return PriorityResult(
@@ -146,6 +224,8 @@ struct HeuristicEngine: IntelligenceService {
                 chainingDetail:    ""
             )
         }
+        emitResultEvents(results, todos: todos, progress: progress)
+        return results
     }
 
     // MARK: - 4축 산출
@@ -293,12 +373,11 @@ struct HeuristicEngine: IntelligenceService {
 /// 재링크 조건: Xcode > 타깃 > Frameworks, Libraries → FoundationModels.framework 추가.
 /// 모든 코드는 #if canImport(FoundationModels) + @available(iOS 26.0, *) 로 격리.
 final class FoundationModelsEngine: IntelligenceService {
-    private let fallback = HeuristicEngine()
-
     func prioritize(
         todos: [Todo],
         events: [CalendarService.CalendarEventSummary],
-        persona: PersonaContext
+        persona: PersonaContext,
+        progress: IntelligenceProgressHandler?
     ) async throws -> [PriorityResult] {
         #if canImport(FoundationModels)
         if #available(iOS 26.0, *), FoundationModelsService.isAvailable {
@@ -311,27 +390,49 @@ final class FoundationModelsEngine: IntelligenceService {
             }
             let active = Array(sorted.prefix(20))
             guard !active.isEmpty else { return [] }
+            progress?(.requesting(
+                index: 1,
+                total: 1,
+                title: "일괄 요청 (\(active.count)개)",
+                provider: PriorityEngine.foundationModels.rawValue
+            ))
             do {
-                return try await FoundationModelsService().rankTodos(
+                let results = try await FoundationModelsService().rankTodos(
                     todos: active,
                     events: events,
                     persona: persona
                 )
+                progress?(.received(
+                    index: 1,
+                    total: 1,
+                    title: "일괄 요청 (\(active.count)개)",
+                    provider: PriorityEngine.foundationModels.rawValue
+                ))
+                emitResultEvents(results, todos: active, progress: progress)
+                return results
             } catch let genErr as LanguageModelSession.GenerationError {
                 if case .exceededContextWindowSize(let tokenCount) = genErr {
-                    print("[FoundationModelsEngine] 컨텍스트 초과 (\(tokenCount) 토큰 / 4096 한도)")
-                } else {
-                    print("[FoundationModelsEngine] FM GenerationError: \(genErr.localizedDescription)")
+                    throw IntelligenceRoutingError.generationFailed(
+                        provider: .foundationModels,
+                        reason: "Apple Foundation Models 컨텍스트 초과 (\(tokenCount) 토큰)"
+                    )
                 }
-                throw genErr
+                throw IntelligenceRoutingError.generationFailed(
+                    provider: .foundationModels,
+                    reason: genErr.localizedDescription
+                )
             } catch {
-                print("[FoundationModelsEngine] FM 실패: \(error.localizedDescription)")
-                throw error
+                throw IntelligenceRoutingError.generationFailed(
+                    provider: .foundationModels,
+                    reason: error.localizedDescription
+                )
             }
         }
         #endif
-        // AFM 미가용 기기 → 휴리스틱 (알림 없음)
-        return try await fallback.prioritize(todos: todos, events: events, persona: persona)
+        throw IntelligenceRoutingError.backendUnavailable(
+            provider: .foundationModels,
+            reason: "Apple Foundation Models를 이 기기에서 사용할 수 없습니다."
+        )
     }
 }
 
@@ -342,138 +443,28 @@ final class FoundationModelsEngine: IntelligenceService {
 /// 입력: ScheduleInput JSON (current_time / user_persona / tasks[]).
 /// 출력: ScheduleResponseV9 JSON (4축 scoring + reasoning + recommended_schedule).
 /// total_score는 모델 출력값을 무시하고 ScheduleScorer + 적응형 가중치로 재산출.
-/// 파싱 실패 시 FoundationModelsEngine(AFM) → HeuristicEngine 폴백 체인.
 final class OnDeviceLLMIntelligenceEngine: IntelligenceService {
-    private let fallback = FoundationModelsEngine()
-
-    // ScheduleResponseV9 JSON 출력 지시 — Prompts.swift에서 수정 가능
-    private static let systemPrompt = Prompts.Schedule.systemInstruction
-
-    // MARK: ScheduleInput JSON 직렬화
+    private static let systemPrompt = ScheduleLLMAdapter.systemPrompt
 
     private static func buildScheduleInput(
         todos: [Todo],
         persona: PersonaContext,
         events: [CalendarService.CalendarEventSummary]
     ) -> String {
-        let memory = MemoryService.shared
-
-        let availability: String
-        if let h = memory.productiveHour {
-            let end  = min(23, h + 8)
-            availability = String(format: "%02d:00-%02d:00", h, end)
-        } else {
-            availability = "09:00-22:00"
-        }
-
-        let bioValue = persona.types.isEmpty
-            ? persona.description
-            : persona.types.map { $0.displayName }.joined(separator: ", ")
-
-        let personaDict: [String: Any] = [
-            "occupations":     persona.types.map { $0.displayName },
-            "detailed_status": persona.description,
-            "bio":             bioValue,
-            "availability":    availability
-        ]
-
-        let tasks: [[String: Any]] = todos.map { todo in
-            let sourceStr: String
-            switch todo.todoSource {
-            case .manual:   sourceStr = "memo_app"
-            case .email:    sourceStr = "email"
-            case .calendar: sourceStr = "calendar"
-            }
-            return [
-                "task_id":                    todo.id.uuidString,
-                "title":                      todo.title,
-                "memo":                       todo.notes,
-                "source":                     sourceStr,
-                "deadline":                   todo.dueDate.map { AppDateFormat.llmString(from: $0) } as Any,
-                "estimated_duration_minutes": todo.estimatedDurationMinutes
-            ]
-        }
-
-        let input: [String: Any] = [
-            "current_time": AppDateFormat.llmString(from: Date()),
-            "user_persona": personaDict,
-            "tasks":        tasks
-        ]
-        let data = (try? JSONSerialization.data(withJSONObject: input, options: .prettyPrinted)) ?? Data()
-        return String(data: data, encoding: .utf8) ?? "{}"
+        ScheduleLLMAdapter.buildScheduleInput(todos: todos, persona: persona, events: events)
     }
-
-    // MARK: ScheduleResponseV9 관대 파싱
 
     func parseScheduleResponseV9(
         text: String,
         todos: [Todo],
         persona: PersonaContext
     ) -> [PriorityResult]? {
-        var t = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let first = t.range(of: "{"),
-              let last  = t.range(of: "}", options: .backwards)
-        else { return nil }
-        t = String(t[first.lowerBound...last.lowerBound])
-
-        guard let data           = t.data(using: .utf8),
-              let json           = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let scheduledTasks = json["scheduled_tasks"] as? [[String: Any]]
-        else { return nil }
-
-        let weights   = ScheduleWeights.adaptive()
-        var results   = [PriorityResult]()
-
-        for taskDict in scheduledTasks {
-            guard let taskID = taskDict["task_id"] as? String,
-                  let uuid   = UUID(uuidString: taskID)
-            else { continue }
-
-            let scoring = taskDict["scoring"] as? [String: Any] ?? [:]
-            let axes    = AxisScores(
-                deadlineProximity: max(0, min(10, (scoring["deadline_proximity"] as? Double) ?? 2.0)),
-                urgency:           max(0, min(10, (scoring["urgency"]             as? Double) ?? 5.0)),
-                importance:        max(0, min(10, (scoring["task_importance"]     as? Double) ?? 5.0)),
-                chaining:          max(0, min(10, (scoring["task_chaining"]       as? Double) ?? 2.0))
-            )
-            let score = ScheduleScorer.normalizedScore(axes, weights: weights)
-
-            let reasoning      = taskDict["reasoning"] as? [String: Any] ?? [:]
-            let summary        = reasoning["summary"]         as? String ?? ""
-            let chainingDetail = reasoning["chaining_detail"] as? String ?? ""
-
-            var recommendedTime: Date? = nil
-            if let sched    = taskDict["recommended_schedule"] as? [String: Any],
-               let startISO = sched["start_time"]              as? String,
-               !startISO.isEmpty {
-                recommendedTime = AppDateFormat.parseLLMDate(startISO)
-            }
-
-            let personaKeywords = persona.weightedKeywords
-            let personaFit: Bool
-            if let todo = todos.first(where: { $0.id == uuid }) {
-                personaFit = !personaKeywords.isEmpty && (
-                    todo.tags.contains(where: { personaKeywords.contains($0) }) ||
-                    personaKeywords.contains(where: { todo.title.localizedCaseInsensitiveContains($0) })
-                )
-            } else {
-                personaFit = false
-            }
-
-            results.append(PriorityResult(
-                todoID:            uuid,
-                score:             score,
-                reason:            String(summary.prefix(80)),
-                detail:            summary,
-                needsNotification: axes.deadlineProximity >= 7.0 || axes.urgency >= 7.0,
-                recommendedTime:   recommendedTime,
-                personaFit:        personaFit,
-                engine:            .onDeviceMLX,
-                axes:              axes,
-                chainingDetail:    chainingDetail
-            ))
-        }
-        return results.isEmpty ? nil : results
+        ScheduleLLMAdapter.parseScheduleResponseV9(
+            text: text,
+            todos: todos,
+            persona: persona,
+            engine: .onDeviceMLX
+        )
     }
 
     // MARK: prioritize
@@ -481,14 +472,26 @@ final class OnDeviceLLMIntelligenceEngine: IntelligenceService {
     func prioritize(
         todos: [Todo],
         events: [CalendarService.CalendarEventSummary],
-        persona: PersonaContext
+        persona: PersonaContext,
+        progress: IntelligenceProgressHandler?
     ) async throws -> [PriorityResult] {
         let service = OnDeviceLLMService.shared
+        guard service.isCapable else {
+            throw IntelligenceRoutingError.backendUnavailable(
+                provider: .onDevice,
+                reason: "이 기기는 현재 Qwen 로컬 실행 기준(메모리 6GB 이상)을 충족하지 않습니다."
+            )
+        }
+
         if !service.isModelLoaded && service.isModelCachedOnDisk {
             await service.loadModelIfNeeded()
         }
+
         guard service.isModelLoaded else {
-            return try await fallback.prioritize(todos: todos, events: events, persona: persona)
+            let reason = service.isModelCachedOnDisk
+                ? (service.loadError ?? "Qwen 모델을 로드할 수 없습니다.")
+                : "Qwen 모델이 아직 다운로드되지 않았습니다."
+            throw IntelligenceRoutingError.backendUnavailable(provider: .onDevice, reason: reason)
         }
 
         let sortedActive = todos.filter { !$0.isCompleted }.sorted {
@@ -501,42 +504,190 @@ final class OnDeviceLLMIntelligenceEngine: IntelligenceService {
         let active = Array(sortedActive.prefix(15))
         guard !active.isEmpty else { return [] }
 
-        // V9 출력은 항목당 ~120 토큰 (4축 + reasoning + schedule)
-        let maxTokens = max(512, min(2048, active.count * 120))
-
+        let batchTitle = "일괄 요청 (\(active.count)개)"
+        let maxTokens = max(768, min(4096, active.count * 220))
+        let text: String
+        progress?(.requesting(
+            index: 1,
+            total: 1,
+            title: batchTitle,
+            provider: PriorityEngine.onDeviceMLX.rawValue
+        ))
         do {
-            let text = try await service.generate(
+            text = try await service.generate(
                 systemPrompt: Self.systemPrompt,
                 userPrompt:   Self.buildScheduleInput(todos: active, persona: persona, events: events),
                 maxTokens:    maxTokens
             )
-            if let parsed = parseScheduleResponseV9(text: text, todos: active, persona: persona),
-               !parsed.isEmpty {
-                return parsed
-            }
-        } catch {}
+            progress?(.received(
+                index: 1,
+                total: 1,
+                title: batchTitle,
+                provider: PriorityEngine.onDeviceMLX.rawValue
+            ))
+        } catch let llmError as OnDeviceLLMService.LLMError {
+            throw IntelligenceRoutingError.generationFailed(
+                provider: .onDevice,
+                reason: llmError.localizedDescription
+            )
+        } catch {
+            throw IntelligenceRoutingError.generationFailed(
+                provider: .onDevice,
+                reason: error.localizedDescription
+            )
+        }
 
-        return try await fallback.prioritize(todos: todos, events: events, persona: persona)
+        guard let parsed = parseScheduleResponseV9(text: text, todos: active, persona: persona),
+              !parsed.isEmpty else {
+            throw IntelligenceRoutingError.parseFailed(
+                provider: .onDevice,
+                reason: "Qwen 응답을 우선순위 JSON으로 해석하지 못했습니다."
+            )
+        }
+        emitResultEvents(parsed, todos: active, progress: progress)
+        return parsed
     }
 }
 
+private func hasGeminiRoutingKey() -> Bool {
+    GeminiProviderService.storedAPIKey != nil
+}
+
+enum IntelligenceProviderRouting {
+    static func chain(for requestedProvider: PersonaAIProvider, hasGeminiKey: Bool) -> [PersonaAIProvider] {
+        switch requestedProvider {
+        case .foundationModels:
+            return [.foundationModels]
+        case .onDevice:
+            var providers: [PersonaAIProvider] = [.onDevice]
+            if hasGeminiKey { providers.append(.gemini) }
+            providers.append(.foundationModels)
+            return providers
+        case .gemini:
+            return [.gemini, .foundationModels, .onDevice]
+        }
+    }
+}
+
+final class RoutedIntelligenceEngine: IntelligenceService {
+    private let requestedProvider: PersonaAIProvider
+    private let foundationModels = FoundationModelsEngine()
+    private let onDevice = OnDeviceLLMIntelligenceEngine()
+    private let gemini = GeminiIntelligenceEngine()
+    private let heuristic = HeuristicEngine()
+
+    init(requestedProvider: PersonaAIProvider = SettingsStore.selectedProvider()) {
+        self.requestedProvider = requestedProvider
+    }
+
+    func prioritize(
+        todos: [Todo],
+        events: [CalendarService.CalendarEventSummary],
+        persona: PersonaContext,
+        progress: IntelligenceProgressHandler?
+    ) async throws -> [PriorityResult] {
+        let requestedProvider = self.requestedProvider
+        let activeTodos = todos.filter { !$0.isCompleted }
+        progress?(.preparing(total: activeTodos.count, requestedProvider: requestedProvider.displayName))
+
+        let hasGeminiKey = requestedProvider == .foundationModels ? false : hasGeminiRoutingKey()
+        let chain = IntelligenceProviderRouting.chain(
+            for: requestedProvider,
+            hasGeminiKey: hasGeminiKey
+        )
+
+        var failures: [String] = []
+        for (index, provider) in chain.enumerated() {
+            let routeReason = failures.joined(separator: " → ")
+            let providerProgress: IntelligenceProgressHandler? = progress.map { outerProgress in
+                { event in
+                    switch event {
+                    case .result(let result, let resultIndex, let total, let title):
+                        let annotated = annotateResults(
+                            [result],
+                            requestedProvider: requestedProvider,
+                            fallbackReason: routeReason
+                        )[0]
+                        outerProgress(.result(annotated, index: resultIndex, total: total, title: title))
+                    default:
+                        outerProgress(event)
+                    }
+                }
+            }
+            do {
+                let results = try await engine(for: provider).prioritize(
+                    todos: todos,
+                    events: events,
+                    persona: persona,
+                    progress: providerProgress
+                )
+                let annotated = annotateResults(results, requestedProvider: requestedProvider, fallbackReason: routeReason)
+                progress?(.completed(finalProvider: provider.displayName, total: annotated.count))
+                return annotated
+            } catch let routingError as IntelligenceRoutingError {
+                failures.append("\(provider.displayName): \(routingError.localizedDescription)")
+                if let nextProvider = chain.dropFirst(index + 1).first {
+                    progress?(.fallback(from: provider.displayName, to: nextProvider.displayName, reason: routingError.localizedDescription))
+                }
+            } catch {
+                failures.append("\(provider.displayName): \(error.localizedDescription)")
+                if let nextProvider = chain.dropFirst(index + 1).first {
+                    progress?(.fallback(from: provider.displayName, to: nextProvider.displayName, reason: error.localizedDescription))
+                }
+            }
+        }
+
+        let fallbackReason = failures.isEmpty
+            ? "요청한 AI 백엔드를 사용할 수 없어 휴리스틱으로 처리했습니다."
+            : failures.joined(separator: " → ")
+        let heuristicProgress: IntelligenceProgressHandler? = progress.map { outerProgress in
+            { event in
+                switch event {
+                case .result(let result, let resultIndex, let total, let title):
+                    let annotated = annotateResults(
+                        [result],
+                        requestedProvider: requestedProvider,
+                        fallbackReason: fallbackReason
+                    )[0]
+                    outerProgress(.result(annotated, index: resultIndex, total: total, title: title))
+                default:
+                    outerProgress(event)
+                }
+            }
+        }
+        let heuristicResults = try await heuristic.prioritize(
+            todos: todos,
+            events: events,
+            persona: persona,
+            progress: heuristicProgress
+        )
+        let annotated = annotateResults(
+            heuristicResults,
+            requestedProvider: requestedProvider,
+            fallbackReason: fallbackReason
+        )
+        progress?(.completed(finalProvider: PriorityEngine.heuristic.rawValue, total: annotated.count))
+        return annotated
+    }
+
+    private func engine(for provider: PersonaAIProvider) -> any IntelligenceService {
+        switch provider {
+        case .foundationModels:
+            return foundationModels
+        case .onDevice:
+            return onDevice
+        case .gemini:
+            return gemini
+        }
+    }
+}
 
 // MARK: - Service Factory
 
 struct IntelligenceServiceFactory {
-    /// selectedAIProvider(사용자 선택)가 우선 — AFM 기본, Qwen 선택 시 해당 모델이 먼저.
-    /// 미지원/알 수 없는 값은 AFM으로 폴백한다.
+    /// selectedAIProvider(사용자 선택)를 명시적으로 라우팅한다.
+    /// 미지원/알 수 없는 값은 AFM으로 정규화한다.
     static func makeService() -> any IntelligenceService {
-        let raw      = UserDefaults.standard.string(forKey: "selectedAIProvider") ?? ""
-        let provider = PersonaAIProvider(rawValue: raw) ?? .foundationModels
-
-        switch provider {
-        case .onDevice:
-            // Qwen이 AFM보다 먼저 동작. Qwen 미로드 시 fallback=FoundationModelsEngine.
-            return OnDeviceLLMIntelligenceEngine()
-
-        case .foundationModels:
-            return FoundationModelsEngine()
-        }
+        RoutedIntelligenceEngine()
     }
 }

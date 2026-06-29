@@ -4,6 +4,27 @@ import Combine
 @MainActor
 final class SettingsStore: ObservableObject {
     static let shared = SettingsStore()
+    static let syncableKeys: [String] = [
+        "pieroot.todo.onDeviceLLMEnabled",
+        "selectedAIProvider",
+        "pieroot.todo.geminiModelID",
+        "pieroot.todo.providerEmailAnalysisEnabled",
+        "pieroot.todo.emailAutoAnalysisEnabled",
+        "pieroot.todo.emailRefreshHour",
+        "pieroot.todo.emailLookbackDays",
+        "pieroot.todo.calendarAutoRegister",
+        "pieroot.todo.calendarCompletionAction",
+        "pieroot.todo.suppressedSenders",
+        "pieroot.todo.dismissedMessageIDs",
+        "pieroot.todo.analyzedMessageIDs",
+        "pieroot.todo.senderDeletionCounts",
+        "pieroot.todo.memorySummary",
+        "pieroot.todo.memoryInsights",
+        "pieroot.todo.memoryDate",
+        "pieroot.todo.memoryFastTags",
+        "pieroot.todo.memoryOverdueRate",
+        "pieroot.todo.memoryProductiveHour"
+    ]
     
     private let local = UserDefaults.standard
     private let global = NSUbiquitousKeyValueStore.default
@@ -19,31 +40,31 @@ final class SettingsStore: ObservableObject {
         global.synchronize()
     }
     
+    nonisolated static func selectedProvider() -> PersonaAIProvider {
+        let key = "selectedAIProvider"
+        let local = UserDefaults.standard
+        let defaultValue = PersonaAIProvider.foundationModels.rawValue
+        let normalize: (String?) -> String = { raw in
+            let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return trimmed.isEmpty ? defaultValue : trimmed
+        }
+        
+        if local.bool(forKey: "\(key).isLocal") {
+            return PersonaAIProvider(rawValue: normalize(local.string(forKey: key))) ?? .foundationModels
+        }
+        
+        let global = NSUbiquitousKeyValueStore.default
+        let raw = normalize(global.string(forKey: key) ?? local.string(forKey: key))
+        return PersonaAIProvider(rawValue: raw) ?? .foundationModels
+    }
+    
     @objc private func globalStoreDidChange(_ notification: Notification) {
-        let syncableKeys = [
-            "pieroot.todo.onDeviceLLMEnabled",
-            "selectedAIProvider",
-            "pieroot.todo.emailAutoAnalysisEnabled",
-            "pieroot.todo.emailRefreshHour",
-            "pieroot.todo.emailLookbackDays",
-            "pieroot.todo.calendarAutoRegister",
-            "pieroot.todo.calendarCompletionAction",
-            "pieroot.todo.suppressedSenders",
-            "pieroot.todo.dismissedMessageIDs",
-            "pieroot.todo.senderDeletionCounts",
-            "pieroot.todo.memorySummary",
-            "pieroot.todo.memoryInsights",
-            "pieroot.todo.memoryDate",
-            "pieroot.todo.memoryFastTags",
-            "pieroot.todo.memoryOverdueRate",
-            "pieroot.todo.memoryProductiveHour"
-        ]
 
         let reason = notification.userInfo?[NSUbiquitousKeyValueStoreChangeReasonKey] as? Int
         
         if reason == NSUbiquitousKeyValueStoreInitialSyncChange || reason == NSUbiquitousKeyValueStoreAccountChange {
             print("[SettingsStore] iCloud 초기 동기화 또는 계정 변경 감지: 전체 키 동기화 진행")
-            for key in syncableKeys {
+            for key in Self.syncableKeys {
                 if !isLocal(key: key) {
                     if let value = global.object(forKey: key) {
                         local.set(value, forKey: key)
@@ -54,7 +75,8 @@ final class SettingsStore: ObservableObject {
             }
         } else if let keys = notification.userInfo?[NSUbiquitousKeyValueStoreChangedKeysKey] as? [String] {
             print("[SettingsStore] iCloud 일부 키 변경 감지: \(keys)")
-            for key in keys {
+            let changedKeys = Set(keys)
+            for key in Self.syncableKeys where changedKeys.contains(key) {
                 if !isLocal(key: key) {
                     if let value = global.object(forKey: key) {
                         local.set(value, forKey: key)
@@ -128,26 +150,7 @@ final class SettingsStore: ObservableObject {
     
     /// 그동안 로컬 UserDefaults에만 저장되어 있던 설정들을 iCloud로 모두 업로드합니다.
     func uploadLocalSettingsToCloud() {
-        let syncableKeys = [
-            "pieroot.todo.onDeviceLLMEnabled",
-            "selectedAIProvider",
-            "pieroot.todo.emailAutoAnalysisEnabled",
-            "pieroot.todo.emailRefreshHour",
-            "pieroot.todo.emailLookbackDays",
-            "pieroot.todo.calendarAutoRegister",
-            "pieroot.todo.calendarCompletionAction",
-            "pieroot.todo.suppressedSenders",
-            "pieroot.todo.dismissedMessageIDs",
-            "pieroot.todo.senderDeletionCounts",
-            "pieroot.todo.memorySummary",
-            "pieroot.todo.memoryInsights",
-            "pieroot.todo.memoryDate",
-            "pieroot.todo.memoryFastTags",
-            "pieroot.todo.memoryOverdueRate",
-            "pieroot.todo.memoryProductiveHour"
-        ]
-        
-        for key in syncableKeys {
+        for key in Self.syncableKeys {
             // 로컬 모드가 아닌 경우에만 클라우드에 업로드
             if !isLocal(key: key) {
                 if let localValue = local.object(forKey: key) {

@@ -3,36 +3,61 @@ import Testing
 @testable import todo
 
 @Suite("AI provider selection", .serialized)
+@MainActor
 struct AIProviderAuthTests {
-
-    init() {
-        reset()
-    }
 
     private func reset() {
         UserDefaults.standard.removeObject(forKey: "selectedAIProvider")
+        UserDefaults.standard.removeObject(forKey: "selectedAIProvider.isLocal")
+        NSUbiquitousKeyValueStore.default.removeObject(forKey: "selectedAIProvider")
+        NSUbiquitousKeyValueStore.default.synchronize()
+        UserDefaults.standard.set(false, forKey: "pieroot.todo.iCloudSyncEnabled")
+        GeminiProviderService.deleteAPIKey()
     }
 
-    @Test("지원하는 TODO 정렬 AI는 온디바이스 제공자만 노출한다")
-    func supportedProvidersAreLocalOnly() {
-        #expect(PersonaAIProvider.allCases == [.foundationModels, .onDevice])
+    @Test("지원하는 TODO 정렬 AI에 Gemini가 포함된다")
+    func supportedProvidersIncludeGemini() async {
+        await AIProviderTestIsolation.shared.withLock {
+            reset()
+            #expect(PersonaAIProvider.allCases == [.foundationModels, .onDevice, .gemini])
+        }
     }
 
-    @Test("알 수 없는 저장값은 AFM으로 폴백한다")
-    func factoryFallsBackForUnknownStoredProvider() {
-        defer { reset() }
-        UserDefaults.standard.set("legacy-cloud-provider", forKey: "selectedAIProvider")
+    @Test("알 수 없는 저장값은 AFM 요청으로 정규화된 RoutedIntelligenceEngine을 사용한다")
+    func factoryFallsBackForUnknownStoredProvider() async {
+        await AIProviderTestIsolation.shared.withLock {
+            reset()
+            defer { reset() }
+            UserDefaults.standard.set("legacy-cloud-provider", forKey: "selectedAIProvider")
 
-        let service = IntelligenceServiceFactory.makeService()
-        #expect(String(describing: type(of: service)).contains("FoundationModelsEngine"))
+            let service = IntelligenceServiceFactory.makeService()
+            #expect(String(describing: type(of: service)).contains("RoutedIntelligenceEngine"))
+        }
     }
 
-    @Test("온디바이스 선택값은 온디바이스 엔진을 사용한다")
-    func factoryUsesOnDeviceEngine() {
-        defer { reset() }
-        UserDefaults.standard.set(PersonaAIProvider.onDevice.rawValue, forKey: "selectedAIProvider")
+    @Test("Gemini 선택값도 RoutedIntelligenceEngine을 사용한다")
+    func factoryUsesRoutedEngineForGemini() async {
+        await AIProviderTestIsolation.shared.withLock {
+            reset()
+            defer { reset() }
+            UserDefaults.standard.set(PersonaAIProvider.gemini.rawValue, forKey: "selectedAIProvider")
 
-        let service = IntelligenceServiceFactory.makeService()
-        #expect(String(describing: type(of: service)).contains("OnDeviceLLMIntelligenceEngine"))
+            let service = IntelligenceServiceFactory.makeService()
+            #expect(String(describing: type(of: service)).contains("RoutedIntelligenceEngine"))
+        }
+    }
+
+    @Test("공유 selectedAIProvider는 iCloud 값을 우선 읽는다")
+    func selectedProviderPrefersGlobalValueWhenKeyIsShared() async {
+        await AIProviderTestIsolation.shared.withLock {
+            reset()
+            defer { reset() }
+            UserDefaults.standard.set(PersonaAIProvider.gemini.rawValue, forKey: "selectedAIProvider")
+            UserDefaults.standard.set(false, forKey: "selectedAIProvider.isLocal")
+            NSUbiquitousKeyValueStore.default.set(PersonaAIProvider.foundationModels.rawValue, forKey: "selectedAIProvider")
+            NSUbiquitousKeyValueStore.default.synchronize()
+
+            #expect(SettingsStore.selectedProvider() == .foundationModels)
+        }
     }
 }

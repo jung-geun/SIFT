@@ -1,17 +1,15 @@
 import Foundation
 
-// MARK: - 수동 추가 시 온디바이스 AFM 약한 정렬 서비스
+// MARK: - 수동 추가 시 약한 AI 정렬 서비스
 //
-// TODO를 수동으로 추가하는 즉시 해당 항목만 온디바이스 AFM(ANE)으로 단일 분석해
+// TODO를 수동으로 추가하는 즉시 해당 항목만 현재 선택된 라우터로 단일 분석해
 // 근사 우선순위 점수를 부여한다.
 //
 // 설계 원칙:
-//   - 클라우드 미사용: IntelligenceServiceFactory(사용자 선택 provider)를 우회하고
-//     FoundationModelsEngine을 직접 인스턴스화 → 항상 온디바이스.
+//   - 동일 라우팅 사용: 목록의 "AI 정리"와 같은 provider 선택 / Gemini 폴백 정책을 따른다.
 //   - 비차단: 호출부가 Task { } 로 감싸 UI 지연 없이 background 실행.
 //   - 수동 우선순위 보호: manualPriority != nil이면 분석 자체를 건너뜀.
-//   - 폴백: AFM 미가용(구형 기기 등) 시 FoundationModelsEngine이 자동으로
-//     HeuristicEngine으로 폴백 → 즉시·결정론적 점수 부여.
+//   - 폴백: 라우터 전체 실패 시에만 HeuristicEngine으로 즉시·결정론적 점수 부여.
 //
 // ⚠️ 전체 상대 재정렬은 기존 "AI 정리" 버튼(runPrioritize)이 담당.
 //    이 서비스는 단일 항목 삽입 시 "약한(weak) 정렬"만 수행한다.
@@ -19,7 +17,7 @@ import Foundation
 @MainActor
 enum QuickSortService {
 
-    /// 수동 추가된 단일 TODO를 온디바이스 AFM으로 즉시 분석하고 약한 우선순위 점수를 부여한다.
+    /// 수동 추가된 단일 TODO를 현재 선택된 AI 라우터로 즉시 분석하고 약한 우선순위 점수를 부여한다.
     ///
     /// - Parameters:
     ///   - todo: 방금 삽입된 Todo 인스턴스.
@@ -28,9 +26,20 @@ enum QuickSortService {
         // 수동 우선순위 설정 시 자동 분석 생략 (사용자 의도 존중)
         guard todo.manualPriority == nil else { return }
 
-        // 항상 온디바이스: FoundationModelsEngine(AFM ANE) → Heuristic 폴백 체인
-        let engine  = FoundationModelsEngine()
-        let results = (try? await engine.prioritize(todos: [todo], events: [], persona: persona)) ?? []
+        let provider = SettingsStore.selectedProvider()
+        let results: [PriorityResult]
+        do {
+            results = try await RoutedIntelligenceEngine(requestedProvider: provider)
+                .prioritize(todos: [todo], events: [], persona: persona)
+        } catch {
+            let heuristic = try? await HeuristicEngine().prioritize(todos: [todo], events: [], persona: persona)
+            results = heuristic?.map {
+                var updated = $0
+                updated.requestedProviderRawValue = provider.rawValue
+                updated.fallbackReason = error.localizedDescription
+                return updated
+            } ?? []
+        }
 
         guard let result = results.first else { return }
 

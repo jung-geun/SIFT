@@ -64,10 +64,12 @@ struct FMPriorityRankingList {
     var rankings: [FMPriorityRanking]
 }
 
-/// 행동 패턴 인사이트 재작성 출력 (B: 포그라운드 패턴 분석).
-/// summary는 휴리스틱 값 유지 — FM은 insights 배열만 재작성.
+/// 행동 패턴 분석 출력.
 @Generable
-struct FMPatternOutput {
+struct FMPatternAnalysisOutput {
+    @Guide(description: "1~3문장 한국어 행동 패턴 요약. 추천·조언 금지.")
+    var summary: String
+
     @Guide(description: "2~4개의 관찰된 사용자 행동 패턴. 각 항목은 한 문장 한국어. 패턴 사실만 서술. 추천·조언·권고 없음.")
     var insights: [String]
 }
@@ -241,28 +243,60 @@ struct FoundationModelsService {
         return allResults
     }
 
-    // MARK: - 행동 패턴 인사이트 재작성 (B: 포그라운드 분석)
+    // MARK: - 행동 패턴 분석 (B: 포그라운드 분석)
 
-    /// 휴리스틱 패턴 요약을 FM이 사용자 친화적 인사이트로 재작성한다.
-    /// insights 배열만 반환 — summary·fastTags는 호출 전 heuristic에서 확정됨.
-    /// 포그라운드 전용. 백그라운드 BGTask는 MemoryService.analyze()를 직접 호출.
-    func generatePatternInsights(summary: String, todos: [Todo]) async throws -> [String] {
-        guard !summary.isEmpty else { return [] }
+    /// 포그라운드 전용. 완료된 할 일 메타데이터만 사용해 행동 패턴 요약과 인사이트를 생성한다.
+    func generatePatternAnalysis(todos: [Todo]) async throws -> (summary: String, insights: [String]) {
+        let metadata = buildPatternAnalysisMetadata(todos: todos)
+        guard !metadata.isEmpty else { return ("", []) }
 
-        let instructions = Prompts.PatternInsights.systemInstruction
-        let recentTitles = todos.filter { $0.isCompleted }.prefix(10)
-            .map { String($0.title.prefix(40)) }.joined(separator: ", ")
+        let instructions = """
+        \(Prompts.PatternInsights.systemInstruction)
 
+        출력은 반드시 summary와 insights를 모두 포함해야 합니다.
+        """
         let prompt = """
-[통계 요약]
-\(String(summary.prefix(inputCharCap)))
+        [완료된 할 일 메타데이터]
+        \(metadata)
 
-\(recentTitles.isEmpty ? "" : "[최근 완료 할 일 예시]\n\(recentTitles)\n")
-\(Prompts.PatternInsights.requestSuffix)
-"""
-        let session  = LanguageModelSession(instructions: instructions)
-        let response = try await session.respond(to: prompt, generating: FMPatternOutput.self)
-        return response.content.insights.filter { !$0.isEmpty }
+        아래 규칙을 지키세요.
+        - title, tags, createdAt, dueDate, completedAt 메타데이터만 사용합니다.
+        - summary는 1~3문장 한국어 행동 패턴 요약입니다.
+        - insights는 2~4개의 한국어 관찰 문장 배열입니다.
+        - 추천, 조언, 실행 지시는 금지합니다.
+        """
+
+        let session = LanguageModelSession(instructions: instructions)
+        let response = try await session.respond(to: prompt, generating: FMPatternAnalysisOutput.self)
+        let output = response.content
+        return (
+            output.summary.trimmingCharacters(in: .whitespacesAndNewlines),
+            output.insights
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+        )
+    }
+
+    private func buildPatternAnalysisMetadata(todos: [Todo], limit: Int = 24) -> String {
+        let completed = todos
+            .filter { $0.isCompleted && $0.completedAt != nil }
+            .sorted { ($0.completedAt ?? .distantPast) > ($1.completedAt ?? .distantPast) }
+            .prefix(limit)
+
+        return completed.enumerated().map { index, todo in
+            let title = String(todo.title.replacingOccurrences(of: "\n", with: " ").prefix(60))
+            let tags = todo.tags.isEmpty ? "-" : todo.tags.joined(separator: ", ")
+            let created = AppDateFormat.llmString(from: todo.createdAt)
+            let due = todo.dueDate.map { AppDateFormat.llmString(from: $0) } ?? "null"
+            let completedAt = todo.completedAt.map { AppDateFormat.llmString(from: $0) } ?? "null"
+            return """
+            \(index + 1). title: \(title)
+               tags: \(tags)
+               createdAt: \(created)
+               dueDate: \(due)
+               completedAt: \(completedAt)
+            """
+        }.joined(separator: "\n")
     }
 
     // MARK: - 이메일 마감 추출 (C: AFM 강제)

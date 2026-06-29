@@ -230,6 +230,8 @@ final class AppDataContainer: ObservableObject {
                 newTodo.aiPersonaFit = todo.aiPersonaFit
                 newTodo.aiDetail = todo.aiDetail
                 newTodo.aiEngine = todo.aiEngine
+                newTodo.aiRequestedProvider = todo.aiRequestedProvider
+                newTodo.aiFallbackReason = todo.aiFallbackReason
                 newTodo.isFixedSchedule = todo.isFixedSchedule
                 icloudContext.insert(newTodo)
             }

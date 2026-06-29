@@ -88,20 +88,17 @@ struct FMRankingsSmokeTests {
 @Suite("FM 패턴 인사이트 스모크")
 struct FMPatternInsightsSmokeTests {
 
-    @Test("generatePatternInsights: insights 반환, 조언 키워드 부재 (A-1 회귀 가드)")
-    func generatePatternInsightsSmoke() async throws {
+    @Test("generatePatternAnalysis: summary·insights 반환, 조언 키워드 부재")
+    func generatePatternAnalysisSmoke() async throws {
         if #available(iOS 26.0, *) {
             guard FoundationModelsService.isAvailable else { return }
             let service = FoundationModelsService()
-            let summary = "주요 집중 시간대: 22:00~01:00. 평균 착수 지연: 2.3일. 빠른 완료 유형: 단순 반복 업무(15분). 지연 유형: 문서 작성(3일+)."
             let todos = makeTodos(["문서 작성", "코드 리뷰"])
-            let insights = try await service.generatePatternInsights(summary: summary, todos: todos)
+            let result = try await service.generatePatternAnalysis(todos: todos)
 
-            for insight in insights {
+            #expect(!result.summary.isEmpty, "summary가 비어 있습니다")
+            for insight in result.insights {
                 #expect(!insight.isEmpty, "빈 insight가 있습니다")
-                // 회귀 가드: PatternInsights 명시적 조언 금지 (A-1 정합화)
-                // "하세요"는 관찰 서술문에도 출현 가능한 폴라이트 어미라 제외,
-                // 명백한 권고 표현만 체크한다.
                 let lower = insight.lowercased()
                 let hasExplicitAdvice = lower.contains("해보세요")
                     || lower.contains("하는 것이 좋")
@@ -112,13 +109,14 @@ struct FMPatternInsightsSmokeTests {
         }
     }
 
-    @Test("빈 summary → 빈 배열 반환 (guard 확인)")
-    func emptySummaryReturnsEmpty() async throws {
+    @Test("빈 todos → 빈 summary와 insights 반환")
+    func emptyTodosReturnEmptyAnalysis() async throws {
         if #available(iOS 26.0, *) {
             guard FoundationModelsService.isAvailable else { return }
             let service = FoundationModelsService()
-            let insights = try await service.generatePatternInsights(summary: "", todos: [])
-            #expect(insights.isEmpty, "빈 summary에서 insights가 반환되어서는 안 됩니다")
+            let result = try await service.generatePatternAnalysis(todos: [])
+            #expect(result.summary.isEmpty, "빈 todos에서 summary가 비어 있어야 합니다")
+            #expect(result.insights.isEmpty, "빈 todos에서 insights가 비어 있어야 합니다")
         }
     }
 }

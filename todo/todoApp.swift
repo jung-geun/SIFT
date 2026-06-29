@@ -4,6 +4,7 @@ import CloudKit
 import UserNotifications
 import BackgroundTasks
 import EventKit
+import MSAL
 
 // MARK: - BGTask 식별자
 
@@ -56,6 +57,17 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         completionHandler(.newData)
     }
 
+    func application(
+        _ app: UIApplication,
+        open url: URL,
+        options: [UIApplication.OpenURLOptionsKey: Any] = [:]
+    ) -> Bool {
+        MSALPublicClientApplication.handleMSALResponse(
+            url,
+            sourceApplication: options[.sourceApplication] as? String
+        )
+    }
+
     // MARK: - BGAppRefreshTask 핸들러
 
     @MainActor
@@ -97,48 +109,45 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
 
     @MainActor @discardableResult
     private func fetchEmailTodos(context: ModelContext) async -> Bool {
-        guard EmailService.shared.isAuthenticated else { return false }
         // 메일 자동 분석 토글 — 배경(BGTask) 경로 독립 게이트 (마스터 onDeviceLLMEnabled와 무관)
         // register(defaults:)로 기본값 true 보장 → 기존 사용자 동작 그대로 유지
         guard UserDefaults.standard.bool(forKey: "pieroot.todo.emailAutoAnalysisEnabled") else { return false }
-        do {
-            // C: 백그라운드 BGTask → allowFoundationModels:false (ANE 백그라운드 미사용)
-            let existing = (try? context.fetch(FetchDescriptor<Todo>())) ?? []
-            let existingRefs = Set(existing.map { $0.sourceRef })
-            let (todos, events) = try await EmailService.shared.fetchAndExtractAll(
-                allowFoundationModels: false,
-                excludingAlreadyHandledMessageIDs: existingRefs
-            )
-            // Todo 삽입 (sourceRef로 중복 방지)
-            for todo in todos where !existingRefs.contains(todo.sourceRef) {
-                context.insert(todo)
-                // 캘린더 자동 등록 정책 적용 (긴급/최우선 강제 포함)
-                CalendarService.shared.applyAutoRegistration(for: todo)
-            }
 
-            // 캘린더 일정 자동 등록 (이메일에서 추출한 캘린더 이벤트)
-            if CalendarService.shared.isAuthorized
-                && CalendarAutoPolicy.isAuto {
-                let iso = ISO8601DateFormatter()
-                for (event, sourceRef) in events {
-                    guard !CalendarService.shared.hasEvent(forEmailRef: sourceRef),
-                          let start = iso.date(from: event.startISO) else { continue }
-                    let end = event.endISO.isEmpty ? nil : iso.date(from: event.endISO)
-                    _ = try? CalendarService.shared.createEventFromEmail(
-                        title: event.title, start: start, end: end,
-                        isAllDay: event.isAllDay, location: event.location,
-                        notes: event.notes, sourceRef: sourceRef
-                    )
-                }
-            }
+        let gmailAuthenticated = EmailService.shared.isAuthenticated
+        let outlookAuthenticated = await OutlookMailService.shared.canAccessMailSilently()
+        guard gmailAuthenticated || outlookAuthenticated else { return false }
 
-            // 마지막 동기화 시각 저장
-            UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "pieroot.todo.lastEmailFetchDate")
-            return true
-        } catch {
-            print("[EmailService] fetch 실패: \(error.localizedDescription)")
-            return false
+        var didSucceed = false
+        var failures: [String] = []
+
+        if gmailAuthenticated {
+            do {
+                _ = try await EmailService.shared.fetchAndStoreExtractedItems(
+                    context: context,
+                    allowFoundationModels: false
+                )
+                didSucceed = true
+            } catch {
+                print("[EmailService] fetch 실패: \(error.localizedDescription)")
+                failures.append("gmail")
+            }
         }
+
+        if outlookAuthenticated {
+            do {
+                _ = try await OutlookMailService.shared.fetchAndStoreExtractedItems(
+                    context: context,
+                    allowFoundationModels: false
+                )
+                didSucceed = true
+            } catch {
+                print("[OutlookMailService] fetch 실패: \(error.localizedDescription)")
+                failures.append("outlook")
+            }
+        }
+
+        if didSucceed { return true }
+        return failures.isEmpty == false ? false : didSucceed
     }
 
     // MARK: - Foreground 알림 표시
@@ -206,14 +215,17 @@ struct todoApp: App {
 
     /// 선택된 탭 (lastUsed 복원용).
     @AppStorage("pieroot.todo.selectedTab") private var selectedTab = 0
+    @AppStorage("pieroot.todo.hasOnboarded") private var hasOnboarded = false
+    @AppStorage("pieroot.todo.hasCompletedTutorial") private var hasCompletedTutorial = false
 
     /// 시작 화면 정책: "lastUsed"(마지막 화면) | "fixed"(고정 탭)
     @AppStorage("pieroot.todo.launchBehavior") private var launchBehavior = "lastUsed"
 
     /// 고정 탭 인덱스 (launchBehavior == "fixed" 일 때 사용)
     @AppStorage("pieroot.todo.launchTab") private var launchTab = 0
-
     @AppStorage("pieroot.todo.iCloudSyncEnabled") private var iCloudSyncEnabled = false
+    @StateObject private var tutorial = AppTutorialState()
+    @State private var tabVisibility = AppTabVisibility(calendarVisible: false, mailVisible: false)
 
     // MARK: - 페르소나 중복 제거 (PersonaSettingsView에서도 참조)
 
@@ -252,82 +264,123 @@ struct todoApp: App {
         WindowGroup {
             // 캘린더 탭(tag 1) 재탭 시 오늘로 이동하는 커스텀 바인딩
             let tabBinding = Binding<Int>(
-                get: { selectedTab },
+                get: { tabVisibility.clamped(selectedTab) },
                 set: { newTab in
-                    if newTab == 1 && selectedTab == 1 {
+                    let clamped = tabVisibility.clamped(newTab)
+                    if tabVisibility.calendarVisible
+                        && clamped == AppTabID.calendar.rawValue
+                        && selectedTab == AppTabID.calendar.rawValue {
                         NotificationCenter.default.post(name: .calendarScrollToToday, object: nil)
                     }
-                    selectedTab = newTab
+                    selectedTab = clamped
+                    tutorial.handleTabSelection(clamped)
                 }
             )
             TabView(selection: tabBinding) {
                 TodoListView()
                     .tabItem { Label("할 일", systemImage: "checklist") }
-                    .tag(0)
-                CalendarTabView()
-                    .tabItem { Label("캘린더", systemImage: "calendar") }
-                    .tag(1)
-                MailTabView()
-                    .modelContainer(appData.emailContainer)
-                    .tabItem { Label("메일", systemImage: "envelope") }
-                    .tag(2)
+                    .tag(AppTabID.todo.rawValue)
+
+                if tabVisibility.calendarVisible {
+                    CalendarTabView()
+                        .tabItem { Label("캘린더", systemImage: "calendar") }
+                        .tag(AppTabID.calendar.rawValue)
+                }
+
+                if tabVisibility.mailVisible {
+                    MailTabView()
+                        .modelContainer(appData.emailContainer)
+                        .tabItem { Label("메일", systemImage: "envelope") }
+                        .tag(AppTabID.mail.rawValue)
+                }
             }
             .environmentObject(syncMonitor)
-                .onAppear {
-                    NSUbiquitousKeyValueStore.default.synchronize()
+            .environment(\.appTutorialState, tutorial)
+            .onAppear {
+                NSUbiquitousKeyValueStore.default.synchronize()
 
-                    let ctx = appData.container.mainContext
-                    appDelegate.modelContext = ctx
-                    todoApp.deduplicatePersonas(context: ctx)
+                let ctx = appData.container.mainContext
+                appDelegate.modelContext = ctx
+                todoApp.deduplicatePersonas(context: ctx)
 
-                    CalendarService.shared.restoreAuthorizationIfGranted()
-                    scheduleEmailRefresh()
-                    scheduleMemoryAnalysis()
-
-                    // 시작 화면 정책: fixed면 지정 탭으로 강제 이동
+                CalendarService.shared.restoreAuthorizationIfGranted()
+                Task {
+                    await refreshTabVisibility()
                     if launchBehavior == "fixed" {
                         selectedTab = launchTab
                     }
+                    if hasOnboarded && !hasCompletedTutorial {
+                        selectedTab = AppTabID.todo.rawValue
+                        tutorial.start(tabVisibility: tabVisibility)
+                    }
+                }
+                scheduleEmailRefresh()
+                scheduleMemoryAnalysis()
 
-                    // 어느 탭이든 앱 실행 시 iCloud 동기화 시작
-                    if iCloudSyncEnabled {
-                        syncMonitor.startObserving(initialCount: 0)
-                    }
+                // 어느 탭이든 앱 실행 시 iCloud 동기화 시작
+                if iCloudSyncEnabled {
+                    syncMonitor.startObserving(initialCount: 0)
+                }
 
-                    // 콜드 런치: scenePhase는 이미 .active라 onChange가 발동하지 않음
+                // 콜드 런치: scenePhase는 이미 .active라 onChange가 발동하지 않음
+                Task {
+                    await LLMAutomationOrchestrator.shared.runIfEligible(context: ctx)
+                }
+                Task {
+                    await CalendarService.shared.runWeeklyImportIfDue(context: ctx)
+                }
+                Task {
+                    // iCloud 동기화가 진행 중이면 완료 후 캘린더 동기화
+                    // (iCloud에 먼저 도착한 캘린더 이벤트를 Todo 없는 신규로 오인하는 경쟁 조건 방지)
+                    if iCloudSyncEnabled { await syncMonitor.waitForCompletion() }
+                    await CalendarService.shared.syncCalendarWithTodos(context: ctx)
+                    await CalendarService.shared.cleanupOldCompletedTodos(context: ctx)
+                }
+            }
+            .onChange(of: appData.rebuildID) { _, _ in
+                // 컨테이너 재건(iCloud 동적 전환) 후 AppDelegate 컨텍스트 갱신
+                appDelegate.modelContext = appData.container.mainContext
+                todoApp.deduplicatePersonas(context: appData.container.mainContext)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .EKEventStoreChanged)) { _ in
+                if let ctx = appDelegate.modelContext {
                     Task {
-                        await LLMAutomationOrchestrator.shared.runIfEligible(context: ctx)
-                    }
-                    Task {
-                        await CalendarService.shared.runWeeklyImportIfDue(context: ctx)
-                    }
-                    Task {
-                        // iCloud 동기화가 진행 중이면 완료 후 캘린더 동기화
-                        // (iCloud에 먼저 도착한 캘린더 이벤트를 Todo 없는 신규로 오인하는 경쟁 조건 방지)
                         if iCloudSyncEnabled { await syncMonitor.waitForCompletion() }
                         await CalendarService.shared.syncCalendarWithTodos(context: ctx)
-                        await CalendarService.shared.cleanupOldCompletedTodos(context: ctx)
                     }
                 }
-                .onChange(of: appData.rebuildID) { _, _ in
-                    // 컨테이너 재건(iCloud 동적 전환) 후 AppDelegate 컨텍스트 갱신
-                    appDelegate.modelContext = appData.container.mainContext
-                    todoApp.deduplicatePersonas(context: appData.container.mainContext)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .gmailAuthChanged)) { _ in
+                Task { await refreshTabVisibility() }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .outlookAuthChanged)) { _ in
+                Task { await refreshTabVisibility() }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .calendarAuthorizationChanged)) { _ in
+                Task { await refreshTabVisibility() }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .appTutorialRequested)) { _ in
+                Task {
+                    await refreshTabVisibility()
+                    selectedTab = AppTabID.todo.rawValue
+                    tutorial.start(tabVisibility: tabVisibility)
                 }
-                .onReceive(NotificationCenter.default.publisher(for: .EKEventStoreChanged)) { _ in
-                    if let ctx = appDelegate.modelContext {
-                        Task {
-                            if iCloudSyncEnabled { await syncMonitor.waitForCompletion() }
-                            await CalendarService.shared.syncCalendarWithTodos(context: ctx)
-                        }
-                    }
-                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .settingsDismissRequested)) { _ in
+                Task { await refreshTabVisibility() }
+            }
             .onChange(of: scenePhase) { _, newPhase in
                 switch newPhase {
                 case .active:
                     // 포그라운드 전환 시에도 동기화 시작 (탭 무관)
                     if iCloudSyncEnabled {
                         syncMonitor.startObserving(initialCount: 0)
+                    }
+                    Task {
+                        await refreshTabVisibility()
+                        if launchBehavior == "fixed" {
+                            selectedTab = launchTab
+                        }
                     }
                     if let ctx = appDelegate.modelContext {
                         Task {
@@ -348,6 +401,12 @@ struct todoApp: App {
                     break
                 }
             }
+            .overlay {
+                AppTutorialView(
+                    selectedTab: $selectedTab,
+                    tabVisibility: tabVisibility
+                )
+            }
         }
         .modelContainer(appData.container)
 
@@ -358,7 +417,22 @@ struct todoApp: App {
                 PersonaSettingsView()
             }
             .modelContainer(appData.container)
+            .environment(\.appTutorialState, tutorial)
         }
         #endif
     }
+
+    @MainActor
+    private func refreshTabVisibility() async {
+        CalendarService.shared.restoreAuthorizationIfGranted()
+        let calendarVisible = CalendarService.shared.isAuthorized
+        let outlookVisible = OutlookMailService.shared.isConfigured
+            ? await OutlookMailService.shared.canAccessMailSilently()
+            : false
+        let mailVisible = EmailService.shared.isAuthenticated || outlookVisible
+        tabVisibility = AppTabVisibility(calendarVisible: calendarVisible, mailVisible: mailVisible)
+        selectedTab = tabVisibility.clamped(selectedTab)
+        launchTab = tabVisibility.clamped(launchTab)
+    }
+
 }

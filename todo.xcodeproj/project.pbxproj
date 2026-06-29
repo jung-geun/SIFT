@@ -7,13 +7,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		AE58F1D22FDEFA3D00690FA6 /* privacy-policy.md in Resources */ = {isa = PBXBuildFile; fileRef = AE58F1D02FDEFA3D00690FA6 /* privacy-policy.md */; };
-		AE58F1D32FDEFA3D00690FA6 /* terms-of-service.md in Resources */ = {isa = PBXBuildFile; fileRef = AE58F1D12FDEFA3D00690FA6 /* terms-of-service.md */; };
-		AEDC6C872FE3E978006E59B5 /* MLXEmbedders in Frameworks */ = {isa = PBXBuildFile; productRef = AEDC6C862FE3E978006E59B5 /* MLXEmbedders */; };
-		AEDC6C892FE3E978006E59B5 /* MLXHuggingFace in Frameworks */ = {isa = PBXBuildFile; productRef = AEDC6C882FE3E978006E59B5 /* MLXHuggingFace */; };
+		AE8A10112FEA0001006E59B5 /* MSAL in Frameworks */ = {isa = PBXBuildFile; productRef = AE8A10102FEA0001006E59B5 /* MSAL */; };
 		AEDC6C8B2FE3E978006E59B5 /* MLXLLM in Frameworks */ = {isa = PBXBuildFile; productRef = AEDC6C8A2FE3E978006E59B5 /* MLXLLM */; };
 		AEDC6C8D2FE3E978006E59B5 /* MLXLMCommon in Frameworks */ = {isa = PBXBuildFile; productRef = AEDC6C8C2FE3E978006E59B5 /* MLXLMCommon */; };
-		AEDC6C8F2FE3E978006E59B5 /* MLXVLM in Frameworks */ = {isa = PBXBuildFile; productRef = AEDC6C8E2FE3E978006E59B5 /* MLXVLM */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -77,11 +73,9 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				AEDC6C8F2FE3E978006E59B5 /* MLXVLM in Frameworks */,
 				AEDC6C8B2FE3E978006E59B5 /* MLXLLM in Frameworks */,
-				AEDC6C872FE3E978006E59B5 /* MLXEmbedders in Frameworks */,
 				AEDC6C8D2FE3E978006E59B5 /* MLXLMCommon in Frameworks */,
-				AEDC6C892FE3E978006E59B5 /* MLXHuggingFace in Frameworks */,
+				AE8A10112FEA0001006E59B5 /* MSAL in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -144,11 +138,9 @@
 			);
 			name = todo;
 			packageProductDependencies = (
-				AEDC6C862FE3E978006E59B5 /* MLXEmbedders */,
-				AEDC6C882FE3E978006E59B5 /* MLXHuggingFace */,
 				AEDC6C8A2FE3E978006E59B5 /* MLXLLM */,
 				AEDC6C8C2FE3E978006E59B5 /* MLXLMCommon */,
-				AEDC6C8E2FE3E978006E59B5 /* MLXVLM */,
+				AE8A10102FEA0001006E59B5 /* MSAL */,
 			);
 			productName = todo;
 			productReference = AE58F1A22FDEFA3B00690FA6 /* todo.app */;
@@ -243,6 +235,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				AEDC6C852FE3E978006E59B5 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */,
+				AE8A100F2FEA0001006E59B5 /* XCRemoteSwiftPackageReference "microsoft-authentication-library-for-objc" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = AE58F1A32FDEFA3B00690FA6 /* Products */;
@@ -261,8 +254,6 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				AE58F1D22FDEFA3D00690FA6 /* privacy-policy.md in Resources */,
-				AE58F1D32FDEFA3D00690FA6 /* terms-of-service.md in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -345,7 +336,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0.3;
+				MARKETING_VERSION = 1.0.5;
 				PRODUCT_BUNDLE_IDENTIFIER = "pieroot.sift-todo";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -383,7 +374,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0.3;
+				MARKETING_VERSION = 1.0.5;
 				PRODUCT_BUNDLE_IDENTIFIER = "pieroot.sift-todo";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -649,6 +640,14 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
+		AE8A100F2FEA0001006E59B5 /* XCRemoteSwiftPackageReference "microsoft-authentication-library-for-objc" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/AzureAD/microsoft-authentication-library-for-objc";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.5.1;
+			};
+		};
 		AEDC6C852FE3E978006E59B5 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/ml-explore/mlx-swift-lm";
@@ -660,15 +659,10 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
-		AEDC6C862FE3E978006E59B5 /* MLXEmbedders */ = {
+		AE8A10102FEA0001006E59B5 /* MSAL */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = AEDC6C852FE3E978006E59B5 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */;
-			productName = MLXEmbedders;
-		};
-		AEDC6C882FE3E978006E59B5 /* MLXHuggingFace */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = AEDC6C852FE3E978006E59B5 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */;
-			productName = MLXHuggingFace;
+			package = AE8A100F2FEA0001006E59B5 /* XCRemoteSwiftPackageReference "microsoft-authentication-library-for-objc" */;
+			productName = MSAL;
 		};
 		AEDC6C8A2FE3E978006E59B5 /* MLXLLM */ = {
 			isa = XCSwiftPackageProductDependency;
@@ -679,11 +673,6 @@
 			isa = XCSwiftPackageProductDependency;
 			package = AEDC6C852FE3E978006E59B5 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */;
 			productName = MLXLMCommon;
-		};
-		AEDC6C8E2FE3E978006E59B5 /* MLXVLM */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = AEDC6C852FE3E978006E59B5 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */;
-			productName = MLXVLM;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

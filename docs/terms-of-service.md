@@ -13,7 +13,7 @@
 
 ## 1. 서비스 정의
 
-SIFT는 이메일·캘린더·수동 입력으로 수집한 할 일을 온디바이스 AI로 분류·정리하는 iOS/macOS 개인 생산성 앱입니다. 운영자가 개인적으로 개발·배포하는 무료 서비스입니다.
+SIFT는 이메일·캘린더·수동 입력으로 수집한 할 일을 기본적으로 온디바이스 AI로 분류·정리하는 iOS/macOS 개인 생산성 앱이며, 사용자가 선택하면 자신의 API 키로 Google Gemini API를 보조 제공자로 사용할 수 있습니다. 운영자가 개인적으로 개발·배포하는 무료 서비스입니다.
 
 ---
 
@@ -31,7 +31,7 @@ SIFT는 이메일·캘린더·수동 입력으로 수집한 할 일을 온디바
 
 | 서비스 | 제공사 | 약관 |
 |--------|--------|------|
-| Gmail API | Google LLC | [Google 서비스 약관](https://policies.google.com/terms) |
+| Gmail API / Gemini API | Google LLC | [Google 서비스 약관](https://policies.google.com/terms) |
 | iCloud / CloudKit | Apple Inc. | [Apple 서비스 약관](https://www.apple.com/legal/internet-services/icloud/) |
 
 제3자 서비스 이용 과정에서 발생하는 책임(데이터 손실, 서비스 중단 등)은 해당 제공사와의 관계에서 이용자가 직접 부담합니다.
@@ -42,6 +42,7 @@ SIFT는 이메일·캘린더·수동 입력으로 수집한 할 일을 온디바
 
 - 서비스는 현재 상태 그대로("as-is") 무료로 제공됩니다.
 - 운영자는 사전 통보 없이 기능을 변경·중단·종료할 수 있습니다.
+- 온디바이스 AI 및 Apple/Google 시스템 서비스의 가용성은 OS·기기 상태와 사용자의 Gemini API 키 구성 여부에 따라 달라질 수 있습니다.
 - iOS 26.5 이상, 특정 기기 성능을 요구하는 온디바이스 AI 기능은 구형 기기에서 이용이 제한될 수 있습니다.
 
 ---

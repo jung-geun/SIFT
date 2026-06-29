@@ -29,9 +29,11 @@ final class CalendarService {
         do {
             let granted = try await store.requestFullAccessToEvents()
             isAuthorized = granted
+            NotificationCenter.default.post(name: .calendarAuthorizationChanged, object: nil)
             return granted
         } catch {
             isAuthorized = false
+            NotificationCenter.default.post(name: .calendarAuthorizationChanged, object: nil)
             return false
         }
     }
@@ -196,6 +198,61 @@ final class CalendarService {
             event.url?.scheme == "x-todoapp-email" && event.url?.host == sourceRef
         }
     }
+    @discardableResult
+    func removeEmailCalendarArtifacts(for todo: Todo) -> Bool {
+        guard isAuthorized else { return false }
+        guard todo.todoSource == .email else { return false }
+
+        var eventIDs = Set<String>()
+        if let eventID = todo.calendarEventID, !eventID.isEmpty {
+            eventIDs.insert(eventID)
+        }
+        if !todo.sourceRef.isEmpty, let mappedID = emailEventMapping[todo.sourceRef], !mappedID.isEmpty {
+            eventIDs.insert(mappedID)
+        }
+        if !todo.calendarEventExternalID.isEmpty {
+            let items = store.calendarItems(withExternalIdentifier: todo.calendarEventExternalID)
+            for case let event as EKEvent in items {
+                if let eventID = event.eventIdentifier, !eventID.isEmpty {
+                    eventIDs.insert(eventID)
+                }
+            }
+        }
+        if let dueDate = todo.dueDate,
+           !todo.sourceRef.isEmpty,
+           let found = findEmailEvent(sourceRef: todo.sourceRef, near: dueDate),
+           let foundID = found.eventIdentifier,
+           !foundID.isEmpty {
+            eventIDs.insert(foundID)
+        }
+
+        guard !eventIDs.isEmpty else { return false }
+
+        for eventID in eventIDs {
+            do {
+                try removeEvent(eventID: eventID)
+            } catch {
+                return false
+            }
+        }
+
+        if !todo.sourceRef.isEmpty {
+            var mapping = emailEventMapping
+            mapping.removeValue(forKey: todo.sourceRef)
+            emailEventMapping = mapping
+        }
+
+        todo.calendarEventID = nil
+        todo.calendarEventExternalID = ""
+        return true
+    }
+
+    @discardableResult
+    private func removePendingEmailCalendarLinkIfNeeded(for todo: Todo) -> Bool {
+        guard todo.triage != .todo else { return false }
+        return removeEmailCalendarArtifacts(for: todo)
+    }
+
 
     @discardableResult
     func createEventFromEmail(
@@ -247,6 +304,15 @@ final class CalendarService {
 // MARK: - CalendarService + 자동 등록
 
 extension CalendarService {
+    static func isAutomaticRegistrationCandidate(_ todo: Todo) -> Bool {
+        guard todo.todoSource != .calendar else { return false }
+        guard todo.dueDate != nil else { return false }
+        if todo.todoSource == .email {
+            return todo.triage == .todo
+        }
+        return true
+    }
+
 
     /// 마감일이 있는 todo를 캘린더에 자동 등록한다 (중복 방지 내장).
     /// - 캘린더 출처 todo는 역방향 재등록 방지를 위해 무시.
@@ -254,9 +320,8 @@ extension CalendarService {
     /// - 마감이 있으면 우선순위·정책과 무관하게 항상 등록됨.
     @discardableResult
     func applyAutoRegistration(for todo: Todo) -> Bool {
-        // 캘린더 출처 todo는 재등록하지 않음 (역방향 중복 방지)
-        guard todo.todoSource != .calendar else { return false }
-        guard isAuthorized, todo.dueDate != nil else { return false }
+        guard Self.isAutomaticRegistrationCandidate(todo) else { return false }
+        guard isAuthorized else { return false }
 
         // 1) 이 기기의 eventIdentifier로 이벤트 존재 확인
         if let id = todo.calendarEventID, store.event(withIdentifier: id) != nil {
@@ -353,16 +418,21 @@ extension CalendarService {
     /// - 신규 이벤트: source=.calendar, triage=.review, isFixedSchedule=event.isRecurring으로 삽입.
     /// - applyAutoRegistration 호출 안 함 → 캘린더 역방향 재등록 방지.
     @MainActor
-    func syncCalendarTodos(context: ModelContext) async {
+    @discardableResult
+    func syncCalendarTodos(context: ModelContext) async -> Bool {
         let allEvents = upcomingEvents(days: 30).filter { !$0.identifier.isEmpty }
-        guard !allEvents.isEmpty else { return }
+        guard !allEvents.isEmpty else { return false }
 
         let now = Date()
         var todos = (try? context.fetch(FetchDescriptor<Todo>())) ?? []
+        var hasChanges = false
 
         // 1. 등록 대기열 만료 항목 자동 제거 (마감 지났지만 진행중 미등록)
         for todo in todos where todo.triage == .review && !todo.isCompleted {
-            if let due = todo.dueDate, due < now { context.delete(todo) }
+            if let due = todo.dueDate, due < now {
+                context.delete(todo)
+                hasChanges = true
+            }
         }
         todos = (try? context.fetch(FetchDescriptor<Todo>())) ?? []
 
@@ -400,10 +470,15 @@ extension CalendarService {
 
             if let existing = calendarTodosByRef[ref] {
                 // 동기화: 제목·마감·고정 여부만 갱신, triageStatus·isCompleted 보존
-                existing.title           = event.title
-                existing.dueDate         = event.startDate
-                existing.isFixedSchedule = event.isRecurring
-
+                let isTitleChanged = existing.title != event.title
+                let isDueDateChanged = existing.dueDate != event.startDate
+                let isFixedScheduleChanged = existing.isFixedSchedule != event.isRecurring
+                if isTitleChanged || isDueDateChanged || isFixedScheduleChanged {
+                    existing.title = event.title
+                    existing.dueDate = event.startDate
+                    existing.isFixedSchedule = event.isRecurring
+                    hasChanges = true
+                }
             } else if linkedEventIDs.contains(event.identifier) {
                 // 앱이 만든 캘린더 이벤트의 역import 방지
                 continue
@@ -437,11 +512,17 @@ extension CalendarService {
                     sourceRef: ref
                 )
                 todo.calendarEventID = event.identifier
-                todo.triageStatus    = TodoTriage.review.rawValue
+                todo.triageStatus = TodoTriage.review.rawValue
                 todo.isFixedSchedule = event.isRecurring
                 context.insert(todo)
+                hasChanges = true
             }
         }
+
+        if hasChanges {
+            try? context.save()
+        }
+        return hasChanges
     }
 
     /// 어플과 캘린더의 일정을 양방향으로 동기화하고, 충돌 시 최근 수정된 내용을 우선하여 갱신합니다.
@@ -462,11 +543,28 @@ extension CalendarService {
         var hasChanges = false
 
         for todo in todos {
+            if removePendingEmailCalendarLinkIfNeeded(for: todo) {
+                todo.updatedAt = Date()
+                hasChanges = true
+                continue
+            }
+
             // 캘린더에서 역수입한 todo는 이 메서드의 관리 대상이 아님
             if todo.todoSource == .calendar { continue }
 
-            // 어플에서 생성된 할 일인데 마감이 설정되었지만 캘린더 ID가 없는 경우 -> 자동 등록
-            if todo.dueDate != nil && todo.calendarEventID == nil {
+            // 어플에서 생성된 할 일인데 자동 등록 대상이며 캘린더 ID가 없는 경우 -> 자동 등록
+            if Self.isAutomaticRegistrationCandidate(todo) && todo.calendarEventID == nil {
+                if todo.todoSource == .email,
+                   let dueDate = todo.dueDate,
+                   !todo.sourceRef.isEmpty,
+                   let existing = findEmailEvent(sourceRef: todo.sourceRef, near: dueDate),
+                   let existingID = existing.eventIdentifier,
+                   !existingID.isEmpty {
+                    todo.calendarEventID = existingID
+                    todo.updatedAt = existing.lastModifiedDate ?? existing.creationDate ?? Date()
+                    hasChanges = true
+                    continue
+                }
                 if let eventID = try? registerOrUpdate(todo: todo) {
                     todo.calendarEventID = eventID
                     // 저장 성공 후 이벤트의 수정 시간을 어플의 updatedAt과 정확히 싱크
@@ -533,6 +631,8 @@ extension CalendarService {
         if hasChanges {
             try? context.save()
         }
+
+        _ = await syncCalendarTodos(context: context)
     }
 
     /// Application Support 폴더 내 SQLite 관련 파일들의 크기 총합을 바이트 단위로 반환합니다.

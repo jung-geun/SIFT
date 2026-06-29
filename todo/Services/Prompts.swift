@@ -7,7 +7,7 @@ import Foundation
 //
 // 사용처 목록:
 //   1. Schedule        → IntelligenceService.swift — OnDeviceLLMIntelligenceEngine
-//   2. PatternInsights → FoundationModelsService.swift — generatePatternInsights()
+//   2. PatternInsights → FoundationModelsService.swift — generatePatternAnalysis()
 //   3. EmailFM         → FoundationModelsService.swift — analyzeEmail()
 //   4. PersonaFM       → FoundationModelsService.swift — buildPersonaInstructions()
 //   5. PersonaCloud    → PersonaGenerationService.swift — buildInstructions() (Qwen 폴백)
@@ -41,7 +41,7 @@ enum Prompts {
         # Strict Constraints
         - 출력은 반드시 아래 [출력 JSON 구조]와 정확히 일치해야 합니다.
         - 시스템 파서(Parser)가 읽을 수 있도록 Markdown 포맷(```json ... ``` 등)이나 어떠한 설명 텍스트도 포함하지 마십시오. 순수 JSON 문자열만 출력해야 합니다.
-        - `task_id`는 입력받은 UUID 값을 변경 없이 그대로 에코(Echo)해야 합니다.
+        - `task_id`는 입력받은 짧은 식별자(예: `T1`, `T2`)를 변경 없이 그대로 에코(Echo)해야 합니다.
 
         [입력 JSON 구조]
         {
@@ -54,7 +54,7 @@ enum Prompts {
           },
           "tasks": [
             {
-              "task_id": "<UUID>",
+              "task_id": "<T1 같은 짧은 식별자>",
               "title": "<제목>",
               "memo": "<메모>",
               "source": "memo_app|email|calendar",
@@ -76,8 +76,8 @@ enum Prompts {
                 "task_chaining": 2
               },
               "reasoning": {
-                "summary": "<해당 점수와 스케줄을 배정한 근거를 페르소나 및 소요시간과 연관지어 1~2문장으로 요약>",
-                "chaining_detail": "<선행/후행 태스크와의 관계 설명, 독립 태스크인 경우 빈 문자열>"
+                "summary": "<근거를 한 문장으로 짧게 요약>",
+                "chaining_detail": "<선행/후행 관계를 짧은 구문으로 설명, 독립 태스크인 경우 빈 문자열>"
               },
               "recommended_schedule": {
                 "start_time": "<예상 시작 시간 (ISO8601 현지시각+offset) 또는 빈 문자열>"

@@ -2,7 +2,7 @@ import Foundation
 import AuthenticationServices
 import Security
 import OSLog
-
+import SwiftData
 extension Array {
     func chunked(into size: Int) -> [[Element]] {
         stride(from: 0, to: count, by: size).map {
@@ -35,6 +35,23 @@ struct ExtractedEmailEvent: Codable {
     var location: String
     var notes: String
     var isAllDay: Bool
+}
+
+struct EmailIngestionResult: Sendable {
+    let todoCount: Int
+    let eventCount: Int
+}
+
+struct EmailCacheSyncResult: Sendable {
+    let upsertedMessageCount: Int
+    let prunedMessageCount: Int
+    let prunedTodoCount: Int
+}
+
+private struct RecentMessageSyncSnapshot: Sendable {
+    let messages: [GmailMessage]
+    let messageIDsInLookback: Set<String>
+    let lookbackCutoff: Date
 }
 
 /// 수동 등록 전용 이메일 할 일 초안 모델.
@@ -74,7 +91,7 @@ struct GmailMessage: Sendable {
 ///
 /// ⚠️ 프라이버시 불변식: 어떤 구현이든 메일 본문은 온디바이스 전용
 /// (NSDataDetector/AFM-PCC). 외부 서드파티 클라우드 전송 금지.
-protocol MailProvider: AnyObject {
+protocol MailProviderProtocol: AnyObject {
     /// 메일 계정 인증 (OAuth 등)
     func authenticate() async throws
 
@@ -93,7 +110,7 @@ protocol MailProvider: AnyObject {
 /// 1. Google Cloud Console에서 OAuth 클라이언트 ID 발급 (iOS 앱 유형)
 /// 2. 리디렉트 URI 스킴을 Info.plist CFBundleURLSchemes에 등록
 /// 3. `clientID`와 `clientSecret`에 실제 값 입력
-final class EmailService: NSObject, MailProvider {
+final class EmailService: NSObject, MailProviderProtocol {
     static let shared = EmailService()
     private override init() {}
 
@@ -102,7 +119,9 @@ final class EmailService: NSObject, MailProvider {
     private let clientID     = "746219534143-ij6p50gff6as4hn2bbhdc9a1u6os3jmp.apps.googleusercontent.com"
     private let clientSecret = ""
     private let redirectURI  = "com.googleusercontent.apps.746219534143-ij6p50gff6as4hn2bbhdc9a1u6os3jmp:/oauth2callback"
-    private let scope        = "https://www.googleapis.com/auth/gmail.readonly"
+    private let scope        = "https://www.googleapis.com/auth/gmail.modify"
+    private let requiredTokenScopeVersion = "gmail.modify.v1"
+    private let tokenScopeVersionAccount = "scope_version"
 
     private let keychainService = "pieroot.todo.gmail"
     private let logger = Logger(subsystem: "pieroot.todo", category: "GmailOAuth")
@@ -116,8 +135,27 @@ final class EmailService: NSObject, MailProvider {
 
     // MARK: - Authorization State
 
-    var isAuthenticated: Bool { loadTokens().accessToken != nil }
+    var isAuthenticated: Bool {
+        let tokens = loadTokens()
+        guard tokens.accessToken != nil || tokens.refreshToken != nil else { return false }
+        guard hasCurrentGmailScope else {
+            clearTokensIfScopeIsStale()
+            return false
+        }
+        return tokens.accessToken != nil
+    }
 
+    private var hasCurrentGmailScope: Bool {
+        KeychainStore.get(service: keychainService, account: tokenScopeVersionAccount) == requiredTokenScopeVersion
+    }
+
+    private func clearTokensIfScopeIsStale() {
+        let tokens = loadTokens()
+        guard tokens.accessToken != nil || tokens.refreshToken != nil else { return }
+        guard !hasCurrentGmailScope else { return }
+        deleteTokens()
+        NotificationCenter.default.post(name: .gmailAuthChanged, object: false)
+    }
     // MARK: - OAuth 2.0 (ASWebAuthenticationSession)
 
     // ASWebAuthenticationSession은 반드시 메인 스레드에서 실행해야 합니다.
@@ -177,12 +215,212 @@ final class EmailService: NSObject, MailProvider {
 
     // MARK: - Fetch & Extract
 
-    /// 새 메일을 가져와 FM으로 할 일을 추출하고 TodoSource.email로 SwiftData에 삽입.
-    /// - Parameter after: 마지막 확인 이후 히스토리 ID (없으면 최근 50건)
-    /// - Returns: 새로 생성된 할 일 목록
-    func fetchAndExtractTodos(after historyID: String? = nil) async throws -> [Todo] {
-        let (todos, _) = try await fetchAndExtractAll(after: historyID)
-        return todos
+    /// 새 메일을 가져와 온디바이스 분석 후 Todo/Calendar에 반영한다.
+    @MainActor
+    func fetchAndStoreExtractedItems(
+        context: ModelContext,
+        allowFoundationModels: Bool = true,
+        updateLastFetchTimestamp: Bool = true
+    ) async throws -> EmailIngestionResult {
+        let existing = (try? context.fetch(FetchDescriptor<Todo>())) ?? []
+        let existingRefs = Set(existing.map(\.sourceRef))
+        let (todos, events) = try await fetchAndExtractAll(
+            allowFoundationModels: allowFoundationModels,
+            excludingAlreadyHandledMessageIDs: existingRefs
+        )
+        let result = applyExtractedItems(
+            todos: todos,
+            events: events,
+            to: context,
+            existingRefs: existingRefs
+        )
+        if updateLastFetchTimestamp {
+            UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "pieroot.todo.lastEmailFetchDate")
+        }
+        return result
+    }
+
+    @MainActor
+    @discardableResult
+    func syncRecentMessageCache(
+        emailContext: ModelContext,
+        todoContext: ModelContext? = nil
+    ) async throws -> EmailCacheSyncResult {
+        let snapshot = try await fetchRecentMessageSyncSnapshot()
+        let existing = (try? emailContext.fetch(FetchDescriptor<EmailMessage>())) ?? []
+        let existingByID = Dictionary(uniqueKeysWithValues: existing.map { ($0.id, $0) })
+
+        var upsertedMessageCount = 0
+        for msg in snapshot.messages {
+            let serverIsRead = !msg.labelIds.contains("UNREAD")
+            if let email = existingByID[msg.id] {
+                var didChange = false
+                if email.threadID != msg.threadID {
+                    email.threadID = msg.threadID
+                    didChange = true
+                }
+                if email.subject != msg.subject {
+                    email.subject = msg.subject
+                    didChange = true
+                }
+                if email.from != msg.from {
+                    email.from = msg.from
+                    didChange = true
+                }
+                if email.snippet != msg.snippet {
+                    email.snippet = msg.snippet
+                    didChange = true
+                }
+                if email.receivedAt != msg.receivedAt {
+                    email.receivedAt = msg.receivedAt
+                    didChange = true
+                }
+                if email.isRead != serverIsRead {
+                    email.isRead = serverIsRead
+                    didChange = true
+                }
+                if didChange {
+                    upsertedMessageCount += 1
+                }
+            } else {
+                let email = EmailMessage(
+                    id: msg.id,
+                    threadID: msg.threadID,
+                    subject: msg.subject,
+                    from: msg.from,
+                    snippet: msg.snippet,
+                    body: msg.body,
+                    htmlBody: msg.htmlBody,
+                    receivedAt: msg.receivedAt
+                )
+                email.isRead = serverIsRead
+                emailContext.insert(email)
+                upsertedMessageCount += 1
+            }
+        }
+
+        let emailIDsInLookback = snapshot.messageIDsInLookback
+        let inWindowMissingEmailIDs = Set(
+            existing.lazy
+                .filter { $0.receivedAt >= snapshot.lookbackCutoff && !emailIDsInLookback.contains($0.id) }
+                .map(\.id)
+        )
+
+        var deletedRefs = inWindowMissingEmailIDs
+
+        var todos: [Todo] = []
+        if let todoContext {
+            todos = (try? todoContext.fetch(FetchDescriptor<Todo>())) ?? []
+        }
+
+        let todoLinkedCandidateRefs = Set(
+            todos.lazy
+                .filter {
+                    $0.todoSource == .email
+                        && !$0.sourceRef.isEmpty
+                        && !deletedRefs.contains($0.sourceRef)
+                        && !emailIDsInLookback.contains($0.sourceRef)
+                }
+                .map(\.sourceRef)
+        )
+
+        if !todoLinkedCandidateRefs.isEmpty {
+            guard let token = loadTokens().accessToken else {
+                throw EmailError.notAuthenticated
+            }
+            for ref in todoLinkedCandidateRefs {
+                if try await messageIsInActiveMailbox(id: ref, token: token) == false {
+                    deletedRefs.insert(ref)
+                }
+            }
+        }
+
+        let staleEmails = existing.filter { deletedRefs.contains($0.id) }
+        for email in staleEmails {
+            emailContext.delete(email)
+        }
+
+        var prunedTodoCount = 0
+        if let todoContext {
+            for todo in todos where deletedRefs.contains(todo.sourceRef) {
+                NotificationService.shared.cancel(todo: todo)
+                _ = CalendarService.shared.removeEmailCalendarArtifacts(for: todo)
+                todoContext.delete(todo)
+                prunedTodoCount += 1
+            }
+        }
+
+        if upsertedMessageCount > 0 || !staleEmails.isEmpty {
+            try emailContext.save()
+        }
+        if let todoContext, prunedTodoCount > 0 {
+            try todoContext.save()
+        }
+
+        return EmailCacheSyncResult(
+            upsertedMessageCount: upsertedMessageCount,
+            prunedMessageCount: staleEmails.count,
+            prunedTodoCount: prunedTodoCount
+        )
+    }
+
+    @MainActor
+    func applyExtractedItems(
+        todos newTodos: [Todo],
+        events extractedEvents: [(event: ExtractedEmailEvent, sourceRef: String)],
+        to context: ModelContext,
+        existingRefs: Set<String>
+    ) -> EmailIngestionResult {
+        var handledRefs = existingRefs
+        var insertedTodosByRef: [String: Todo] = [:]
+        var todoCount = 0
+        for todo in newTodos where !handledRefs.contains(todo.sourceRef) {
+            context.insert(todo)
+            handledRefs.insert(todo.sourceRef)
+            insertedTodosByRef[todo.sourceRef] = todo
+            todoCount += 1
+        }
+
+        var eventCount = 0
+        if CalendarService.shared.isAuthorized && CalendarAutoPolicy.isAuto {
+            let iso = ISO8601DateFormatter()
+            var processedEventRefs = Set<String>()
+            for (event, sourceRef) in extractedEvents {
+                guard let todo = insertedTodosByRef[sourceRef],
+                      CalendarService.isAutomaticRegistrationCandidate(todo),
+                      !processedEventRefs.contains(sourceRef),
+                      todo.calendarEventID == nil,
+                      let start = iso.date(from: event.startISO) else { continue }
+                let end = event.endISO.isEmpty ? nil : iso.date(from: event.endISO)
+                let alreadyLinked = CalendarService.shared.hasEvent(forEmailRef: sourceRef)
+                if let eventID = try? CalendarService.shared.createEventFromEmail(
+                    title: event.title,
+                    start: start,
+                    end: end,
+                    isAllDay: event.isAllDay,
+                    location: event.location,
+                    notes: event.notes,
+                    sourceRef: sourceRef
+                ) {
+                    todo.calendarEventID = eventID
+                    processedEventRefs.insert(sourceRef)
+                    if !alreadyLinked {
+                        eventCount += 1
+                    }
+                }
+            }
+
+            for todo in insertedTodosByRef.values
+                where CalendarService.isAutomaticRegistrationCandidate(todo)
+                    && todo.calendarEventID == nil
+                    && !CalendarService.shared.hasEvent(forEmailRef: todo.sourceRef) {
+                if CalendarService.shared.applyAutoRegistration(for: todo) {
+                    eventCount += 1
+                }
+            }
+        }
+
+        return EmailIngestionResult(todoCount: todoCount, eventCount: eventCount)
     }
 
     /// 할 일과 캘린더 일정을 한 번의 Gmail fetch로 함께 추출합니다.
@@ -206,11 +444,12 @@ final class EmailService: NSObject, MailProvider {
 
         let messages = try await listRecentMessagesForExtraction(after: historyID, excludingMessageIDs: excluded)
 
+        let ingestionEngine = EmailIngestionEngine()
         var todos: [Todo] = []
         for message in messages {
-            todos += (try? await extractTodos(from: message, allowFoundationModels: allowFoundationModels)) ?? []
+            todos += (try? await ingestionEngine.extractTodos(from: message, allowFoundationModels: allowFoundationModels)) ?? []
         }
-        let events = (try? await extractCalendarEventsFromMessages(messages)) ?? []
+        let events = (try? await ingestionEngine.extractCalendarEvents(from: messages)) ?? []
 
         // 추출 완료 메시지 ID를 분석 이력으로 기록 — 기간 반복 시 중복 fetch/분석 방지.
         store.recordAnalyzed(messageIDs: messages.map(\.id))
@@ -234,62 +473,7 @@ final class EmailService: NSObject, MailProvider {
     /// 수동 등록용 메시지 요약 기반 할 일 초안을 생성합니다.
     /// allowFoundationModels=false 이면 규칙 기반 폴백을 사용합니다.
     func makeManualTodo(from message: GmailMessage, allowFoundationModels: Bool = true) async -> Todo {
-        let analyzer = EmailContentAnalyzer()
-        var draft: EmailTodoDraft?
-
-        if allowFoundationModels {
-            #if canImport(FoundationModels)
-            if #available(iOS 26.0, *), FoundationModelsService.isAvailable {
-                do {
-                    draft = try await FoundationModelsService().draftTodoFromEmail(message, now: Date())
-                } catch {
-                    print("[EmailService] draftTodoFromEmail failed: \(error.localizedDescription)")
-                }
-            }
-            #endif
-        }
-
-        let finalDraft = draft ?? makeFallbackManualDraft(from: message, analyzer: analyzer)
-
-        let todo = Todo(
-            title: finalDraft.title,
-            notes: finalDraft.notes,
-            dueDate: finalDraft.dueDate,
-            source: .email,
-            sourceRef: message.id
-        )
-        todo.sourceSender = finalDraft.sender.isEmpty ? analyzer.parseSender(from: message.from) : finalDraft.sender
-        todo.sourceSenderEmail = finalDraft.senderEmail.isEmpty ? analyzer.parseSenderEmail(from: message.from) : finalDraft.senderEmail
-        todo.sourceMessageID = message.messageID
-        todo.sourceThreadID = message.threadID
-        todo.triageStatus = TodoTriage.todo.rawValue
-        return todo
-    }
-
-
-    private func makeFallbackManualDraft(from message: GmailMessage, analyzer: EmailContentAnalyzer) -> EmailTodoDraft {
-        let sender = analyzer.parseSender(from: message.from)
-        let snippet = collapsedWhitespace(message.snippet)
-        let body = collapsedWhitespace(message.body)
-        let summaryText = !snippet.isEmpty ? snippet : String(body.prefix(500))
-        let summary = summaryText.isEmpty ? "요약할 본문 없음" : summaryText
-        let title = message.subject.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        return EmailTodoDraft(
-            title: title.isEmpty ? "메일 확인" : title,
-            notes: "[메일 요약]\n\(summary)\n\n[발신자] \(sender.isEmpty ? message.from : sender)",
-            dueDate: nil,
-            isAllDay: false,
-            sender: sender.isEmpty ? message.from : sender,
-            senderEmail: analyzer.parseSenderEmail(from: message.from)
-        )
-    }
-
-    private func collapsedWhitespace(_ text: String) -> String {
-        text
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        await EmailIngestionEngine().makeManualTodo(from: message, allowFoundationModels: allowFoundationModels)
     }
 
     // MARK: - Gmail API
@@ -304,43 +488,14 @@ final class EmailService: NSObject, MailProvider {
         }
 
         // 최근 수신 메일 ID 목록 조회
-        let lookbackDays = {
-            let v = UserDefaults.standard.integer(forKey: "pieroot.todo.emailLookbackDays")
-            return v > 0 ? min(max(v, 1), 30) : 3
-        }()
+        let lookbackDays = recentMessageLookbackDays(fallback: 3)
 
         logger.info("Listing new messages for extraction, lookbackDays: \(lookbackDays)")
         if let ignoredHistoryID = historyID {
             logger.debug("historyID 기반 조회는 users.messages.list에서 미지원: \(ignoredHistoryID)")
         }
 
-        var urlComponents = URLComponents(string: "https://gmail.googleapis.com/gmail/v1/users/me/messages")!
-        let q = "newer_than:\(lookbackDays)d"
-
-        urlComponents.queryItems = [
-            URLQueryItem(name: "q", value: q),
-            URLQueryItem(name: "maxResults", value: "100")
-        ]
-
-        var request = URLRequest(url: urlComponents.url!)
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-
-        let (data, response) = try await session.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse else {
-            logger.error("Request failed: No HTTP response")
-            throw EmailError.apiFailed
-        }
-
-        logger.info("Request status: \(httpResponse.statusCode)")
-
-        guard httpResponse.statusCode == 200 else {
-            let errorBody = String(data: data, encoding: .utf8) ?? "no body"
-            logger.error("Request failed: \(errorBody)")
-            throw EmailError.apiFailed
-        }
-
-
-        let list = try JSONDecoder().decode(MessageListResponse.self, from: data)
+        let list = try await fetchRecentMessageListPage(token: token, lookbackDays: lookbackDays)
         guard let messageIDs = list.messages else {
             logger.info("No new messages found")
             return []
@@ -455,6 +610,33 @@ final class EmailService: NSObject, MailProvider {
         )
     }
 
+    private func messageIsInActiveMailbox(id: String, token: String) async throws -> Bool {
+        let urlStr = "https://gmail.googleapis.com/gmail/v1/users/me/messages/\(id)?format=metadata"
+        var request = URLRequest(url: URL(string: urlStr)!)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+
+        let (data, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            logger.error("messageIsInActiveMailbox failed: No HTTP response")
+            throw EmailError.apiFailed
+        }
+
+        switch httpResponse.statusCode {
+        case 200:
+            guard let raw = try? JSONDecoder().decode(RawGmailMessage.self, from: data) else {
+                logger.error("messageIsInActiveMailbox failed for \(id): decode error")
+                throw EmailError.apiFailed
+            }
+            let labels = Set(raw.labelIds ?? [])
+            return !labels.contains("TRASH") && !labels.contains("SPAM")
+        case 404:
+            return false
+        default:
+            logger.error("messageIsInActiveMailbox failed for \(id): status \(httpResponse.statusCode)")
+            throw EmailError.apiFailed
+        }
+    }
+
     /// 특정 메시지의 전체 본문(format=full)을 가져옴. 상세 화면 lazy-load용.
     func fetchFullMessage(id: String) async throws -> GmailMessage? {
         try await refreshTokenIfNeeded()
@@ -496,27 +678,34 @@ final class EmailService: NSObject, MailProvider {
     // MARK: - 이메일 뷰어: 최근 메일 전체 fetch
 
     /// 읽음/안읽음 관계없이 최근 메일 전체를 가져옴.
-    /// `is:unread` 필터 제거 — `emailLookbackDays` 기간 내 수신 메일 최대 100건.
-    /// 이메일 뷰어(MailTabView) pull-to-refresh에서 호출.
-    /// 스코프 `gmail.readonly` + `format=full` 확인됨 → 읽은 메일 본문도 조회 가능.
+    /// 내부적으로 lookback 범위 전체 message id를 페이지네이션으로 수집해
+    /// 로컬 stale 메일 prune 기준도 함께 만든다.
     func fetchAllRecentMessages() async throws -> [GmailMessage] {
-        try await refreshTokenIfNeeded()
-        return try await listAllMessages()
+        try await fetchRecentMessageSyncSnapshot().messages
     }
 
-    private func listAllMessages() async throws -> [GmailMessage] {
-        guard let token = loadTokens().accessToken else { throw EmailError.notAuthenticated }
-        let lookbackDays: Int = {
-            let v = UserDefaults.standard.integer(forKey: "pieroot.todo.emailLookbackDays")
-            return v > 0 ? min(max(v, 1), 30) : 7  // 뷰어 기본값 7일
-        }()
+    private func recentMessageLookbackDays(fallback defaultValue: Int) -> Int {
+        let value = UserDefaults.standard.integer(forKey: "pieroot.todo.emailLookbackDays")
+        return value > 0 ? min(max(value, 1), 30) : defaultValue
+    }
+
+    private func fetchRecentMessageListPage(
+        token: String,
+        lookbackDays: Int,
+        pageToken: String? = nil
+    ) async throws -> MessageListResponse {
         var urlComponents = URLComponents(
             string: "https://gmail.googleapis.com/gmail/v1/users/me/messages"
         )!
-        urlComponents.queryItems = [
-            URLQueryItem(name: "q",          value: "newer_than:\(lookbackDays)d"),  // is:unread 제거
+        var queryItems = [
+            URLQueryItem(name: "q", value: "newer_than:\(lookbackDays)d"),
             URLQueryItem(name: "maxResults", value: "100")
         ]
+        if let pageToken, !pageToken.isEmpty {
+            queryItems.append(URLQueryItem(name: "pageToken", value: pageToken))
+        }
+        urlComponents.queryItems = queryItems
+
         var request = URLRequest(url: urlComponents.url!)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
 
@@ -534,83 +723,47 @@ final class EmailService: NSObject, MailProvider {
             throw EmailError.apiFailed
         }
 
-        let list = try JSONDecoder().decode(MessageListResponse.self, from: data)
-        
-        guard let messageIDs = list.messages else { return [] }
-
-        // 메타데이터만 가져와 목록 표시 — 본문은 상세 화면에서 lazy-load
-        let targetIDs = messageIDs.prefix(100).map { $0.id }
-        let messages = try await fetchMessagesInBatches(ids: targetIDs, token: token, isMetadata: true)
-        return messages.sorted { $0.receivedAt > $1.receivedAt }
+        return try JSONDecoder().decode(MessageListResponse.self, from: data)
     }
 
-    // MARK: - On-Device Extraction (NSDataDetector)
+    private func listAllMessageIDs(token: String, lookbackDays: Int) async throws -> [String] {
+        var ids: [String] = []
+        var seen = Set<String>()
+        var pageToken: String?
 
-    /// 메일 한 건에서 마감일이 감지되면 Todo를 반환, 없으면 빈 배열.
-    /// 완전 온디바이스 처리 — 본문이 기기 밖으로 나가지 않음 (프라이버시 규칙 준수).
-    ///
-    /// 3-way 분류:
-    ///   - SOCIAL/FORUMS 카테고리 → drop (할 일·참고함 둘 다 생성 안 함)
-    ///   - PROMOTIONS 또는 마감 키워드 없음(score==0) → review (참고함)
-    ///   - PERSONAL/UPDATES/미분류 + 키워드 있음 → todo (메인 할 일)
-    private func extractTodos(from message: GmailMessage, allowFoundationModels: Bool = true) async throws -> [Todo] {
-        let engine = EmailAnalysisEngineFactory.makeEngine(allowFoundationModels: allowFoundationModels)
-        guard let extraction = await engine.analyze(message, now: Date()) else {
-            return []   // 마감일 미감지 → 할 일 미생성
-        }
-
-        // 1차 분류: Gmail 카테고리 라벨
-        let labels = Set(message.labelIds)
-        let dropLabels:   Set<String> = ["CATEGORY_SOCIAL", "CATEGORY_FORUMS"]
-        let reviewLabels: Set<String> = ["CATEGORY_PROMOTIONS"]
-
-        if !labels.isDisjoint(with: dropLabels) {
-            return []   // 소셜/포럼 → drop
-        }
-
-        // 2차 분류: PROMOTIONS·벌크메일(List-Unsubscribe/Precedence:bulk) 또는 키워드 없음 → 참고함
-        // isBulk: Gmail 카테고리 라벨이 없는 뉴스레터도 캐치 (List-Unsubscribe RFC 2369)
-        let isPromotion = !labels.isDisjoint(with: reviewLabels) || message.isBulk
-        let triage: TodoTriage = (isPromotion || extraction.keywordScore == 0) ? .review : .todo
-
-        let todo = Todo(
-            title: message.subject,
-            notes: extraction.notes,
-            dueDate: extraction.dueDate,
-            source: .email,
-            sourceRef: message.id
-        )
-        todo.sourceSender      = extraction.sender
-        todo.sourceSenderEmail = extraction.senderEmail
-        todo.sourceMessageID   = message.messageID
-        todo.sourceThreadID    = message.threadID
-        todo.triageStatus      = triage.rawValue
-        return [todo]
-    }
-
-    /// 마감일이 감지된 메일만 캘린더 이벤트 후보로 반환.
-    /// CalendarAutoPolicy.isAuto가 켜진 경우에만 실제 등록됨.
-    private func extractCalendarEventsFromMessages(_ messages: [GmailMessage]) async throws -> [(event: ExtractedEmailEvent, sourceRef: String)] {
-        let analyzer = EmailContentAnalyzer()
-        let iso      = ISO8601DateFormatter()
-        var results: [(ExtractedEmailEvent, String)] = []
-        for msg in messages {
-            guard let extraction = analyzer.analyze(msg, now: Date()) else { continue }
-            let notesText = extraction.sender.isEmpty
-                ? msg.snippet
-                : "[\(extraction.sender)] \(msg.snippet)"
-            let event = ExtractedEmailEvent(
-                title:    msg.subject,
-                startISO: iso.string(from: extraction.dueDate),
-                endISO:   "",
-                location: "",
-                notes:    notesText,
-                isAllDay: extraction.isAllDay
+        repeat {
+            let list = try await fetchRecentMessageListPage(
+                token: token,
+                lookbackDays: lookbackDays,
+                pageToken: pageToken
             )
-            results.append((event, msg.id))
-        }
-        return results
+            for message in list.messages ?? [] where seen.insert(message.id).inserted {
+                ids.append(message.id)
+            }
+            pageToken = list.nextPageToken
+        } while pageToken != nil
+
+        return ids
     }
+
+    private func fetchRecentMessageSyncSnapshot() async throws -> RecentMessageSyncSnapshot {
+        try await refreshTokenIfNeeded()
+        guard let token = loadTokens().accessToken else { throw EmailError.notAuthenticated }
+
+        let lookbackDays = recentMessageLookbackDays(fallback: 7)
+        let now = Date()
+        let messageIDs = try await listAllMessageIDs(token: token, lookbackDays: lookbackDays)
+        let targetIDs = Array(messageIDs.prefix(100))
+        let messages = try await fetchMessagesInBatches(ids: targetIDs, token: token, isMetadata: true)
+        let cutoff = now.addingTimeInterval(-Double(lookbackDays) * 24 * 3600)
+
+        return RecentMessageSyncSnapshot(
+            messages: messages.sorted { $0.receivedAt > $1.receivedAt },
+            messageIDsInLookback: Set(messageIDs),
+            lookbackCutoff: cutoff
+        )
+    }
+
 
     // MARK: - MIME Body Extraction
 
@@ -767,6 +920,7 @@ final class EmailService: NSObject, MailProvider {
         logger.info("Tokens saved successfully")
     }
     private func refreshTokenIfNeeded() async throws {
+        clearTokensIfScopeIsStale()
         guard let refresh = loadTokens().refreshToken else { 
             logger.debug("No refresh token available, skipping refresh")
             throw EmailError.notAuthenticated 
@@ -819,6 +973,7 @@ final class EmailService: NSObject, MailProvider {
         if let rt = refreshToken {
             KeychainStore.set(service: keychainService, account: "refresh_token", value: rt)
         }
+        KeychainStore.set(service: keychainService, account: tokenScopeVersionAccount, value: requiredTokenScopeVersion)
     }
 
     private func loadTokens() -> (accessToken: String?, refreshToken: String?) {
@@ -829,6 +984,7 @@ final class EmailService: NSObject, MailProvider {
     private func deleteTokens() {
         KeychainStore.deleteAny(service: keychainService, account: "access_token")
         KeychainStore.deleteAny(service: keychainService, account: "refresh_token")
+        KeychainStore.deleteAny(service: keychainService, account: tokenScopeVersionAccount)
     }
 
     // MARK: - Read State Sync
@@ -837,10 +993,11 @@ final class EmailService: NSObject, MailProvider {
     /// `gmail.modify` 스코프 필요 — 이전 `gmail.readonly` 토큰이면 403으로 무음 실패.
     func markAsRead(messageID: String) async throws {
         logger.info("Marking message as read: \(messageID)")
+        clearTokensIfScopeIsStale()
         try await refreshTokenIfNeeded()
-        guard let token = loadTokens().accessToken else { 
+        guard let token = loadTokens().accessToken else {
             logger.error("markAsRead failed: not authenticated")
-            throw EmailError.notAuthenticated 
+            throw EmailError.notAuthenticated
         }
         let url = URL(string: "https://gmail.googleapis.com/gmail/v1/users/me/messages/\(messageID)/modify")!
         var request = URLRequest(url: url)
@@ -853,15 +1010,45 @@ final class EmailService: NSObject, MailProvider {
             logger.error("markAsRead failed: No HTTP response")
             throw EmailError.apiFailed
         }
-        
+
         logger.info("markAsRead response status: \(http.statusCode)")
-        
+
         if !(200...299).contains(http.statusCode) {
             let errorBody = String(data: data, encoding: .utf8) ?? "no body"
             logger.error("markAsRead failed for \(messageID): \(errorBody)")
             throw EmailError.apiFailed
         }
         logger.info("Message \(messageID) marked as read successfully")
+    }
+
+    func trashMessage(messageID: String) async throws {
+        logger.info("Trashing message: \(messageID)")
+        clearTokensIfScopeIsStale()
+        try await refreshTokenIfNeeded()
+        guard let token = loadTokens().accessToken else {
+            logger.error("trashMessage failed: not authenticated")
+            throw EmailError.notAuthenticated
+        }
+
+        let url = URL(string: "https://gmail.googleapis.com/gmail/v1/users/me/messages/\(messageID)/trash")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            logger.error("trashMessage failed: No HTTP response")
+            throw EmailError.apiFailed
+        }
+
+        logger.info("trashMessage response status: \(http.statusCode)")
+
+        if !(200...299).contains(http.statusCode) {
+            let errorBody = String(data: data, encoding: .utf8) ?? "no body"
+            logger.error("trashMessage failed for \(messageID): \(errorBody)")
+            throw EmailError.apiFailed
+        }
+        logger.info("Message \(messageID) moved to trash successfully")
     }
     // MARK: - Date Parsing
 

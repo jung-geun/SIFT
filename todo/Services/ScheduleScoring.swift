@@ -4,7 +4,7 @@ import Foundation
 
 /// timesorter-v9 호환 4개 개별 축 점수. 각 0 ~ 10.
 /// total_score는 ScheduleScorer.total()로 수동 계산 (단일 점수 통합 회피).
-struct AxisScores: Sendable {
+struct AxisScores: Sendable, Equatable {
     /// 마감 임박도: 10 = 마감 초과·즉시, 0 = 마감 없음/매우 여유
     var deadlineProximity: Double
     /// 긴급도: 마감근접 + 출처/키워드 신호 (즉시성 ≠ 잔여시간)

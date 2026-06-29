@@ -131,8 +131,12 @@ final class Todo {
     /// AI가 생성한 세부 설명 (priorityReason 한 줄 요약과 별개)
     var aiDetail: String = ""
     /// 우선순위를 산출한 실제 엔진 (PriorityEngine.rawValue). 빈 문자열 = AI 미실행.
-    /// "휴리스틱" → LLM 경로 실패(메모리 경고·미설치)로 규칙 기반 폴백됐음을 의미.
+    /// "휴리스틱" → LLM 경로 실패로 규칙 기반 폴백됐음을 의미.
     var aiEngine: String = ""
+    /// 사용자가 요청한 제공자(rawValue). 빈 문자열 = AI 미실행.
+    var aiRequestedProvider: String = ""
+    /// 요청 제공자 실패 후 다른 엔진/휴리스틱으로 폴백한 이유.
+    var aiFallbackReason: String = ""
     /// 캘린더 주기(반복) 일정에서 import한 todo이면 true — 목록/상세에 고정 배지 표시
     var isFixedSchedule: Bool = false
 
@@ -226,5 +230,20 @@ final class Todo {
         aiNeedsNotification   = result.needsNotification
         aiRecommendedTime     = result.recommendedTime
         aiPersonaFit          = result.personaFit
+        aiRequestedProvider   = result.requestedProviderRawValue
+        aiFallbackReason      = result.fallbackReason
+    }
+}
+
+enum TodoAISortScope {
+    static func candidates(from todos: [Todo]) -> [Todo] {
+        todos.filter { !$0.isCompleted && $0.triage == .todo }
+    }
+
+    @discardableResult
+    static func apply(_ result: PriorityResult, in candidates: [Todo]) -> Todo? {
+        guard let todo = candidates.first(where: { $0.id == result.todoID }) else { return nil }
+        todo.apply(result)
+        return todo
     }
 }
