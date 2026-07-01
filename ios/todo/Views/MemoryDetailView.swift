@@ -57,7 +57,7 @@ struct MemoryDetailView: View {
                     if isAnalyzing {
                         HStack(spacing: 8) {
                             ProgressView().controlSize(.small)
-                            Text(afmAvailable ? "Apple Foundation Models로 분석 중…" : "통계 기반으로 분석 중…")
+                            Text(afmAvailable ? "Apple Foundation Models로 분석 중…" : "사용 가능한 로컬/통계 경로로 분석 중…")
                         }
                     } else {
                         Label(pendingMemoryResult == nil ? "지금 패턴 분석" : "다시 분석", systemImage: "chart.bar.xaxis")
@@ -66,17 +66,13 @@ struct MemoryDetailView: View {
                 .buttonStyle(.borderless)
                 .disabled(isAnalyzing || todos.filter { $0.isCompleted }.isEmpty)
             } footer: {
-                Text("완료한 할 일의 시간대 · 태그별 처리 속도 · 완료율을 분석합니다. Apple Foundation Models가 사용자 친화적 패턴 인사이트를 재작성합니다(미가용 시 통계 기반). AI 우선순위와 페르소나 생성에 자동 반영됩니다. 백그라운드에서 2일 간격으로 자동 실행됩니다.")
+                Text("완료한 할 일의 시간대 · 태그별 처리 속도 · 완료율을 분석합니다. Apple Foundation Models가 사용 가능하면 패턴 인사이트를 재작성하고, 미가용 시 Qwen 또는 통계 기반 분석으로 계속합니다. AI 우선순위와 페르소나 생성에 자동 반영됩니다. 백그라운드에서 2일 간격으로 자동 실행됩니다.")
             }
         }
         .navigationTitle("행동 패턴 분석")
         .navigationBarTitleDisplayMode(.inline)
         .task {
-            #if canImport(FoundationModels)
-            if #available(iOS 26.0, *) {
-                afmAvailable = FoundationModelsService.isAvailable
-            }
-            #endif
+            afmAvailable = FoundationModelsAvailability.isAvailable
         }
         .alert("AI 분석 오류", isPresented: $showError) {
             Button("확인", role: .cancel) {

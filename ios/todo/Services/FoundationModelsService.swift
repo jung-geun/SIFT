@@ -5,9 +5,9 @@ import Foundation
 // 사용 조건:
 //   1. Xcode > 프로젝트 타깃 > Frameworks, Libraries, and Embedded Content →
 //      FoundationModels.framework 추가 (File → Add Frameworks → FoundationModels).
-//   2. 실기기에서 Apple Intelligence 활성화 (iPhone 15 Pro+ / M-시리즈 Mac).
-//   3. FoundationModelsService.isAvailable == true 확인 후 사용.
-//
+//   2. FoundationModelsAvailability.isAvailable == true 확인 후 사용.
+//   3. iOS 26에서는 Apple Intelligence 활성화가 필요하고, iOS 27+에서는 현재 Siri AI를
+//      사용할 수 있는 영어권 Siri 언어 및 Apple Intelligence 활성화 환경이어야 한다.
 // 장점:
 //   - Neural Engine(ANE) 실행 → GPU 백그라운드 제약·메모리 경고 취소 클래스 자체가 없음.
 //   - Guided Generation(@Generable) → 우선순위 점수 0% 버그 구조적 해소.
@@ -18,6 +18,63 @@ import Foundation
 
 #if canImport(FoundationModels)
 import FoundationModels
+#endif
+
+enum FoundationModelsAvailability {
+    static var isAvailable: Bool {
+        #if targetEnvironment(simulator)
+        return false
+        #else
+        #if canImport(FoundationModels)
+        if #available(iOS 26.0, *) {
+            return SystemLanguageModel.default.availability == .available
+        }
+        #endif
+        return false
+        #endif
+    }
+
+    static var unavailableExplanation: String? {
+        let iOSMajorVersion = ProcessInfo.processInfo.operatingSystemVersion.majorVersion
+        #if targetEnvironment(simulator)
+        let isSimulator = true
+        #else
+        let isSimulator = false
+        #endif
+        #if canImport(FoundationModels)
+        let frameworkLinked = true
+        #else
+        let frameworkLinked = false
+        #endif
+        return unavailableExplanation(
+            isAvailable: Self.isAvailable,
+            iOSMajorVersion: iOSMajorVersion,
+            isSimulator: isSimulator,
+            frameworkLinked: frameworkLinked
+        )
+    }
+
+    static func unavailableExplanation(
+        isAvailable: Bool,
+        iOSMajorVersion: Int,
+        isSimulator: Bool,
+        frameworkLinked: Bool
+    ) -> String? {
+        guard !isAvailable else { return nil }
+        if isSimulator {
+            return "시뮬레이터에서는 Apple Foundation Models를 비활성화합니다. 실기기에서 Apple Intelligence 및 Siri 설정을 확인하세요."
+        }
+        guard frameworkLinked, iOSMajorVersion >= 26 else {
+            return "Apple Foundation Models는 iOS 26 이상 및 FoundationModels.framework가 있는 빌드에서만 사용할 수 있습니다."
+        }
+        if iOSMajorVersion >= 27 {
+            return "Apple Foundation Models는 현재 Siri AI를 사용할 수 있는 영어권 Siri 언어 및 Apple Intelligence 활성화 환경에서만 사용할 수 있습니다. 설정 > Apple Intelligence 및 Siri에서 언어와 활성화 상태를 확인하세요."
+        }
+        return "Apple Foundation Models는 Apple Intelligence를 사용할 수 있고 활성화된 기기에서만 사용할 수 있습니다. 설정 > Apple Intelligence 및 Siri에서 활성화 상태를 확인하세요."
+    }
+}
+
+#if canImport(FoundationModels)
 
 // MARK: - Guided Generation Types
 
@@ -141,14 +198,9 @@ struct FoundationModelsService {
     private let inputCharCap = 200
 
     /// Apple Intelligence가 현재 기기에서 사용 가능한지 여부.
-    /// 시뮬레이터에서는 SensitiveContentAnalysisML(오류 15) 미지원으로 AFM 세션 해제 시
-    /// libc++ Hardening assertion 크래시가 발생하므로 명시적으로 비활성화.
+    /// 실제 availability 판정은 모든 빌드에서 호출 가능한 FoundationModelsAvailability가 담당한다.
     static var isAvailable: Bool {
-        #if targetEnvironment(simulator)
-        return false
-        #else
-        return SystemLanguageModel.default.availability == .available
-        #endif
+        FoundationModelsAvailability.isAvailable
     }
 
     // MARK: - 페르소나 생성·개선

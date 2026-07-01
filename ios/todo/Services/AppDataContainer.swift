@@ -134,7 +134,51 @@ final class AppDataContainer: ObservableObject {
         }
     }()
 
-    // MARK: - Migration (로컬 → iCloud)
+    // MARK: - Migration (legacy local/iCloud → local)
+
+    static func migrateLegacyStoresToLocalIfNeeded() {
+        let fileManager = FileManager.default
+        let localV2URL = getStoreURL(name: "local_v2.store")
+        let icloudV2URL = getStoreURL(name: "icloud_v2.store")
+        let defaultConfig = ModelConfiguration(schema: appSchema, isStoredInMemoryOnly: false)
+        let defaultURL = defaultConfig.url
+
+        if !fileManager.fileExists(atPath: localV2URL.path), fileManager.fileExists(atPath: icloudV2URL.path) {
+            do {
+                try fileManager.copyItem(at: icloudV2URL, to: localV2URL)
+                let legacySHM = icloudV2URL.deletingPathExtension().appendingPathExtension("store-shm")
+                let localSHM = localV2URL.deletingPathExtension().appendingPathExtension("store-shm")
+                if fileManager.fileExists(atPath: legacySHM.path), !fileManager.fileExists(atPath: localSHM.path) {
+                    try? fileManager.copyItem(at: legacySHM, to: localSHM)
+                }
+                let legacyWAL = icloudV2URL.deletingPathExtension().appendingPathExtension("store-wal")
+                let localWAL = localV2URL.deletingPathExtension().appendingPathExtension("store-wal")
+                if fileManager.fileExists(atPath: legacyWAL.path), !fileManager.fileExists(atPath: localWAL.path) {
+                    try? fileManager.copyItem(at: legacyWAL, to: localWAL)
+                }
+            } catch {
+                print("[Migration] 기존 iCloud 저장소를 local_v2.store로 복사하지 못했습니다: \(error)")
+            }
+        }
+
+        if !fileManager.fileExists(atPath: localV2URL.path), fileManager.fileExists(atPath: defaultURL.path) {
+            do {
+                try fileManager.moveItem(at: defaultURL, to: localV2URL)
+                let defaultSHM = defaultURL.deletingPathExtension().appendingPathExtension("store-shm")
+                let localSHM = localV2URL.deletingPathExtension().appendingPathExtension("store-shm")
+                if fileManager.fileExists(atPath: defaultSHM.path), !fileManager.fileExists(atPath: localSHM.path) {
+                    try? fileManager.moveItem(at: defaultSHM, to: localSHM)
+                }
+                let defaultWAL = defaultURL.deletingPathExtension().appendingPathExtension("store-wal")
+                let localWAL = localV2URL.deletingPathExtension().appendingPathExtension("store-wal")
+                if fileManager.fileExists(atPath: defaultWAL.path), !fileManager.fileExists(atPath: localWAL.path) {
+                    try? fileManager.moveItem(at: defaultWAL, to: localWAL)
+                }
+            } catch {
+                print("[Migration] 레거시 default.store를 local_v2.store로 이동하지 못했습니다: \(error)")
+            }
+        }
+    }
 
     /// 로컬 데이터가 있고 iCloud 스토어가 없으면 깊은 복사 이관 실행.
     /// iCloud 첫 활성화 시 1회만 의미 있음 (이후엔 이미 icloud_v2.store 존재).

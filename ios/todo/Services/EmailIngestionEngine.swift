@@ -7,7 +7,7 @@ struct EmailIngestionEngine {
 
         if allowFoundationModels {
             #if canImport(FoundationModels)
-            if #available(iOS 26.0, *), FoundationModelsService.isAvailable {
+            if #available(iOS 26.0, *), FoundationModelsAvailability.isAvailable {
                 do {
                     draft = try await FoundationModelsService().draftTodoFromEmail(message, now: Date())
                 } catch {

@@ -57,17 +57,6 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         completionHandler(.newData)
     }
 
-    func application(
-        _ app: UIApplication,
-        open url: URL,
-        options: [UIApplication.OpenURLOptionsKey: Any] = [:]
-    ) -> Bool {
-        MSALPublicClientApplication.handleMSALResponse(
-            url,
-            sourceApplication: options[.sourceApplication] as? String
-        )
-    }
-
     // MARK: - BGAppRefreshTask 핸들러
 
     @MainActor
@@ -296,6 +285,12 @@ struct todoApp: App {
             }
             .environmentObject(syncMonitor)
             .environment(\.appTutorialState, tutorial)
+            .onOpenURL { url in
+                MSALPublicClientApplication.handleMSALResponse(
+                    url,
+                    sourceApplication: nil
+                )
+            }
             .onAppear {
                 NSUbiquitousKeyValueStore.default.synchronize()
 

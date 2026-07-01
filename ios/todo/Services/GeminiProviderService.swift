@@ -91,12 +91,16 @@ enum ScheduleLLMAdapter {
             uniqueKeysWithValues: todos.enumerated().map { ("T\($0.offset + 1)", $0.element.id) }
         )
         var results: [PriorityResult] = []
+        var seenTodoIDs = Set<UUID>()
 
         for taskDict in scheduledTasks {
             guard let taskID = taskDict["task_id"] as? String else {
                 continue
             }
             guard let todoID = tokenToTodoID[taskID] ?? UUID(uuidString: taskID) else {
+                continue
+            }
+            guard seenTodoIDs.insert(todoID).inserted else {
                 continue
             }
 
@@ -110,8 +114,15 @@ enum ScheduleLLMAdapter {
             let score = ScheduleScorer.normalizedScore(axes, weights: weights)
 
             let reasoning = taskDict["reasoning"] as? [String: Any] ?? [:]
-            let summary = reasoning["summary"] as? String ?? ""
-            let chainingDetail = reasoning["chaining_detail"] as? String ?? ""
+            let summary = (reasoning["summary"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let chainingDetail = (reasoning["chaining_detail"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let reasonText = !summary.isEmpty ? summary : chainingDetail
+            let detailText: String
+            if !chainingDetail.isEmpty && chainingDetail != reasonText {
+                detailText = String(chainingDetail.prefix(160))
+            } else {
+                detailText = ""
+            }
 
             var recommendedTime: Date? = nil
             if let schedule = taskDict["recommended_schedule"] as? [String: Any],
@@ -134,8 +145,8 @@ enum ScheduleLLMAdapter {
             results.append(PriorityResult(
                 todoID: todoID,
                 score: score,
-                reason: String(summary.prefix(80)),
-                detail: summary,
+                reason: String(reasonText.prefix(80)),
+                detail: detailText,
                 needsNotification: axes.deadlineProximity >= 7.0 || axes.urgency >= 7.0,
                 recommendedTime: recommendedTime,
                 personaFit: personaFit,

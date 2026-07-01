@@ -41,7 +41,7 @@ struct FoundationModelsEmailEngine: EmailAnalysisEngine {
 
     func analyze(_ msg: GmailMessage, now: Date) async -> EmailExtraction? {
         #if canImport(FoundationModels)
-        if #available(iOS 26.0, *), FoundationModelsService.isAvailable {
+        if #available(iOS 26.0, *), FoundationModelsAvailability.isAvailable {
             do {
                 return try await FoundationModelsService().analyzeEmail(msg, now: now)
             } catch {

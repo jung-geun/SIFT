@@ -380,7 +380,7 @@ final class FoundationModelsEngine: IntelligenceService {
         progress: IntelligenceProgressHandler?
     ) async throws -> [PriorityResult] {
         #if canImport(FoundationModels)
-        if #available(iOS 26.0, *), FoundationModelsService.isAvailable {
+        if #available(iOS 26.0, *), FoundationModelsAvailability.isAvailable {
             let sorted = todos.filter { !$0.isCompleted }.sorted {
                 switch ($0.dueDate, $1.dueDate) {
                 case (let a?, let b?): return a < b
@@ -600,7 +600,7 @@ final class RoutedIntelligenceEngine: IntelligenceService {
         for (index, provider) in chain.enumerated() {
             let routeReason = failures.joined(separator: " → ")
             let providerProgress: IntelligenceProgressHandler? = progress.map { outerProgress in
-                { event in
+                { @MainActor @Sendable event in
                     switch event {
                     case .result(let result, let resultIndex, let total, let title):
                         let annotated = annotateResults(
@@ -641,7 +641,7 @@ final class RoutedIntelligenceEngine: IntelligenceService {
             ? "요청한 AI 백엔드를 사용할 수 없어 휴리스틱으로 처리했습니다."
             : failures.joined(separator: " → ")
         let heuristicProgress: IntelligenceProgressHandler? = progress.map { outerProgress in
-            { event in
+            { @MainActor @Sendable event in
                 switch event {
                 case .result(let result, let resultIndex, let total, let title):
                     let annotated = annotateResults(

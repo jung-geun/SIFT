@@ -13,7 +13,6 @@ struct PersonaDetailView: View {
     @State private var errorMessage: String?
     @State private var showError = false
     @State private var showOnboardingResetup = false
-    @State private var afmAvailable = false
     
     private let generationService = PersonaGenerationService()
     
@@ -83,10 +82,10 @@ struct PersonaDetailView: View {
                         }
                     }
                     .buttonStyle(.borderless)
-                    .disabled(isGenerating || !afmAvailable)
+                    .disabled(isGenerating)
                     
-                    if !afmAvailable {
-                        Label("이 기기에서 Apple Foundation Models를 사용할 수 없습니다", systemImage: "exclamationmark.triangle.fill")
+                    if let reason = FoundationModelsAvailability.unavailableExplanation {
+                        Label("Apple Foundation Models 미사용: \(reason) 가능한 경우 Qwen 또는 통계 기반 생성으로 계속합니다.", systemImage: "exclamationmark.triangle.fill")
                             .font(.caption)
                             .foregroundStyle(.orange)
                     }
@@ -121,15 +120,6 @@ struct PersonaDetailView: View {
                 let p = Persona()
                 modelContext.insert(p)
             }
-            #if canImport(FoundationModels)
-            if #available(iOS 26.0, *) {
-                afmAvailable = FoundationModelsService.isAvailable
-            } else {
-                afmAvailable = false
-            }
-            #else
-            afmAvailable = false
-            #endif
         }
         .onDisappear {
             tutorial?.handlePersonaDetailClosed()

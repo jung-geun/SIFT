@@ -279,7 +279,7 @@ final class MemoryService {
     @MainActor
     private func availableBehaviorAnalysisBackend() -> BehaviorAnalysisBackend? {
         #if canImport(FoundationModels)
-        if #available(iOS 26.0, *), FoundationModelsService.isAvailable {
+        if #available(iOS 26.0, *), FoundationModelsAvailability.isAvailable {
             return .foundationModels
         }
         #endif
@@ -385,7 +385,7 @@ final class MemoryService {
         return labels[weekday]
     }
 
-    private static func median(_ values: [Double]) -> Double {
+    private static nonisolated func median(_ values: [Double]) -> Double {
         let sorted = values.sorted()
         guard !sorted.isEmpty else { return 0 }
         let mid = sorted.count / 2
@@ -414,7 +414,7 @@ final class MemoryService {
             return (latestAnalysis?.summary ?? "", latestAnalysis?.insights ?? [])
         }
 
-        if let backend = await availableBehaviorAnalysisBackend() {
+        if let backend = availableBehaviorAnalysisBackend() {
             let analysis: (summary: String, insights: [String])
             switch backend {
             case .foundationModels:
@@ -462,7 +462,7 @@ final class MemoryService {
             return heuristic
         }
 
-        if let backend = await availableBehaviorAnalysisBackend() {
+        if let backend = availableBehaviorAnalysisBackend() {
             let analysis: (summary: String, insights: [String])
             switch backend {
             case .foundationModels:

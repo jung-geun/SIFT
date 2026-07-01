@@ -2,13 +2,9 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>SchemeUserState</key>
-	<dict>
-		<key>todo.xcscheme_^#shared#^_</key>
-		<dict>
-			<key>orderHint</key>
-			<integer>0</integer>
-		</dict>
-	</dict>
+    <key>APIKey</key>
+    <string>AIzaSyBHsVIQq31_teig6Nd9A2sFK8Vbu3LHkfY</string>
+    <key>ProjectID</key>
+    <string>xyz-pieroot-sift-d5e7b</string>
 </dict>
 </plist>

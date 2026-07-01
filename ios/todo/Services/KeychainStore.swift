@@ -119,6 +119,7 @@ enum KeychainStore {
         [
             (service: "pieroot.todo.gmail", account: "access_token"),
             (service: "pieroot.todo.gmail", account: "refresh_token"),
+            (service: "pieroot.todo.gmail", account: "id_token"),
             (service: GeminiProviderService.keychainService, account: GeminiProviderService.apiKeyAccount)
         ]
     }

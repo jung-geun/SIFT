@@ -119,11 +119,14 @@ final class EmailService: NSObject, MailProviderProtocol {
     private let clientID     = "746219534143-ij6p50gff6as4hn2bbhdc9a1u6os3jmp.apps.googleusercontent.com"
     private let clientSecret = ""
     private let redirectURI  = "com.googleusercontent.apps.746219534143-ij6p50gff6as4hn2bbhdc9a1u6os3jmp:/oauth2callback"
-    private let scope        = "https://www.googleapis.com/auth/gmail.modify"
-    private let requiredTokenScopeVersion = "gmail.modify.v1"
+    private let scope        = "openid email profile https://www.googleapis.com/auth/gmail.modify"
+    private let requiredTokenScopeVersion = "gmail.modify.openid.v2"
     private let tokenScopeVersionAccount = "scope_version"
 
     private let keychainService = "pieroot.todo.gmail"
+    static var firebaseIDToken: String? {
+        KeychainStore.get(service: "pieroot.todo.gmail", account: "id_token")
+    }
     private let logger = Logger(subsystem: "pieroot.todo", category: "GmailOAuth")
     
     var session: URLSession = .shared
@@ -916,7 +919,7 @@ final class EmailService: NSObject, MailProviderProtocol {
         }
 
         let tokens = try JSONDecoder().decode(TokenResponse.self, from: data)
-        saveTokens(accessToken: tokens.access_token, refreshToken: tokens.refresh_token)
+        saveTokens(accessToken: tokens.access_token, refreshToken: tokens.refresh_token, idToken: tokens.id_token)
         logger.info("Tokens saved successfully")
     }
     private func refreshTokenIfNeeded() async throws {
@@ -950,7 +953,7 @@ final class EmailService: NSObject, MailProviderProtocol {
         }
         
         let tokens = try JSONDecoder().decode(TokenResponse.self, from: data)
-        saveTokens(accessToken: tokens.access_token, refreshToken: refresh)
+        saveTokens(accessToken: tokens.access_token, refreshToken: refresh, idToken: tokens.id_token)
         logger.info("Access token refreshed successfully")
     }
     private func buildAuthURL() -> URL? {
@@ -968,10 +971,13 @@ final class EmailService: NSObject, MailProviderProtocol {
 
     // MARK: - Keychain (KeychainStore 위임)
 
-    private func saveTokens(accessToken: String, refreshToken: String?) {
+    private func saveTokens(accessToken: String, refreshToken: String?, idToken: String?) {
         KeychainStore.set(service: keychainService, account: "access_token", value: accessToken)
         if let rt = refreshToken {
             KeychainStore.set(service: keychainService, account: "refresh_token", value: rt)
+        }
+        if let idToken, !idToken.isEmpty {
+            KeychainStore.set(service: keychainService, account: "id_token", value: idToken)
         }
         KeychainStore.set(service: keychainService, account: tokenScopeVersionAccount, value: requiredTokenScopeVersion)
     }
@@ -1225,6 +1231,7 @@ private struct TokenResponse: Decodable {
     let access_token: String
     let refresh_token: String?
     let expires_in: Int?
+    let id_token: String?
 }
 
 // MARK: - ASWebAuthenticationSession Presentation Context

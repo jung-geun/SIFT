@@ -16,10 +16,6 @@ struct ICloudSyncDetailView: View {
                         if newValue {
                             SettingsStore.shared.uploadLocalSettingsToCloud()
                         }
-                        // @AppStorage가 UserDefaults에 newValue를 반영한 직후 호출 →
-                        // KeychainStore.shouldSync가 올바른 값을 읽어 시크릿 동기화 정책 재적용.
-                        // ON: 시크릿 → synchronizable (iCloud Keychain 동기화 시작)
-                        // OFF: 시크릿 → ThisDeviceOnly (타 기기 iCloud Keychain에서 회수)
                         KeychainStore.applySyncPolicy()
                         showSyncRestartAlert = true
                     }

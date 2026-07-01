@@ -10,7 +10,6 @@ struct IntelligenceDetailView: View {
     @ObservedObject private var llmService: OnDeviceLLMService = .shared
     
     @State private var showDownloadConfirm = false
-    @State private var afmAvailable = false
     @State private var geminiAPIKeyInput = ""
     
     private var selectedProvider: PersonaAIProvider {
@@ -75,6 +74,13 @@ struct IntelligenceDetailView: View {
                     Label("온디바이스 모델을 먼저 다운로드하세요 (아래 모델 관리 섹션)", systemImage: "exclamationmark.triangle")
                         .font(.caption)
                         .foregroundStyle(.orange)
+                }
+                if selectedProvider == .foundationModels {
+                    if let reason = FoundationModelsAvailability.unavailableExplanation {
+                        Label(reason, systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
                 }
                 
                 Label("할 일 목록 화면 ✦ 버튼으로 AI 우선순위 정리 실행", systemImage: "info.circle")
@@ -293,15 +299,6 @@ struct IntelligenceDetailView: View {
             }
             geminiAPIKeyInput = GeminiProviderService.storedAPIKey ?? ""
 
-            #if canImport(FoundationModels)
-            if #available(iOS 26.0, *) {
-                afmAvailable = FoundationModelsService.isAvailable
-            } else {
-                afmAvailable = false
-            }
-            #else
-            afmAvailable = false
-            #endif
         }
     }
     

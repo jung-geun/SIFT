@@ -39,7 +39,7 @@ struct PersonaGenerationService {
         todos: [Todo],
         provider: PersonaAIProvider
     ) async throws -> (personaText: String, insights: [String]) {
-        guard let backend = await usablePersonaBackend(preferred: provider) else {
+        guard let backend = usablePersonaBackend(preferred: provider) else {
             return generateHeuristicPersona(existingPersona: existingPersona, todos: todos)
         }
 
@@ -57,7 +57,7 @@ struct PersonaGenerationService {
 
     private func withAFM(existingPersona: String, todos: [Todo]) async throws -> (String, [String]) {
         #if canImport(FoundationModels)
-        if #available(iOS 26.0, *), FoundationModelsService.isAvailable {
+        if #available(iOS 26.0, *), FoundationModelsAvailability.isAvailable {
             return try await FoundationModelsService().generatePersona(
                 existingPersona: existingPersona,
                 todos: todos
@@ -98,7 +98,7 @@ struct PersonaGenerationService {
     private func usablePersonaBackend(preferred provider: PersonaAIProvider) -> PersonaAIProvider? {
         let foundationModelsAvailable: Bool = {
             #if canImport(FoundationModels)
-            if #available(iOS 26.0, *), FoundationModelsService.isAvailable {
+            if #available(iOS 26.0, *), FoundationModelsAvailability.isAvailable {
                 return true
             }
             #endif
