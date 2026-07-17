@@ -44,8 +44,22 @@ final class OnDeviceLLMService: ObservableObject {
         /// 이 모델을 실행하기 위한 최소 물리 메모리(GiB, physicalMemory 보고값 기준).
         /// 6GB 기기(보고값 ~5.6–5.9 GiB)는 2B까지만, 4B는 8GB(보고값 ~7.3–7.9 GiB) 이상에서만.
         let minMemoryGiB: Double
+        /// 프롬프트 맨 앞에 붙일 접두(BOS 등). Qwen은 없음, LFM2는 "<|startoftext|>" 필요.
+        var promptPrefix: String = ""
+        /// assistant 턴 시작 뒤 프라이머. Qwen3.5는 빈 <think> 블록으로 thinking을 억제해
+        /// JSON을 직접 출력시킨다. LFM2 등 다른 계열은 강제 프라이머 없이 비운다.
+        var assistantPrimer: String = "<think>\n\n</think>\n"
     }
     static let modelCatalog: [ModelOption] = [
+        // ── 경량 LFM2 (구형/저메모리 6GB 기기용, ChatML 호환) ──────────
+        ModelOption(
+            id: "mlx-community/LFM2.5-1.2B-Instruct-4bit",
+            displayName: "LFM2.5-1.2B · 4bit (경량·빠름, ~0.65GB)",
+            sizeMB: 650,
+            minMemoryGiB: 5.0,
+            promptPrefix: "<|startoftext|>",
+            assistantPrimer: ""
+        ),
         // ── 범용 Qwen 모델 (성능 비교용) ──────────────────────────
         ModelOption(
             id: "mlx-community/Qwen3.5-2B-MLX-4bit",
@@ -290,7 +304,12 @@ final class OnDeviceLLMService: ObservableObject {
         let trimmedUser = userPrompt.count > maxUserChars
             ? String(userPrompt.prefix(maxUserChars)) + "\n...[이하 생략]"
             : userPrompt
-        let prompt = "<|im_start|>system\n\(systemPrompt)<|im_end|>\n<|im_start|>user\n\(trimmedUser)<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n"
+        // 모델별 프롬프트 포맷 — Qwen/LFM2 모두 ChatML(<|im_start|>) 마커를 쓰지만
+        // LFM2는 BOS(<|startoftext|>) 접두가 필요하고 Qwen 전용 빈 <think> 프라이머는 쓰지 않는다.
+        let opt = Self.modelCatalog.first { $0.id == modelID }
+        let prefix = opt?.promptPrefix ?? ""
+        let primer = opt?.assistantPrimer ?? "<think>\n\n</think>\n"
+        let prompt = "\(prefix)<|im_start|>system\n\(systemPrompt)<|im_end|>\n<|im_start|>user\n\(trimmedUser)<|im_end|>\n<|im_start|>assistant\n\(primer)"
 
         let task = Task<String, Error> {
             try await container.perform { context in
@@ -321,7 +340,17 @@ final class OnDeviceLLMService: ObservableObject {
             throw LLMError.cancelled(reason: lastUnloadReason)
         }
         resetIdleTimer()
-        return result
+        // LFM2 등 추론형 모델이 출력 앞에 <think>…</think>를 붙이면 JSON 파싱이 깨지므로 제거.
+        return Self.stripLeadingThinkBlock(result)
+    }
+
+    /// 출력 맨 앞의 <think>…</think> 추론 블록을 제거해 후속 JSON 파싱을 보호한다.
+    /// think 블록이 없으면 원본을 그대로 반환.
+    static func stripLeadingThinkBlock(_ text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("<think>"),
+              let end = trimmed.range(of: "</think>") else { return text }
+        return String(trimmed[end.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     // MARK: - 언로드 사유 계측
@@ -708,8 +737,10 @@ final class OnDeviceLLMService: ObservableObject {
     @Published var downloadInterrupted = false
     struct ModelOption: Identifiable {
         let id: String; let displayName: String; let sizeMB: Int; let minMemoryGiB: Double
+        var promptPrefix: String = ""; var assistantPrimer: String = "<think>\n\n</think>\n"
     }
     static let modelCatalog: [ModelOption] = [
+        ModelOption(id: "mlx-community/LFM2.5-1.2B-Instruct-4bit", displayName: "LFM2.5-1.2B · 4bit (경량·빠름, ~0.65GB)", sizeMB: 650, minMemoryGiB: 5.0, promptPrefix: "<|startoftext|>", assistantPrimer: ""),
         ModelOption(id: "mlx-community/Qwen3.5-2B-MLX-4bit", displayName: "Qwen3.5-2B · 4bit (범용, ~1.4GB)", sizeMB: 1400, minMemoryGiB: 5.0),
         ModelOption(id: "mlx-community/Qwen3.5-4B-MLX-4bit", displayName: "Qwen3.5-4B · 4bit (범용 고품질, ~2.4GB)", sizeMB: 2400, minMemoryGiB: 7.0),
     ]
