@@ -41,20 +41,42 @@ final class OnDeviceLLMService: ObservableObject {
         let id: String          // HuggingFace 모델 ID (UserDefaults 저장값)
         let displayName: String // 설정 화면 표시명
         let sizeMB: Int         // 예상 다운로드 크기(MB)
+        /// 이 모델을 실행하기 위한 최소 물리 메모리(GiB, physicalMemory 보고값 기준).
+        /// 6GB 기기(보고값 ~5.6–5.9 GiB)는 2B까지만, 4B는 8GB(보고값 ~7.3–7.9 GiB) 이상에서만.
+        let minMemoryGiB: Double
     }
     static let modelCatalog: [ModelOption] = [
         // ── 범용 Qwen 모델 (성능 비교용) ──────────────────────────
         ModelOption(
             id: "mlx-community/Qwen3.5-2B-MLX-4bit",
             displayName: "Qwen3.5-2B · 4bit (범용, ~1.4GB)",
-            sizeMB: 1400
+            sizeMB: 1400,
+            minMemoryGiB: 5.0
         ),
         ModelOption(
             id: "mlx-community/Qwen3.5-4B-MLX-4bit",
             displayName: "Qwen3.5-4B · 4bit (범용 고품질, ~2.4GB)",
-            sizeMB: 2400
+            sizeMB: 2400,
+            minMemoryGiB: 7.0
         ),
     ]
+
+    /// 현재 기기의 실측 물리 메모리(GiB). physicalMemory는 마케팅 용량보다 약간 낮게 보고됨
+    /// (예: "6GB" 기기 → ~5.6–5.9 GiB, "8GB" → ~7.3–7.9 GiB, "4GB" → ~3.7 GiB).
+    static var physicalMemoryGiB: Double {
+        Double(ProcessInfo.processInfo.physicalMemory) / (1_024 * 1_024 * 1_024)
+    }
+
+    /// 최소 실행 요건(가장 작은 2B 모델) 충족을 판정하는 임계값.
+    /// 6GB 기기는 통과(iPhone 13 Pro/14/15/15 Plus 등), 4GB 기기(~3.7 GiB)는 제외.
+    static let minCapableMemoryGiB: Double = 5.0
+
+    /// 현재 기기에서 실행 가능한(= 요구 메모리를 충족하는) 모델만 반환.
+    /// 6GB 기기에서는 2B만, 8GB+ 기기에서는 2B+4B 노출.
+    static var availableModels: [ModelOption] {
+        let mem = physicalMemoryGiB
+        return modelCatalog.filter { mem >= $0.minMemoryGiB }
+    }
     /// 기본 모델: Qwen 2B 모델.
     /// UserDefaults "pieroot.todo.onDeviceModelID"로 기기당 재지정 가능.
     static let defaultModelID = "mlx-community/Qwen3.5-2B-MLX-4bit"
@@ -87,7 +109,7 @@ final class OnDeviceLLMService: ObservableObject {
     private(set) var lastUnloadReason: UnloadReason?
 
     var isCapable: Bool {
-        ProcessInfo.processInfo.physicalMemory >= 6 * 1_024 * 1_024 * 1_024
+        Self.physicalMemoryGiB >= Self.minCapableMemoryGiB
     }
 
     /// HuggingFace 캐시 디렉터리에 모델 파일이 있는지 확인.
@@ -104,6 +126,9 @@ final class OnDeviceLLMService: ObservableObject {
     }
 
     private init() {
+        // 임계값 실측 검증용 진단 로그 — physicalMemory 보고값으로 6GB/4GB 판정 확인.
+        print(String(format: "[OnDeviceLLM] 물리 메모리 %.2f GiB · isCapable=%@ · availableModels=%d",
+                     Self.physicalMemoryGiB, isCapable ? "true" : "false", Self.availableModels.count))
         setupLifecycleObservers()
     }
 
@@ -130,6 +155,16 @@ final class OnDeviceLLMService: ObservableObject {
         do {
             try Task.checkCancellation()
             let idToLoad = modelID
+            // 로드 직전 실측 가용 메모리 확인 — 경계 기기에서 OOM 크래시 대신 명확한 에러로 폴백.
+            // 모델 가중치(sizeMB)를 램에 올릴 여유 + 안전 마진(512MB)이 없으면 로드하지 않는다.
+            let modelSizeMB = Self.modelCatalog.first { $0.id == idToLoad }?.sizeMB ?? 1400
+            let requiredBytes = (modelSizeMB + 512) * 1_024 * 1_024
+            let availableBytes = os_proc_available_memory()
+            print("[OnDeviceLLM] 로드 전 가용 메모리 \(availableBytes / 1_024 / 1_024)MB, 필요 추정 \(requiredBytes / 1_024 / 1_024)MB")
+            if availableBytes > 0 && availableBytes < requiredBytes {
+                loadError = "메모리가 부족해 온디바이스 모델을 로드할 수 없습니다. 다른 앱을 종료한 뒤 다시 시도해 주세요."
+                return
+            }
             let config = ModelConfiguration(id: idToLoad)
             container = try await LLMModelFactory.shared.loadContainer(
                 from: HuggingFaceHubDownloader(),
@@ -672,12 +707,15 @@ final class OnDeviceLLMService: ObservableObject {
     @Published var downloadProgress: Double = 0
     @Published var downloadInterrupted = false
     struct ModelOption: Identifiable {
-        let id: String; let displayName: String; let sizeMB: Int
+        let id: String; let displayName: String; let sizeMB: Int; let minMemoryGiB: Double
     }
     static let modelCatalog: [ModelOption] = [
-        ModelOption(id: "mlx-community/Qwen3.5-2B-MLX-4bit", displayName: "Qwen3.5-2B · 4bit (범용, ~1.4GB)", sizeMB: 1400),
-        ModelOption(id: "mlx-community/Qwen3.5-4B-MLX-4bit", displayName: "Qwen3.5-4B · 4bit (범용 고품질, ~2.4GB)", sizeMB: 2400),
+        ModelOption(id: "mlx-community/Qwen3.5-2B-MLX-4bit", displayName: "Qwen3.5-2B · 4bit (범용, ~1.4GB)", sizeMB: 1400, minMemoryGiB: 5.0),
+        ModelOption(id: "mlx-community/Qwen3.5-4B-MLX-4bit", displayName: "Qwen3.5-4B · 4bit (범용 고품질, ~2.4GB)", sizeMB: 2400, minMemoryGiB: 7.0),
     ]
+    static var physicalMemoryGiB: Double { Double(ProcessInfo.processInfo.physicalMemory) / (1_024 * 1_024 * 1_024) }
+    static let minCapableMemoryGiB: Double = 5.0
+    static var availableModels: [ModelOption] { modelCatalog.filter { physicalMemoryGiB >= $0.minMemoryGiB } }
     static let defaultModelID = "mlx-community/Qwen3.5-2B-MLX-4bit"
     static let defaultContextLength = 4096
     static let isMLXAvailable = false   // 패키지 미설치 — Xcode GUI로 추가 필요

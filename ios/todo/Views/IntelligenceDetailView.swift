@@ -132,13 +132,20 @@ struct IntelligenceDetailView: View {
                     }
                     
                     Picker("모델", selection: $onDeviceModelID) {
-                        ForEach(OnDeviceLLMService.modelCatalog) { option in
+                        ForEach(OnDeviceLLMService.availableModels) { option in
                             Text(option.displayName).tag(option.id)
                         }
                     }
                     .pickerStyle(.menu)
                     .onChange(of: onDeviceModelID) { _, _ in
                         if llmService.isModelLoaded { llmService.unloadModel() }
+                    }
+                    .onAppear {
+                        // 저장된 모델이 이 기기에서 허용되지 않으면(예: 6GB 기기인데 4B) 허용 모델로 교정.
+                        let allowed = OnDeviceLLMService.availableModels
+                        if !allowed.contains(where: { $0.id == onDeviceModelID }) {
+                            onDeviceModelID = allowed.first?.id ?? OnDeviceLLMService.defaultModelID
+                        }
                     }
                     
                     if llmService.isLoading {
