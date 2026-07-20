@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<data-extraction-rules>
+    <cloud-backup>
+        <include domain="file" path="." />
+        <exclude domain="file" path="meetings" />
+        <exclude domain="file" path="sift_state.json" />
+    </cloud-backup>
+    <device-transfer>
+        <include domain="file" path="." />
+        <exclude domain="file" path="meetings" />
+        <exclude domain="file" path="sift_state.json" />
+    </device-transfer>
+</data-extraction-rules>

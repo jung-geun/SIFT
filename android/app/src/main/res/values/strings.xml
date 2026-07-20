@@ -1,0 +1,8 @@
+<resources>
+    <string name="app_name">SIFT</string>
+    <string name="sift_tagline">Tasks, device calendar, and migration-ready mail settings in one Android workspace</string>
+    <string name="sift_empty_title">SIFT Android is ready</string>
+    <string name="sift_empty_body">Use the TODO, calendar, and settings flows to manage local work while Android mail OAuth and provider-backed AI are wired separately.</string>
+    <string name="sift_status_label">Android migration status</string>
+    <string name="sift_status_value">Usable local parity build</string>
+</resources>

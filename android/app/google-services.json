@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "762457978011",
+    "project_id": "xyz-pieroot-sift-d5e7b",
+    "storage_bucket": "xyz-pieroot-sift-d5e7b.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:762457978011:android:6ba9f06076d4fb6a67c23e",
+        "android_client_info": {
+          "package_name": "xyz.pieroot.sift"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBHsVIQq31_teig6Nd9A2sFK8Vbu3LHkfY"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
