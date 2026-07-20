@@ -43,3 +43,7 @@ GoogleService-Info.plist
 # OS
 .DS_Store
 Thumbs.db
+.gstack/
+/artifacts/
+/backend/meeting-api/node_modules/
+/backend/meeting-api/dist/
