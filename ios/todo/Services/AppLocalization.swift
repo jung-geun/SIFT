@@ -146,7 +146,7 @@ extension AppLanguage {
             table: table,
             comment: comment
         )
-        return String.localizedStringWithFormat(format, Int64(count))
+        return String(format: format, locale: language.locale, Int64(count))
     }
 
     private var bundleCandidates: [String] {
