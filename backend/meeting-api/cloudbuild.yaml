@@ -1,0 +1,21 @@
+steps:
+  - name: node:22
+    dir: backend/meeting-api
+    entrypoint: bash
+    args: [-c, 'npm install -g npm@11.18.0 && npm ci']
+  - name: node:22
+    dir: backend/meeting-api
+    entrypoint: bash
+    args: [-c, 'npm install -g npm@11.18.0 && npm test']
+  - name: node:22
+    dir: backend/meeting-api
+    entrypoint: bash
+    args: [-c, 'npm install -g npm@11.18.0 && npm run build']
+  - name: gcr.io/cloud-builders/docker
+    args: [build, -f, backend/meeting-api/Dockerfile, -t, '${_IMAGE}', backend/meeting-api]
+images: ['${_IMAGE}']
+timeout: 3600s
+options:
+  logging: CLOUD_LOGGING_ONLY
+substitutions:
+  _IMAGE: asia-northeast3-docker.pkg.dev/$PROJECT_ID/meeting-api/meeting-api:$SHORT_SHA

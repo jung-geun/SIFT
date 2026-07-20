@@ -1,0 +1,33 @@
+{
+  "name": "@sift/meeting-api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "test": "vitest run",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "@fastify/multipart": "10.1.0",
+    "@fastify/websocket": "11.3.0",
+    "@google-cloud/speech": "7.5.0",
+    "@google-cloud/storage": "7.21.0",
+    "@google-cloud/tasks": "6.2.3",
+    "@google/genai": "2.11.0",
+    "canonicalize": "3.0.0",
+    "firebase-admin": "14.1.0",
+    "fastify": "5.10.0",
+    "openai": "6.46.0",
+    "pino": "10.1.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.1",
+    "tsx": "4.20.6",
+    "typescript": "6.0.2",
+    "vitest": "4.1.10"
+  }
+}

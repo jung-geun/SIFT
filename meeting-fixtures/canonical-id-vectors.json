@@ -1,0 +1,73 @@
+{
+  "version": 1,
+  "segmentVectors": [
+    {
+      "name": "nfc-korean",
+      "meetingId": "123e4567-e89b-12d3-a456-426614174000",
+      "transcriptRevision": 0,
+      "startMs": 0,
+      "endMs": 1000,
+      "inputText": "  민수님이 다음 주 화요일까지 견적서를 보내주세요\r\n",
+      "canonical": "{\"meetingId\":\"123e4567-e89b-12d3-a456-426614174000\",\"transcriptRevision\":0,\"startMs\":0,\"endMs\":1000,\"text\":\"민수님이 다음 주 화요일까지 견적서를 보내주세요\"}",
+      "id": "b1d9ec713d8164418c29c9fa85b30423"
+    },
+    {
+      "name": "nfd-korean",
+      "meetingId": "123e4567-e89b-12d3-a456-426614174000",
+      "transcriptRevision": 1,
+      "startMs": 1000,
+      "endMs": 2000,
+      "inputText": "회의 내용",
+      "canonical": "{\"meetingId\":\"123e4567-e89b-12d3-a456-426614174000\",\"transcriptRevision\":1,\"startMs\":1000,\"endMs\":2000,\"text\":\"회의 내용\"}",
+      "id": "22a82fb8c90b4004e05a13c5671738ee"
+    },
+    {
+      "name": "escapes-and-trim",
+      "meetingId": "123e4567-e89b-12d3-a456-426614174000",
+      "transcriptRevision": 2,
+      "startMs": 2000,
+      "endMs": 3000,
+      "inputText": "\"\\/\b\t\n\f\r\u0001  ",
+      "canonical": "{\"meetingId\":\"123e4567-e89b-12d3-a456-426614174000\",\"transcriptRevision\":2,\"startMs\":2000,\"endMs\":3000,\"text\":\"\\\"\\\\/\\b\\t\\n\\f\\n\\u0001\"}",
+      "id": "3804ba789cb1d8d3cce071aa17251af5"
+    },
+    {
+      "name": "internal-line-separators-and-safe-integer-edge",
+      "meetingId": "123e4567-e89b-12d3-a456-426614174000",
+      "transcriptRevision": 9007199254740991,
+      "startMs": 0,
+      "endMs": 9007199254740991,
+      "inputText": "앞 중간 끝",
+      "canonical": "{\"meetingId\":\"123e4567-e89b-12d3-a456-426614174000\",\"transcriptRevision\":9007199254740991,\"startMs\":0,\"endMs\":9007199254740991,\"text\":\"앞 중간 끝\"}",
+      "id": "029e3179e11f497b4342bcb902c98b20"
+    }
+  ],
+  "actionVectors": [
+    {
+      "name": "null-and-duplicates",
+      "meetingId": "123e4567-e89b-12d3-a456-426614174000",
+      "sourceSegmentIds": ["bbbb", "aaaa", "bbbb"],
+      "title": "  견적서 제출  ",
+      "assignee": null,
+      "dueAt": null,
+      "canonical": "{\"meetingId\":\"123e4567-e89b-12d3-a456-426614174000\",\"sourceSegmentIds\":[\"aaaa\",\"bbbb\"],\"title\":\"견적서 제출\",\"assignee\":null,\"dueAt\":null}",
+      "id": "ea912f8e12cf7512daa4ea43a2fe958f"
+    },
+    {
+      "name": "date-and-spaces",
+      "meetingId": "123e4567-e89b-12d3-a456-426614174000",
+      "sourceSegmentIds": ["0001", "0002"],
+      "title": "\t정산  자료\n공유 ",
+      "assignee": " 민수 님 ",
+      "dueAt": "2026-07-14T00:00:00.000Z",
+      "canonical": "{\"meetingId\":\"123e4567-e89b-12d3-a456-426614174000\",\"sourceSegmentIds\":[\"0001\",\"0002\"],\"title\":\"정산 자료 공유\",\"assignee\":\"민수 님\",\"dueAt\":\"2026-07-14T00:00:00.000Z\"}",
+      "id": "1441a82b6dcff9b5de1388f3db781c87"
+    }
+  ],
+  "integerBounds": {
+    "accepted": [0, 1, 9007199254740991],
+    "rejected": [-1, 9007199254740992],
+    "uint64Multipart": "Validate as ASCII decimal and parse as UInt64 or BigInt outside canonical JSON."
+  },
+  "surrogateRejection": "Tests must construct unpaired UTF-16 high and low surrogates directly; JSON cannot represent them."
+}
