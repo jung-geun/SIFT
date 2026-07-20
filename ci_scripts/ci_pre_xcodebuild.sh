@@ -13,7 +13,7 @@ REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 # 
 # Xcode Cloud는 이 스크립트를 ci_scripts/ 디렉터리에서 실행하므로
 # 저장소 루트를 기준으로 경로를 계산한다.
-RESOLVED_REPO_PATH="todo.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
+RESOLVED_REPO_PATH="ios/todo.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
 EXPECTED_HASH_FILE="$REPO_ROOT/.package-resolved.sha256"
 
 if [ ! -f "$EXPECTED_HASH_FILE" ]; then
@@ -24,12 +24,12 @@ fi
 EXPECTED_HASH=$(cat "$EXPECTED_HASH_FILE" | tr -d '[:space:]')
 
 # SPM이 워킹 트리 파일을 갱신했을 수 있으므로 HEAD 커밋의 내용으로 해시를 계산
-COMMITTED_HASH=$(git -C "$REPO_ROOT" show HEAD:"$RESOLVED_REPO_PATH" 2>/dev/null | shasum -a 256 | cut -d' ' -f1)
-
-if [ -z "$COMMITTED_HASH" ]; then
+if ! git -C "$REPO_ROOT" cat-file -e "HEAD:$RESOLVED_REPO_PATH" 2>/dev/null; then
   echo "[CI] git show HEAD:\"$RESOLVED_REPO_PATH\" 실패 — Package.resolved가 커밋에 포함되지 않았습니다." >&2
   exit 1
 fi
+
+COMMITTED_HASH=$(git -C "$REPO_ROOT" show HEAD:"$RESOLVED_REPO_PATH" | shasum -a 256 | cut -d' ' -f1)
 
 if [ "$COMMITTED_HASH" != "$EXPECTED_HASH" ]; then
   echo "[CI] Package.resolved 해시 불일치." >&2

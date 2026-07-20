@@ -73,11 +73,13 @@ jobs:
       - name: Archive
         run: |
           xcodebuild archive \
+            -project ios/todo.xcodeproj \
             -scheme todo \
             -destination 'generic/platform=iOS' \
             -archivePath $RUNNER_TEMP/todo.xcarchive \
             CODE_SIGN_STYLE=Manual \
             | xcpretty || xcodebuild archive \
+            -project ios/todo.xcodeproj \
             -scheme todo \
             -destination 'generic/platform=iOS' \
             -archivePath $RUNNER_TEMP/todo.xcarchive \

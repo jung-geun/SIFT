@@ -39,10 +39,12 @@ jobs:
       - name: Build
         run: |
           xcodebuild build \
+            -project ios/todo.xcodeproj \
             -scheme todo \
             -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
             CODE_SIGNING_ALLOWED=NO \
             | xcpretty || xcodebuild build \
+            -project ios/todo.xcodeproj \
             -scheme todo \
             -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
             CODE_SIGNING_ALLOWED=NO
@@ -50,11 +52,13 @@ jobs:
       - name: Test (Tier 1 파서; FM 스모크 자동 skip)
         run: |
           xcodebuild test \
+            -project ios/todo.xcodeproj \
             -scheme todo \
             -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
             -only-testing:todoTests \
             CODE_SIGNING_ALLOWED=NO \
             | xcpretty || xcodebuild test \
+            -project ios/todo.xcodeproj \
             -scheme todo \
             -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
             -only-testing:todoTests \
