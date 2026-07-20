@@ -19,6 +19,8 @@ description: 메일·캘린더에서 할 일을 자동으로 찾아내고, AI가
 <p>
   <a href="https://testflight.apple.com/join/qQNuSmj4"><strong>🧪 TestFlight 베타 신청</strong></a>
   &nbsp;·&nbsp;
+  <a href="./changes.html">변경사항</a>
+  &nbsp;·&nbsp;
   <a href="./privacy-policy.html">개인정보 처리방침</a>
   &nbsp;·&nbsp;
   <a href="./terms-of-service.html">서비스 약관</a>
@@ -120,24 +122,28 @@ SIFT는 *"TODO를 열심히 관리하게 만드는 앱"* 이 아니라, **TODO �
 ### ✅ 완료
 
 - SwiftData 기반 로컬 / iCloud 데이터 저장소
+- 최초 실행 튜토리얼 및 iCloud 동기화 온보딩
 - Gmail OAuth2 연동 및 이메일 자동 분석
-- 이메일 딥링크 (Gmail 앱 → Mail.app → 웹 순 폴백)
+- 메일 탭에서 원본 메일 보기와 TODO 자동 등록
 - 캘린더 마감 자동 등록 및 완료 처리 정책 연동
-- 앱-시스템 캘린더 실시간 양방향 동기화
+- 앱-시스템 캘린더 실시간 양방향 동기화 및 충돌 자동 해결
 - 완료된 항목 1개월 경과 시 자동 숨김
+- 오래된 로컬 데이터 자동 청소
 - 시간대·태그별 처리 속도 기반 행동 패턴 분석
-- 온디바이스 LLM (Qwen3.5 2B, MLX 최적화)
-- iCloud 동기화 설정 + 기기별 로컬 설정 분리
+- 설정 화면 8대 대분류 카테고리 분리
+- 온디바이스 LLM 최적화 (Qwen3.5 2B 기본, 4B 선택 가능)
+- Gemini API 선택형 라우팅과 이메일 본문 분석 opt-in
 
 ### 🔄 진행 중
 
+- Outlook/MSAL 연동 배포 설정 검증 (MicrosoftClientID 구성 전 기본 빌드에서는 숨김)
 - Qwen3.5 4B 고성능 모델 기기 메모리 최적화
-- 백그라운드 캘린더 변경 감지 정확도 향상
+- 백그라운드 캘린더·메일 변경 감지와 자동 동기화 고도화
 
 ### 📋 다음 예정
 
-- 다중 이메일 계정 연동 (IMAP 등 Gmail 외 서비스)
-- Apple Foundation Models 정식 버전 대응 및 통합
+- Gmail 외 메일 서비스의 공개 배포 확대
+- Apple Foundation Models 정식 환경 재검증 및 링크 정책 확정
 - 커스텀 파인튜닝 LLM 교체 지원
 
 ---
@@ -204,6 +210,6 @@ SIFT는 스케줄 관리를 잘하는 사람을 위한 앱이라기보다, **스
 
 <br>
 
-<a href="./privacy-policy.html">개인정보 처리방침</a> &nbsp;·&nbsp; <a href="./terms-of-service.html">서비스 약관</a>
+<a href="./changes.html">변경사항</a> &nbsp;·&nbsp; <a href="./privacy-policy.html">개인정보 처리방침</a> &nbsp;·&nbsp; <a href="./terms-of-service.html">서비스 약관</a>
 
 </div>

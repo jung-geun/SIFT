@@ -98,12 +98,13 @@ SIFT는 이메일·캘린더·수동 입력으로 쌓이는 할 일들을 기본
 
 ---
 
-## 법적 문서
+## 사이트 문서
 
 | 문서 | GitHub | 웹 |
 |------|--------|-----|
-| 개인정보 처리방침 | [docs/privacy-policy.md](docs/privacy-policy.md) | [jung-geun.github.io/SIFT/privacy-policy.html](https://jung-geun.github.io/SIFT/privacy-policy.html) |
-| 서비스 약관 | [docs/terms-of-service.md](docs/terms-of-service.md) | [jung-geun.github.io/SIFT/terms-of-service.html](https://jung-geun.github.io/SIFT/terms-of-service.html) |
+| 변경사항 | [docs/changes.md](docs/changes.md) | [sift.pieroot.xyz/changes.html](https://sift.pieroot.xyz/changes.html) |
+| 개인정보 처리방침 | [docs/privacy-policy.md](docs/privacy-policy.md) | [sift.pieroot.xyz/privacy-policy.html](https://sift.pieroot.xyz/privacy-policy.html) |
+| 서비스 약관 | [docs/terms-of-service.md](docs/terms-of-service.md) | [sift.pieroot.xyz/terms-of-service.html](https://sift.pieroot.xyz/terms-of-service.html) |
 
 ---
 

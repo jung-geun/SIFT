@@ -113,7 +113,7 @@ HuggingFace (Qwen3.5-4B-MLX-4bit)
 
 ### 6-B. Swift 통합 (빌드 제외 스캐폴드)
 
-`todo/Services/CoreAILanguageModelBackend.swift` 참조.
+`ios/todo/Services/CoreAILanguageModelBackend.swift` 참조.
 
 ```swift
 // COREAI_PREVIEW 플래그 활성화 시 컴파일
