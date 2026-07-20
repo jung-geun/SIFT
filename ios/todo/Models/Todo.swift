@@ -8,6 +8,7 @@ enum TodoSource: String, Codable, Sendable {
     case manual   = "manual"
     case email    = "email"
     case calendar = "calendar"
+    case meeting  = "meeting"
 }
 
 /// 이메일 메일 triage 결과 — 메인 할 일 vs 참고함
@@ -25,12 +26,16 @@ enum TodoPriority: Int, Codable, CaseIterable, Sendable {
     case critical = 5
 
     var label: String {
+        displayName(language: .current)
+    }
+
+    func displayName(language: AppLanguage) -> String {
         switch self {
-        case .low:      "낮음"
-        case .medium:   "보통"
-        case .high:     "높음"
-        case .urgent:   "긴급"
-        case .critical: "최우선"
+        case .low:      return language == .english ? "Low" : "낮음"
+        case .medium:   return language == .english ? "Medium" : "보통"
+        case .high:     return language == .english ? "High" : "높음"
+        case .urgent:   return language == .english ? "Urgent" : "긴급"
+        case .critical: return language == .english ? "Critical" : "최우선"
         }
     }
 
@@ -101,6 +106,8 @@ final class Todo {
     var sourceThreadID: String = ""
     /// 발신자 이메일 주소 — 학습 억제 키 (표시명보다 안정적, 예: "no-reply@coupang.com")
     var sourceSenderEmail: String = ""
+    /// Opaque authenticated mailbox namespace for email-source Todos.
+    var sourceAccountNamespace: String = ""
     /// 이메일 triage 상태 — TodoTriage.rawValue. 기본 "todo" → 기존 항목/수동 항목은 메인 목록 유지
     var triageStatus: String = TodoTriage.todo.rawValue
 
@@ -214,6 +221,7 @@ final class Todo {
     var dueDateLabel: String? {
         guard let due = dueDate else { return nil }
         let formatter = RelativeDateTimeFormatter()
+        formatter.locale = AppLanguage.current.locale
         formatter.unitsStyle = .short
         return formatter.localizedString(for: due, relativeTo: Date())
     }

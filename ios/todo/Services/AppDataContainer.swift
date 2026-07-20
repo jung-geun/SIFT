@@ -49,7 +49,7 @@ final class AppDataContainer: ObservableObject {
 
     // MARK: - Store URL
 
-    static func getStoreURL(name: String) -> URL {
+    nonisolated static func getStoreURL(name: String) -> URL {
         let fileManager = FileManager.default
         let appSupportURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         if !fileManager.fileExists(atPath: appSupportURL.path) {
@@ -105,6 +105,7 @@ final class AppDataContainer: ObservableObject {
         Todo.self,
         Persona.self,
         TaskAuditEvent.self,
+        TaskBehaviorEvent.self,
         MemoryAnalysis.self
     ])
 
@@ -114,16 +115,22 @@ final class AppDataContainer: ObservableObject {
     /// iCloud 토글 여부와 무관하게 항상 기기 로컬에만 저장.
     static let emailSchema = Schema([EmailMessage.self])
 
+    static func makeEmailContainer(storeURL: URL) throws -> ModelContainer {
+        let config = ModelConfiguration(
+            schema: emailSchema,
+            url: storeURL,
+            cloudKitDatabase: .none
+        )
+        return try ModelContainer(for: emailSchema, configurations: [config])
+    }
+
     /// iCloud 설정과 무관하게 항상 로컬(cloudKitDatabase: .none)로 고정되는 컨테이너.
     /// MailTabView 서브트리에만 주입 — 메인 appSchema에 EmailMessage 포함 금지.
     lazy var emailContainer: ModelContainer = {
-        let config = ModelConfiguration(
-            schema: AppDataContainer.emailSchema,
-            url: AppDataContainer.getStoreURL(name: "email_local.store"),
-            cloudKitDatabase: .none   // iCloud 토글과 무관하게 항상 로컬
-        )
         do {
-            return try ModelContainer(for: AppDataContainer.emailSchema, configurations: [config])
+            return try AppDataContainer.makeEmailContainer(
+                storeURL: AppDataContainer.emailStoreURL()
+            )
         } catch {
             print("[EmailContainer] 초기화 실패: \(error). 메모리 전용 모드로 실행.")
             let fallback = ModelConfiguration(
@@ -133,6 +140,125 @@ final class AppDataContainer: ObservableObject {
             return try! ModelContainer(for: AppDataContainer.emailSchema, configurations: [fallback])
         }
     }()
+
+    nonisolated static func emailDirectory() throws -> URL {
+        let directory = getStoreURL(name: "EmailLocal")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        var mutableDirectory = directory
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try mutableDirectory.setResourceValues(values)
+        try FileManager.default.setAttributes(
+            [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+            ofItemAtPath: directory.path
+        )
+        return directory
+    }
+
+    nonisolated static func emailStoreURL() throws -> URL {
+        let directory = try emailDirectory()
+        let storeURL = directory.appendingPathComponent("email_local.store")
+        let legacyURL = getStoreURL(name: "email_local.store")
+        let fileManager = FileManager.default
+
+        for suffix in ["-shm", "-wal", ""] {
+            let source = URL(fileURLWithPath: legacyURL.path + suffix)
+            let destination = URL(fileURLWithPath: storeURL.path + suffix)
+            guard fileManager.fileExists(atPath: source.path),
+                  !fileManager.fileExists(atPath: destination.path)
+            else {
+                continue
+            }
+            try fileManager.moveItem(at: source, to: destination)
+            try fileManager.setAttributes(
+                [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+                ofItemAtPath: destination.path
+            )
+        }
+        return storeURL
+    }
+
+    // MARK: - Meeting Container (local-only, protected)
+
+    /// Transcripts, summaries, draft actions, manifests, and the derived
+    /// personalized glossary never enter CloudKit.
+    static let meetingSchema = Schema([
+        MeetingRecord.self,
+        MeetingGlossaryTerm.self,
+        VocabularyStoreMetadata.self,
+        VocabularySourceState.self,
+        VocabularyObservation.self
+    ])
+
+    lazy var meetingContainer: ModelContainer = {
+        let directory = AppDataContainer.meetingDirectory()
+        AppDataContainer.excludeFromBackup(directory)
+        AppDataContainer.setProtection(.complete, at: directory)
+        let url = directory.appendingPathComponent("meeting_local.store")
+        let config = ModelConfiguration(
+            schema: AppDataContainer.meetingSchema,
+            url: url,
+            cloudKitDatabase: .none
+        )
+        do {
+            let container = try ModelContainer(for: AppDataContainer.meetingSchema, configurations: [config])
+            AppDataContainer.protectMeetingStoreContents(at: directory)
+            return container
+        } catch {
+            print("[MeetingContainer] initialization failed: \(error). Falling back to memory-only storage.")
+            let fallback = ModelConfiguration(
+                schema: AppDataContainer.meetingSchema,
+                isStoredInMemoryOnly: true
+            )
+            return try! ModelContainer(for: AppDataContainer.meetingSchema, configurations: [fallback])
+        }
+    }()
+
+    nonisolated static func meetingDirectory() -> URL {
+        let directory = getStoreURL(name: "Meetings")
+        if !FileManager.default.fileExists(atPath: directory.path) {
+            try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        }
+        return directory
+    }
+
+    /// Active capture is opened before lock and remains writable while open.
+    /// On Stop, callers must close the handle, then call finalizeMeetingAudio(at:).
+    static func activeMeetingAudioDirectory(meetingID: String) -> URL {
+        let directory = meetingDirectory()
+            .appendingPathComponent(meetingID, isDirectory: true)
+            .appendingPathComponent("audio", isDirectory: true)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        excludeFromBackup(directory)
+        setProtection(.completeUnlessOpen, at: directory)
+        return directory
+    }
+
+    static func finalizeMeetingAudio(at file: URL) {
+        setProtection(.complete, at: file)
+    }
+
+    private static func protectMeetingStoreContents(at directory: URL) {
+        for path in (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? [] {
+            guard path.lastPathComponent.hasPrefix("meeting_local.store") else { continue }
+            excludeFromBackup(path)
+            setProtection(.complete, at: path)
+        }
+    }
+
+    private static func excludeFromBackup(_ path: URL) {
+        var path = path
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try? path.setResourceValues(values)
+    }
+
+    private static func setProtection(_ protection: FileProtectionType, at path: URL) {
+        try? FileManager.default.setAttributes(
+            [.protectionKey: protection],
+            ofItemAtPath: path.path
+        )
+    }
 
     // MARK: - Migration (legacy local/iCloud → local)
 
@@ -220,12 +346,17 @@ final class AppDataContainer: ObservableObject {
             let localContainer = try ModelContainer(for: schema, configurations: [localConfig])
             let localContext = ModelContext(localContainer)
 
-            let localTodos     = (try? localContext.fetch(FetchDescriptor<Todo>())) ?? []
-            let localPersonas  = (try? localContext.fetch(FetchDescriptor<Persona>())) ?? []
-            let localEvents    = (try? localContext.fetch(FetchDescriptor<TaskAuditEvent>())) ?? []
-            let localAnalyses  = (try? localContext.fetch(FetchDescriptor<MemoryAnalysis>())) ?? []
+            let localTodos          = (try? localContext.fetch(FetchDescriptor<Todo>())) ?? []
+            let localPersonas       = (try? localContext.fetch(FetchDescriptor<Persona>())) ?? []
+            let localAuditEvents    = (try? localContext.fetch(FetchDescriptor<TaskAuditEvent>())) ?? []
+            let localBehaviorEvents = (try? localContext.fetch(FetchDescriptor<TaskBehaviorEvent>())) ?? []
+            let localAnalyses       = (try? localContext.fetch(FetchDescriptor<MemoryAnalysis>())) ?? []
 
-            guard !localTodos.isEmpty || !localPersonas.isEmpty || !localEvents.isEmpty || !localAnalyses.isEmpty else {
+            guard !localTodos.isEmpty
+                    || !localPersonas.isEmpty
+                    || !localAuditEvents.isEmpty
+                    || !localBehaviorEvents.isEmpty
+                    || !localAnalyses.isEmpty else {
                 print("[Migration] 이전 데이터가 비어있어 이관을 생략합니다.")
                 return
             }
@@ -266,6 +397,7 @@ final class AppDataContainer: ObservableObject {
                 newTodo.sourceMessageID = todo.sourceMessageID
                 newTodo.sourceThreadID = todo.sourceThreadID
                 newTodo.sourceSenderEmail = todo.sourceSenderEmail
+                newTodo.sourceAccountNamespace = todo.sourceAccountNamespace
                 newTodo.triageStatus = todo.triageStatus
                 newTodo.calendarEventID = todo.calendarEventID
                 newTodo.memoryNotes = todo.memoryNotes
@@ -280,7 +412,7 @@ final class AppDataContainer: ObservableObject {
                 icloudContext.insert(newTodo)
             }
 
-            for event in localEvents {
+            for event in localAuditEvents {
                 let newEvent = TaskAuditEvent(from: Todo())
                 newEvent.id = event.id
                 newEvent.createdAt = event.createdAt
@@ -293,13 +425,42 @@ final class AppDataContainer: ObservableObject {
                 icloudContext.insert(newEvent)
             }
 
+            for event in localBehaviorEvents {
+                let newEvent = TaskBehaviorEvent(
+                    todo: Todo(),
+                    type: event.eventType,
+                    actor: event.actor,
+                    occurredAt: event.occurredAt
+                )
+                newEvent.id = event.id
+                newEvent.todoID = event.todoID
+                newEvent.eventTypeRaw = event.eventTypeRaw
+                newEvent.actorRaw = event.actorRaw
+                newEvent.sourceType = event.sourceType
+                newEvent.triageType = event.triageType
+                newEvent.wasFixedSchedule = event.wasFixedSchedule
+                newEvent.beforeCompletion = event.beforeCompletion
+                newEvent.afterCompletion = event.afterCompletion
+                newEvent.beforeDueDate = event.beforeDueDate
+                newEvent.afterDueDate = event.afterDueDate
+                newEvent.beforeManualPriority = event.beforeManualPriority
+                newEvent.afterManualPriority = event.afterManualPriority
+                newEvent.beforeComputedPriority = event.beforeComputedPriority
+                newEvent.afterComputedPriority = event.afterComputedPriority
+                icloudContext.insert(newEvent)
+            }
+
             for analysis in localAnalyses {
                 let newAnalysis = MemoryAnalysis(
                     summary: analysis.summary,
                     insights: analysis.insights,
                     fastTags: analysis.fastTags,
                     overdueRate: analysis.overdueRate,
-                    productiveHour: analysis.productiveHour
+                    productiveHour: analysis.productiveHour,
+                    recordTitle: analysis.recordTitle,
+                    accessScopeSummary: analysis.accessScopeSummary,
+                    processorDescription: analysis.processorDescription,
+                    behaviorProfile: analysis.behaviorProfile
                 )
                 newAnalysis.id = analysis.id
                 newAnalysis.createdAt = analysis.createdAt
@@ -307,7 +468,12 @@ final class AppDataContainer: ObservableObject {
             }
 
             try icloudContext.save()
-            print("[Migration] iCloud 컨테이너에 \(localTodos.count + localPersonas.count + localEvents.count + localAnalyses.count)개의 로컬 데이터 이관 완료!")
+            let migratedCount = localTodos.count
+                + localPersonas.count
+                + localAuditEvents.count
+                + localBehaviorEvents.count
+                + localAnalyses.count
+            print("[Migration] iCloud 컨테이너에 \(migratedCount)개의 로컬 데이터 이관 완료!")
 
             // 이관 완료 후 로컬 원본 삭제
             try fileManager.removeItem(at: localV2URL)

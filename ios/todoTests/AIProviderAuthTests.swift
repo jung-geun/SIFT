@@ -9,8 +9,7 @@ struct AIProviderAuthTests {
     private func reset() {
         UserDefaults.standard.removeObject(forKey: "selectedAIProvider")
         UserDefaults.standard.removeObject(forKey: "selectedAIProvider.isLocal")
-        NSUbiquitousKeyValueStore.default.removeObject(forKey: "selectedAIProvider")
-        NSUbiquitousKeyValueStore.default.synchronize()
+        SettingsStore.setTestCloudValue(nil, forKey: "selectedAIProvider")
         UserDefaults.standard.set(false, forKey: "pieroot.todo.iCloudSyncEnabled")
         GeminiProviderService.deleteAPIKey()
     }
@@ -54,8 +53,7 @@ struct AIProviderAuthTests {
             defer { reset() }
             UserDefaults.standard.set(PersonaAIProvider.gemini.rawValue, forKey: "selectedAIProvider")
             UserDefaults.standard.set(false, forKey: "selectedAIProvider.isLocal")
-            NSUbiquitousKeyValueStore.default.set(PersonaAIProvider.foundationModels.rawValue, forKey: "selectedAIProvider")
-            NSUbiquitousKeyValueStore.default.synchronize()
+            SettingsStore.setTestCloudValue(PersonaAIProvider.foundationModels.rawValue, forKey: "selectedAIProvider")
 
             #expect(SettingsStore.selectedProvider() == .foundationModels)
         }

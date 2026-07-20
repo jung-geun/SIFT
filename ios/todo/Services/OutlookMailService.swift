@@ -4,8 +4,9 @@ import AuthenticationServices
 import MSAL
 import UIKit
 
-final class OutlookMailService: NSObject {
+final class OutlookMailService: NSObject, MailboxPagingProvider {
     static let shared = OutlookMailService()
+    let provider: MailProvider = .outlook
 
     private override init() {}
 
@@ -85,9 +86,16 @@ final class OutlookMailService: NSObject {
 
     @MainActor
     @discardableResult
-    func syncRecentMessageCache(emailContext: ModelContext, todoContext: ModelContext) async throws -> EmailCacheSyncResult {
-        let lookbackDays = recentMessageLookbackDays(fallback: 7)
-        let snapshot = try await fetchRecentMessageSyncSnapshot(lookbackDays: lookbackDays)
+    func syncRecentMessageCache(
+        emailContext: ModelContext,
+        todoContext _: ModelContext
+    ) async throws -> EmailCacheSyncResult {
+        let lookbackDays = EmailAnalysisLookbackPolicy.storedLookbackDays()
+        let messages = try await fetchRecentInboxMessages(
+            lookbackDays: lookbackDays,
+            top: 100,
+            paginate: true
+        )
         let providerRawValue = MailProvider.outlook.rawValue
         let existingDescriptor = FetchDescriptor<EmailMessage>(
             predicate: #Predicate<EmailMessage> { email in
@@ -95,17 +103,22 @@ final class OutlookMailService: NSObject {
             }
         )
         let existing = (try? emailContext.fetch(existingDescriptor)) ?? []
-        let existingByID = Dictionary(uniqueKeysWithValues: existing.map { ($0.providerMessageID, $0) })
+        let existingByID = Dictionary(
+            grouping: existing,
+            by: \.providerMessageID
+        ).compactMapValues(\.first)
 
         var upsertedMessageCount = 0
-        for message in snapshot.messages {
-            let body = normalizedBody(from: message)
+        for message in messages {
             let sender = senderDisplay(from: message.from)
             let receivedAt = message.receivedDateTime ?? .distantPast
             let subject = message.subject ?? ""
             let snippet = message.bodyPreview ?? ""
             let threadID = message.conversationId ?? ""
             let isRead = message.isRead ?? false
+            let classification = message.inferenceClassification ?? ""
+            let categories = message.categories ?? []
+            let folderID = message.parentFolderId ?? ""
 
             if let email = existingByID[message.id] {
                 var didChange = false
@@ -137,14 +150,6 @@ final class OutlookMailService: NSObject {
                     email.snippet = snippet
                     didChange = true
                 }
-                if email.body != body {
-                    email.body = body
-                    didChange = true
-                }
-                if email.htmlBody != nil {
-                    email.htmlBody = nil
-                    didChange = true
-                }
                 if email.receivedAt != receivedAt {
                     email.receivedAt = receivedAt
                     didChange = true
@@ -153,65 +158,60 @@ final class OutlookMailService: NSObject {
                     email.isRead = isRead
                     didChange = true
                 }
+                if !email.isInInbox {
+                    email.isInInbox = true
+                    didChange = true
+                }
+                if email.outlookInferenceClassificationRawValue != classification {
+                    email.outlookInferenceClassificationRawValue = classification
+                    didChange = true
+                }
+                if email.providerCategoryNames != categories {
+                    email.providerCategoryNames = categories
+                    didChange = true
+                }
+                if email.providerFolderID != folderID {
+                    email.providerFolderID = folderID
+                    didChange = true
+                }
                 if didChange {
                     upsertedMessageCount += 1
                 }
             } else {
-                let email = EmailMessage(
-                    id: message.id,
-                    threadID: threadID,
-                    subject: subject,
-                    from: sender,
-                    snippet: snippet,
-                    body: body,
-                    htmlBody: nil,
-                    receivedAt: receivedAt,
-                    isRead: isRead,
-                    provider: .outlook,
-                    rawMessageID: message.id
+                emailContext.insert(
+                    EmailMessage(
+                        id: message.id,
+                        threadID: threadID,
+                        subject: subject,
+                        from: sender,
+                        snippet: snippet,
+                        receivedAt: receivedAt,
+                        isRead: isRead,
+                        provider: .outlook,
+                        rawMessageID: message.id,
+                        isInInbox: true,
+                        outlookInferenceClassificationRawValue: classification,
+                        providerCategoryNames: categories,
+                        providerFolderID: folderID
+                    )
                 )
-                emailContext.insert(email)
                 upsertedMessageCount += 1
             }
         }
 
-        let activeIDs = Set(snapshot.messages.map(\.id))
-        let staleEmails = existing.filter {
-            $0.receivedAt >= snapshot.lookbackCutoff && !activeIDs.contains($0.providerMessageID)
-        }
-
-        let staleRefs = Set(staleEmails.map(\.todoSourceRef))
-        let todos = (try? todoContext.fetch(FetchDescriptor<Todo>())) ?? []
-        var prunedTodoCount = 0
-
-        for email in staleEmails {
-            emailContext.delete(email)
-        }
-
-        for todo in todos where staleRefs.contains(todo.sourceRef) {
-            NotificationService.shared.cancel(todo: todo)
-            _ = CalendarService.shared.removeEmailCalendarArtifacts(for: todo)
-            todoContext.delete(todo)
-            prunedTodoCount += 1
-        }
-
-        if upsertedMessageCount > 0 || !staleEmails.isEmpty {
+        if upsertedMessageCount > 0 {
             try emailContext.save()
         }
-        if prunedTodoCount > 0 {
-            try todoContext.save()
-        }
-
         return EmailCacheSyncResult(
             upsertedMessageCount: upsertedMessageCount,
-            prunedMessageCount: staleEmails.count,
-            prunedTodoCount: prunedTodoCount
+            prunedMessageCount: 0,
+            prunedTodoCount: 0
         )
     }
 
     @MainActor
     func fetchAndStoreExtractedItems(context: ModelContext, allowFoundationModels: Bool = true) async throws -> EmailIngestionResult {
-        let lookbackDays = recentMessageLookbackDays(fallback: 7)
+        let lookbackDays = EmailAnalysisLookbackPolicy.storedLookbackDays()
         let cap = min(50, max(10, lookbackDays * 3))
         let messages = try await fetchRecentActiveMessages(lookbackDays: lookbackDays, top: cap)
         let store = EmailLearningStore.shared
@@ -246,6 +246,86 @@ final class OutlookMailService: NSObject {
         store.recordAnalyzed(messageIDs: candidates.map(\.id))
         UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "pieroot.todo.lastEmailFetchDate")
         return result
+    }
+
+    func fetchInboxPage(after cursor: String?) async throws -> MailboxPage {
+        let token = try await accessToken()
+        let url: URL
+        if let cursor {
+            guard let cursorURL = URL(string: cursor) else {
+                throw OutlookMailError.invalidResponse
+            }
+            url = cursorURL
+        } else {
+            url = try graphURL(
+                path: "/me/mailFolders/inbox/messages",
+                queryItems: [
+                    URLQueryItem(name: "$top", value: "100"),
+                    URLQueryItem(name: "$orderby", value: "receivedDateTime desc"),
+                    URLQueryItem(
+                        name: "$select",
+                        value: "id,conversationId,internetMessageId,subject,from,bodyPreview,receivedDateTime,isRead,parentFolderId,inferenceClassification,categories"
+                    )
+                ]
+            )
+        }
+
+        let data = try await performGraphRequest(
+            url: url,
+            token: token,
+            preferTextBody: false
+        )
+        let response = try decodeMessageList(data)
+        return MailboxPage(
+            messages: response.value.map {
+                mailboxMetadata(from: $0, isInInbox: true)
+            },
+            nextCursor: response.nextLink
+        )
+    }
+
+    func fetchInboxMessageIDs() async throws -> Set<String> {
+        let token = try await accessToken()
+        var nextURL: URL? = try graphURL(
+            path: "/me/mailFolders/inbox/messages",
+            queryItems: [
+                URLQueryItem(name: "$top", value: "1000"),
+                URLQueryItem(name: "$select", value: "id")
+            ]
+        )
+        var ids = Set<String>()
+        while let url = nextURL {
+            let data = try await performGraphRequest(
+                url: url,
+                token: token,
+                preferTextBody: false
+            )
+            let response = try decodeMessageList(data)
+            ids.formUnion(response.value.map(\.id))
+            if let nextLink = response.nextLink {
+                guard let parsed = URL(string: nextLink) else {
+                    throw OutlookMailError.invalidResponse
+                }
+                nextURL = parsed
+            } else {
+                nextURL = nil
+            }
+        }
+        return ids
+    }
+
+    func fetchMessageContent(messageID: String) async throws -> MailboxMessageContent {
+        let token = try await accessToken()
+        let message = try await fetchMessage(id: messageID, token: token)
+        let rawBody = message.body?.content ?? ""
+        let htmlBody = message.body?.contentType?.lowercased() == "html"
+            ? rawBody
+            : ""
+        return MailboxMessageContent(
+            metadata: mailboxMetadata(from: message, isInInbox: true),
+            body: normalizedBody(from: message),
+            htmlBody: htmlBody
+        )
     }
 
     func fetchFullMessage(id rawMessageID: String) async throws -> GmailMessage {
@@ -408,18 +488,32 @@ private extension OutlookMailService {
         return root
     }
 
-    func recentMessageLookbackDays(fallback defaultValue: Int) -> Int {
-        let value = UserDefaults.standard.integer(forKey: "pieroot.todo.emailLookbackDays")
-        return value > 0 ? min(max(value, 1), 30) : defaultValue
-    }
 
-    func fetchRecentMessageSyncSnapshot(lookbackDays: Int) async throws -> OutlookRecentMessageSyncSnapshot {
-        let activeMessages = try await fetchRecentActiveMessages(lookbackDays: lookbackDays, top: 100, paginate: true)
-        let cutoff = Date().addingTimeInterval(-Double(lookbackDays) * 24 * 3600)
-        return OutlookRecentMessageSyncSnapshot(
-            messages: activeMessages,
-            lookbackCutoff: cutoff
+    func fetchRecentInboxMessages(
+        lookbackDays: Int,
+        top: Int,
+        paginate: Bool
+    ) async throws -> [OutlookGraphMessage] {
+        let token = try await accessToken()
+        var nextURL: URL? = try recentInboxMessagesURL(
+            lookbackDays: lookbackDays,
+            top: top
         )
+        var messages: [OutlookGraphMessage] = []
+        while let url = nextURL {
+            let data = try await performGraphRequest(
+                url: url,
+                token: token,
+                preferTextBody: false
+            )
+            let response = try decodeMessageList(data)
+            messages.append(contentsOf: response.value)
+            nextURL = paginate ? response.nextLink.flatMap(URL.init(string:)) : nil
+        }
+        return messages.sorted {
+            ($0.receivedDateTime ?? .distantPast)
+                > ($1.receivedDateTime ?? .distantPast)
+        }
     }
 
     func fetchRecentActiveMessages(lookbackDays: Int, top: Int, paginate: Bool = false) async throws -> [OutlookGraphMessage] {
@@ -462,10 +556,13 @@ private extension OutlookMailService {
         let url = try graphURL(
             path: "/me/messages/\(rawMessageID)",
             queryItems: [
-                URLQueryItem(name: "$select", value: "id,conversationId,internetMessageId,subject,from,bodyPreview,body,receivedDateTime,isRead,parentFolderId")
+                URLQueryItem(
+                    name: "$select",
+                    value: "id,conversationId,internetMessageId,subject,from,body,bodyPreview,receivedDateTime,isRead,parentFolderId,inferenceClassification,categories"
+                )
             ]
         )
-        let data = try await performGraphRequest(url: url, token: token, preferTextBody: true)
+        let data = try await performGraphRequest(url: url, token: token, preferTextBody: false)
         do {
             return try graphDecoder.decode(OutlookGraphMessage.self, from: data)
         } catch {
@@ -483,6 +580,54 @@ private extension OutlookMailService {
                 URLQueryItem(name: "$top", value: String(top)),
                 URLQueryItem(name: "$select", value: "id,conversationId,internetMessageId,subject,from,bodyPreview,body,receivedDateTime,isRead,parentFolderId")
             ]
+        )
+    }
+
+    func recentInboxMessagesURL(lookbackDays: Int, top: Int) throws -> URL {
+        let cutoff = Date().addingTimeInterval(-Double(lookbackDays) * 24 * 3600)
+        return try graphURL(
+            path: "/me/mailFolders/inbox/messages",
+            queryItems: [
+                URLQueryItem(name: "$filter", value: "receivedDateTime ge \(graphFilterFormatter.string(from: cutoff))"),
+                URLQueryItem(name: "$orderby", value: "receivedDateTime desc"),
+                URLQueryItem(name: "$top", value: String(top)),
+                URLQueryItem(
+                    name: "$select",
+                    value: "id,conversationId,internetMessageId,subject,from,bodyPreview,receivedDateTime,isRead,parentFolderId,inferenceClassification,categories"
+                )
+            ]
+        )
+    }
+
+    func decodeMessageList(_ data: Data) throws -> OutlookGraphMessageListResponse {
+        do {
+            return try graphDecoder.decode(
+                OutlookGraphMessageListResponse.self,
+                from: data
+            )
+        } catch {
+            throw OutlookMailError.invalidResponse
+        }
+    }
+
+    func mailboxMetadata(
+        from message: OutlookGraphMessage,
+        isInInbox: Bool
+    ) -> MailboxMessageMetadata {
+        MailboxMessageMetadata(
+            provider: .outlook,
+            providerMessageID: message.id,
+            threadID: message.conversationId ?? "",
+            subject: message.subject ?? "",
+            from: senderDisplay(from: message.from),
+            snippet: message.bodyPreview ?? "",
+            receivedAt: message.receivedDateTime ?? .distantPast,
+            isRead: message.isRead ?? false,
+            isInInbox: isInInbox,
+            gmailLabelIDs: [],
+            outlookInferenceClassificationRawValue: message.inferenceClassification ?? "",
+            providerCategoryNames: message.categories ?? [],
+            providerFolderID: message.parentFolderId ?? ""
         )
     }
 
@@ -570,7 +715,9 @@ private extension OutlookMailService {
             htmlBody: nil,
             receivedAt: message.receivedDateTime ?? .distantPast,
             labelIds: [],
-            isBulk: false
+            isBulk: false,
+            provider: .outlook,
+            providerMessageID: message.id
         )
     }
 
@@ -666,23 +813,51 @@ enum OutlookMailError: LocalizedError, Equatable {
     case invalidResponse
 
     var errorDescription: String? {
+        errorDescription(language: .current)
+    }
+
+    func errorDescription(language: AppLanguage) -> String {
         switch self {
         case .missingClientID:
-            return "Microsoft Client ID가 Info.plist의 MicrosoftClientID 키에 설정되어 있지 않습니다."
+            return AppLanguage.localized(
+                "error.outlook.missingClientID",
+                defaultValue: language == .english
+                    ? "The Microsoft Client ID is not configured under the MicrosoftClientID key in Info.plist."
+                    : "Microsoft Client ID가 Info.plist의 MicrosoftClientID 키에 설정되어 있지 않습니다.",
+                language: language,
+                comment: "Outlook error shown when the Microsoft client ID is missing from the app configuration."
+            )
         case .notAuthenticated:
-            return "Outlook에 로그인되어 있지 않습니다."
+            return AppLanguage.localized(
+                "error.outlook.notAuthenticated",
+                defaultValue: language == .english
+                    ? "You are not signed in to Outlook."
+                    : "Outlook에 로그인되어 있지 않습니다.",
+                language: language,
+                comment: "Outlook error shown when an authenticated account is required."
+            )
         case .apiFailed:
-            return "Microsoft Graph API 호출에 실패했습니다."
+            return AppLanguage.localized(
+                "error.outlook.apiFailed",
+                defaultValue: language == .english
+                    ? "The Microsoft Graph API request failed."
+                    : "Microsoft Graph API 호출에 실패했습니다.",
+                language: language,
+                comment: "Outlook error shown when a Microsoft Graph API request fails."
+            )
         case .invalidResponse:
-            return "Outlook 응답을 해석하지 못했습니다."
+            return AppLanguage.localized(
+                "error.outlook.invalidResponse",
+                defaultValue: language == .english
+                    ? "The Outlook response could not be understood."
+                    : "Outlook 응답을 해석하지 못했습니다.",
+                language: language,
+                comment: "Outlook error shown when a Graph response cannot be decoded."
+            )
         }
     }
 }
 
-private struct OutlookRecentMessageSyncSnapshot {
-    let messages: [OutlookGraphMessage]
-    let lookbackCutoff: Date
-}
 
 private struct OutlookGraphMessageListResponse: Decodable {
     let value: [OutlookGraphMessage]
@@ -722,5 +897,7 @@ private struct OutlookGraphMessage: Decodable {
     let receivedDateTime: Date?
     let isRead: Bool?
     let parentFolderId: String?
+    let inferenceClassification: String?
+    let categories: [String]?
     let from: OutlookGraphRecipientContainer?
 }

@@ -7,10 +7,11 @@ enum LegalDocument: String, CaseIterable {
     case terms   = "terms-of-service"
 
     var displayTitle: String {
-        switch self {
-        case .privacy: "개인정보 처리방침"
-        case .terms:   "서비스 약관"
+        let (key, fallback): (String, String) = switch self {
+        case .privacy: ("legal.privacy.title", "개인정보 처리방침")
+        case .terms: ("legal.terms.title", "서비스 약관")
         }
+        return AppLanguage.localized(key, defaultValue: fallback, language: .current, comment: "Legal document title.")
     }
 
     var webURL: URL {
@@ -19,6 +20,14 @@ enum LegalDocument: String, CaseIterable {
         case .terms:   URL(string: "https://jung-geun.github.io/SIFT/terms-of-service.html")!
         }
     }
+}
+private func legalLocalized(_ source: String) -> String {
+    AppLanguage.localized(
+        "legal.text.\(source)",
+        defaultValue: source,
+        language: .current,
+        comment: "Localized legal document content; preserve the Korean source meaning and structure."
+    )
 }
 
 // MARK: - LegalDocumentView
@@ -51,9 +60,14 @@ struct LegalDocumentView: View {
             Text(document.displayTitle)
                 .font(.title2.bold())
             HStack {
-                Label("개인 개발자 jung-geun", systemImage: "person.circle")
+                Label(
+                    AppLanguage.localized("legal.developer", defaultValue: "개인 개발자 jung-geun", language: .current, comment: "Legal document developer attribution."),
+                    systemImage: "person.circle"
+                )
                 Spacer()
-                Text("시행일: 2026년 6월 23일")
+                Text(
+                    AppLanguage.localized("legal.effectiveDate", defaultValue: "시행일: 2026년 6월 23일", language: .current, comment: "Legal document effective date.")
+                )
             }
             .font(.caption)
             .foregroundStyle(.secondary)
@@ -65,7 +79,15 @@ struct LegalDocumentView: View {
 
     private var webLinkFooter: some View {
         Link(destination: document.webURL) {
-            Label("웹에서 원문 보기", systemImage: "safari")
+            Label(
+                AppLanguage.localized(
+                    "legal.web.original",
+                    defaultValue: "웹에서 원문 보기",
+                    language: .current,
+                    comment: "Link to the Korean legal document on the web."
+                ),
+                systemImage: "safari"
+            )
                 .font(.subheadline)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 12)
@@ -75,7 +97,6 @@ struct LegalDocumentView: View {
 }
 
 // MARK: - Shared Components
-
 private struct LegalCard<Content: View>: View {
     let number: Int
     let title: String
@@ -89,8 +110,7 @@ private struct LegalCard<Content: View>: View {
                     .foregroundStyle(.white)
                     .frame(width: 22, height: 22)
                     .background(Color.accentColor, in: Circle())
-                Text(title)
-                    .font(.headline)
+                Text(legalLocalized(title))
             }
             Divider()
             content()
@@ -104,16 +124,15 @@ private struct LegalCard<Content: View>: View {
 private struct LegalSubTitle: View {
     let text: String
     var body: some View {
-        Text(text)
+        Text(legalLocalized(text))
             .font(.subheadline.bold())
-            .padding(.top, 6)
     }
 }
 
 private struct LegalBody: View {
     let text: String
     var body: some View {
-        Text(text)
+        Text(legalLocalized(text))
             .font(.subheadline)
             .fixedSize(horizontal: false, vertical: true)
     }
@@ -127,7 +146,7 @@ private struct LegalBullets: View {
             ForEach(items, id: \.self) { item in
                 HStack(alignment: .top, spacing: 8) {
                     Text("•").font(.subheadline).foregroundStyle(.secondary)
-                    Text(item).font(.subheadline).fixedSize(horizontal: false, vertical: true)
+                    Text(legalLocalized(item)).font(.subheadline).fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
@@ -139,7 +158,7 @@ private struct InfoBox: View {
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: "info.circle.fill").foregroundStyle(.blue).font(.subheadline)
-            Text(text).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            Text(legalLocalized(text)).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
         .padding(10)
         .background(Color.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
@@ -168,7 +187,7 @@ private struct LegalTable: View {
     private func tableRow(cells: [String], isHeader: Bool, isEven: Bool) -> some View {
         HStack(alignment: .top, spacing: 0) {
             ForEach(Array(cells.enumerated()), id: \.offset) { i, cell in
-                Text(cell)
+                Text(legalLocalized(cell))
                     .font(isHeader ? .caption.bold() : .caption)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -198,13 +217,13 @@ private struct ThirdPartyCard: View {
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
             VStack(alignment: .leading, spacing: 3) {
-                Text(name).font(.subheadline.bold())
-                Text(provider).font(.caption2).foregroundStyle(.secondary)
-                Text(items).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Text(legalLocalized(name)).font(.subheadline.bold())
+                Text(legalLocalized(provider)).font(.caption2).foregroundStyle(.secondary)
+                Text(legalLocalized(items)).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             Spacer()
             Link(destination: url) {
-                Text("방침 보기")
+                Text(legalLocalized("방침 보기"))
                     .font(.caption2.bold())
                     .padding(.horizontal, 10)
                     .padding(.vertical, 5)
@@ -259,7 +278,7 @@ private struct PrivacyPolicyContent: View {
 
             LegalSubTitle(text: "1-5. 할 일 우선순위 정렬 AI")
             LegalBullets([
-                "기본값: 온디바이스 AI (Apple Foundation Models 또는 MLX Qwen)",
+                "기본값: 온디바이스 AI (Apple Foundation Models 또는 MLX 모델)",
                 "Gemini를 선택하면 할 일 제목·메모·마감·페르소나·캘린더 컨텍스트가 Google Gemini API로 전송될 수 있음",
                 "이메일 본문은 별도 동의가 없으면 전송하지 않음",
             ])

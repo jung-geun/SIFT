@@ -11,6 +11,15 @@ final class CalendarService {
     private init() {}
 
     private let store = EKEventStore()
+
+    private static func localizedDeadlineTitle(language: AppLanguage) -> String {
+        AppLanguage.localized(
+            "calendar.todoDeadline",
+            defaultValue: language == .english ? "To-Do Deadline" : "할 일 마감",
+            language: language,
+            comment: "Calendar event fallback title"
+        )
+    }
     private(set) var isAuthorized = false
     private var lastStoreRefresh: Date = .distantPast
 
@@ -83,13 +92,19 @@ final class CalendarService {
     /// todo의 dueDate를 캘린더 이벤트로 등록/업데이트.
     /// - preferredCalendarID: 신규 생성 시 사용할 캘린더 ID (nil이면 기본 캘린더 사용).
     @discardableResult
-    func registerOrUpdate(todo: Todo, preferredCalendarID: String? = nil) throws -> String? {
+    func registerOrUpdate(
+        todo: Todo,
+        preferredCalendarID: String? = nil,
+        language: AppLanguage = .current
+    ) throws -> String? {
         guard isAuthorized, let dueDate = todo.dueDate else { return nil }
 
         // 기존 이벤트 업데이트 — 1순위: 이 기기의 eventIdentifier로 조회
         if let existingID = todo.calendarEventID,
            let event = store.event(withIdentifier: existingID) {
-            event.title = todo.title.isEmpty ? "할 일 마감" : todo.title
+            event.title = todo.title.isEmpty
+                ? Self.localizedDeadlineTitle(language: language)
+                : todo.title
             event.startDate = dueDate
             event.endDate = dueDate.addingTimeInterval(3600)
             event.notes = todo.notes
@@ -101,7 +116,9 @@ final class CalendarService {
         if !todo.calendarEventExternalID.isEmpty {
             let items = store.calendarItems(withExternalIdentifier: todo.calendarEventExternalID)
             if let found = items.compactMap({ $0 as? EKEvent }).first {
-                found.title = todo.title.isEmpty ? "할 일 마감" : todo.title
+                found.title = todo.title.isEmpty
+                    ? Self.localizedDeadlineTitle(language: language)
+                    : todo.title
                 found.startDate = dueDate
                 found.endDate = dueDate.addingTimeInterval(3600)
                 found.notes = todo.notes
@@ -113,7 +130,9 @@ final class CalendarService {
 
         // 신규 등록
         let event = EKEvent(eventStore: store)
-        event.title = todo.title.isEmpty ? "할 일 마감" : todo.title
+        event.title = todo.title.isEmpty
+            ? Self.localizedDeadlineTitle(language: language)
+            : todo.title
         event.startDate = dueDate
         event.endDate = dueDate.addingTimeInterval(3600)
         event.notes = todo.notes
@@ -263,7 +282,8 @@ final class CalendarService {
         location: String,
         notes: String,
         sourceRef: String,
-        calendarID: String? = nil
+        calendarID: String? = nil,
+        language: AppLanguage = .current
     ) throws -> String {
         guard isAuthorized else { throw CalendarError.notAuthorized }
 
@@ -280,7 +300,9 @@ final class CalendarService {
         }
 
         let event       = EKEvent(eventStore: store)
-        event.title     = title.isEmpty ? "(제목 없음)" : title
+        event.title = title.isEmpty
+            ? (language == .english ? "(No Title)" : "(제목 없음)")
+            : title
         event.startDate = start
         event.endDate   = end ?? start.addingTimeInterval(isAllDay ? 86400 : 3600)
         event.isAllDay  = isAllDay
@@ -386,8 +408,15 @@ enum CalendarAutoPolicy {
 
 enum CalendarError: LocalizedError {
     case notAuthorized
+
     var errorDescription: String? {
-        "캘린더 접근 권한이 없습니다. 설정 > 개인정보 보호에서 허용해주세요."
+        errorDescription(language: .current)
+    }
+
+    func errorDescription(language: AppLanguage) -> String {
+        language == .english
+            ? "Calendar access is not authorized. Allow access in Settings > Privacy & Security."
+            : "캘린더 접근 권한이 없습니다. 설정 > 개인정보 보호에서 허용해주세요."
     }
 }
 
@@ -430,6 +459,7 @@ extension CalendarService {
         // 1. 등록 대기열 만료 항목 자동 제거 (마감 지났지만 진행중 미등록)
         for todo in todos where todo.triage == .review && !todo.isCompleted {
             if let due = todo.dueDate, due < now {
+                TaskBehaviorRecorder.recordDeletion(of: todo, actor: .system, in: context)
                 context.delete(todo)
                 hasChanges = true
             }
@@ -469,6 +499,7 @@ extension CalendarService {
             let ref = "\(event.identifier)#\(iso.string(from: event.startDate))"
 
             if let existing = calendarTodosByRef[ref] {
+                let previousDueDate = existing.dueDate
                 // 동기화: 제목·마감·고정 여부만 갱신, triageStatus·isCompleted 보존
                 let isTitleChanged = existing.title != event.title
                 let isDueDateChanged = existing.dueDate != event.startDate
@@ -478,6 +509,13 @@ extension CalendarService {
                     existing.dueDate = event.startDate
                     existing.isFixedSchedule = event.isRecurring
                     hasChanges = true
+                    TaskBehaviorRecorder.recordDueDateChange(
+                        of: existing,
+                        from: previousDueDate,
+                        to: existing.dueDate,
+                        actor: event.isRecurring ? .recurrence : .calendarSync,
+                        in: context
+                    )
                 }
             } else if linkedEventIDs.contains(event.identifier) {
                 // 앱이 만든 캘린더 이벤트의 역import 방지
@@ -515,6 +553,11 @@ extension CalendarService {
                 todo.triageStatus = TodoTriage.review.rawValue
                 todo.isFixedSchedule = event.isRecurring
                 context.insert(todo)
+                TaskBehaviorRecorder.recordCreation(
+                    of: todo,
+                    actor: event.isRecurring ? .recurrence : .calendarSync,
+                    in: context
+                )
                 hasChanges = true
             }
         }
@@ -589,12 +632,20 @@ extension CalendarService {
                     let isDueDateChanged = todo.dueDate != event.startDate
 
                     if isTitleChanged || isNotesChanged || isDueDateChanged {
+                        let previousDueDate = todo.dueDate
                         // 캘린더의 수정 시각이 변경되었거나 데이터에 차이가 있다면 어플 Todo를 캘린더 정보로 갱신
                         todo.title = event.title ?? ""
                         todo.dueDate = event.startDate
                         todo.notes = event.notes ?? ""
                         todo.updatedAt = event.lastModifiedDate ?? event.creationDate ?? Date()
                         hasChanges = true
+                        TaskBehaviorRecorder.recordDueDateChange(
+                            of: todo,
+                            from: previousDueDate,
+                            to: todo.dueDate,
+                            actor: event.hasRecurrenceRules ? .recurrence : .calendarSync,
+                            in: context
+                        )
                     }
                 } else {
                     // eventIdentifier 무효화 방어: externalIdentifier로 재탐색
@@ -607,21 +658,37 @@ extension CalendarService {
                             let isDueDateChanged = todo.dueDate  != found.startDate
                             let isNotesChanged   = todo.notes    != (found.notes  ?? "")
                             if isTitleChanged || isDueDateChanged || isNotesChanged {
+                                let previousDueDate = todo.dueDate
                                 todo.title     = found.title     ?? ""
                                 todo.dueDate   = found.startDate
                                 todo.notes     = found.notes     ?? ""
                                 todo.updatedAt = found.lastModifiedDate ?? found.creationDate ?? Date()
                                 hasChanges = true
+                                TaskBehaviorRecorder.recordDueDateChange(
+                                    of: todo,
+                                    from: previousDueDate,
+                                    to: todo.dueDate,
+                                    actor: found.hasRecurrenceRules ? .recurrence : .calendarSync,
+                                    in: context
+                                )
                             }
                             recovered = true
                         }
                     }
                     if !recovered {
+                        let previousDueDate = todo.dueDate
                         // 캘린더에서 진짜 삭제된 경우 → 마감 정보 해제
                         todo.calendarEventID = nil
                         todo.dueDate = nil
                         todo.updatedAt = Date()
                         hasChanges = true
+                        TaskBehaviorRecorder.recordDueDateChange(
+                            of: todo,
+                            from: previousDueDate,
+                            to: todo.dueDate,
+                            actor: .calendarSync,
+                            in: context
+                        )
                     }
                 }
             }
@@ -676,6 +743,7 @@ extension CalendarService {
         
         var deletedCount = 0
         for todo in completedTodos {
+            TaskBehaviorRecorder.recordDeletion(of: todo, actor: .system, in: context)
             context.delete(todo)
             deletedCount += 1
             

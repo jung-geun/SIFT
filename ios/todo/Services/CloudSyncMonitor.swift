@@ -37,6 +37,13 @@ final class CloudSyncMonitor: ObservableObject {
 
     /// iCloud 동기화 시작 시 호출. initialCount = 현재 @Query 총 항목 수.
     func startObserving(initialCount: Int) {
+        guard cancellables.isEmpty, phase != .importing else {
+            if baselineCount == 0, initialCount > 0 {
+                baselineCount = initialCount
+            }
+            return
+        }
+
         stopObserving()
         baselineCount = initialCount
         importedCount = 0
@@ -53,7 +60,9 @@ final class CloudSyncMonitor: ObservableObject {
         }
         .store(in: &cancellables)
 
-        withAnimation { phase = .importing }
+        if phase != .importing {
+            withAnimation { phase = .importing }
+        }
 
         // 폴백: 3초 내 실제 이벤트 미도착 시 8초 타이머로 완료 처리
         fallbackTask = Task {
@@ -109,7 +118,9 @@ final class CloudSyncMonitor: ObservableObject {
 
         if event.endDate == nil {
             // Import 진행 중
-            withAnimation { phase = .importing }
+            if phase != .importing {
+                withAnimation { phase = .importing }
+            }
         } else {
             // Import 완료
             print("[CloudSyncMonitor] CloudKit import 완료 (succeeded: \(event.succeeded))")
@@ -135,10 +146,14 @@ final class CloudSyncMonitor: ObservableObject {
     private func finishImport() {
         completionTask?.cancel()
         completionTask = Task {
-            withAnimation { phase = .completed }
+            if phase != .completed {
+                withAnimation { phase = .completed }
+            }
             try? await Task.sleep(for: .seconds(2))
             guard !Task.isCancelled else { return }
-            withAnimation { phase = .idle }
+            if phase != .idle {
+                withAnimation { phase = .idle }
+            }
         }
     }
 }

@@ -64,19 +64,25 @@ struct AppInfoDetailView: View {
                     devRow("✅", "데이터베이스 용량 초과 방지를 위한 자동 오래된 데이터 청소")
                     devRow("✅", "시간대/태그별 처리 속도 통계 기반 행동 패턴 메모리 분석")
                     devRow("✅", "설정 화면 8대 대분류 카테고리 분할 및 독립 뷰 리팩토링")
-                    devRow("✅", "온디바이스 LLM 최적화 (가상 모델 제거 및 Qwen3.5 2B MLX 탑재)")
-                } header: { Text("완료") }
-                
+                    devRow("✅", "온디바이스 AI 최적화 (가상 모델 제거 및 MLX 모델 탑재)")
+                } header: {
+                    Text(AppLanguage.localized("appInfo.completed", defaultValue: "완료", language: .current, comment: "Development status section."))
+                }
+
                 Section {
-                    devRow("🔄", "온디바이스 Qwen3.5 4B 고성능 모델 기기 메모리 최적화")
+                    devRow("🔄", "온디바이스 AI 고성능 모델 기기 메모리 최적화")
                     devRow("🔄", "백그라운드 캘린더 변경사항 감지 정확도 향상 및 자동 동기화 고도화")
-                } header: { Text("진행 중") }
+                } header: {
+                    Text(AppLanguage.localized("appInfo.inProgress", defaultValue: "진행 중", language: .current, comment: "Development status section."))
+                }
                 
                 Section {
                     devRow("📋", "다중 이메일 계정 연동 및 Gmail 외 서비스(IMAP 등) 연동 확장")
                     devRow("📋", "Apple Foundation Models 정식 버전 대응 및 통합 재도입")
                     devRow("📋", "사용자 맞춤형 커스텀 파인튜닝 LLM 교체 및 간편 로드")
-                } header: { Text("예정") }
+                } header: {
+                    Text(AppLanguage.localized("appInfo.planned", defaultValue: "예정", language: .current, comment: "Development status section."))
+                }
             }
             .navigationTitle("개발 현황")
             .navigationBarTitleDisplayMode(.inline)
@@ -92,7 +98,7 @@ struct AppInfoDetailView: View {
     private func devRow(_ icon: String, _ text: String) -> some View {
         HStack(alignment: .top, spacing: 10) {
             Text(icon).font(.body)
-            Text(text).font(.subheadline)
+            Text(AppLanguage.localized(text, defaultValue: text, language: .current, comment: "Development status item.")).font(.subheadline)
         }
     }
 }

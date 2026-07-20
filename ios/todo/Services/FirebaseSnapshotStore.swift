@@ -1,12 +1,12 @@
 import SwiftData
 import Foundation
-import SwiftData
 
 private struct FirebaseSnapshotEnvelope: Codable {
     let exportedAt: Date
     let personas: [FirebaseSnapshotPersona]
     let todos: [FirebaseSnapshotTodo]
     let audits: [FirebaseSnapshotAudit]
+    let behaviorEvents: [FirebaseSnapshotBehaviorEvent]?
     let analyses: [FirebaseSnapshotAnalysis]
 }
 
@@ -37,6 +37,7 @@ private struct FirebaseSnapshotTodo: Codable {
     let sourceMessageID: String
     let sourceThreadID: String
     let sourceSenderEmail: String
+    let sourceAccountNamespace: String?
     let triageStatus: String
     let tags: [String]
     let calendarEventID: String?
@@ -63,6 +64,25 @@ private struct FirebaseSnapshotAudit: Codable {
     let hadDueDate: Bool
 }
 
+private struct FirebaseSnapshotBehaviorEvent: Codable {
+    let id: UUID
+    let todoID: UUID
+    let occurredAt: Date
+    let eventTypeRaw: String
+    let actorRaw: String
+    let sourceType: String
+    let triageType: String
+    let wasFixedSchedule: Bool
+    let beforeCompletion: Bool?
+    let afterCompletion: Bool?
+    let beforeDueDate: Date?
+    let afterDueDate: Date?
+    let beforeManualPriority: Int?
+    let afterManualPriority: Int?
+    let beforeComputedPriority: Double?
+    let afterComputedPriority: Double?
+}
+
 private struct FirebaseSnapshotAnalysis: Codable {
     let id: UUID
     let summary: String
@@ -71,6 +91,16 @@ private struct FirebaseSnapshotAnalysis: Codable {
     let overdueRate: Double
     let productiveHour: Int?
     let createdAt: Date
+    let recordTitle: String?
+    let accessScopeSummary: String?
+    let processorDescription: String?
+    let analysisVersion: Int?
+    let windowStart: Date?
+    let windowEnd: Date?
+    let sampleCount: Int?
+    let effectiveSampleSize: Double?
+    let confidenceRaw: String?
+    let behaviorProfileData: Data?
 }
 
 enum FirebaseSnapshotStore {
@@ -79,6 +109,7 @@ enum FirebaseSnapshotStore {
         let personas = (try? context.fetch(FetchDescriptor<Persona>(sortBy: [SortDescriptor(\.updatedAt, order: .reverse)]))) ?? []
         let todos = (try? context.fetch(FetchDescriptor<Todo>())) ?? []
         let audits = (try? context.fetch(FetchDescriptor<TaskAuditEvent>())) ?? []
+        let behaviorEvents = (try? context.fetch(FetchDescriptor<TaskBehaviorEvent>())) ?? []
         let analyses = (try? context.fetch(FetchDescriptor<MemoryAnalysis>())) ?? []
 
         let envelope = FirebaseSnapshotEnvelope(
@@ -112,6 +143,7 @@ enum FirebaseSnapshotStore {
                     sourceMessageID: $0.sourceMessageID,
                     sourceThreadID: $0.sourceThreadID,
                     sourceSenderEmail: $0.sourceSenderEmail,
+                    sourceAccountNamespace: $0.sourceAccountNamespace,
                     triageStatus: $0.triageStatus,
                     tags: $0.tags,
                     calendarEventID: $0.calendarEventID,
@@ -139,6 +171,26 @@ enum FirebaseSnapshotStore {
                     hadDueDate: $0.hadDueDate
                 )
             },
+            behaviorEvents: behaviorEvents.map {
+                FirebaseSnapshotBehaviorEvent(
+                    id: $0.id,
+                    todoID: $0.todoID,
+                    occurredAt: $0.occurredAt,
+                    eventTypeRaw: $0.eventTypeRaw,
+                    actorRaw: $0.actorRaw,
+                    sourceType: $0.sourceType,
+                    triageType: $0.triageType,
+                    wasFixedSchedule: $0.wasFixedSchedule,
+                    beforeCompletion: $0.beforeCompletion,
+                    afterCompletion: $0.afterCompletion,
+                    beforeDueDate: $0.beforeDueDate,
+                    afterDueDate: $0.afterDueDate,
+                    beforeManualPriority: $0.beforeManualPriority,
+                    afterManualPriority: $0.afterManualPriority,
+                    beforeComputedPriority: $0.beforeComputedPriority,
+                    afterComputedPriority: $0.afterComputedPriority
+                )
+            },
             analyses: analyses.map {
                 FirebaseSnapshotAnalysis(
                     id: $0.id,
@@ -147,7 +199,17 @@ enum FirebaseSnapshotStore {
                     fastTags: $0.fastTags,
                     overdueRate: $0.overdueRate,
                     productiveHour: $0.productiveHour,
-                    createdAt: $0.createdAt
+                    createdAt: $0.createdAt,
+                    recordTitle: $0.recordTitle,
+                    accessScopeSummary: $0.accessScopeSummary,
+                    processorDescription: $0.processorDescription,
+                    analysisVersion: $0.analysisVersion,
+                    windowStart: $0.windowStart,
+                    windowEnd: $0.windowEnd,
+                    sampleCount: $0.sampleCount,
+                    effectiveSampleSize: $0.effectiveSampleSize,
+                    confidenceRaw: $0.confidenceRaw,
+                    behaviorProfileData: $0.behaviorProfileData
                 )
             }
         )
@@ -170,6 +232,9 @@ enum FirebaseSnapshotStore {
         }
         for audit in (try? context.fetch(FetchDescriptor<TaskAuditEvent>())) ?? [] {
             context.delete(audit)
+        }
+        for event in (try? context.fetch(FetchDescriptor<TaskBehaviorEvent>())) ?? [] {
+            context.delete(event)
         }
         for analysis in (try? context.fetch(FetchDescriptor<MemoryAnalysis>())) ?? [] {
             context.delete(analysis)
@@ -204,6 +269,7 @@ enum FirebaseSnapshotStore {
             todo.sourceMessageID = payload.sourceMessageID
             todo.sourceThreadID = payload.sourceThreadID
             todo.sourceSenderEmail = payload.sourceSenderEmail
+            todo.sourceAccountNamespace = payload.sourceAccountNamespace ?? ""
             todo.triageStatus = payload.triageStatus
             todo.tags = payload.tags
             todo.calendarEventID = payload.calendarEventID
@@ -234,16 +300,51 @@ enum FirebaseSnapshotStore {
             context.insert(audit)
         }
 
+        for payload in envelope.behaviorEvents ?? [] {
+            let event = TaskBehaviorEvent(
+                todo: Todo(),
+                type: TaskBehaviorEventType(rawValue: payload.eventTypeRaw) ?? .created,
+                actor: TaskBehaviorActor(rawValue: payload.actorRaw) ?? .system,
+                occurredAt: payload.occurredAt
+            )
+            event.id = payload.id
+            event.todoID = payload.todoID
+            event.eventTypeRaw = payload.eventTypeRaw
+            event.actorRaw = payload.actorRaw
+            event.sourceType = payload.sourceType
+            event.triageType = payload.triageType
+            event.wasFixedSchedule = payload.wasFixedSchedule
+            event.beforeCompletion = payload.beforeCompletion
+            event.afterCompletion = payload.afterCompletion
+            event.beforeDueDate = payload.beforeDueDate
+            event.afterDueDate = payload.afterDueDate
+            event.beforeManualPriority = payload.beforeManualPriority
+            event.afterManualPriority = payload.afterManualPriority
+            event.beforeComputedPriority = payload.beforeComputedPriority
+            event.afterComputedPriority = payload.afterComputedPriority
+            context.insert(event)
+        }
+
         for payload in envelope.analyses {
             let analysis = MemoryAnalysis(
                 summary: payload.summary,
                 insights: payload.insights,
                 fastTags: payload.fastTags,
                 overdueRate: payload.overdueRate,
-                productiveHour: payload.productiveHour
+                productiveHour: payload.productiveHour,
+                recordTitle: payload.recordTitle ?? "",
+                accessScopeSummary: payload.accessScopeSummary ?? "",
+                processorDescription: payload.processorDescription ?? ""
             )
             analysis.id = payload.id
             analysis.createdAt = payload.createdAt
+            analysis.analysisVersion = payload.analysisVersion ?? 1
+            analysis.windowStart = payload.windowStart
+            analysis.windowEnd = payload.windowEnd
+            analysis.sampleCount = payload.sampleCount ?? 0
+            analysis.effectiveSampleSize = payload.effectiveSampleSize ?? 0
+            analysis.confidenceRaw = payload.confidenceRaw ?? BehaviorConfidence.insufficient.rawValue
+            analysis.behaviorProfileData = payload.behaviorProfileData ?? Data()
             context.insert(analysis)
         }
 

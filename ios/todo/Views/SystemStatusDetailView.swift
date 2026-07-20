@@ -2,32 +2,46 @@ import SwiftUI
 
 // 7. 시스템 권한 및 상태
 struct SystemStatusDetailView: View {
+    private enum PermissionStatus {
+        case checking, granted, denied, notConfigured, unknown
+
+        var label: String {
+            let (key, fallback): (String, String) = switch self {
+            case .checking: ("system.status.checking", "확인 중…")
+            case .granted: ("system.status.granted", "허용됨")
+            case .denied: ("system.status.denied", "거부됨")
+            case .notConfigured: ("system.status.notConfigured", "미설정")
+            case .unknown: ("system.status.unknown", "알 수 없음")
+            }
+            return AppLanguage.localized(key, defaultValue: fallback, language: .current, comment: "System permission status.")
+        }
+    }
+
     @Environment(\.appTutorialState) private var tutorial
-    @State private var notificationStatus = "확인 중…"
-    @State private var calendarStatus     = "확인 중…"
-    
+    @State private var notificationStatus: PermissionStatus = .checking
+    @State private var calendarStatus: PermissionStatus = .checking
     var body: some View {
         Form {
             Section {
                 HStack {
                     Label("알림", systemImage: "bell.badge")
                     Spacer()
-                    Text(notificationStatus)
+                    Text(notificationStatus.label)
                         .font(.subheadline)
-                        .foregroundStyle(notificationStatus == "허용됨" ? .green : .orange)
-                    if notificationStatus != "허용됨" {
+                        .foregroundStyle(notificationStatus == .granted ? .green : .orange)
+                    if notificationStatus != .granted {
                         Button("허용") { Task { await requestNotification() } }
                             .font(.caption).buttonStyle(.bordered).controlSize(.small)
                     }
                 }
-                
+
                 HStack {
                     Label("캘린더", systemImage: "calendar")
                     Spacer()
-                    Text(calendarStatus)
+                    Text(calendarStatus.label)
                         .font(.subheadline)
-                        .foregroundStyle(calendarStatus == "허용됨" ? .green : .orange)
-                    if calendarStatus != "허용됨" {
+                        .foregroundStyle(calendarStatus == .granted ? .green : .orange)
+                    if calendarStatus != .granted {
                         Button("허용") { Task { await requestCalendar() } }
                             .font(.caption).buttonStyle(.bordered).controlSize(.small)
                     }
@@ -54,19 +68,19 @@ struct SystemStatusDetailView: View {
     private func refreshStatus() async {
         let status = await NotificationService.shared.authorizationStatus()
         notificationStatus = switch status {
-        case .authorized, .provisional, .ephemeral: "허용됨"
-        case .denied: "거부됨"
-        case .notDetermined: "미설정"
-        @unknown default: "알 수 없음"
+        case .authorized, .provisional, .ephemeral: .granted
+        case .denied: .denied
+        case .notDetermined: .notConfigured
+        @unknown default: .unknown
         }
-        calendarStatus = CalendarService.shared.isAuthorized ? "허용됨" : "미설정"
+        calendarStatus = CalendarService.shared.isAuthorized ? .granted : .notConfigured
     }
-    
+
     private func requestNotification() async {
-        notificationStatus = await NotificationService.shared.requestAuthorization() ? "허용됨" : "거부됨"
+        notificationStatus = await NotificationService.shared.requestAuthorization() ? .granted : .denied
     }
-    
+
     private func requestCalendar() async {
-        calendarStatus = await CalendarService.shared.requestAccess() ? "허용됨" : "거부됨"
+        calendarStatus = await CalendarService.shared.requestAccess() ? .granted : .denied
     }
 }

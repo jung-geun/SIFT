@@ -22,7 +22,7 @@ struct ICloudSyncDetailView: View {
                 ))
                 
                 if iCloudSyncEnabled {
-                    Label("할 일·페르소나가 iCloud를 통해 동기화됩니다", systemImage: "checkmark.icloud.fill")
+                    Label("할 일·페르소나·행동 패턴 분석이 iCloud를 통해 동기화됩니다", systemImage: "checkmark.icloud.fill")
                         .font(.caption)
                         .foregroundStyle(.green)
                 } else {
@@ -31,14 +31,21 @@ struct ICloudSyncDetailView: View {
                         .foregroundStyle(.secondary)
                 }
             } footer: {
-                Text("iCloud 동기화를 활성화하면 할 일, 페르소나, 할 일 감사 기록이 같은 Apple ID로 로그인한 모든 기기와 동기화됩니다. 행동 패턴 분석과 이메일 학습 데이터는 기기 로컬에만 저장됩니다.")
+                Text("iCloud 동기화를 활성화하면 할 일, 페르소나, 할 일 감사 기록, 행동 패턴 분석이 같은 Apple ID로 로그인한 모든 기기와 동기화됩니다. 이메일 본문 캐시와 이메일 학습 데이터는 기기 로컬에만 저장됩니다.")
             }
             .alert("앱 재시작 필요", isPresented: $showSyncRestartAlert) {
                 Button("확인", role: .cancel) {}
             } message: {
-                Text(iCloudSyncEnabled
-                     ? "iCloud 동기화가 활성화되었습니다. 앱을 종료 후 다시 실행하면 동기화가 시작됩니다."
-                     : "iCloud 동기화가 비활성화되었습니다. 앱을 종료 후 다시 실행하면 로컬 전용으로 전환됩니다.")
+                Text(
+                    AppLanguage.localized(
+                        iCloudSyncEnabled ? "settings.sync.enabledMessage" : "settings.sync.disabledMessage",
+                        defaultValue: iCloudSyncEnabled
+                            ? "iCloud 동기화가 활성화되었습니다. 앱을 종료 후 다시 실행하면 동기화가 시작됩니다."
+                            : "iCloud 동기화가 비활성화되었습니다. 앱을 종료 후 다시 실행하면 로컬 전용으로 전환됩니다.",
+                        language: .current,
+                        comment: "iCloud sync restart alert message."
+                    )
+                )
             }
             
             if iCloudSyncEnabled {
@@ -47,7 +54,7 @@ struct ICloudSyncDetailView: View {
                     syncManagementRow(title: "TODO 자동 정렬 AI", key: "selectedAIProvider")
                     syncManagementRow(title: "메일 자동 분석", key: "pieroot.todo.emailAutoAnalysisEnabled")
                     syncManagementRow(title: "자동 동기화 시각", key: "pieroot.todo.emailRefreshHour")
-                    syncManagementRow(title: "메일 확인 기간", key: "pieroot.todo.emailLookbackDays")
+                    syncManagementRow(title: "메일 분석 기간", key: EmailAnalysisLookbackPolicy.lookbackSettingKey)
                     syncManagementRow(title: "마감 자동 캘린더 등록", key: "pieroot.todo.calendarAutoRegister")
                     syncManagementRow(title: "완료 시 처리", key: "pieroot.todo.calendarCompletionAction")
                 } header: {
@@ -62,9 +69,22 @@ struct ICloudSyncDetailView: View {
     }
     
     private func syncManagementRow(title: String, key: String) -> some View {
-        HStack {
-            Text(title)
-                .font(.body)
+        let localizedTitle: String = {
+            let keyName: String
+            switch key {
+            case "pieroot.todo.onDeviceLLMEnabled": keyName = "settings.sync.aiAutomation"
+            case "selectedAIProvider": keyName = "settings.sync.priorityAI"
+            case "pieroot.todo.emailAutoAnalysisEnabled": keyName = "settings.sync.mailAnalysis"
+            case "pieroot.todo.emailRefreshHour": keyName = "settings.sync.refreshHour"
+            case EmailAnalysisLookbackPolicy.lookbackSettingKey: keyName = "settings.sync.mailLookback"
+            case "pieroot.todo.calendarAutoRegister": keyName = "settings.sync.calendarAutoRegister"
+            case "pieroot.todo.calendarCompletionAction": keyName = "settings.sync.completionAction"
+            default: keyName = title
+            }
+            return AppLanguage.localized(keyName, defaultValue: title, language: .current, comment: "iCloud setting name.")
+        }()
+        return HStack {
+            Text(localizedTitle)
             Spacer()
             Menu {
                 Button {

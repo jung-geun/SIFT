@@ -33,6 +33,7 @@ enum AppTabID: Int, CaseIterable {
     case todo = 0
     case calendar = 1
     case mail = 2
+    case meeting = 3
 }
 
 struct AppTabVisibility: Equatable {
@@ -43,6 +44,7 @@ struct AppTabVisibility: Equatable {
         var ids: Set<Int> = [AppTabID.todo.rawValue]
         if calendarVisible { ids.insert(AppTabID.calendar.rawValue) }
         if mailVisible { ids.insert(AppTabID.mail.rawValue) }
+        ids.insert(AppTabID.meeting.rawValue)
         return ids
     }
 
@@ -66,6 +68,13 @@ enum AppTutorialScreen {
 struct AppTutorialHint: Equatable {
     let title: String
     let body: String
+
+    var localizedTitle: String {
+        AppLanguage.localized("tutorial.\(title)", defaultValue: title, language: .current, comment: "Tutorial hint title.")
+    }
+    var localizedBody: String {
+        AppLanguage.localized("tutorial.body.\(body)", defaultValue: body, language: .current, comment: "Tutorial hint body.")
+    }
 }
 
 @MainActor
@@ -368,7 +377,7 @@ struct AppTutorialHintCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .top) {
-                Text(hint.title)
+                Text(hint.localizedTitle)
                     .font(.headline)
                 Spacer()
                 Button("닫기") {
@@ -378,7 +387,7 @@ struct AppTutorialHintCard: View {
                 .foregroundStyle(.secondary)
             }
 
-            Text(hint.body)
+            Text(hint.localizedBody)
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

@@ -6,14 +6,42 @@ import Testing
 @Suite("Email ingestion apply tests", .serialized)
 @MainActor
 struct EmailIngestionTests {
-    private func makeContainer() throws -> ModelContainer {
-        let config = ModelConfiguration(schema: AppDataContainer.appSchema, isStoredInMemoryOnly: true)
-        return try ModelContainer(for: AppDataContainer.appSchema, configurations: [config])
+    private func makeContainer() throws -> (container: ModelContainer, storeDirectory: URL) {
+        let storeDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("email-ingestion-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: storeDirectory,
+            withIntermediateDirectories: true
+        )
+
+        let storeURL = storeDirectory.appendingPathComponent("store.sqlite")
+        let config = ModelConfiguration(
+            schema: AppDataContainer.appSchema,
+            url: storeURL,
+            cloudKitDatabase: .none
+        )
+
+        do {
+            let container = try ModelContainer(
+                for: AppDataContainer.appSchema,
+                configurations: [config]
+            )
+            return (container, storeDirectory)
+        } catch {
+            try? FileManager.default.removeItem(at: storeDirectory)
+            throw error
+        }
     }
+
+    private func cleanupStore(at directory: URL) {
+        try? FileManager.default.removeItem(at: directory)
+    }
+
 
     @Test("applyExtractedItems skips existing and same-batch duplicate refs")
     func applyExtractedItemsSkipsDuplicateSourceRefs() throws {
-        let container = try makeContainer()
+        let (container, storeDirectory) = try makeContainer()
+        defer { cleanupStore(at: storeDirectory) }
         let context = ModelContext(container)
 
         let existing = Todo(title: "기존", source: .email, sourceRef: "msg-1")
@@ -30,6 +58,7 @@ struct EmailIngestionTests {
             existingRefs: ["msg-1"]
         )
 
+        try context.save()
         let stored = try context.fetch(FetchDescriptor<Todo>())
 
         #expect(result.todoCount == 1)
@@ -39,7 +68,8 @@ struct EmailIngestionTests {
 
     @Test("applyExtractedItems ignores invalid calendar event dates")
     func applyExtractedItemsIgnoresInvalidEventDates() throws {
-        let container = try makeContainer()
+        let (container, storeDirectory) = try makeContainer()
+        defer { cleanupStore(at: storeDirectory) }
         let context = ModelContext(container)
         let invalidEvent = ExtractedEmailEvent(
             title: "잘못된 일정",
@@ -57,6 +87,7 @@ struct EmailIngestionTests {
             existingRefs: []
         )
 
+        try context.save()
         #expect(result.eventCount == 0)
     }
     
@@ -88,7 +119,8 @@ struct EmailIngestionTests {
 
     @Test("applyExtractedItems keeps review email unlinked from calendar")
     func applyExtractedItemsKeepsReviewEmailUnlinkedFromCalendar() throws {
-        let container = try makeContainer()
+        let (container, storeDirectory) = try makeContainer()
+        defer { cleanupStore(at: storeDirectory) }
         let context = ModelContext(container)
         let due = Date().addingTimeInterval(3600)
         let pending = Todo(
@@ -115,6 +147,7 @@ struct EmailIngestionTests {
             existingRefs: []
         )
 
+        try context.save()
         let stored = try #require(try context.fetch(FetchDescriptor<Todo>()).first)
         #expect(result.todoCount == 1)
         #expect(result.eventCount == 0)

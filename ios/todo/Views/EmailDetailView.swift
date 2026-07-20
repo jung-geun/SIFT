@@ -30,9 +30,19 @@ struct EmailDetailView: View {
         ) ?? .foundationModels
     }
 
+    private var emailLookbackDaysBinding: Binding<Int> {
+        Binding(
+            get: {
+                EmailAnalysisLookbackPolicy.storedLookbackDays()
+            },
+            set: { newValue in
+                EmailAnalysisLookbackPolicy.saveLookbackDays(newValue)
+            }
+        )
+    }
+
     private var emailLookbackDays: Int {
-        get { SettingsStore.shared.get("pieroot.todo.emailLookbackDays", defaultValue: 3) }
-        nonmutating set { saveSetting(key: "pieroot.todo.emailLookbackDays", value: newValue) }
+        emailLookbackDaysBinding.wrappedValue
     }
 
     private var emailRefreshHour: Int {
@@ -154,11 +164,26 @@ struct EmailDetailView: View {
                         }
 
                         VStack(alignment: .leading, spacing: 4) {
-                            Stepper("메일 확인 기간: \(emailLookbackDays)일", value: settingsBinding(key: "pieroot.todo.emailLookbackDays", defaultValue: 3), in: 1...30)
-                            Text("최근 \(emailLookbackDays)일치 메일을 분석합니다. 기본값 3일.")
+                            Stepper(
+                                "메일 분석 기간: \(emailLookbackDays)일",
+                                value: emailLookbackDaysBinding,
+                                in: EmailAnalysisLookbackPolicy.lookbackRange
+                            )
+                            Text(
+                                String(
+                                    format: AppLanguage.localized(
+                                        "mail.lookback.scope",
+                                        defaultValue: "Independent of Inbox display period; automatic To-Do/calendar analysis is limited to the latest %lld days.",
+                                        language: .current,
+                                        comment: "Email analysis lookback explanation."
+                                    ),
+                                    locale: AppLanguage.current.locale,
+                                    Int64(emailLookbackDays)
+                                )
+                            )
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
-                            scopeBadge(for: "pieroot.todo.emailLookbackDays", iCloudSyncEnabled: iCloudSyncEnabled)
+                            scopeBadge(for: EmailAnalysisLookbackPolicy.lookbackSettingKey, iCloudSyncEnabled: iCloudSyncEnabled)
                         }
                     } label: {
                         HStack {
@@ -250,11 +275,19 @@ struct EmailDetailView: View {
         onFetch: @escaping () -> Void,
         onSignOut: @escaping () -> Void
     ) -> some View {
+        let titleKey = title.hasPrefix("Gmail") ? "mail.account.gmail" : "mail.account.outlook"
+        let localizedTitle = AppLanguage.localized(titleKey, defaultValue: title, language: .current, comment: "Mail account label.")
+        let connection = AppLanguage.localized(
+            connected ? "mail.account.connected" : "mail.account.disconnected",
+            defaultValue: connected ? "연결됨" : "미연결",
+            language: .current,
+            comment: "Mail account connection state."
+        )
         HStack {
-            Label(title, systemImage: icon)
+            Label(localizedTitle, systemImage: icon)
                 .symbolRenderingMode(.multicolor)
             Spacer()
-            Text(connected ? "연결됨" : "미연결")
+            Text(connection)
                 .font(.subheadline)
                 .foregroundStyle(connected ? tint : .secondary)
         }
@@ -310,12 +343,20 @@ struct EmailDetailView: View {
 
     private static func hourLabel(_ h: Int) -> String {
         switch h {
-        case 0:  return "자정 00:00"
-        case 12: return "정오 12:00"
+        case 0:
+            return AppLanguage.localized("mail.hour.midnight", defaultValue: "자정 00:00", language: .current, comment: "Mail refresh hour.")
+        case 12:
+            return AppLanguage.localized("mail.hour.noon", defaultValue: "정오 12:00", language: .current, comment: "Mail refresh hour.")
         default:
-            let period = h < 12 ? "오전" : "오후"
+            let periodKey = h < 12 ? "mail.hour.am" : "mail.hour.pm"
+            let periodFallback = h < 12 ? "오전" : "오후"
+            let period = AppLanguage.localized(periodKey, defaultValue: periodFallback, language: .current, comment: "Mail refresh hour period.")
             let display = h <= 12 ? h : h - 12
-            return "\(period) \(display)시 (\(String(format: "%02d", h)):00)"
+            let clock = String(format: "%02d:00", h)
+            if AppLanguage.current == .english {
+                return "\(display) \(period) (\(clock))"
+            }
+            return "\(period) \(display)시 (\(clock))"
         }
     }
 
@@ -337,11 +378,11 @@ struct EmailDetailView: View {
         do {
             try await EmailService.shared.authenticate()
             isGmailAuthenticated = true
-            lastFetchMessage = "Gmail 연결 완료"
+            lastFetchMessage = AppLanguage.localized("mail.connection.gmail.success", defaultValue: "Gmail connected", language: .current, comment: "Gmail connection success.")
         } catch {
             let nsError = error as NSError
             if nsError.domain == "com.apple.AuthenticationServices.WebAuthenticationSession" && nsError.code == 1 {
-                errorMessage = "로그인이 취소되었습니다."
+                errorMessage = AppLanguage.localized("mail.auth.cancelled", defaultValue: "Sign-in was cancelled.", language: .current, comment: "Mail authentication cancellation.")
             } else {
                 errorMessage = error.localizedDescription
             }
@@ -355,19 +396,73 @@ struct EmailDetailView: View {
         do {
             try await OutlookMailService.shared.authenticate()
             isOutlookAuthenticated = true
-            lastFetchMessage = "Outlook 연결 완료"
+            lastFetchMessage = AppLanguage.localized("mail.connection.outlook.success", defaultValue: "Outlook connected", language: .current, comment: "Outlook connection success.")
         } catch OutlookMailError.missingClientID {
             errorMessage = OutlookMailError.missingClientID.localizedDescription
             showError = true
         } catch {
             let nsError = error as NSError
             if nsError.domain == MSALErrorDomain && nsError.code == MSALError.userCanceled.rawValue {
-                errorMessage = "로그인이 취소되었습니다."
+                errorMessage = AppLanguage.localized("mail.auth.cancelled", defaultValue: "Sign-in was cancelled.", language: .current, comment: "Mail authentication cancellation.")
             } else {
                 errorMessage = error.localizedDescription
             }
             showError = true
         }
+    }
+
+    nonisolated static func fetchStatusMessage(
+        todoCount: Int,
+        eventCount: Int,
+        failures: [String],
+        language: AppLanguage
+    ) -> String {
+        var parts: [String] = []
+        if todoCount > 0 {
+            parts.append(
+                AppLanguage.localizedCount(
+                    "mail.fetch.todoCount",
+                    count: todoCount,
+                    defaultValue: language == .english
+                        ? (todoCount == 1 ? "%lld To-Do" : "%lld To-Dos")
+                        : "할 일 %lld개",
+                    language: language,
+                    comment: "Count of extracted to-dos."
+                )
+            )
+        }
+        if eventCount > 0 {
+            parts.append(
+                AppLanguage.localizedCount(
+                    "mail.fetch.eventCount",
+                    count: eventCount,
+                    defaultValue: language == .english
+                        ? (eventCount == 1 ? "%lld Calendar Event" : "%lld Calendar Events")
+                        : "일정 %lld개",
+                    language: language,
+                    comment: "Count of extracted calendar events."
+                )
+            )
+        }
+
+        if !failures.isEmpty {
+            let prefix = parts.isEmpty ? "" : parts.joined(separator: ", ") + " / "
+            return prefix + failures.joined(separator: "\n")
+        }
+        guard !parts.isEmpty else {
+            return AppLanguage.localized(
+                "mail.fetch.none",
+                defaultValue: language == .english ? "No New Items" : "새 항목 없음",
+                language: language,
+                comment: "No extracted mail items."
+            )
+        }
+        return parts.joined(separator: ", ") + " " + AppLanguage.localized(
+            "mail.fetch.extracted",
+            defaultValue: language == .english ? "extracted" : "추출됨",
+            language: language,
+            comment: "Extracted mail items suffix."
+        )
     }
 
     private func fetchEmailsNow() async {
@@ -415,15 +510,11 @@ struct EmailDetailView: View {
             lastEmailFetchTimestamp = Date().timeIntervalSince1970
         }
 
-        var parts: [String] = []
-        if todoCount > 0 { parts.append("할 일 \(todoCount)개") }
-        if eventCount > 0 { parts.append("일정 \(eventCount)개") }
-
-        if !failures.isEmpty {
-            let prefix = parts.isEmpty ? "" : parts.joined(separator: ", ") + " / "
-            lastFetchMessage = prefix + failures.joined(separator: "\n")
-        } else {
-            lastFetchMessage = parts.isEmpty ? "새 항목 없음" : parts.joined(separator: ", ") + " 추출됨"
-        }
+        lastFetchMessage = Self.fetchStatusMessage(
+            todoCount: todoCount,
+            eventCount: eventCount,
+            failures: failures,
+            language: AppLanguage.current
+        )
     }
 }

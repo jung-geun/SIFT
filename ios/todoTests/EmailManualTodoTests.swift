@@ -33,7 +33,8 @@ struct EmailManualTodoTests {
     func testFallbackTitleAndNotes() async {
         let todo = await EmailService.shared.makeManualTodo(
             from: message(id: "msg-no-subject", subject: "", from: "\"홍길동\" <hong@sample.com>", snippet: "업무 메모가 비어있지 않음"),
-            allowFoundationModels: false
+            allowFoundationModels: false,
+            language: .korean
         )
 
         #expect(todo.title == "메일 확인")

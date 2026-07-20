@@ -119,6 +119,8 @@ final class LLMAutomationOrchestrator: ObservableObject {
         }
 
         let todos    = (try? context.fetch(FetchDescriptor<Todo>())) ?? []
+        let auditEvents = (try? context.fetch(FetchDescriptor<TaskAuditEvent>())) ?? []
+        let behaviorEvents = (try? context.fetch(FetchDescriptor<TaskBehaviorEvent>())) ?? []
         let personaDescriptor = FetchDescriptor<Persona>(sortBy: [SortDescriptor(\.updatedAt, order: .reverse)])
         let personas = (try? context.fetch(personaDescriptor)) ?? []
         let existing = personas.first?.descriptionText ?? ""
@@ -128,6 +130,8 @@ final class LLMAutomationOrchestrator: ObservableObject {
             let result = try await PersonaGenerationService().generate(
                 existingPersona: existing,
                 todos: todos,
+                auditEvents: auditEvents,
+                behaviorEvents: behaviorEvents,
                 provider: provider
             )
             // SwiftData upsert: 기존 페르소나 업데이트 또는 신규 삽입

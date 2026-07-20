@@ -7,6 +7,8 @@ struct PersonaDetailView: View {
     @Environment(\.appTutorialState) private var tutorial
     @Query(sort: \Persona.updatedAt, order: .reverse) private var personas: [Persona]
     @Query private var todos: [Todo]
+    @Query private var auditEvents: [TaskAuditEvent]
+    @Query private var behaviorEvents: [TaskBehaviorEvent]
     
     @State private var isGenerating = false
     @State private var generationResult: (personaText: String, insights: [String])?
@@ -71,12 +73,12 @@ struct PersonaDetailView: View {
                         if isGenerating {
                             HStack(spacing: 8) {
                                 ProgressView().controlSize(.small)
-                                Text("AI 분석 중…")
+                                Text("행동 근거 분석 중…")
                             }
                         } else {
                             Label(
-                                personas.first?.descriptionText.isEmpty ?? true ? "AI 페르소나 생성" : "AI 페르소나 개선",
-                                systemImage: "sparkles"
+                                personas.first?.descriptionText.isEmpty ?? true ? "패턴 기반 페르소나 생성" : "패턴 기반 페르소나 개선",
+                                systemImage: "person.crop.circle.badge.checkmark"
                             )
                             .fontWeight(.medium)
                         }
@@ -84,11 +86,6 @@ struct PersonaDetailView: View {
                     .buttonStyle(.borderless)
                     .disabled(isGenerating)
                     
-                    if let reason = FoundationModelsAvailability.unavailableExplanation {
-                        Label("Apple Foundation Models 미사용: \(reason) 가능한 경우 Qwen 또는 통계 기반 생성으로 계속합니다.", systemImage: "exclamationmark.triangle.fill")
-                            .font(.caption)
-                            .foregroundStyle(.orange)
-                    }
                     
                     if let result = generationResult {
                         generationResultCard(result)
@@ -99,7 +96,7 @@ struct PersonaDetailView: View {
                         .padding(.vertical, 8)
                 }
             } footer: {
-                Text("생활 유형은 AI 키 없이도 할 일 우선순위에 즉시 반영됩니다. AI 페르소나 개선은 사용자의 패턴을 토대로 자동으로 점진적으로 개선합니다.")
+                Text("최근 행동 기록을 결정론적으로 분석합니다. 모든 지원 기기에서 같은 근거, 계산 규칙, 신뢰도를 사용합니다.")
             }
         }
         .navigationTitle("나의 페르소나")
@@ -197,6 +194,8 @@ struct PersonaDetailView: View {
             let result = try await generationService.generate(
                 existingPersona: existing,
                 todos: todos,
+                auditEvents: auditEvents,
+                behaviorEvents: behaviorEvents,
                 provider: provider
             )
             generationResult = result

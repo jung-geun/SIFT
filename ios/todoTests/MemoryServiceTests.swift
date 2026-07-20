@@ -1,42 +1,500 @@
 import Foundation
 import Testing
+import SwiftData
 @testable import todo
 
-@Suite("MemoryService computeAnalysis")
+@Suite("MemoryService deterministic behavior analysis")
 struct MemoryServiceTests {
-    private func makeDate(year: Int, month: Int, day: Int, hour: Int, minute: Int = 0) -> Date {
-        Calendar.current.date(from: DateComponents(year: year, month: month, day: day, hour: hour, minute: minute))!
+    private func makeDate(
+        year: Int = 2026,
+        month: Int = 7,
+        day: Int,
+        hour: Int,
+        minute: Int = 0
+    ) -> Date {
+        Calendar.current.date(
+            from: DateComponents(
+                year: year,
+                month: month,
+                day: day,
+                hour: hour,
+                minute: minute
+            )
+        )!
     }
 
-    @Test("computeAnalysis preserves key heuristic outputs")
-    func computeAnalysisPreservesHeuristics() {
-        let fastCreated = makeDate(year: 2026, month: 1, day: 1, hour: 8)
-        let fastCompleted = makeDate(year: 2026, month: 1, day: 1, hour: 10)
-        let slowCreated = makeDate(year: 2026, month: 1, day: 2, hour: 8)
-        let slowCompleted = makeDate(year: 2026, month: 1, day: 3, hour: 10)
+    private func completedTodo(
+        title: String,
+        createdAt: Date,
+        completedAt: Date,
+        dueDate: Date? = nil,
+        tags: [String] = []
+    ) -> Todo {
+        let todo = Todo(title: title, dueDate: dueDate, tags: tags)
+        todo.createdAt = createdAt
+        todo.updatedAt = completedAt
+        todo.isCompleted = true
+        todo.completedAt = completedAt
+        return todo
+    }
 
-        let fastTodo = Todo(title: "빠른 할 일", dueDate: makeDate(year: 2026, month: 1, day: 1, hour: 9))
-        fastTodo.createdAt = fastCreated
-        fastTodo.updatedAt = fastCompleted
-        fastTodo.isCompleted = true
-        fastTodo.completedAt = fastCompleted
-        fastTodo.tags = ["fast"]
+    private func deletionSnapshot(
+        completed: Bool,
+        createdAt: Date,
+        completedAt: Date?,
+        deletedAt: Date
+    ) -> TaskAuditEvent {
+        let todo = Todo(title: completed ? "완료 후 삭제" : "미완료 삭제")
+        todo.createdAt = createdAt
+        todo.isCompleted = completed
+        todo.completedAt = completedAt
+        todo.triageStatus = TodoTriage.todo.rawValue
+        let event = TaskAuditEvent(from: todo)
+        event.deletedAt = deletedAt
+        return event
+    }
 
-        let slowTodo = Todo(title: "느린 할 일", dueDate: makeDate(year: 2026, month: 1, day: 3, hour: 12))
-        slowTodo.createdAt = slowCreated
-        slowTodo.updatedAt = slowCompleted
-        slowTodo.isCompleted = true
-        slowTodo.completedAt = slowCompleted
-        slowTodo.tags = ["slow"]
+    @Test("current state and every user deletion snapshot use separate denominators")
+    func separatesCurrentAndDeletionSnapshotDenominators() {
+        let now = makeDate(day: 10, hour: 12)
+        let completed = completedTodo(
+            title: "현재 완료",
+            createdAt: makeDate(day: 1, hour: 8),
+            completedAt: makeDate(day: 2, hour: 10)
+        )
+        let active = Todo(title: "현재 미완료")
+        active.createdAt = makeDate(day: 3, hour: 8)
+        active.updatedAt = makeDate(day: 3, hour: 8)
 
-        let incompleteTodo = Todo(title: "미완료")
+        let completedDeletion = deletionSnapshot(
+            completed: true,
+            createdAt: makeDate(day: 1, hour: 8),
+            completedAt: makeDate(day: 2, hour: 10),
+            deletedAt: makeDate(day: 4, hour: 10)
+        )
+        let incompleteDeletion = deletionSnapshot(
+            completed: false,
+            createdAt: makeDate(day: 2, hour: 8),
+            completedAt: nil,
+            deletedAt: makeDate(day: 5, hour: 10)
+        )
 
-        let result = MemoryService.computeAnalysis(todos: [fastTodo, slowTodo, incompleteTodo])
+        let result = MemoryService.computeAnalysis(
+            todos: [completed, active],
+            auditEvents: [completedDeletion, incompleteDeletion],
+            now: now,
+            language: .korean
+        )
 
-        #expect(result.summary.contains("가장 생산적인 시간대: 10시~11시 (2건 완료)"))
-        #expect(result.summary.contains("전체 완료율: 67% (2/3개)"))
-        #expect(result.fastTags == ["fast"])
-        #expect(result.overdueRate == 0.5)
-        #expect(result.productiveHour == 10)
+        #expect(result.summary.contains("현재 보유 TODO 완료 상태: 1/2건"))
+        #expect(result.summary.contains("완료 후 삭제: 1/2건"))
+        #expect(!result.summary.contains("전체 완료율"))
+        #expect(result.analyzedCompletedCount == 2)
+        #expect(result.behaviorProfile.insight(for: .currentCompletionShare)?.denominator == 2)
+        #expect(result.behaviorProfile.insight(for: .deletedCompletedShare)?.denominator == 2)
+    }
+
+    @Test("overdue rate denominator contains only completed Todos with due dates")
+    func overdueRateUsesDueDatedCompletionDenominator() {
+        let now = makeDate(day: 10, hour: 12)
+        let due = makeDate(day: 5, hour: 12)
+        var todos = [
+            completedTodo(
+                title: "조기",
+                createdAt: makeDate(day: 1, hour: 8),
+                completedAt: makeDate(day: 5, hour: 10),
+                dueDate: due
+            ),
+            completedTodo(
+                title: "지연",
+                createdAt: makeDate(day: 1, hour: 8),
+                completedAt: makeDate(day: 5, hour: 14),
+                dueDate: due
+            )
+        ]
+        for index in 0..<3 {
+            todos.append(
+                completedTodo(
+                    title: "마감 없음 \(index)",
+                    createdAt: makeDate(day: 1, hour: 8),
+                    completedAt: makeDate(day: 6, hour: 9)
+                )
+            )
+        }
+
+        let result = MemoryService.computeAnalysis(todos: todos, now: now, language: .korean)
+        let overdue = result.behaviorProfile.insight(for: .overdueCompletionRate)
+
+        #expect(overdue?.numerator == 1)
+        #expect(overdue?.denominator == 2)
+        #expect((overdue?.value ?? 0) > 0.5)
+        #expect(abs((overdue?.value ?? 0) - 0.5) < 0.001)
+    }
+
+    @Test("five equal-weight completion records produce a low-confidence time block")
+    func completionConcentrationUsesConfidenceAndThreeHourBlocks() {
+        let now = makeDate(day: 10, hour: 12)
+        let completion = makeDate(day: 9, hour: 10)
+        let todos = (0..<5).map { index in
+            completedTodo(
+                title: "완료 \(index)",
+                createdAt: makeDate(day: 8, hour: 8),
+                completedAt: completion
+            )
+        }
+
+        let result = MemoryService.computeAnalysis(todos: todos, now: now, language: .korean)
+        let concentration = result.behaviorProfile.insight(for: .completionConcentrationHour)
+
+        #expect(result.productiveHour == 9)
+        #expect(concentration?.confidence == .low)
+        #expect(concentration?.numerator == 5)
+        #expect(concentration?.denominator == 5)
+        #expect(result.summary.contains("완료 기록 집중 시간: 9시~12시"))
+    }
+
+    @Test("typed transitions expose rates only after five denominator events")
+    func transitionMetricsAreConfidenceGated() {
+        let now = makeDate(day: 10, hour: 12)
+        var events: [TaskBehaviorEvent] = []
+        var todos: [Todo] = []
+
+        for index in 0..<5 {
+            let todo = Todo(title: "이벤트 \(index)")
+            todos.append(todo)
+            let completed = TaskBehaviorEvent(
+                todo: todo,
+                type: .completionChanged,
+                actor: .user,
+                occurredAt: makeDate(day: 9, hour: 6 + index)
+            )
+            completed.beforeCompletion = false
+            completed.afterCompletion = true
+            events.append(completed)
+
+            let aiPriority = TaskBehaviorEvent(
+                todo: todo,
+                type: .priorityChanged,
+                actor: .artificialIntelligence,
+                occurredAt: makeDate(day: 9, hour: 12 + index)
+            )
+            aiPriority.beforeComputedPriority = 0.2
+            aiPriority.afterComputedPriority = 0.8
+            events.append(aiPriority)
+        }
+
+        let undone = TaskBehaviorEvent(
+            todo: todos[0],
+            type: .completionChanged,
+            actor: .user,
+            occurredAt: makeDate(day: 10, hour: 9)
+        )
+        undone.beforeCompletion = true
+        undone.afterCompletion = false
+        events.append(undone)
+
+        for index in 0..<2 {
+            let userPriority = TaskBehaviorEvent(
+                todo: todos[index],
+                type: .priorityChanged,
+                actor: .user,
+                occurredAt: makeDate(day: 9, hour: 18 + index)
+            )
+            userPriority.beforeManualPriority = nil
+            userPriority.afterManualPriority = TodoPriority.high.rawValue
+            events.append(userPriority)
+        }
+
+        let result = MemoryService.computeAnalysis(
+            todos: todos,
+            behaviorEvents: events,
+            now: now,
+            language: .korean
+        )
+        let undo = result.behaviorProfile.insight(for: .completionUndoRate)
+        let override = result.behaviorProfile.insight(for: .aiOverrideRate)
+
+        #expect(undo?.numerator == 1)
+        #expect(undo?.denominator == 5)
+        #expect(undo?.confidence == .low)
+        #expect(override?.numerator == 2)
+        #expect(override?.denominator == 5)
+        #expect(result.insights.contains { $0.contains("완료 취소 1건") })
+        #expect(result.insights.contains { $0.contains("사용자 재변경 2건") })
+    }
+
+    @Test("one completion can pair with at most one undo")
+    func undoPairingIsOneToOne() {
+        let now = makeDate(day: 10, hour: 12)
+        let todo = Todo(title: "중복 완료 취소")
+        let completed = TaskBehaviorEvent(
+            todo: todo,
+            type: .completionChanged,
+            actor: .user,
+            occurredAt: makeDate(day: 9, hour: 9)
+        )
+        completed.beforeCompletion = false
+        completed.afterCompletion = true
+        let firstUndo = TaskBehaviorEvent(
+            todo: todo,
+            type: .completionChanged,
+            actor: .user,
+            occurredAt: makeDate(day: 9, hour: 10)
+        )
+        firstUndo.beforeCompletion = true
+        firstUndo.afterCompletion = false
+        let duplicateUndo = TaskBehaviorEvent(
+            todo: todo,
+            type: .completionChanged,
+            actor: .user,
+            occurredAt: makeDate(day: 9, hour: 11)
+        )
+        duplicateUndo.beforeCompletion = true
+        duplicateUndo.afterCompletion = false
+
+        let result = MemoryService.computeAnalysis(
+            todos: [todo],
+            behaviorEvents: [completed, firstUndo, duplicateUndo],
+            now: now,
+            language: .korean
+        )
+        let insight = result.behaviorProfile.insight(for: .completionUndoRate)
+
+        #expect(insight?.numerator == 1)
+        #expect(insight?.denominator == 1)
+        #expect((insight?.value ?? 0) <= 1)
+    }
+
+    @Test("four-event transition cohorts remain structured but produce no behavior claims")
+    func sparseTransitionMetricsRemainHidden() {
+        let now = makeDate(day: 10, hour: 12)
+        var events: [TaskBehaviorEvent] = []
+        var todos: [Todo] = []
+
+        for index in 0..<4 {
+            let todo = Todo(title: "희소 이벤트 \(index)")
+            todos.append(todo)
+
+            let completed = TaskBehaviorEvent(
+                todo: todo,
+                type: .completionChanged,
+                actor: .user,
+                occurredAt: makeDate(day: 5, hour: 8 + index)
+            )
+            completed.beforeCompletion = false
+            completed.afterCompletion = true
+            events.append(completed)
+
+            let dueChanged = TaskBehaviorEvent(
+                todo: todo,
+                type: .dueDateChanged,
+                actor: .user,
+                occurredAt: makeDate(day: 6, hour: 8 + index)
+            )
+            dueChanged.beforeDueDate = makeDate(day: 12, hour: 9)
+            dueChanged.afterDueDate = makeDate(day: 13, hour: 9)
+            events.append(dueChanged)
+
+            let aiPriority = TaskBehaviorEvent(
+                todo: todo,
+                type: .priorityChanged,
+                actor: .artificialIntelligence,
+                occurredAt: makeDate(day: 7, hour: 8 + index)
+            )
+            aiPriority.beforeComputedPriority = 0.2
+            aiPriority.afterComputedPriority = 0.8
+            events.append(aiPriority)
+
+            let userPriority = TaskBehaviorEvent(
+                todo: todo,
+                type: .priorityChanged,
+                actor: .user,
+                occurredAt: makeDate(day: 7, hour: 12 + index)
+            )
+            userPriority.beforeManualPriority = nil
+            userPriority.afterManualPriority = TodoPriority.high.rawValue
+            events.append(userPriority)
+        }
+
+        let undone = TaskBehaviorEvent(
+            todo: todos[0],
+            type: .completionChanged,
+            actor: .user,
+            occurredAt: makeDate(day: 8, hour: 9)
+        )
+        undone.beforeCompletion = true
+        undone.afterCompletion = false
+        events.append(undone)
+
+        let result = MemoryService.computeAnalysis(
+            todos: todos,
+            behaviorEvents: events,
+            now: now,
+            language: .korean
+        )
+
+        for metric in [
+            BehaviorMetric.completionUndoRate,
+            .dueDateChangeRate,
+            .manualPriorityChangeRate,
+            .aiOverrideRate
+        ] {
+            #expect(result.behaviorProfile.insight(for: metric)?.confidence == .insufficient)
+        }
+        #expect(!result.insights.contains { $0.contains("완료 취소") })
+        #expect(!result.insights.contains { $0.contains("마감일을 변경") })
+        #expect(!result.insights.contains { $0.contains("우선순위를 변경") })
+        #expect(!result.insights.contains { $0.contains("사용자 재변경") })
+    }
+
+    @Test("behavior recorder persists typed before and after values")
+    @MainActor
+    func behaviorRecorderPersistsTransitions() throws {
+        let config = ModelConfiguration(
+            schema: AppDataContainer.appSchema,
+            isStoredInMemoryOnly: true,
+            cloudKitDatabase: .none
+        )
+        let container = try ModelContainer(
+            for: AppDataContainer.appSchema,
+            configurations: [config]
+        )
+        let context = ModelContext(container)
+        let todo = Todo(title: "민감한 제목", dueDate: makeDate(day: 12, hour: 9))
+        context.insert(todo)
+
+        TaskBehaviorRecorder.recordCreation(
+            of: todo,
+            actor: .user,
+            in: context,
+            at: makeDate(day: 10, hour: 8)
+        )
+        let previousDueDate = todo.dueDate
+        todo.dueDate = makeDate(day: 13, hour: 9)
+        TaskBehaviorRecorder.recordDueDateChange(
+            of: todo,
+            from: previousDueDate,
+            to: todo.dueDate,
+            actor: .user,
+            in: context,
+            at: makeDate(day: 10, hour: 9)
+        )
+        TaskBehaviorRecorder.recordDeletion(
+            of: todo,
+            actor: .system,
+            in: context,
+            at: makeDate(day: 10, hour: 10)
+        )
+        context.delete(todo)
+        try context.save()
+
+        let events = try context.fetch(
+            FetchDescriptor<TaskBehaviorEvent>(
+                sortBy: [SortDescriptor(\.occurredAt, order: .forward)]
+            )
+        )
+        #expect(events.count == 3)
+        #expect(events[0].eventType == .created)
+        #expect(events[0].actor == .user)
+        #expect(events[0].todoID == todo.id)
+        #expect(events[1].eventType == .dueDateChanged)
+        #expect(events[1].beforeDueDate == previousDueDate)
+        #expect(events[1].afterDueDate == todo.dueDate)
+        #expect(events[2].eventType == .deleted)
+        #expect(events[2].actor == .system)
+        #expect(events[2].beforeDueDate == makeDate(day: 13, hour: 9))
+        #expect(try context.fetch(FetchDescriptor<TaskAuditEvent>()).isEmpty)
+    }
+
+    @Test("Firebase snapshot preserves future behavior event raw values")
+    @MainActor
+    func firebaseSnapshotPreservesUnknownBehaviorRawValues() throws {
+        let sourceConfig = ModelConfiguration(
+            schema: AppDataContainer.appSchema,
+            isStoredInMemoryOnly: true,
+            cloudKitDatabase: .none
+        )
+        let sourceContainer = try ModelContainer(
+            for: AppDataContainer.appSchema,
+            configurations: [sourceConfig]
+        )
+        let sourceContext = ModelContext(sourceContainer)
+        let todo = Todo(title: "snapshot")
+        let event = TaskBehaviorEvent(
+            todo: todo,
+            type: .created,
+            actor: .system,
+            occurredAt: makeDate(day: 10, hour: 9)
+        )
+        event.eventTypeRaw = "futureEvent"
+        event.actorRaw = "futureActor"
+        sourceContext.insert(event)
+        let json = try FirebaseSnapshotStore.exportJSON(context: sourceContext)
+
+        let targetConfig = ModelConfiguration(
+            schema: AppDataContainer.appSchema,
+            isStoredInMemoryOnly: true,
+            cloudKitDatabase: .none
+        )
+        let targetContainer = try ModelContainer(
+            for: AppDataContainer.appSchema,
+            configurations: [targetConfig]
+        )
+        let targetContext = ModelContext(targetContainer)
+        try FirebaseSnapshotStore.importJSON(json, context: targetContext)
+
+        let imported = try #require(
+            targetContext.fetch(FetchDescriptor<TaskBehaviorEvent>()).first
+        )
+        #expect(imported.eventTypeRaw == "futureEvent")
+        #expect(imported.actorRaw == "futureActor")
+    }
+
+    @Test("behavior profile persists and corrupt payload falls back to scalar metadata")
+    @MainActor
+    func behaviorProfilePersistsAndFallsBack() throws {
+        let now = makeDate(day: 10, hour: 12)
+        let profile = BehaviorProfile(
+            version: BehaviorProfile.currentVersion,
+            windowStart: makeDate(day: 1, hour: 0),
+            windowEnd: now,
+            sampleCount: 12,
+            effectiveSampleSize: 9,
+            confidence: .low,
+            insights: []
+        )
+        let config = ModelConfiguration(
+            schema: AppDataContainer.appSchema,
+            isStoredInMemoryOnly: true,
+            cloudKitDatabase: .none
+        )
+        let container = try ModelContainer(
+            for: AppDataContainer.appSchema,
+            configurations: [config]
+        )
+        let context = ModelContext(container)
+        let analysis = MemoryAnalysis(
+            summary: "요약",
+            insights: [],
+            fastTags: [],
+            overdueRate: 0,
+            behaviorProfile: profile
+        )
+        context.insert(analysis)
+        try context.save()
+
+        let reloaded = try #require(
+            ModelContext(container).fetch(FetchDescriptor<MemoryAnalysis>()).first
+        )
+        #expect(reloaded.behaviorProfile == profile)
+        #expect(reloaded.sampleCount == 12)
+        #expect(reloaded.confidence == .low)
+
+        reloaded.behaviorProfileData = Data([0xFF])
+        let fallback = reloaded.behaviorProfile
+        #expect(fallback.version == BehaviorProfile.currentVersion)
+        #expect(fallback.sampleCount == 12)
+        #expect(fallback.confidence == .low)
+        #expect(fallback.insights.isEmpty)
     }
 }

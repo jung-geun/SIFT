@@ -1,0 +1,90 @@
+{
+  "sourceLanguage" : "ko",
+  "strings" : {
+    "CFBundleDisplayName" : {
+      "comment" : "Application display name.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SIFT: To-Do List"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SIFT: To-Do List"
+          }
+        }
+      }
+    },
+    "CFBundleName" : {
+      "comment" : "Bundle name",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "ko" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "todo"
+          }
+        }
+      }
+    },
+    "NSCalendarsFullAccessUsageDescription" : {
+      "comment" : "Reason the app requests full calendar access.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Calendar access is required to add to-do deadlines and read your schedule."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "할 일 마감을 캘린더에 등록하고 일정을 읽어오기 위해 캘린더 접근이 필요합니다."
+          }
+        }
+      }
+    },
+    "NSMicrophoneUsageDescription" : {
+      "comment" : "Reason the app requests microphone access.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Microphone access is required to record meetings and transcribe them on this device."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "회의를 녹음하고 기기에서 전사하려면 마이크 접근이 필요합니다."
+          }
+        }
+      }
+    },
+    "NSSpeechRecognitionUsageDescription" : {
+      "comment" : "Reason the app requests speech recognition access.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Speech recognition access is required to transcribe recorded meetings on this device."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "녹음 중인 회의를 기기에서 전사하려면 음성 인식 접근이 필요합니다."
+          }
+        }
+      }
+    }
+  },
+  "version" : "1.0"
+}

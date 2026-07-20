@@ -5,6 +5,7 @@ struct TodoDetailView: View {
     @Bindable var todo: Todo
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.userVocabulary) private var userVocabulary
 
     @State private var showDatePicker = false
     @State private var showReminderPicker = false
@@ -13,6 +14,7 @@ struct TodoDetailView: View {
     @State private var showDeleteConfirm = false
     /// 앱 내 메일 상세 시트 — 로컬 EmailMessage가 있을 때 표시
     @State private var showingEmail: EmailMessage?
+    @State private var vocabularyObservationTask: Task<Void, Never>?
 
     // MARK: - Body
 
@@ -55,6 +57,13 @@ struct TodoDetailView: View {
             MailDetailView(email: email)
                 .modelContainer(AppDataContainer.shared.emailContainer)
         }
+        .onChange(of: todo.title) { _, _ in scheduleVocabularyObservation() }
+        .onChange(of: todo.notes) { _, _ in scheduleVocabularyObservation() }
+        .onChange(of: todo.tags) { _, _ in scheduleVocabularyObservation() }
+        .onChange(of: todo.isCompleted) { _, completed in
+            if completed { vocabularyObservationTask?.cancel() }
+        }
+        .onDisappear { vocabularyObservationTask?.cancel() }
     }
 
     // MARK: - Sections
@@ -94,6 +103,7 @@ struct TodoDetailView: View {
             Toggle(isOn: Binding(
                 get: { todo.dueDate != nil },
                 set: { on in
+                    let previousDueDate = todo.dueDate
                     if on {
                         todo.dueDate = Calendar.current.date(byAdding: .day, value: 1, to: Date())
                         todo.updatedAt = Date()
@@ -109,6 +119,13 @@ struct TodoDetailView: View {
                         todo.updatedAt = Date()
                         NotificationService.shared.cancel(todo: todo)
                     }
+                    TaskBehaviorRecorder.recordDueDateChange(
+                        of: todo,
+                        from: previousDueDate,
+                        to: todo.dueDate,
+                        actor: .user,
+                        in: modelContext
+                    )
                 }
             )) {
                 Label("마감 시각 설정", systemImage: "calendar.badge.clock")
@@ -120,6 +137,7 @@ struct TodoDetailView: View {
                     selection: Binding(
                         get: { todo.dueDate ?? Date() },
                         set: { newDate in
+                            let previousDueDate = todo.dueDate
                             todo.dueDate = newDate
                             todo.updatedAt = Date()
                             if todo.calendarEventID != nil {
@@ -128,6 +146,13 @@ struct TodoDetailView: View {
                                 CalendarService.shared.applyAutoRegistration(for: todo)
                             }
                             Task { await NotificationService.shared.update(todo: todo) }
+                            TaskBehaviorRecorder.recordDueDateChange(
+                                of: todo,
+                                from: previousDueDate,
+                                to: todo.dueDate,
+                                actor: .user,
+                                in: modelContext
+                            )
                         }
                     ),
                     displayedComponents: [.date, .hourAndMinute]
@@ -155,16 +180,32 @@ struct TodoDetailView: View {
                 }
                 Menu {
                     Button("설정 안함") {
+                        let previousPriority = todo.manualPriority
                         todo.manualPriority = nil
                         todo.updatedAt = Date()
+                        TaskBehaviorRecorder.recordManualPriorityChange(
+                            of: todo,
+                            from: previousPriority,
+                            to: todo.manualPriority,
+                            actor: .user,
+                            in: modelContext
+                        )
                     }
                     Divider()
                     ForEach(TodoPriority.allCases, id: \.rawValue) { p in
                         Button {
+                            let previousPriority = todo.manualPriority
                             todo.manualPriority = p.rawValue
                             todo.updatedAt = Date()
                             // 긴급/최우선 선택 시 강제 등록 (마감 있을 때만)
                             CalendarService.shared.applyAutoRegistration(for: todo)
+                            TaskBehaviorRecorder.recordManualPriorityChange(
+                                of: todo,
+                                from: previousPriority,
+                                to: todo.manualPriority,
+                                actor: .user,
+                                in: modelContext
+                            )
                         } label: {
                             Label(p.label, systemImage: "flag")
                         }
@@ -173,6 +214,8 @@ struct TodoDetailView: View {
                     Image(systemName: "chevron.up.chevron.down")
                         .foregroundStyle(.secondary)
                 }
+                .accessibilityLabel(AppLanguage.localized("todo.priority.accessibilityLabel", defaultValue: "우선순위 선택", language: .current, comment: "To-do priority picker."))
+                .accessibilityIdentifier("todo.priorityPicker")
             }
 
             // AI 자동 우선순위 표시
@@ -368,8 +411,17 @@ struct TodoDetailView: View {
     private var completeButton: some View {
         Button {
             withAnimation {
+                let wasCompleted = todo.isCompleted
                 todo.isCompleted.toggle()
                 todo.completedAt = todo.isCompleted ? Date() : nil
+                todo.updatedAt = Date()
+                TaskBehaviorRecorder.recordCompletionChange(
+                    of: todo,
+                    from: wasCompleted,
+                    to: todo.isCompleted,
+                    actor: .user,
+                    in: modelContext
+                )
                 if todo.isCompleted {
                     NotificationService.shared.cancel(todo: todo)
                 }
@@ -392,6 +444,8 @@ struct TodoDetailView: View {
             Label("이메일", systemImage: "envelope.fill").foregroundStyle(.blue)
         case .calendar:
             Label("캘린더", systemImage: "calendar").foregroundStyle(.green)
+        case .meeting:
+            Label("회의", systemImage: "person.2.fill").foregroundStyle(.purple)
         }
     }
 
@@ -482,15 +536,7 @@ struct TodoDetailView: View {
     }
 
     private func offsetLabel(_ offset: Double) -> String {
-        let abs = Swift.abs(offset)
-        switch abs {
-        case ..<900:    return "마감 \(Int(abs / 60))분 전"
-        case ..<3660:   return "마감 1시간 전"
-        case ..<7260:   return "마감 2시간 전"
-        case ..<21660:  return "마감 6시간 전"
-        case ..<86460:  return "마감 하루 전"
-        default:        return "마감 \(Int(abs / 86400))일 전"
-        }
+        ReminderTiming.detailLabel(for: offset)
     }
 
     private func addOffset(_ offset: Double) {
@@ -525,13 +571,32 @@ struct TodoDetailView: View {
     }
 
     private func deleteTodo() {
+        vocabularyObservationTask?.cancel()
         // 대기열(review) 항목은 캘린더 이벤트 보존 — 태스크(todo)로 승격된 경우만 함께 삭제
         if todo.triage == .todo, let eventID = todo.calendarEventID {
             try? CalendarService.shared.removeEvent(eventID: eventID)
         }
         NotificationService.shared.cancel(todo: todo)
+        TaskBehaviorRecorder.recordDeletion(of: todo, actor: .user, in: modelContext)
+        modelContext.insert(TaskAuditEvent(from: todo))
         modelContext.delete(todo)
         dismiss()
+    }
+
+    private func scheduleVocabularyObservation() {
+        vocabularyObservationTask?.cancel()
+        guard !todo.isCompleted, let observer = userVocabulary?.observer else { return }
+        let document = VocabularySourceDocumentBuilder.todo(todo)
+        vocabularyObservationTask = Task {
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled else { return }
+            do {
+                try modelContext.save()
+                await observer.observeDocument(document, false)
+            } catch {
+                modelContext.rollback()
+            }
+        }
     }
 }
 
@@ -557,6 +622,8 @@ struct TagEditorView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
+                    .accessibilityLabel(AppLanguage.localized("todo.tag.delete.accessibilityLabel", defaultValue: "태그 삭제", language: .current, comment: "To-do tag delete button."))
+                    .accessibilityIdentifier("todo.tagDeleteButton")
                     .buttonStyle(.plain)
                 }
             }

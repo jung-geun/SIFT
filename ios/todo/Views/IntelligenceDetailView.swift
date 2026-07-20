@@ -1,5 +1,16 @@
 import SwiftUI
 
+enum OnDeviceModelSupportState: Equatable {
+    case available
+    case unsupported
+
+    init(isCapable: Bool, availableModelCount: Int) {
+        self = isCapable && availableModelCount > 0
+            ? .available
+            : .unsupported
+    }
+}
+
 // 3. TODO 자동 정렬 및 AI
 struct IntelligenceDetailView: View {
     @Environment(\.appTutorialState) private var tutorial
@@ -41,6 +52,13 @@ struct IntelligenceDetailView: View {
     private var isOnDeviceLLMCapable: Bool {
         llmService.isCapable
     }
+
+    private var onDeviceModelSupportState: OnDeviceModelSupportState {
+        OnDeviceModelSupportState(
+            isCapable: isOnDeviceLLMCapable,
+            availableModelCount: OnDeviceLLMService.availableModels.count
+        )
+    }
     
     var body: some View {
         Form {
@@ -66,11 +84,9 @@ struct IntelligenceDetailView: View {
                 
                 
                 
-                if selectedProvider == .onDevice && !llmService.isCapable {
-                    Label("이 기기는 현재 온디바이스 AI 실행 기준을 충족하지 않아 다른 경로로 폴백될 수 있습니다.", systemImage: "exclamationmark.triangle")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                } else if selectedProvider == .onDevice && !llmService.isModelCachedOnDisk {
+                if selectedProvider == .onDevice,
+                   onDeviceModelSupportState == .available,
+                   !llmService.isModelCachedOnDisk {
                     Label("온디바이스 모델을 먼저 다운로드하세요 (아래 모델 관리 섹션)", systemImage: "exclamationmark.triangle")
                         .font(.caption)
                         .foregroundStyle(.orange)
@@ -92,7 +108,8 @@ struct IntelligenceDetailView: View {
                 Text(intelligenceFooter)
             }
             
-            if selectedProvider == .onDevice && isOnDeviceLLMCapable {
+            if selectedProvider == .onDevice
+                && onDeviceModelSupportState == .available {
                 Section {
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
@@ -119,7 +136,18 @@ struct IntelligenceDetailView: View {
                             Button(role: .destructive) {
                                 Task { await llmService.deleteDownloadedModel() }
                             } label: {
-                                Label("모델 삭제 (약 \(selectedModelSizeMB / 100 * 100 / 1000).\((selectedModelSizeMB / 100) % 10)GB 확보)", systemImage: "trash")
+                                Label(
+                                    String(
+                                        format: AppLanguage.localized(
+                                            "intelligence.model.delete",
+                                            defaultValue: "모델 삭제 (약 %@GB 확보)",
+                                            language: .current,
+                                            comment: "On-device model delete action."
+                                        ),
+                                        String(format: "%.1f", Double(selectedModelSizeMB) / 1000.0)
+                                    ),
+                                    systemImage: "trash"
+                                )
                             }
                         }
                         if !llmService.isModelCachedOnDisk && !llmService.isLoading {
@@ -133,7 +161,12 @@ struct IntelligenceDetailView: View {
                     
                     Picker("모델", selection: $onDeviceModelID) {
                         ForEach(OnDeviceLLMService.availableModels) { option in
-                            Text(option.displayName).tag(option.id)
+                            Text(AppLanguage.localized(
+                                "intelligence.model.option.\(option.id)",
+                                defaultValue: option.displayName,
+                                language: .current,
+                                comment: "On-device model option display name."
+                            )).tag(option.id)
                         }
                     }
                     .pickerStyle(.menu)
@@ -141,7 +174,6 @@ struct IntelligenceDetailView: View {
                         if llmService.isModelLoaded { llmService.unloadModel() }
                     }
                     .onAppear {
-                        // 저장된 모델이 이 기기에서 허용되지 않으면(예: 6GB 기기인데 4B) 허용 모델로 교정.
                         let allowed = OnDeviceLLMService.availableModels
                         if !allowed.contains(where: { $0.id == onDeviceModelID }) {
                             onDeviceModelID = allowed.first?.id ?? OnDeviceLLMService.defaultModelID
@@ -152,7 +184,17 @@ struct IntelligenceDetailView: View {
                         VStack(alignment: .leading, spacing: 6) {
                             ProgressView(value: llmService.downloadProgress > 0 ? llmService.downloadProgress : nil)
                             if llmService.downloadProgress > 0 {
-                                Text("\(Int(llmService.downloadProgress * 100))% 완료")
+                                Text(
+                                    String(
+                                        format: AppLanguage.localized(
+                                            "intelligence.model.progress",
+                                            defaultValue: "%d%% 완료",
+                                            language: .current,
+                                            comment: "On-device model download progress."
+                                        ),
+                                        Int(llmService.downloadProgress * 100)
+                                    )
+                                )
                                     .font(.caption.monospacedDigit())
                                     .foregroundStyle(.secondary)
                             } else {
@@ -167,7 +209,15 @@ struct IntelligenceDetailView: View {
                     if llmService.downloadInterrupted {
                         VStack(alignment: .leading, spacing: 6) {
                             Label(
-                                "다운로드가 중단됐습니다 (\(Int(llmService.downloadProgress * 100))% 완료)",
+                                String(
+                                    format: AppLanguage.localized(
+                                        "intelligence.model.interruptedMessage",
+                                        defaultValue: "다운로드가 중단됐습니다 (%d%% 완료)",
+                                        language: .current,
+                                        comment: "On-device model download interruption."
+                                    ),
+                                    Int(llmService.downloadProgress * 100)
+                                ),
                                 systemImage: "pause.circle.fill"
                             )
                             .font(.caption)
@@ -232,7 +282,7 @@ struct IntelligenceDetailView: View {
                 } header: {
                     Label("온디바이스 모델 관리", systemImage: "square.and.arrow.down")
                 } footer: {
-                    Text("'Qwen AI' 선택 시 활성화됩니다. 최초 1회만 다운로드합니다. Wi-Fi 환경에서 진행을 권장합니다. 모델은 기기에만 저장되며 이메일 본문은 기기 밖으로 전송되지 않습니다.")
+                    Text("'온디바이스 AI' 선택 시 활성화됩니다. 최초 1회만 다운로드합니다. Wi-Fi 환경에서 진행을 권장합니다. 모델은 기기에만 저장되며 이메일 본문은 기기 밖으로 전송되지 않습니다.")
                 }
                 .confirmationDialog(
                     "모델 다운로드",
@@ -245,6 +295,25 @@ struct IntelligenceDetailView: View {
                     Button("취소", role: .cancel) {}
                 } message: {
                     Text("\(onDeviceModelID) 모델을 기기에 다운로드합니다. Wi-Fi 환경에서 진행을 권장하며, 모든 추론은 기기 내에서만 이루어집니다.")
+                }
+            } else if selectedProvider == .onDevice {
+                Section {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Label(
+                            "기기가 지원되지 않는 기능입니다",
+                            systemImage: "exclamationmark.triangle.fill"
+                        )
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.orange)
+
+                        Text("이 기기는 온디바이스 AI 모델을 실행할 수 있는 메모리 요건을 충족하지 않습니다.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 4)
+                    .accessibilityIdentifier("intelligence.onDevice.unsupported")
+                } header: {
+                    Label("온디바이스 모델 관리", systemImage: "square.and.arrow.down")
                 }
             }
             
@@ -310,40 +379,46 @@ struct IntelligenceDetailView: View {
     }
     
     private var intelligenceFooter: String {
+        let key: String
+        let fallback: String
         switch selectedProvider {
         case .foundationModels:
-            return "Apple Foundation Models(온디바이스)가 할 일을 정렬합니다. 실패하면 휴리스틱으로 폴백합니다.\n\n\(credentialStorageHint)"
+            key = "intelligence.footer.foundationModels"
+            fallback = "Apple Foundation Models(온디바이스)가 할 일을 정렬합니다. 실패하면 휴리스틱으로 폴백합니다."
         case .onDevice:
-            return "Qwen 온디바이스 모델이 우선 정렬하고, 실패하면 Gemini API(키 저장 시) → Apple Foundation Models → 휴리스틱 순으로 폴백합니다.\n\n\(credentialStorageHint)"
+            key = "intelligence.footer.onDevice"
+            fallback = "온디바이스 AI가 우선 정렬하고, 실패하면 Gemini API(키 저장 시) → Apple Foundation Models → 휴리스틱 순으로 폴백합니다."
         case .gemini:
-            return "Gemini API가 할 일을 정렬합니다. API 키가 없으면 Apple Foundation Models, 그 다음 Qwen/휴리스틱으로 폴백합니다.\n\n\(credentialStorageHint)"
+            key = "intelligence.footer.gemini"
+            fallback = "Gemini API가 할 일을 정렬합니다. API 키가 없으면 Apple Foundation Models, 그 다음 온디바이스 AI/휴리스틱으로 폴백합니다."
         }
+        let storage = AppLanguage.localized(
+            iCloudSyncEnabled ? "intelligence.storage.iCloud" : "intelligence.storage.device",
+            defaultValue: iCloudSyncEnabled
+                ? "인증정보와 보안정보들은 사용자의 iCloud Keychain에 안전하게 저장됩니다."
+                : "인증정보와 보안정보들은 사용자의 Keychain에 안전하게 저장됩니다.",
+            language: .current,
+            comment: "AI credential storage hint."
+        )
+        return AppLanguage.localized(key, defaultValue: fallback, language: .current, comment: "AI provider explanation.") + "\n\n" + storage
     }
-    
-    private var credentialStorageHint: String {
-        if iCloudSyncEnabled {
-            return "인증정보와 보안정보들은 사용자의 iCloud Keychain에 안전하게 저장됩니다."
-        }
-        return "인증정보와 보안정보들은 사용자의 Keychain에 안전하게 저장됩니다."
-    }
-    
+
     @ViewBuilder
     private var llmModelStatusBadge: some View {
-        let (label, color): (String, Color) = {
-            if llmService.isDeleting        { return ("삭제 중", .red) }
-            if llmService.isModelLoaded     { return ("로드됨", .green) }
-            if llmService.isLoading         { return ("다운로드 중", .blue) }
-            if llmService.downloadInterrupted { return ("중단됨", .orange) }
-            if llmService.isModelCachedOnDisk { return ("설치됨", .yellow) }
-            return ("미설치", .gray)
+        let (key, fallback, color): (String, String, Color) = {
+            if llmService.isDeleting        { return ("intelligence.model.deleting", "삭제 중", .red) }
+            if llmService.isModelLoaded     { return ("intelligence.model.loaded", "로드됨", .green) }
+            if llmService.isLoading         { return ("intelligence.model.downloading", "다운로드 중", .blue) }
+            if llmService.downloadInterrupted { return ("intelligence.model.interrupted", "중단됨", .orange) }
+            if llmService.isModelCachedOnDisk { return ("intelligence.model.installed", "설치됨", .yellow) }
+            return ("intelligence.model.notInstalled", "미설치", .gray)
         }()
-        Text(label)
+        Text(AppLanguage.localized(key, defaultValue: fallback, language: .current, comment: "On-device model status."))
             .font(.caption)
             .padding(.horizontal, 8).padding(.vertical, 3)
             .background(color.opacity(0.15), in: Capsule())
             .foregroundStyle(color)
     }
-    
     private func saveSetting<T>(key: String, value: T, onChange: ((T) -> Void)? = nil) {
         let isLocal = !iCloudSyncEnabled || SettingsStore.shared.isLocal(key: key)
         if isLocal {

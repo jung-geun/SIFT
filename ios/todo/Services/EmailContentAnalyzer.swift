@@ -50,7 +50,11 @@ struct EmailContentAnalyzer {
 
     /// 메시지를 분석해 마감일 + 부가 정보를 추출.
     /// 마감일을 찾지 못하면 nil을 반환한다.
-    func analyze(_ msg: GmailMessage, now: Date) -> EmailExtraction? {
+    func analyze(
+        _ msg: GmailMessage,
+        now: Date,
+        language: AppLanguage = .current
+    ) -> EmailExtraction? {
         let maxDate = now.addingTimeInterval(maxLookAheadDays * 24 * 3600)
         // 제목 + 본문을 합쳐 분석 — 제목에 마감일 언급이 많음
         let fullText = msg.subject + "\n" + msg.body
@@ -64,19 +68,17 @@ struct EmailContentAnalyzer {
         let matches = detector.matches(in: fullText, options: [], range: nsRange)
 
         // 2. 미래 날짜만 필터 + 키워드 근접 점수 부여
-        var candidates: [(date: Date, score: Int, context: String, matchRange: Range<String.Index>)] = []
+        var candidates: [(date: Date, score: Int, context: String, matchRange: Range<String.Index>, timeZone: TimeZone?, sourceText: String)] = []
         for match in matches {
-            guard let date = match.date else { continue }
-            // (a) 미래만, (b) ~1년 이내 — 과거 날짜·전화번호·"since YYYY" 노이즈 제거
-            guard date > now, date < maxDate else { continue }
-
-            // 3. 마감 키워드 근접 점수
             var score = 0
             var contextStr = ""
             var swiftMatchRange: Range<String.Index>?
+            var sourceText = ""
 
             if let swiftRange = Range(match.range, in: fullText) {
                 swiftMatchRange = swiftRange
+                sourceText = sourceTextForDateMatch(in: fullText, matchRange: swiftRange)
+
                 // 매치 주변 contextWindow 자 범위 추출
                 let distToStart = fullText.distance(from: fullText.startIndex, to: swiftRange.lowerBound)
                 let distToEnd   = fullText.distance(from: swiftRange.upperBound, to: fullText.endIndex)
@@ -96,7 +98,24 @@ struct EmailContentAnalyzer {
                     score += 1
                 }
             }
-            candidates.append((date: date, score: score, context: contextStr, matchRange: swiftMatchRange ?? fullText.startIndex..<fullText.startIndex))
+
+            let parsedDate = AppDateFormat.parseMailDate(sourceText)
+            guard let date = parsedDate ?? match.date else { continue }
+            let timeZone = parsedDate != nil
+                ? AppDateFormat.sourceTimeZone(in: sourceText)
+                : match.timeZone
+
+            // (a) 미래만, (b) ~1년 이내 — 과거 날짜·전화번호·"since YYYY" 노이즈 제거
+            guard date > now, date < maxDate else { continue }
+
+            candidates.append((
+                date: date,
+                score: score,
+                context: contextStr,
+                matchRange: swiftMatchRange ?? fullText.startIndex..<fullText.startIndex,
+                timeZone: timeZone,
+                sourceText: sourceText
+            ))
         }
 
         guard !candidates.isEmpty else { return nil }
@@ -107,23 +126,15 @@ struct EmailContentAnalyzer {
         }
         let best = candidates[0]
 
-        // 5. 날짜만(시각 없음) 감지 → 그날 23:59 로컬로 보정
+        // 5. 날짜만(시각 없음) 감지 → 그날 23:59 로컬/원문 시간대로 보정
         //    안 그러면 "6월 30일까지" 메일이 6월 30일 00:00에 이미 초과 표시됨
-        let cal = Calendar.current
-        let comps = cal.dateComponents([.hour, .minute, .second], from: best.date)
-        let isMidnight = comps.hour == 0 && comps.minute == 0 && (comps.second ?? 0) == 0
-
-        let finalDate: Date
-        let isAllDay: Bool
-        if isMidnight {
-            var eod = cal.dateComponents([.year, .month, .day], from: best.date)
-            eod.hour = 23; eod.minute = 59; eod.second = 0
-            finalDate = cal.date(from: eod) ?? best.date
-            isAllDay = true
-        } else {
-            finalDate = best.date
-            isAllDay = false
+        var calendar = Calendar.current
+        if let timeZone = best.timeZone {
+            calendar.timeZone = timeZone
         }
+        let normalizedDeadline = AppDateFormat.normalizedAllDayDeadline(best.date, calendar: calendar)
+        let finalDate = normalizedDeadline.date
+        let isAllDay = normalizedDeadline.isAllDay
 
         // 6. 발신자 파싱
         let sender      = parseSender(from: msg.from)
@@ -138,7 +149,8 @@ struct EmailContentAnalyzer {
             snippet: msg.snippet,
             date: finalDate,
             isAllDay: isAllDay,
-            deadlineSentence: deadlineSentence
+            deadlineSentence: deadlineSentence,
+            language: language
         )
 
         return EmailExtraction(
@@ -150,6 +162,53 @@ struct EmailContentAnalyzer {
             deadlineSentence: deadlineSentence,
             notes: notes
         )
+    }
+
+    private func sourceTextForDateMatch(in text: String, matchRange: Range<String.Index>) -> String {
+        let matchText = String(text[matchRange])
+        let remaining = text.distance(from: matchRange.upperBound, to: text.endIndex)
+        let scanEnd = text.index(
+            matchRange.upperBound,
+            offsetBy: min(16, remaining),
+            limitedBy: text.endIndex
+        ) ?? text.endIndex
+        let trailing = String(text[matchRange.upperBound..<scanEnd])
+        guard let zoneToken = trailingZoneToken(in: trailing) else {
+            return matchText
+        }
+        return matchText + " " + zoneToken
+    }
+
+    private func trailingZoneToken(in text: String) -> String? {
+        let pattern = #"(?i)^\s*(Z|UTC|GMT)([+-]\d{1,2}(?::?\d{2})?)?"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let range = NSRange(text.startIndex..., in: text)
+        guard let match = regex.firstMatch(in: text, range: range),
+              let tokenRange = Range(match.range(at: 1), in: text) else {
+            return nil
+        }
+
+        let matchEndOffset = match.range.location + match.range.length
+        if matchEndOffset < (text as NSString).length {
+            let matchEnd = String.Index(utf16Offset: matchEndOffset, in: text)
+            if matchEnd < text.endIndex,
+               let scalar = String(text[matchEnd]).unicodeScalars.first {
+                let value = scalar.value
+                let isASCIIAlphanumeric = (48...57).contains(value)
+                    || (65...90).contains(value)
+                    || (97...122).contains(value)
+                if isASCIIAlphanumeric {
+                    return nil
+                }
+            }
+        }
+
+        var token = String(text[tokenRange]).uppercased()
+        if match.range(at: 2).location != NSNotFound,
+           let offsetRange = Range(match.range(at: 2), in: text) {
+            token += String(text[offsetRange])
+        }
+        return token
     }
 
     // MARK: - Sender Parsing
@@ -226,31 +285,68 @@ struct EmailContentAnalyzer {
         snippet: String,
         date: Date,
         isAllDay: Bool,
-        deadlineSentence: String
+        deadlineSentence: String,
+        language: AppLanguage
     ) -> String {
-        let df = DateFormatter()
-        df.locale = Locale(identifier: "ko_KR")
-        df.dateStyle = .long
-        df.timeStyle = isAllDay ? .none : .short
-        let dateStr = df.string(from: date)
+        let dateStr = AppDateFormat.deadlineString(
+            from: date,
+            isAllDay: isAllDay,
+            language: language
+        )
 
         var lines: [String] = []
 
-        // 마감 추정 (lead)
-        lines.append("⏰ \(dateStr)까지")
+        lines.append(
+            {
+                let defaultValue = language == .english
+                    ? "Due by \(dateStr)"
+                    : "⏰ \(dateStr)까지"
+                let localized = AppLanguage.localized(
+                    "mail.deadline",
+                    defaultValue: defaultValue,
+                    language: language,
+                    comment: "Detected email deadline"
+                )
+                return localized == defaultValue
+                    ? localized
+                    : String(format: localized, locale: language.locale, dateStr)
+            }()
+        )
         if !deadlineSentence.isEmpty {
             lines.append(deadlineSentence)
-            lines.append("(본문 발췌 — AI 요약 아님)")
+            lines.append(
+                AppLanguage.localized(
+                    "mail.bodyExcerptDisclaimer",
+                    defaultValue: language == .english
+                        ? "(Body excerpt — not an AI summary)"
+                        : "(본문 발췌 — AI 요약 아님)",
+                    language: language,
+                    comment: "Email body excerpt disclaimer"
+                )
+            )
         }
         lines.append("")
 
-        // 발신자
         if !sender.isEmpty {
-            lines.append("[발신자] \(sender)")
+            lines.append(
+                {
+                    let defaultValue = language == .english
+                        ? "[Sender] \(sender)"
+                        : "[발신자] \(sender)"
+                    let localized = AppLanguage.localized(
+                        "mail.sender",
+                        defaultValue: defaultValue,
+                        language: language,
+                        comment: "Email sender label"
+                    )
+                    return localized == defaultValue
+                        ? localized
+                        : String(format: localized, locale: language.locale, sender)
+                }()
+            )
             lines.append("")
         }
 
-        // Gmail 미리보기
         if !snippet.isEmpty {
             lines.append(snippet)
         }

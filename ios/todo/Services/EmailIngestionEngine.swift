@@ -1,7 +1,11 @@
 import Foundation
 
 struct EmailIngestionEngine {
-    func makeManualTodo(from message: GmailMessage, allowFoundationModels: Bool = true) async -> Todo {
+    func makeManualTodo(
+        from message: GmailMessage,
+        allowFoundationModels: Bool = true,
+        language: AppLanguage = .current
+    ) async -> Todo {
         let analyzer = EmailContentAnalyzer()
         var draft: EmailTodoDraft?
 
@@ -9,7 +13,11 @@ struct EmailIngestionEngine {
             #if canImport(FoundationModels)
             if #available(iOS 26.0, *), FoundationModelsAvailability.isAvailable {
                 do {
-                    draft = try await FoundationModelsService().draftTodoFromEmail(message, now: Date())
+                    draft = try await FoundationModelsService().draftTodoFromEmail(
+                        message,
+                        now: Date(),
+                        language: language
+                    )
                 } catch {
                     print("[EmailService] draftTodoFromEmail failed: \(error.localizedDescription)")
                 }
@@ -17,7 +25,11 @@ struct EmailIngestionEngine {
             #endif
         }
 
-        let finalDraft = draft ?? makeFallbackManualDraft(from: message, analyzer: analyzer)
+        let finalDraft = draft ?? makeFallbackManualDraft(
+            from: message,
+            analyzer: analyzer,
+            language: language
+        )
 
         let todo = Todo(
             title: finalDraft.title,
@@ -30,13 +42,22 @@ struct EmailIngestionEngine {
         todo.sourceSenderEmail = finalDraft.senderEmail.isEmpty ? analyzer.parseSenderEmail(from: message.from) : finalDraft.senderEmail
         todo.sourceMessageID = message.messageID
         todo.sourceThreadID = message.threadID
+        todo.sourceAccountNamespace = message.sourceAccountNamespace
         todo.triageStatus = TodoTriage.todo.rawValue
         return todo
     }
 
-    func extractTodos(from message: GmailMessage, allowFoundationModels: Bool = true) async throws -> [Todo] {
+    func extractTodos(
+        from message: GmailMessage,
+        allowFoundationModels: Bool = true,
+        language: AppLanguage = .current
+    ) async throws -> [Todo] {
         let engine = EmailAnalysisEngineFactory.makeEngine(allowFoundationModels: allowFoundationModels)
-        guard let extraction = await engine.analyze(message, now: Date()) else {
+        guard let extraction = await engine.analyze(
+            message,
+            now: Date(),
+            language: language
+        ) else {
             return []
         }
 
@@ -62,6 +83,7 @@ struct EmailIngestionEngine {
         todo.sourceSenderEmail = extraction.senderEmail
         todo.sourceMessageID = message.messageID
         todo.sourceThreadID = message.threadID
+        todo.sourceAccountNamespace = message.sourceAccountNamespace
         todo.triageStatus = triage.rawValue
         return [todo]
     }
@@ -71,7 +93,11 @@ struct EmailIngestionEngine {
         let iso = ISO8601DateFormatter()
         var results: [(ExtractedEmailEvent, String)] = []
         for msg in messages {
-            guard let extraction = analyzer.analyze(msg, now: Date()) else { continue }
+            guard let extraction = analyzer.analyze(
+                msg,
+                now: Date(),
+                language: .current
+            ) else { continue }
             let notesText = extraction.sender.isEmpty
                 ? msg.snippet
                 : "[\(extraction.sender)] \(msg.snippet)"
@@ -88,20 +114,61 @@ struct EmailIngestionEngine {
         return results
     }
 
-    private func makeFallbackManualDraft(from message: GmailMessage, analyzer: EmailContentAnalyzer) -> EmailTodoDraft {
+    private func makeFallbackManualDraft(
+        from message: GmailMessage,
+        analyzer: EmailContentAnalyzer,
+        language: AppLanguage
+    ) -> EmailTodoDraft {
         let sender = analyzer.parseSender(from: message.from)
         let snippet = collapsedWhitespace(message.snippet)
         let body = collapsedWhitespace(message.body)
         let summaryText = !snippet.isEmpty ? snippet : String(body.prefix(500))
-        let summary = summaryText.isEmpty ? "요약할 본문 없음" : summaryText
+        let summary = summaryText.isEmpty
+            ? AppLanguage.localized(
+                "mail.noBodySummary",
+                defaultValue: language == .english ? "No body to summarize" : "요약할 본문 없음",
+                language: language,
+                comment: "Email fallback summary"
+            )
+            : summaryText
         let title = message.subject.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedSender = sender.isEmpty
+            ? message.from
+            : sender
+        let senderFormat = AppLanguage.localized(
+            "mail.sender",
+            defaultValue: language == .english ? "[Sender] %@" : "[발신자] %@",
+            language: language,
+            comment: "Email sender label"
+        )
 
         return EmailTodoDraft(
-            title: title.isEmpty ? "메일 확인" : title,
-            notes: "[메일 요약]\n\(summary)\n\n[발신자] \(sender.isEmpty ? message.from : sender)",
+            title: title.isEmpty
+                ? AppLanguage.localized(
+                    "mail.checkEmail",
+                    defaultValue: language == .english ? "Check Email" : "메일 확인",
+                    language: language,
+                    comment: "Email fallback Todo title"
+                )
+                : title,
+            notes: [
+                AppLanguage.localized(
+                    "mail.summaryHeader",
+                    defaultValue: language == .english ? "[Email Summary]" : "[메일 요약]",
+                    language: language,
+                    comment: "Email summary header"
+                ),
+                summary,
+                "",
+                String(
+                    format: senderFormat,
+                    locale: language.locale,
+                    resolvedSender
+                )
+            ].joined(separator: "\n"),
             dueDate: nil,
             isAllDay: false,
-            sender: sender.isEmpty ? message.from : sender,
+            sender: resolvedSender,
             senderEmail: analyzer.parseSenderEmail(from: message.from)
         )
     }

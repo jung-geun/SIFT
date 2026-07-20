@@ -5,7 +5,6 @@
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
 		<string>pieroot.todo.emailRefresh</string>
-		<string>pieroot.todo.memoryAnalysis</string>
 	</array>
 	<key>CFBundleURLTypes</key>
 	<array>
@@ -22,6 +21,10 @@
 			</array>
 		</dict>
 	</array>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>회의를 녹음하고 기기에서 전사하려면 마이크 접근이 필요합니다.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>녹음 중인 회의를 기기에서 전사하려면 음성 인식 접근이 필요합니다.</string>
 	<key>LSApplicationQueriesSchemes</key>
 	<array>
 		<string>googlegmail</string>
@@ -36,8 +39,8 @@
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>fetch</string>
-		<string>processing</string>
 		<string>remote-notification</string>
+		<string>audio</string>
 	</array>
 </dict>
 </plist>

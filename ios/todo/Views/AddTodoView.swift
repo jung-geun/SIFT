@@ -5,6 +5,7 @@ struct AddTodoView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
     @Environment(\.appTutorialState) private var tutorial
+    @Environment(\.userVocabulary) private var userVocabulary
     @Query private var todos: [Todo]
     @Query(sort: \Persona.updatedAt, order: .reverse) private var personas: [Persona]
 
@@ -153,7 +154,9 @@ struct AddTodoView: View {
                     Button("취소") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("추가") { addTodo() }
+                    Button("추가") {
+                        Task { await addTodo() }
+                    }
                         .fontWeight(.semibold)
                         .disabled(title.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
@@ -187,7 +190,7 @@ struct AddTodoView: View {
 
     // MARK: - Action
 
-    private func addTodo() {
+    private func addTodo() async {
         let trimmedTitle = title.trimmingCharacters(in: .whitespaces)
         guard !trimmedTitle.isEmpty else { return }
 
@@ -212,6 +215,7 @@ struct AddTodoView: View {
         }
 
         modelContext.insert(todo)
+        TaskBehaviorRecorder.recordCreation(of: todo, actor: .user, in: modelContext)
 
         // 캘린더 등록 처리
         if registerToCalendar && hasDueDate && CalendarService.shared.isAuthorized {
@@ -226,11 +230,19 @@ struct AddTodoView: View {
             CalendarService.shared.applyAutoRegistration(for: todo)
         }
 
-        // 알림 등록
         if hasDueDate && !offsets.isEmpty {
             Task {
                 await NotificationService.shared.update(todo: todo)
             }
+        }
+
+        do {
+            try modelContext.save()
+            let document = VocabularySourceDocumentBuilder.todo(todo)
+            await userVocabulary?.observer.observeDocument(document, false)
+        } catch {
+            modelContext.rollback()
+            return
         }
 
         // 수동 추가 즉시 온디바이스 AFM 약한 정렬 (비차단, ANE 실행)
@@ -239,7 +251,7 @@ struct AddTodoView: View {
             types: personas.first?.personaTypes ?? [],
             description: personas.first?.descriptionText ?? ""
         )
-        Task { await QuickSortService.analyzeOnAdd(todo, persona: ctx) }
+        Task { await QuickSortService.analyzeOnAdd(todo, persona: ctx, context: modelContext) }
 
         dismiss()
     }

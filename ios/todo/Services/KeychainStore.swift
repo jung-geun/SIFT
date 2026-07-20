@@ -13,8 +13,31 @@ import OSLog
 /// - 마이그레이션: 동기화 상태 변경 중에도 기존 데이터를 항상 찾을 수 있도록
 ///   `get`과 `delete`는 `kSecAttrSynchronizableAny`를 사용.
 /// - 저장 전: 동기화/비동기화 잔존 항목 모두 삭제(정책 혼선 차단).
+enum KeychainStoreError: Error, Equatable {
+    case security(OSStatus)
+}
+
 enum KeychainStore {
     private static let logger = Logger(subsystem: "pieroot.todo", category: "KeychainStore")
+
+    #if DEBUG
+    private static let testStoreLock = NSLock()
+    private static var testStore: [String: String] = [:]
+    private static var testDataStore: [String: Data] = [:]
+
+    /// Explicit test seam. Unit-test hosts provide XCTestConfigurationFilePath;
+    /// UI tests opt in through SIFT_UI_TESTING. Production always uses
+    /// Security.framework.
+    private static var usesTestStore: Bool {
+        let environment = ProcessInfo.processInfo.environment
+        return environment["XCTestConfigurationFilePath"] != nil
+            || environment["SIFT_UI_TESTING"] == "1"
+    }
+
+    private static func testKey(service: String, account: String?) -> String {
+        "\(service)\u{1F}\(account ?? "")"
+    }
+    #endif
 
     // MARK: - 동기화 정책
 
@@ -35,6 +58,14 @@ enum KeychainStore {
 
     /// 저장 (현재 동기화 정책 적용). 기존 항목 상태 무관하게 먼저 삭제.
     static func set(service: String, account: String? = nil, value: String) {
+        #if DEBUG
+        if usesTestStore {
+            testStoreLock.lock()
+            testStore[testKey(service: service, account: account)] = value
+            testStoreLock.unlock()
+            return
+        }
+        #endif
         logger.debug("Setting keychain item: service=\(service), account=\(account ?? "nil")")
         guard let data = value.data(using: .utf8) else { return }
         let sync = shouldSync
@@ -57,6 +88,13 @@ enum KeychainStore {
 
     /// 동기화 상태 무관하게 조회(SynchronizableAny)하여 전환 중에도 항상 찾음.
     static func get(service: String, account: String? = nil) -> String? {
+        #if DEBUG
+        if usesTestStore {
+            testStoreLock.lock()
+            defer { testStoreLock.unlock() }
+            return testStore[testKey(service: service, account: account)]
+        }
+        #endif
         logger.debug("Getting keychain item: service=\(service), account=\(account ?? "nil")")
         var query: [String: Any] = [
             kSecClass as String:              kSecClassGenericPassword,
@@ -82,6 +120,14 @@ enum KeychainStore {
 
     /// 삭제 — 동기화/비동기화 항목 모두 제거.
     static func deleteAny(service: String, account: String? = nil) {
+        #if DEBUG
+        if usesTestStore {
+            testStoreLock.lock()
+            testStore.removeValue(forKey: testKey(service: service, account: account))
+            testStoreLock.unlock()
+            return
+        }
+        #endif
         logger.debug("Deleting keychain item: service=\(service), account=\(account ?? "nil")")
         var query: [String: Any] = [
             kSecClass as String:              kSecClassGenericPassword,
@@ -93,6 +139,79 @@ enum KeychainStore {
         let status = SecItemDelete(query as CFDictionary)
         if status != errSecSuccess && status != errSecItemNotFound {
             logger.error("Failed to delete keychain item: status \(status)")
+        }
+    }
+
+    // MARK: - Device-only binary values
+
+    /// Stores a value outside the app's iCloud-keychain sync policy.
+    nonisolated static func setDeviceOnly(service: String, account: String, data: Data) throws {
+        #if DEBUG
+        if usesTestStore {
+            testStoreLock.lock()
+            testDataStore[testKey(service: service, account: account)] = data
+            testStoreLock.unlock()
+            return
+        }
+        #endif
+        try deleteDeviceOnly(service: service, account: account)
+        let attributes: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecAttrSynchronizable as String: kCFBooleanFalse!,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+            kSecValueData as String: data
+        ]
+        let status = SecItemAdd(attributes as CFDictionary, nil)
+        guard status == errSecSuccess else {
+            throw KeychainStoreError.security(status)
+        }
+    }
+
+    nonisolated static func getDeviceOnly(service: String, account: String) throws -> Data? {
+        #if DEBUG
+        if usesTestStore {
+            testStoreLock.lock()
+            defer { testStoreLock.unlock() }
+            return testDataStore[testKey(service: service, account: account)]
+        }
+        #endif
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecAttrSynchronizable as String: kCFBooleanFalse!,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        var result: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess, let data = result as? Data else {
+            throw KeychainStoreError.security(status)
+        }
+        return data
+    }
+
+    nonisolated static func deleteDeviceOnly(service: String, account: String) throws {
+        #if DEBUG
+        if usesTestStore {
+            testStoreLock.lock()
+            testDataStore.removeValue(forKey: testKey(service: service, account: account))
+            testStoreLock.unlock()
+            return
+        }
+        #endif
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecAttrSynchronizable as String: kCFBooleanFalse!
+        ]
+        let status = SecItemDelete(query as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw KeychainStoreError.security(status)
         }
     }
 
@@ -120,6 +239,8 @@ enum KeychainStore {
             (service: "pieroot.todo.gmail", account: "access_token"),
             (service: "pieroot.todo.gmail", account: "refresh_token"),
             (service: "pieroot.todo.gmail", account: "id_token"),
+            (service: "pieroot.todo.gmail", account: "access_token_expires_at"),
+            (service: "pieroot.todo.gmail", account: "scope_version"),
             (service: GeminiProviderService.keychainService, account: GeminiProviderService.apiKeyAccount)
         ]
     }

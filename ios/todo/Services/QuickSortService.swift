@@ -1,4 +1,5 @@
 import Foundation
+import SwiftData
 
 // MARK: - 수동 추가 시 약한 AI 정렬 서비스
 //
@@ -22,9 +23,10 @@ enum QuickSortService {
     /// - Parameters:
     ///   - todo: 방금 삽입된 Todo 인스턴스.
     ///   - persona: 현재 페르소나 컨텍스트 (가중 키워드·설명 포함).
-    static func analyzeOnAdd(_ todo: Todo, persona: PersonaContext) async {
+    static func analyzeOnAdd(_ todo: Todo, persona: PersonaContext, context: ModelContext) async {
         // 수동 우선순위 설정 시 자동 분석 생략 (사용자 의도 존중)
         guard todo.manualPriority == nil else { return }
+        let todoID = todo.id
 
         let provider = SettingsStore.selectedProvider()
         let results: [PriorityResult]
@@ -42,8 +44,24 @@ enum QuickSortService {
         }
 
         guard let result = results.first else { return }
+        var descriptor = FetchDescriptor<Todo>(
+            predicate: #Predicate { $0.id == todoID }
+        )
+        descriptor.fetchLimit = 1
+        guard let liveTodo = try? context.fetch(descriptor).first,
+              liveTodo.manualPriority == nil else {
+            return
+        }
 
-        // Todo.apply()로 공통 적용 (runPrioritize와 동일 경로)
-        todo.apply(result)
+        // Todo.apply()로 공통 적용하고 실제 산출 엔진을 telemetry에 보존한다.
+        let previousScore = liveTodo.computedPriorityScore
+        liveTodo.apply(result)
+        TaskBehaviorRecorder.recordComputedPriorityChange(
+            of: liveTodo,
+            from: previousScore,
+            to: liveTodo.computedPriorityScore,
+            actor: result.engine == .heuristic ? .system : .artificialIntelligence,
+            in: context
+        )
     }
 }

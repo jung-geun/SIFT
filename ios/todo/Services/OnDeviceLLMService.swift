@@ -176,7 +176,14 @@ final class OnDeviceLLMService: ObservableObject {
             let availableBytes = os_proc_available_memory()
             print("[OnDeviceLLM] 로드 전 가용 메모리 \(availableBytes / 1_024 / 1_024)MB, 필요 추정 \(requiredBytes / 1_024 / 1_024)MB")
             if availableBytes > 0 && availableBytes < requiredBytes {
-                loadError = "메모리가 부족해 온디바이스 모델을 로드할 수 없습니다. 다른 앱을 종료한 뒤 다시 시도해 주세요."
+                loadError = AppLanguage.localized(
+                    "error.onDeviceLLM.insufficientMemory",
+                    defaultValue: AppLanguage.current == .english
+                        ? "There is not enough memory to load the on-device model. Close other apps and try again."
+                        : "메모리가 부족해 온디바이스 모델을 로드할 수 없습니다. 다른 앱을 종료한 뒤 다시 시도해 주세요.",
+                    language: .current,
+                    comment: "On-device model error shown when available memory is insufficient to load the model."
+                )
                 return
             }
             let config = ModelConfiguration(id: idToLoad)
@@ -325,7 +332,13 @@ final class OnDeviceLLMService: ObservableObject {
                     // Metal GPU 명령 제출 전에 취소 확인 — for-await post-check 대비 race window 최소화
                     try Task.checkCancellation()
                     guard let generation = await iterator.next() else { break }
-                    if let chunk = generation.chunk { output += chunk }
+                    if let chunk = generation.chunk {
+                        output += chunk
+                        if let completedJSON = Self.completedTopLevelJSONObject(in: output) {
+                            output = completedJSON
+                            break
+                        }
+                    }
                 }
                 return output
             }
@@ -353,6 +366,44 @@ final class OnDeviceLLMService: ObservableObject {
         return String(trimmed[end.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// MLX 모델이 EOS를 바로 내지 못하고 maxTokens까지 이어 쓰는 경우를 막기 위해,
+    /// 최상위 JSON 객체가 완성되는 순간 스트리밍 생성을 중단한다.
+    nonisolated static func completedTopLevelJSONObject(in text: String) -> String? {
+        guard let start = text.firstIndex(of: "{") else { return nil }
+
+        var depth = 0
+        var inString = false
+        var isEscaped = false
+        var index = start
+
+        while index < text.endIndex {
+            let char = text[index]
+            if inString {
+                if isEscaped {
+                    isEscaped = false
+                } else if char == "\\" {
+                    isEscaped = true
+                } else if char == "\"" {
+                    inString = false
+                }
+            } else {
+                if char == "\"" {
+                    inString = true
+                } else if char == "{" {
+                    depth += 1
+                } else if char == "}" {
+                    depth -= 1
+                    if depth == 0 {
+                        return String(text[start...index])
+                    }
+                }
+            }
+            index = text.index(after: index)
+        }
+
+        return nil
+    }
+
     // MARK: - 언로드 사유 계측
 
     /// 모델 언로드 사유 — generate() 취소 에러에 actionable 정보를 추가한다.
@@ -362,6 +413,46 @@ final class OnDeviceLLMService: ObservableObject {
         case idleTimeout   = "유휴 타임아웃 120초"
         case modelDelete   = "모델 삭제"
         case manual        = "수동"
+
+        nonisolated func displayName(language: AppLanguage) -> String {
+            switch self {
+            case .background:
+                return AppLanguage.localized(
+                    "error.onDeviceLLM.reason.background",
+                    defaultValue: language == .english ? "App moved to the background" : "백그라운드 전환",
+                    language: language,
+                    comment: "On-device LLM cancellation reason: the app moved to the background."
+                )
+            case .memoryWarning:
+                return AppLanguage.localized(
+                    "error.onDeviceLLM.reason.memoryWarning",
+                    defaultValue: language == .english ? "Memory warning" : "메모리 부족 경고",
+                    language: language,
+                    comment: "On-device LLM cancellation reason: a memory warning."
+                )
+            case .idleTimeout:
+                return AppLanguage.localized(
+                    "error.onDeviceLLM.reason.idleTimeout",
+                    defaultValue: language == .english ? "Idle timeout (120 seconds)" : "유휴 타임아웃 120초",
+                    language: language,
+                    comment: "On-device LLM cancellation reason: the 120-second idle timeout."
+                )
+            case .modelDelete:
+                return AppLanguage.localized(
+                    "error.onDeviceLLM.reason.modelDelete",
+                    defaultValue: language == .english ? "Model deleted" : "모델 삭제",
+                    language: language,
+                    comment: "On-device LLM cancellation reason: the model was deleted."
+                )
+            case .manual:
+                return AppLanguage.localized(
+                    "error.onDeviceLLM.reason.manual",
+                    defaultValue: language == .english ? "Manual unload" : "수동",
+                    language: language,
+                    comment: "On-device LLM cancellation reason: manually unloaded."
+                )
+            }
+        }
     }
 
     enum LLMError: LocalizedError {
@@ -370,20 +461,71 @@ final class OnDeviceLLMService: ObservableObject {
         case cancelled(reason: UnloadReason?)
 
         var errorDescription: String? {
+            errorDescription(language: .current)
+        }
+
+        func errorDescription(language: AppLanguage) -> String {
             switch self {
             case .modelNotLoaded:
-                return "모델이 로드되지 않았습니다. 설정 > 온디바이스 모델 관리에서 상태를 확인하세요."
+                return AppLanguage.localized(
+                    "error.onDeviceLLM.modelNotLoaded",
+                    defaultValue: language == .english
+                        ? "The model is not loaded. Check its status under Settings > On-Device Model Management."
+                        : "모델이 로드되지 않았습니다. 설정 > 온디바이스 모델 관리에서 상태를 확인하세요.",
+                    language: language,
+                    comment: "On-device LLM error shown when inference is requested before a model is loaded."
+                )
             case .appInBackground:
-                return "앱이 백그라운드 상태입니다. 화면을 켠 상태에서 다시 시도해주세요."
+                return AppLanguage.localized(
+                    "error.onDeviceLLM.appInBackground",
+                    defaultValue: language == .english
+                        ? "The app is in the background. Open it and try again."
+                        : "앱이 백그라운드 상태입니다. 화면을 켠 상태에서 다시 시도해주세요.",
+                    language: language,
+                    comment: "On-device LLM error shown when inference is requested while the app is in the background."
+                )
             case .cancelled(let reason):
                 let hint: String
                 switch reason {
                 case .memoryWarning:
-                    hint = "실행 중인 영상·다른 앱을 닫고 다시 시도해주세요."
+                    hint = AppLanguage.localized(
+                        "error.onDeviceLLM.cancelled.memoryWarning",
+                        defaultValue: language == .english
+                            ? "Close video playback and other apps, then try again."
+                            : "실행 중인 영상·다른 앱을 닫고 다시 시도해주세요.",
+                        language: language,
+                        comment: "On-device LLM cancellation guidance after a memory warning."
+                    )
                 default:
-                    hint = "다시 시도해주세요."
+                    hint = AppLanguage.localized(
+                        "error.onDeviceLLM.cancelled.retry",
+                        defaultValue: language == .english
+                            ? "Please try again."
+                            : "다시 시도해주세요.",
+                        language: language,
+                        comment: "On-device LLM cancellation guidance for retryable cancellation."
+                    )
                 }
-                return "온디바이스 분석이 중단되었습니다 (사유: \(reason?.rawValue ?? "알 수 없음")).\n\(hint)"
+                let format = AppLanguage.localized(
+                    "error.onDeviceLLM.cancelled",
+                    defaultValue: language == .english
+                        ? "On-device analysis stopped (reason: %@).\n%@"
+                        : "온디바이스 분석이 중단되었습니다 (사유: %@).\n%@",
+                    language: language,
+                    comment: "On-device LLM error shown when inference stops; the reason remains diagnostic text."
+                )
+                let diagnostic: String
+                if let reason {
+                    diagnostic = reason.displayName(language: language)
+                } else {
+                    diagnostic = AppLanguage.localized(
+                        "error.onDeviceLLM.reason.unknown",
+                        defaultValue: language == .english ? "Unknown" : "알 수 없음",
+                        language: language,
+                        comment: "On-device LLM cancellation reason shown when no reason is available."
+                    )
+                }
+                return String(format: format, locale: language.locale, diagnostic, hint)
             }
         }
     }
@@ -762,7 +904,24 @@ final class OnDeviceLLMService: ObservableObject {
     func generate(systemPrompt: String, userPrompt: String, maxTokens: Int = 512, contextLength: Int = 8192) async throws -> String {
         throw LLMError.modelNotLoaded
     }
-    enum LLMError: Error { case modelNotLoaded }
+    enum LLMError: LocalizedError {
+        case modelNotLoaded
+
+        var errorDescription: String? {
+            errorDescription(language: .current)
+        }
+
+        func errorDescription(language: AppLanguage) -> String {
+            AppLanguage.localized(
+                "error.onDeviceLLM.modelNotLoaded",
+                defaultValue: language == .english
+                    ? "The model is not loaded. Check its status under Settings > On-Device Model Management."
+                    : "모델이 로드되지 않았습니다. 설정 > 온디바이스 모델 관리에서 상태를 확인하세요.",
+                language: language,
+                comment: "On-device LLM error shown when inference is requested before a model is loaded."
+            )
+        }
+    }
 }
 
 #endif

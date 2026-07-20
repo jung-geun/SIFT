@@ -37,7 +37,8 @@ struct FMAvailabilityMessagingTests {
             isAvailable: false,
             iOSMajorVersion: 27,
             isSimulator: true,
-            frameworkLinked: true
+            frameworkLinked: true,
+            language: .korean
         )
         #expect(reason == "시뮬레이터에서는 Apple Foundation Models를 비활성화합니다. 실기기에서 Apple Intelligence 및 Siri 설정을 확인하세요.")
     }
@@ -48,7 +49,8 @@ struct FMAvailabilityMessagingTests {
             isAvailable: false,
             iOSMajorVersion: 27,
             isSimulator: false,
-            frameworkLinked: false
+            frameworkLinked: false,
+            language: .korean
         )
         #expect(reason == "Apple Foundation Models는 iOS 26 이상 및 FoundationModels.framework가 있는 빌드에서만 사용할 수 있습니다.")
     }
@@ -59,7 +61,8 @@ struct FMAvailabilityMessagingTests {
             isAvailable: false,
             iOSMajorVersion: 26,
             isSimulator: false,
-            frameworkLinked: true
+            frameworkLinked: true,
+            language: .korean
         )
         #expect(reason == "Apple Foundation Models는 Apple Intelligence를 사용할 수 있고 활성화된 기기에서만 사용할 수 있습니다. 설정 > Apple Intelligence 및 Siri에서 활성화 상태를 확인하세요.")
     }
@@ -70,7 +73,8 @@ struct FMAvailabilityMessagingTests {
             isAvailable: false,
             iOSMajorVersion: 27,
             isSimulator: false,
-            frameworkLinked: true
+            frameworkLinked: true,
+            language: .korean
         )
         #expect(reason == "Apple Foundation Models는 현재 Siri AI를 사용할 수 있는 영어권 Siri 언어 및 Apple Intelligence 활성화 환경에서만 사용할 수 있습니다. 설정 > Apple Intelligence 및 Siri에서 언어와 활성화 상태를 확인하세요.")
     }
@@ -97,26 +101,6 @@ struct FMAvailabilityProbeTests {
     }
 }
 
-// MARK: - 페르소나 생성 스모크
-
-@Suite("FM 페르소나 생성 스모크")
-struct FMPersonaSmokeTests {
-
-    @Test("generatePersona: personaText 비어있지 않음, insights 각 항목 유효")
-    func generatePersonaSmoke() async throws {
-        if #available(iOS 26.0, *) {
-            guard FoundationModelsAvailability.isAvailable else { return }
-            let service = FoundationModelsService()
-            let todos = makeTodos(["SwiftUI 앱 개발", "머신러닝 논문 읽기", "코드 리뷰 완료"])
-            let (personaText, insights) = try await service.generatePersona(existingPersona: "", todos: todos)
-
-            #expect(!personaText.isEmpty, "personaText가 비어 있어서는 안 됩니다")
-            for insight in insights {
-                #expect(!insight.isEmpty, "빈 insight가 포함되어서는 안 됩니다")
-            }
-        }
-    }
-}
 
 // MARK: - 우선순위 랭킹 스모크
 
@@ -142,44 +126,7 @@ struct FMRankingsSmokeTests {
             }
         }
     }
-}
 
-// MARK: - 행동 패턴 인사이트 스모크
-
-@Suite("FM 패턴 인사이트 스모크")
-struct FMPatternInsightsSmokeTests {
-
-    @Test("generatePatternAnalysis: summary·insights 반환, 조언 키워드 부재")
-    func generatePatternAnalysisSmoke() async throws {
-        if #available(iOS 26.0, *) {
-            guard FoundationModelsAvailability.isAvailable else { return }
-            let service = FoundationModelsService()
-            let todos = makeTodos(["문서 작성", "코드 리뷰"])
-            let result = try await service.generatePatternAnalysis(todos: todos)
-
-            #expect(!result.summary.isEmpty, "summary가 비어 있습니다")
-            for insight in result.insights {
-                #expect(!insight.isEmpty, "빈 insight가 있습니다")
-                let lower = insight.lowercased()
-                let hasExplicitAdvice = lower.contains("해보세요")
-                    || lower.contains("하는 것이 좋")
-                    || lower.contains("을 권장합니다")
-                    || lower.contains("하시기 바랍니다")
-                #expect(!hasExplicitAdvice, "명시적 조언 키워드 발견됨: \(insight)")
-            }
-        }
-    }
-
-    @Test("빈 todos → 빈 summary와 insights 반환")
-    func emptyTodosReturnEmptyAnalysis() async throws {
-        if #available(iOS 26.0, *) {
-            guard FoundationModelsAvailability.isAvailable else { return }
-            let service = FoundationModelsService()
-            let result = try await service.generatePatternAnalysis(todos: [])
-            #expect(result.summary.isEmpty, "빈 todos에서 summary가 비어 있어야 합니다")
-            #expect(result.insights.isEmpty, "빈 todos에서 insights가 비어 있어야 합니다")
-        }
-    }
 }
 
 // MARK: - 이메일 마감 추출 스모크

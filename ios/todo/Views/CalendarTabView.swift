@@ -199,9 +199,20 @@ struct CalendarTabView: View {
 
     private var noPermissionView: some View {
         ContentUnavailableView {
-            Label("캘린더 접근 권한 없음", systemImage: "calendar.badge.exclamationmark")
+            Label(
+                AppLanguage.localized("calendar.permissionUnavailable", defaultValue: "캘린더 접근 권한 없음", language: .current, comment: "Calendar permission state title."),
+                systemImage: "calendar.badge.exclamationmark"
+            )
+                .accessibilityIdentifier("calendar.permissionUnavailable")
         } description: {
-            Text("설정 > 개인정보 보호 > 캘린더에서 이 앱의 접근을 허용해주세요.")
+            Text(
+                AppLanguage.localized(
+                    "calendar.permissionDescription",
+                    defaultValue: "설정 > 개인정보 보호 > 캘린더에서 이 앱의 접근을 허용해주세요.",
+                    language: .current,
+                    comment: "Calendar permission state description."
+                )
+            )
         }
     }
 
@@ -223,6 +234,8 @@ struct CalendarTabView: View {
                       ? "line.3.horizontal.decrease.circle"
                       : "line.3.horizontal.decrease.circle.fill")
             }
+            .accessibilityLabel(AppLanguage.localized("calendar.filter.accessibilityLabel", defaultValue: "캘린더 필터", language: .current, comment: "Calendar filter button."))
+            .accessibilityIdentifier("calendar.filterButton")
             .disabled(!authorized)
         }
         // 네비게이션 타이틀 영역 — 현재 뷰 모드를 드롭다운 Menu로 표시
@@ -233,7 +246,7 @@ struct CalendarTabView: View {
             } label: {
                 Text("오늘")
                     .fontWeight(isTodayVisible ? .regular : .semibold)
-                    .foregroundStyle(isTodayVisible ? Color.accentColor : Color.red)
+                    .foregroundStyle(isTodayVisible ? AppTheme.accent : AppTheme.destructive)
             }
             .disabled(!authorized)
         }
@@ -243,6 +256,8 @@ struct CalendarTabView: View {
             } label: {
                 Image(systemName: "plus")
             }
+            .accessibilityLabel(AppLanguage.localized("calendar.add.accessibilityLabel", defaultValue: "일정 추가", language: .current, comment: "Calendar add button."))
+            .accessibilityIdentifier("calendar.addButton")
             .disabled(!authorized)
         }
     }
@@ -382,9 +397,10 @@ private struct MonthBlock: View {
     }
 
     private var monthTitle: String {
+        let language = AppLanguage.current
         let fmt = DateFormatter()
-        fmt.locale = Locale(identifier: "ko_KR")
-        fmt.dateFormat = "yyyy년 M월"
+        fmt.locale = language.locale
+        fmt.dateFormat = language == .english ? "LLLL yyyy" : "yyyy년 M월"
         return fmt.string(from: month)
     }
 
@@ -535,7 +551,7 @@ private struct WeekRowView: View {
         var color: Color {
             switch self {
             case .event(let e): return calendarEventColor(for: e.calendarID)
-            case .todo: return .orange
+            case .todo: return AppTheme.accent
             }
         }
     }
@@ -702,7 +718,7 @@ private struct DayNumCell: View {
         VStack(spacing: 0) {
             ZStack {
                 if isToday {
-                    Circle().fill(Color.accentColor).frame(width: 24, height: 24)
+                    Circle().fill(AppTheme.accent).frame(width: 24, height: 24)
                 }
                 Text("\(Calendar.current.component(.day, from: date))")
                     .font(.system(.callout, design: .rounded))
@@ -766,10 +782,11 @@ struct DayDetailSheet: View {
     }
 
     private var dateTitle: String {
-        let fmt = DateFormatter()
-        fmt.locale = Locale(identifier: "ko_KR")
-        fmt.dateFormat = "M월 d일 (E)"
-        return fmt.string(from: date)
+        let formatter = DateFormatter()
+        formatter.locale = AppLanguage.current.locale
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .none
+        return formatter.string(from: date)
     }
 
     private func yOffset(for time: Date) -> CGFloat {
@@ -923,11 +940,11 @@ struct DayDetailSheet: View {
                     if cal.isDateInToday(date) {
                         let lineY = yOffset(for: now)
                         Rectangle()
-                            .fill(Color.red)
+                            .fill(AppTheme.destructive)
                             .frame(height: 1.5)
                             .offset(y: lineY)
                         Circle()
-                            .fill(Color.red)
+                            .fill(AppTheme.destructive)
                             .frame(width: 6, height: 6)
                             .position(x: 3, y: lineY)
                     }
@@ -1000,7 +1017,7 @@ struct DayDetailSheet: View {
     private func todoBlock(_ todo: Todo) -> some View {
         Button { editingTodo = todo } label: {
             HStack(spacing: 4) {
-                Image(systemName: "circle").font(.caption).foregroundStyle(.orange)
+                Image(systemName: "circle").font(.caption).foregroundStyle(AppTheme.accent)
                 Text(todo.title.isEmpty ? "(제목 없음)" : todo.title)
                     .font(.caption.weight(.medium)).foregroundStyle(Color(.label)).lineLimit(1)
                 Spacer(minLength: 0)
@@ -1017,8 +1034,8 @@ struct DayDetailSheet: View {
             }
             .padding(.horizontal, 6).padding(.vertical, 5)
             .frame(minHeight: 30, alignment: .center)
-            .background(Color.orange.opacity(0.11), in: RoundedRectangle(cornerRadius: 6))
-            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.orange.opacity(0.3), lineWidth: 0.5))
+            .background(AppTheme.accentSubtle, in: RoundedRectangle(cornerRadius: 6))
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(AppTheme.accentStroke, lineWidth: 0.5))
         }
         .buttonStyle(.plain)
     }
@@ -1113,7 +1130,7 @@ struct EventEditSheet: View {
                 if let err = errorMessage {
                     Section {
                         Label(err, systemImage: "exclamationmark.triangle")
-                            .font(.caption).foregroundStyle(.red)
+                            .font(.caption).foregroundStyle(AppTheme.destructive)
                     }
                 }
             }
@@ -1134,7 +1151,7 @@ struct EventEditSheet: View {
                             showDeleteConfirm = true
                         } label: {
                             Label("이벤트 삭제", systemImage: "trash")
-                                .foregroundStyle(.red)
+                                .foregroundStyle(AppTheme.destructive)
                         }
                     }
                 }
@@ -1300,7 +1317,7 @@ struct DefaultCalendarPickerView: View {
                 Spacer()
                 if selectedID == info.id {
                     Image(systemName: "checkmark")
-                        .font(.body.weight(.semibold)).foregroundStyle(Color.accentColor)
+                        .font(.body.weight(.semibold)).foregroundStyle(AppTheme.accent)
                 }
             }
         }

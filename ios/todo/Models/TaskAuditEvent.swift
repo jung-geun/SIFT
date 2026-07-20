@@ -63,3 +63,164 @@ final class TaskAuditEvent {
         self.hadDueDate       = todo.dueDate != nil
     }
 }
+
+// MARK: - Typed behavior event log
+
+enum TaskBehaviorEventType: String, Codable, Sendable {
+    case created
+    case completionChanged
+    case dueDateChanged
+    case priorityChanged
+    case deleted
+}
+
+enum TaskBehaviorActor: String, Codable, Sendable {
+    case user
+    case artificialIntelligence
+    case system
+    case emailIngestion
+    case calendarSync
+    case recurrence
+    case meetingImport
+}
+
+/// A typed, content-free record of a meaningful Todo state transition.
+///
+/// Titles, notes, tags, and external identifiers are deliberately excluded.
+/// CloudKit compatibility requires defaults for nonoptional stored properties.
+@Model
+final class TaskBehaviorEvent {
+    var id: UUID = UUID()
+    var todoID: UUID = UUID()
+    var occurredAt: Date = Date()
+    var eventTypeRaw: String = TaskBehaviorEventType.created.rawValue
+    var actorRaw: String = TaskBehaviorActor.system.rawValue
+    var sourceType: String = ""
+    var triageType: String = ""
+    var wasFixedSchedule: Bool = false
+
+    var beforeCompletion: Bool?
+    var afterCompletion: Bool?
+    var beforeDueDate: Date?
+    var afterDueDate: Date?
+    var beforeManualPriority: Int?
+    var afterManualPriority: Int?
+    var beforeComputedPriority: Double?
+    var afterComputedPriority: Double?
+
+    var eventType: TaskBehaviorEventType {
+        TaskBehaviorEventType(rawValue: eventTypeRaw) ?? .created
+    }
+
+    var actor: TaskBehaviorActor {
+        TaskBehaviorActor(rawValue: actorRaw) ?? .system
+    }
+
+    init(
+        todo: Todo,
+        type: TaskBehaviorEventType,
+        actor: TaskBehaviorActor,
+        occurredAt: Date
+    ) {
+        todoID = todo.id
+        self.occurredAt = occurredAt
+        eventTypeRaw = type.rawValue
+        actorRaw = actor.rawValue
+        sourceType = todo.source
+        triageType = todo.triageStatus
+        wasFixedSchedule = todo.isFixedSchedule
+    }
+}
+
+/// Single insertion point for behavior telemetry. Callers mutate Todo first,
+/// then record the transition with the captured before value.
+@MainActor
+enum TaskBehaviorRecorder {
+    static func recordCreation(
+        of todo: Todo,
+        actor: TaskBehaviorActor,
+        in context: ModelContext,
+        at occurredAt: Date = Date()
+    ) {
+        let event = TaskBehaviorEvent(todo: todo, type: .created, actor: actor, occurredAt: occurredAt)
+        event.afterCompletion = todo.isCompleted
+        event.afterDueDate = todo.dueDate
+        event.afterManualPriority = todo.manualPriority
+        event.afterComputedPriority = todo.computedPriorityScore
+        context.insert(event)
+    }
+
+    static func recordCompletionChange(
+        of todo: Todo,
+        from before: Bool,
+        to after: Bool,
+        actor: TaskBehaviorActor,
+        in context: ModelContext,
+        at occurredAt: Date = Date()
+    ) {
+        guard before != after else { return }
+        let event = TaskBehaviorEvent(todo: todo, type: .completionChanged, actor: actor, occurredAt: occurredAt)
+        event.beforeCompletion = before
+        event.afterCompletion = after
+        context.insert(event)
+    }
+
+    static func recordDueDateChange(
+        of todo: Todo,
+        from before: Date?,
+        to after: Date?,
+        actor: TaskBehaviorActor,
+        in context: ModelContext,
+        at occurredAt: Date = Date()
+    ) {
+        guard before != after else { return }
+        let event = TaskBehaviorEvent(todo: todo, type: .dueDateChanged, actor: actor, occurredAt: occurredAt)
+        event.beforeDueDate = before
+        event.afterDueDate = after
+        context.insert(event)
+    }
+
+    static func recordManualPriorityChange(
+        of todo: Todo,
+        from before: Int?,
+        to after: Int?,
+        actor: TaskBehaviorActor,
+        in context: ModelContext,
+        at occurredAt: Date = Date()
+    ) {
+        guard before != after else { return }
+        let event = TaskBehaviorEvent(todo: todo, type: .priorityChanged, actor: actor, occurredAt: occurredAt)
+        event.beforeManualPriority = before
+        event.afterManualPriority = after
+        context.insert(event)
+    }
+
+    static func recordComputedPriorityChange(
+        of todo: Todo,
+        from before: Double,
+        to after: Double,
+        actor: TaskBehaviorActor,
+        in context: ModelContext,
+        at occurredAt: Date = Date()
+    ) {
+        guard before != after else { return }
+        let event = TaskBehaviorEvent(todo: todo, type: .priorityChanged, actor: actor, occurredAt: occurredAt)
+        event.beforeComputedPriority = before
+        event.afterComputedPriority = after
+        context.insert(event)
+    }
+
+    static func recordDeletion(
+        of todo: Todo,
+        actor: TaskBehaviorActor,
+        in context: ModelContext,
+        at occurredAt: Date = Date()
+    ) {
+        let event = TaskBehaviorEvent(todo: todo, type: .deleted, actor: actor, occurredAt: occurredAt)
+        event.beforeCompletion = todo.isCompleted
+        event.beforeDueDate = todo.dueDate
+        event.beforeManualPriority = todo.manualPriority
+        event.beforeComputedPriority = todo.computedPriorityScore
+        context.insert(event)
+    }
+}

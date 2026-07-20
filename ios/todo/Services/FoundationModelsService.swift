@@ -20,6 +20,13 @@ import Foundation
 import FoundationModels
 #endif
 
+struct TranscriptCorrectionBatchResult: Sendable {
+    let segments: [MeetingSegment]
+    let attemptedBatchCount: Int
+    let succeededBatchCount: Int
+    let failedBatchCount: Int
+}
+
 enum FoundationModelsAvailability {
     static var isAvailable: Bool {
         #if targetEnvironment(simulator)
@@ -50,7 +57,8 @@ enum FoundationModelsAvailability {
             isAvailable: Self.isAvailable,
             iOSMajorVersion: iOSMajorVersion,
             isSimulator: isSimulator,
-            frameworkLinked: frameworkLinked
+            frameworkLinked: frameworkLinked,
+            language: .current
         )
     }
 
@@ -58,19 +66,28 @@ enum FoundationModelsAvailability {
         isAvailable: Bool,
         iOSMajorVersion: Int,
         isSimulator: Bool,
-        frameworkLinked: Bool
+        frameworkLinked: Bool,
+        language: AppLanguage = .current
     ) -> String? {
         guard !isAvailable else { return nil }
         if isSimulator {
-            return "시뮬레이터에서는 Apple Foundation Models를 비활성화합니다. 실기기에서 Apple Intelligence 및 Siri 설정을 확인하세요."
+            return language == .english
+                ? "Apple Foundation Models are disabled in the simulator. Check Apple Intelligence and Siri settings on a physical device."
+                : "시뮬레이터에서는 Apple Foundation Models를 비활성화합니다. 실기기에서 Apple Intelligence 및 Siri 설정을 확인하세요."
         }
         guard frameworkLinked, iOSMajorVersion >= 26 else {
-            return "Apple Foundation Models는 iOS 26 이상 및 FoundationModels.framework가 있는 빌드에서만 사용할 수 있습니다."
+            return language == .english
+                ? "Apple Foundation Models require iOS 26 or later and a build linked with FoundationModels.framework."
+                : "Apple Foundation Models는 iOS 26 이상 및 FoundationModels.framework가 있는 빌드에서만 사용할 수 있습니다."
         }
         if iOSMajorVersion >= 27 {
-            return "Apple Foundation Models는 현재 Siri AI를 사용할 수 있는 영어권 Siri 언어 및 Apple Intelligence 활성화 환경에서만 사용할 수 있습니다. 설정 > Apple Intelligence 및 Siri에서 언어와 활성화 상태를 확인하세요."
+            return language == .english
+                ? "Apple Foundation Models require an English Siri language with Apple Intelligence enabled. Check Settings > Apple Intelligence & Siri."
+                : "Apple Foundation Models는 현재 Siri AI를 사용할 수 있는 영어권 Siri 언어 및 Apple Intelligence 활성화 환경에서만 사용할 수 있습니다. 설정 > Apple Intelligence 및 Siri에서 언어와 활성화 상태를 확인하세요."
         }
-        return "Apple Foundation Models는 Apple Intelligence를 사용할 수 있고 활성화된 기기에서만 사용할 수 있습니다. 설정 > Apple Intelligence 및 Siri에서 활성화 상태를 확인하세요."
+        return language == .english
+            ? "Apple Foundation Models require Apple Intelligence to be available and enabled on this device. Check Settings > Apple Intelligence & Siri."
+            : "Apple Foundation Models는 Apple Intelligence를 사용할 수 있고 활성화된 기기에서만 사용할 수 있습니다. 설정 > Apple Intelligence 및 Siri에서 활성화 상태를 확인하세요."
     }
 }
 
@@ -78,40 +95,30 @@ enum FoundationModelsAvailability {
 
 // MARK: - Guided Generation Types
 
-/// 페르소나 생성·개선 출력 구조체.
-/// @Generable → LanguageModelSession.respond(to:generating:) 으로 타입 안전 생성.
-@Generable
-struct FMPersonaOutput {
-    @Guide(description: "2~4문장 한국어 페르소나. 업무 가치관·시간대 선호·처리 스타일·카테고리 우선순위 포함.")
-    var personaText: String
-
-    @Guide(description: "2~3개의 발견된 행동 패턴 인사이트. 각 항목은 한 문장 한국어.")
-    var insights: [String]
-}
 
 /// 단일 할 일 우선순위 랭킹.
 @Generable
 struct FMPriorityRanking {
     // E-2: UUID 대신 정수 번호 — 모델의 UUID 변형으로 인한 조용한 누락 버그 해소.
-    @Guide(description: "할 일 번호 (그대로 복사, 정수 문자열)")
+    @Guide(description: "To-do number (copy exactly as an integer string).")
     var todoID: String
 
-    @Guide(description: "우선순위 점수. 0.01(가장 낮음)~1.0(최우선). 절대 0으로 두지 말 것 — 마감 없어도 0.2 이상.")
+    @Guide(description: "Priority score from 0.01 (lowest) to 1.0 (highest). Never use 0; use at least 0.2 without a due date.")
     var score: Double
 
-    @Guide(description: "40자 이내 한국어 우선순위 이유")
+    @Guide(description: "A concise priority reason of at most 40 characters in the requested output language.")
     var reason: String
 
-    @Guide(description: "항상 빈 문자열.")
+    @Guide(description: "Always return an empty string.")
     var detail: String
 
-    @Guide(description: "오늘 마감·임박·중요 키워드 있으면 true")
+    @Guide(description: "True when the to-do is due today, near its deadline, or contains an urgent/important keyword.")
     var needsNotification: Bool
 
-    @Guide(description: "처리 추천 시각 ISO8601 문자열. 불확실하면 빈 문자열.")
+    @Guide(description: "Recommended processing time as an ISO8601 string; return an empty string when uncertain.")
     var recommendedISO: String
 
-    @Guide(description: "사용자 페르소나에 부합하면 true")
+    @Guide(description: "True when the to-do matches the user's persona.")
     var personaFit: Bool
 }
 
@@ -121,62 +128,110 @@ struct FMPriorityRankingList {
     var rankings: [FMPriorityRanking]
 }
 
-/// 행동 패턴 분석 출력.
-@Generable
-struct FMPatternAnalysisOutput {
-    @Guide(description: "1~3문장 한국어 행동 패턴 요약. 추천·조언 금지.")
-    var summary: String
-
-    @Guide(description: "2~4개의 관찰된 사용자 행동 패턴. 각 항목은 한 문장 한국어. 패턴 사실만 서술. 추천·조언·권고 없음.")
-    var insights: [String]
-}
 
 /// 이메일 마감 추출 출력 (C: AFM 강제 메일 분석).
 /// OnDeviceLLMEmailEngine.parseExtraction의 EmailExtraction 필드와 1:1 대응.
 @Generable
 struct FMEmailOutput {
-    @Guide(description: "마감일 ISO8601 문자열(예: 2026-12-31T23:59:00). 명시적 마감이 없으면 빈 문자열. 추측 금지.")
+    @Guide(description: "Due date as an ISO8601 string. Preserve the source absolute instant and offset when the source specifies Z, UTC, UTC+9, or GMT+09:00. If no timezone is present, use the current local offset. Return an empty string when no explicit due date exists; never infer.")
     var dueDateISO: String
 
-    @Guide(description: "종일 일정 여부. 시간 없이 날짜만 지정된 경우 true.")
+    @Guide(description: "True when the date has no time component and represents an all-day deadline.")
     var isAllDay: Bool
 
-    @Guide(description: "발신자 표시 이름. 없으면 빈 문자열.")
+    @Guide(description: "Sender display name, or an empty string when absent.")
     var sender: String
 
-    @Guide(description: "발신자 이메일 주소. 없으면 빈 문자열.")
+    @Guide(description: "Sender email address, or an empty string when absent.")
     var senderEmail: String
 
-    @Guide(description: "마감 키워드 점수. 마감·기한·deadline·due·expires 있으면 1, 없으면 0.")
+    @Guide(description: "Deadline keyword score: 1 when the source contains a due-date keyword such as deadline, due, or expires; otherwise 0.")
     var keywordScore: Int
 
-    @Guide(description: "마감 관련 핵심 문장 또는 한국어 요약 1-2문장. 없으면 빈 문자열.")
+    @Guide(description: "One or two concise deadline-related sentences in the requested output language, or empty.")
     var deadlineSentence: String
 
-    @Guide(description: "이메일 핵심 내용 메모. 1-3줄 한국어. 없으면 빈 문자열.")
+    @Guide(description: "One to three lines of key email content in the requested output language, or empty.")
     var notes: String
 }
 
 /// 이메일 수동 등록용 요약/마감 초안 출력.
 @Generable
 struct FMEmailTodoDraftOutput {
-    @Guide(description: "할 일 제목. 사용자가 해야 할 일을 40자 이내 한국어 동사형으로 요약. 없으면 이메일 제목을 정리.")
+    @Guide(description: "A to-do title in a concise verb form of at most 40 characters in the requested output language. If absent, clean up the email subject.")
     var title: String
 
-    @Guide(description: "이메일 핵심 내용과 액션 아이템. 1-3줄 한국어. 인사말 제외.")
+    @Guide(description: "One to three lines of key email content and action items in the requested output language. Exclude greetings.")
     var notes: String
 
-    @Guide(description: "명시적 마감일 ISO8601. 없으면 빈 문자열. 추측 금지.")
+    @Guide(description: "Explicit due date as an ISO8601 string. Preserve the source absolute instant and offset when the source specifies a timezone. If absent, return an empty string; never infer.")
     var dueDateISO: String
 
-    @Guide(description: "날짜만 있고 시간이 없으면 true.")
+    @Guide(description: "True when the date has no time component and represents an all-day deadline.")
     var isAllDay: Bool
 
-    @Guide(description: "발신자 표시 이름. 없으면 빈 문자열.")
+    @Guide(description: "Sender display name, or an empty string when absent.")
     var sender: String
 
-    @Guide(description: "발신자 이메일 주소. 없으면 빈 문자열.")
+    @Guide(description: "Sender email address, or an empty string when absent.")
     var senderEmail: String
+}
+
+/// 회의 전사 액션 후보 (LLM 출력). sourceSegmentNumber는 프롬프트에 제시한
+/// 1-based 전사 구간 번호이며, 호출부에서 실제 segment.id로 매핑한다.
+@available(iOS 26.0, *)
+@Generable
+struct FMMeetingActionItem {
+    @Guide(description: "Meeting action title, at most 40 characters, in the requested output language. Preserve source content and do not translate the transcript.")
+    var title: String
+
+    @Guide(description: "One or two sentence context note in the requested output language, or empty. Preserve source content and do not translate the transcript.")
+    var notes: String
+
+    @Guide(description: "Explicit deadline as canonical UTC ISO8601 yyyy-MM-dd'T'HH:mm:ss.SSSZ, always Z, preserving the source timezone's absolute instant. Empty when absent; never infer.")
+    var dueDateISO: String
+
+    @Guide(description: "1-based transcript segment number supporting this action; must exist in the supplied list.")
+    var sourceSegmentNumber: Int
+}
+
+/// 회의 전사 분석 출력. ProviderMeetingExtraction과 1:1 대응.
+@available(iOS 26.0, *)
+@Generable
+struct FMMeetingExtractionOutput {
+    @Guide(description: "Meeting topic noun phrase, at most 15 characters, in the requested output language. Empty when unclear.")
+    var title: String
+
+    @Guide(description: "Objective two-to-four sentence meeting summary in the requested output language. Facts only; no speculation or advice.")
+    var summary: String
+
+    @Guide(description: "Only decisions explicitly agreed or confirmed in the transcript, one sentence each. Empty when absent.")
+    var decisions: [String]
+
+    @Guide(description: "Only unanswered or follow-up questions grounded in the transcript. Empty when absent.")
+    var unresolvedQuestions: [String]
+
+    @Guide(description: "Only explicit commitments, requests, or action candidates grounded in the transcript. Empty when absent.")
+    var actions: [FMMeetingActionItem]
+}
+
+/// 전사 교정 결과의 단일 구간. 원문 구간 번호와 교정된 전체 텍스트를 담는다.
+@available(iOS 26.0, *)
+@Generable
+struct FMSegmentCorrection {
+    @Guide(description: "교정한 전사 구간 번호(1-based). 반드시 제시된 목록에 있는 번호.")
+    var sourceSegmentNumber: Int
+
+    @Guide(description: "해당 구간 전체의 교정된 전사 텍스트. 명백한 오인식·오탈자만 고치고 내용·어순은 유지.")
+    var correctedText: String
+}
+
+/// 전사 교정 패스 출력. 교정이 필요한 구간만 포함한다.
+@available(iOS 26.0, *)
+@Generable
+struct FMTranscriptCorrectionOutput {
+    @Guide(description: "교정이 필요한 구간만 포함. 고칠 것이 없으면 빈 배열.")
+    var corrections: [FMSegmentCorrection]
 }
 
 // MARK: - Service
@@ -203,30 +258,6 @@ struct FoundationModelsService {
         FoundationModelsAvailability.isAvailable
     }
 
-    // MARK: - 페르소나 생성·개선
-
-    /// 온디바이스 Foundation Models로 페르소나를 생성하거나 점진적으로 개선한다.
-    ///
-    /// - Parameters:
-    ///   - existingPersona: 기존 페르소나 텍스트 (첫 생성이면 빈 문자열)
-    ///   - todos: 분석할 할 일 목록 (메타데이터만 사용, 본문 미포함)
-    /// - Returns: (personaText, insights) 튜플
-    func generatePersona(
-        existingPersona: String,
-        todos: [Todo]
-    ) async throws -> (personaText: String, insights: [String]) {
-        let instructions = buildPersonaInstructions(existingPersona: existingPersona)
-        let prompt       = buildPersonaPrompt(existingPersona: existingPersona, todos: todos)
-
-        let session = LanguageModelSession(instructions: instructions)
-        let response = try await session.respond(to: prompt, generating: FMPersonaOutput.self)
-        let output   = response.content
-
-        let text     = output.personaText.trimmingCharacters(in: .whitespaces)
-        let insights = output.insights.filter { !$0.isEmpty }
-        return (text.isEmpty ? existingPersona : text, insights)
-    }
-
     // MARK: - 우선순위 랭킹 (Guided Generation + 배칭)
 
     /// Guided Generation으로 할 일 우선순위를 산출한다.
@@ -245,7 +276,8 @@ struct FoundationModelsService {
     func rankTodos(
         todos: [Todo],
         events: [CalendarService.CalendarEventSummary],
-        persona: PersonaContext
+        persona: PersonaContext,
+        language: AppLanguage = .current
     ) async throws -> [PriorityResult] {
         guard !todos.isEmpty else { return [] }
 
@@ -260,7 +292,7 @@ struct FoundationModelsService {
             Array(indexedTodos[$0 ..< min($0 + fmBatchSize, indexedTodos.count)])
         }
 
-        let instructions = buildRankingInstructions(persona: persona)
+        let instructions = buildRankingInstructions(persona: persona, language: language)
         var allResults   = [PriorityResult]()
 
         // E-5: 배치당 출력 토큰 캡 — 4-item 배치 × ~100 토큰/항목 = 400, 25% 여유 = 500.
@@ -268,11 +300,34 @@ struct FoundationModelsService {
         // 그러나 schema가 예상보다 크면 캡이 안전망 역할. 생성 중단 시 output.rankings가 빈 배열 → 폴백.
         let genOptions = GenerationOptions(maximumResponseTokens: 500)
 
-        for batch in batches {
-            let prompt   = buildRankingPrompt(indexedBatch: batch, events: events)
+        for (batchOffset, batch) in batches.enumerated() {
+            let prompt   = buildRankingPrompt(
+                indexedBatch: batch,
+                events: events,
+                language: language
+            )
+            let operation = "rankTodos batch \(batchOffset + 1)/\(batches.count)"
+            LLMDebugLogger.request(
+                provider: "AFM",
+                operation: operation,
+                metadata: [
+                    "batchSize: \(batch.count)",
+                    "eventCount: \(events.count)",
+                    "maximumResponseTokens: 500"
+                ],
+                systemPrompt: instructions,
+                userPrompt: prompt
+            )
             let session  = LanguageModelSession(instructions: instructions)
             let response = try await session.respond(to: prompt, generating: FMPriorityRankingList.self, options: genOptions)
             let output   = response.content
+            LLMDebugLogger.response(
+                provider: "AFM",
+                operation: operation,
+                text: output.rankings.map { ranking in
+                    "todoID=\(ranking.todoID) score=\(ranking.score) reason=\(ranking.reason) detail=\(ranking.detail) notify=\(ranking.needsNotification) recommendedISO=\(ranking.recommendedISO) personaFit=\(ranking.personaFit)"
+                }.joined(separator: "\n")
+            )
 
             for r in output.rankings {
                 // E-2: 정수 번호로 역참조 — 모델이 번호를 에코하면 변형 없이 매핑
@@ -295,104 +350,99 @@ struct FoundationModelsService {
         return allResults
     }
 
-    // MARK: - 행동 패턴 분석 (B: 포그라운드 분석)
-
-    /// 포그라운드 전용. 완료된 할 일 메타데이터만 사용해 행동 패턴 요약과 인사이트를 생성한다.
-    func generatePatternAnalysis(todos: [Todo]) async throws -> (summary: String, insights: [String]) {
-        let metadata = buildPatternAnalysisMetadata(todos: todos)
-        guard !metadata.isEmpty else { return ("", []) }
-
-        let instructions = """
-        \(Prompts.PatternInsights.systemInstruction)
-
-        출력은 반드시 summary와 insights를 모두 포함해야 합니다.
-        """
-        let prompt = """
-        [완료된 할 일 메타데이터]
-        \(metadata)
-
-        아래 규칙을 지키세요.
-        - title, tags, createdAt, dueDate, completedAt 메타데이터만 사용합니다.
-        - summary는 1~3문장 한국어 행동 패턴 요약입니다.
-        - insights는 2~4개의 한국어 관찰 문장 배열입니다.
-        - 추천, 조언, 실행 지시는 금지합니다.
-        """
-
-        let session = LanguageModelSession(instructions: instructions)
-        let response = try await session.respond(to: prompt, generating: FMPatternAnalysisOutput.self)
-        let output = response.content
-        return (
-            output.summary.trimmingCharacters(in: .whitespacesAndNewlines),
-            output.insights
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { !$0.isEmpty }
-        )
-    }
-
-    private func buildPatternAnalysisMetadata(todos: [Todo], limit: Int = 24) -> String {
-        let completed = todos
-            .filter { $0.isCompleted && $0.completedAt != nil }
-            .sorted { ($0.completedAt ?? .distantPast) > ($1.completedAt ?? .distantPast) }
-            .prefix(limit)
-
-        return completed.enumerated().map { index, todo in
-            let title = String(todo.title.replacingOccurrences(of: "\n", with: " ").prefix(60))
-            let tags = todo.tags.isEmpty ? "-" : todo.tags.joined(separator: ", ")
-            let created = AppDateFormat.llmString(from: todo.createdAt)
-            let due = todo.dueDate.map { AppDateFormat.llmString(from: $0) } ?? "null"
-            let completedAt = todo.completedAt.map { AppDateFormat.llmString(from: $0) } ?? "null"
-            return """
-            \(index + 1). title: \(title)
-               tags: \(tags)
-               createdAt: \(created)
-               dueDate: \(due)
-               completedAt: \(completedAt)
-            """
-        }.joined(separator: "\n")
-    }
-
     // MARK: - 이메일 마감 추출 (C: AFM 강제)
 
     /// Apple Foundation Models로 이메일 마감일을 추출한다.
     /// 본문 캡 ~1500자. 온디바이스/PCC 전용 — 외부 미전송 (프라이버시 불변식).
     /// 포그라운드 전용. 백그라운드 BGTask는 OnDeviceDetectorEngine(NSDataDetector) 사용.
-    func analyzeEmail(_ msg: GmailMessage, now: Date) async throws -> EmailExtraction? {
+    func analyzeEmail(
+        _ msg: GmailMessage,
+        now: Date,
+        language: AppLanguage = .current
+    ) async throws -> EmailExtraction? {
         let bodyPreview = String(msg.body.prefix(1500))
         guard !msg.subject.isEmpty else { return nil }
 
-        let instructions = Prompts.EmailFM.systemInstruction
+        let instructions = Prompts.EmailFM.systemInstruction(language: language) + "\n" + outputLanguageInstruction(language)
         let prompt = """
 현재 시각: \(AppDateFormat.llmString(from: now))
 발신자: \(msg.from)
 제목: \(msg.subject)
 \(bodyPreview.isEmpty ? "" : "본문:\n\(bodyPreview)")
 """
+        LLMDebugLogger.request(
+            provider: "AFM",
+            operation: "analyzeEmail",
+            metadata: ["subject: \(msg.subject)", "bodyPreviewChars: \(bodyPreview.count)"],
+            systemPrompt: instructions,
+            userPrompt: prompt
+        )
         let session  = LanguageModelSession(instructions: instructions)
         let response = try await session.respond(to: prompt, generating: FMEmailOutput.self)
         let output   = response.content
+        LLMDebugLogger.response(provider: "AFM", operation: "analyzeEmail", text: "dueDateISO=\(output.dueDateISO) isAllDay=\(output.isAllDay) sender=\(output.sender) senderEmail=\(output.senderEmail) keywordScore=\(output.keywordScore) deadlineSentence=\(output.deadlineSentence) notes=\(output.notes)")
 
         // 마감일 파싱
         guard !output.dueDateISO.isEmpty else { return nil }
-        guard let dueDate = AppDateFormat.parseLLMDate(output.dueDateISO), dueDate > now else { return nil }
+        guard let dueDate = AppDateFormat.parseMailDate(output.dueDateISO), dueDate > now else { return nil }
 
         // 종일 보정
-        let comps = Calendar.current.dateComponents([.hour, .minute, .second], from: dueDate)
-        var finalDate = dueDate
-        var isAllDay  = output.isAllDay
-        if comps.hour == 0 && comps.minute == 0 && (comps.second ?? 0) == 0 {
-            isAllDay = true
-            var eod = Calendar.current.dateComponents([.year, .month, .day], from: dueDate)
-            eod.hour = 23; eod.minute = 59
-            finalDate = Calendar.current.date(from: eod) ?? dueDate
-        }
+        let sourceCalendar = AppDateFormat.sourceCalendar(for: output.dueDateISO)
+        let normalizedDeadline = AppDateFormat.normalizedAllDayDeadline(dueDate, calendar: sourceCalendar)
+        let finalDate = normalizedDeadline.date
+        let isAllDay = output.isAllDay || normalizedDeadline.isAllDay
 
-        let df = DateFormatter()
-        df.locale    = Locale(identifier: "ko_KR")
-        df.dateStyle = .long
-        df.timeStyle = isAllDay ? .none : .short
-        var notesLines = ["⏰ \(df.string(from: finalDate))까지"]
-        if !output.notes.isEmpty   { notesLines += [output.notes, "(AI 요약)"] }
-        if !output.sender.isEmpty  { notesLines += ["", "[발신자] \(output.sender)"] }
+        let deadlineString = AppDateFormat.deadlineString(
+            from: finalDate,
+            isAllDay: isAllDay,
+            language: language
+        )
+        var notesLines: [String] = [
+            {
+                let defaultValue = language == .english
+                    ? "Due by \(deadlineString)"
+                    : "⏰ \(deadlineString)까지"
+                let localized = AppLanguage.localized(
+                    "mail.deadline",
+                    defaultValue: defaultValue,
+                    language: language,
+                    comment: "Detected email deadline"
+                )
+                return localized == defaultValue
+                    ? localized
+                    : String(format: localized, locale: language.locale, deadlineString)
+            }()
+        ]
+        if !output.notes.isEmpty {
+            notesLines += [
+                output.notes,
+                AppLanguage.localized(
+                    "mail.aiSummary",
+                    defaultValue: language == .english ? "(AI Summary)" : "(AI 요약)",
+                    language: language,
+                    comment: "AI-generated email summary marker"
+                )
+            ]
+        }
+        if !output.sender.isEmpty {
+            notesLines += [
+                "",
+                {
+                    let defaultValue = language == .english
+                        ? "[Sender] \(output.sender)"
+                        : "[발신자] \(output.sender)"
+                    let localized = AppLanguage.localized(
+                        "mail.sender",
+                        defaultValue: defaultValue,
+                        language: language,
+                        comment: "Email sender label"
+                    )
+                    return localized == defaultValue
+                        ? localized
+                        : String(format: localized, locale: language.locale, output.sender)
+                }()
+            ]
+        }
 
         return EmailExtraction(
             dueDate:          finalDate,
@@ -404,25 +454,231 @@ struct FoundationModelsService {
             notes:            notesLines.joined(separator: "\n")
         )
     }
+
+    // MARK: - 회의 전사 분석
+
+    /// 회의 전사문을 온디바이스 LLM으로 분석해 요약·결정·질문·액션 후보를 만든다.
+    /// `sourceSegmentNumber`(1-based)를 실제 `segment.id`로 매핑하고, 목록 밖
+    /// 번호나 빈 제목은 버려 환각 액션이 태스크로 새지 않게 한다.
+    func analyzeMeeting(
+        meetingID: String,
+        segments: [MeetingSegment],
+        glossaryHint: String = "",
+        language: AppLanguage,
+        transcriptCharCap: Int = 6_000
+    ) async throws -> ProviderMeetingExtraction {
+        // 컨텍스트 창(~4096토큰) 방어: 문자 예산 안에서만 구간을 전달한다.
+        var numbered = [String]()
+        var included = [MeetingSegment]()   // 1-based 번호 → segment 매핑
+        var used = 0
+        for segment in segments {
+            let line = "\(included.count + 1). \(segment.text)"
+            if used + line.count > transcriptCharCap, !included.isEmpty { break }
+            numbered.append(line)
+            included.append(segment)
+            used += line.count
+        }
+        guard !included.isEmpty else {
+            return ProviderMeetingExtraction(title: "", summary: "", decisions: [], unresolvedQuestions: [], actionDrafts: [])
+        }
+        let glossaryBlock = Self.glossaryBlock(glossaryHint, language: language)
+        let prompt = """
+        \(glossaryBlock)[전사 구간]
+        \(numbered.joined(separator: "\n"))
+
+        \(Prompts.MeetingFM.requestSuffix(language: language))
+        """
+        LLMDebugLogger.request(
+            provider: "AFM",
+            operation: "analyzeMeeting",
+            metadata: [
+                "meetingID: \(meetingID)",
+                "includedSegments: \(included.count)",
+                "transcriptCharCap: \(transcriptCharCap)"
+            ],
+            systemPrompt: Prompts.MeetingFM.systemInstruction(language: language),
+            userPrompt: prompt
+        )
+        let session = LanguageModelSession(instructions: Prompts.MeetingFM.systemInstruction(language: language))
+        let response = try await session.respond(to: prompt, generating: FMMeetingExtractionOutput.self)
+        let output = response.content
+        LLMDebugLogger.response(
+            provider: "AFM",
+            operation: "analyzeMeeting",
+            text: "title=\(output.title)\nsummary=\(output.summary)\ndecisions=\(output.decisions.joined(separator: " | "))\nunresolvedQuestions=\(output.unresolvedQuestions.joined(separator: " | "))\nactions=\(output.actions.map { "#\($0.sourceSegmentNumber) title=\($0.title) due=\($0.dueDateISO) notes=\($0.notes)" }.joined(separator: "\n"))"
+        )
+
+        let drafts: [ProviderActionDraftInput] = output.actions.compactMap { item in
+            let index = item.sourceSegmentNumber - 1
+            guard index >= 0, index < included.count else { return nil }
+            let title = item.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !title.isEmpty else { return nil }
+            let due = item.dueDateISO.trimmingCharacters(in: .whitespacesAndNewlines)
+            return ProviderActionDraftInput(
+                title: title,
+                notes: item.notes.trimmingCharacters(in: .whitespacesAndNewlines),
+                assignee: nil,
+                dueAtISO8601: due.isEmpty ? nil : due,
+                sourceSegmentIDs: [included[index].id],
+                confidence: 0.7,
+                requiresReview: true
+            )
+        }
+        return ProviderMeetingExtraction(
+            title: output.title.trimmingCharacters(in: .whitespacesAndNewlines),
+            summary: output.summary.trimmingCharacters(in: .whitespacesAndNewlines),
+            decisions: output.decisions.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty },
+            unresolvedQuestions: output.unresolvedQuestions.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty },
+            actionDrafts: drafts
+        )
+    }
+
+    // MARK: - 회의 전사 교정 (녹음 완료·재전사 후)
+
+    /// 전사 구간의 명백한 음성 인식 오류·오탈자만 온디바이스로 교정한다.
+    /// 실시간이 아닌 배치 시점에 실행해 요약 품질을 높이는 것이 목적이다.
+    ///
+    /// 환각 방어(analyzeMeeting과 동일 계열):
+    ///   - 배치별 1-based 번호 + `sourceSegmentNumber` 범위 검증.
+    ///   - 교정본은 구간 텍스트만 대체 — 개수·타이밍·화자·순서 불변.
+    ///   - 빈 텍스트·과도한 길이 변화(±40% 초과)는 원문 유지(재작성 방어).
+    ///   - 배치별 fresh 세션 → 호출 간 transcript 누적 없음. 배치 실패는 원문 보존 후 계속.
+    ///
+    /// - Returns: corrected segments plus exact batch success/failure accounting.
+    func correctTranscript(
+        segments: [MeetingSegment],
+        glossaryHint: String = "",
+        language: AppLanguage,
+        batchCharCap: Int = 2_000
+    ) async throws -> TranscriptCorrectionBatchResult {
+        guard !segments.isEmpty else {
+            return TranscriptCorrectionBatchResult(
+                segments: segments,
+                attemptedBatchCount: 0,
+                succeededBatchCount: 0,
+                failedBatchCount: 0
+            )
+        }
+
+        // 문자 예산 단위로 전 구간을 배치 분할(analyzeMeeting은 앞부분만, 교정은 전체 커버).
+        var batches = [[Int]]()
+        var current = [Int]()
+        var used = 0
+        for index in segments.indices {
+            let lineLen = segments[index].text.count + 8
+            if used + lineLen > batchCharCap, !current.isEmpty {
+                batches.append(current); current = []; used = 0
+            }
+            current.append(index); used += lineLen
+        }
+        if !current.isEmpty { batches.append(current) }
+
+        var corrected = segments
+        var succeededBatchCount = 0
+        var failedBatchCount = 0
+        let glossaryBlock = Self.glossaryBlock(glossaryHint, language: language)
+        let genOptions = GenerationOptions(maximumResponseTokens: 1_500)
+
+        for batch in batches {
+            let numbered = batch.enumerated()
+                .map { "\($0.offset + 1). \(segments[$0.element].text)" }
+                .joined(separator: "\n")
+            let prompt = """
+            \(glossaryBlock)[전사 구간]
+            \(numbered)
+
+            \(Prompts.MeetingCorrectionFM.requestSuffix(language: language))
+            """
+            let operation = "correctTranscript batch \(succeededBatchCount + failedBatchCount + 1)/\(batches.count)"
+            LLMDebugLogger.request(
+                provider: "AFM",
+                operation: operation,
+                metadata: [
+                    "batchSegments: \(batch.count)",
+                    "batchCharCap: \(batchCharCap)",
+                    "maximumResponseTokens: 1500"
+                ],
+                systemPrompt: Prompts.MeetingCorrectionFM.systemInstruction(language: language),
+                userPrompt: prompt
+            )
+            do {
+                let session = LanguageModelSession(instructions: Prompts.MeetingCorrectionFM.systemInstruction(language: language))
+                let response = try await session.respond(to: prompt, generating: FMTranscriptCorrectionOutput.self, options: genOptions)
+                LLMDebugLogger.response(
+                    provider: "AFM",
+                    operation: operation,
+                    text: response.content.corrections.map { "#\($0.sourceSegmentNumber) \($0.correctedText)" }.joined(separator: "\n")
+                )
+                for correction in response.content.corrections {
+                    let local = correction.sourceSegmentNumber - 1
+                    guard local >= 0, local < batch.count else { continue }
+                    let globalIndex = batch[local]
+                    let newText = correction.correctedText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard MeetingCorrectionGuard.isAcceptable(old: segments[globalIndex].text, new: newText) else { continue }
+                    corrected[globalIndex].text = newText
+                }
+                succeededBatchCount += 1
+            } catch {
+                LLMDebugLogger.failure(provider: "AFM", operation: operation, error: error)
+                failedBatchCount += 1
+            }
+        }
+        return TranscriptCorrectionBatchResult(
+            segments: corrected,
+            attemptedBatchCount: batches.count,
+            succeededBatchCount: succeededBatchCount,
+            failedBatchCount: failedBatchCount
+        )
+    }
+
+    /// 단어장 힌트를 프롬프트 앞에 붙일 블록으로 만든다. 비어 있으면 빈 문자열.
+    private static func glossaryBlock(_ hint: String, language: AppLanguage) -> String {
+        let trimmed = hint.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        let label = AppLanguage.localized(
+            "meeting.glossary.label",
+            defaultValue: language == .english ? "User Vocabulary" : "사용자 단어장",
+            language: language,
+            comment: "Meeting prompt glossary section label"
+        )
+        return """
+        [\(label)]
+        \(trimmed)
+
+        """
+    }
+
     /// 이메일에서 제목/메모/마감일 초안을 생성한다.
     /// 본문 캡 ~1500자, AFM 전용(온디바이스) 처리.
     /// 추론 실패 시 throws -> 상위 계층에서 결정적 폴백 수행.
-    func draftTodoFromEmail(_ msg: GmailMessage, now: Date) async throws -> EmailTodoDraft {
+    func draftTodoFromEmail(
+        _ msg: GmailMessage,
+        now: Date,
+        language: AppLanguage = .current
+    ) async throws -> EmailTodoDraft {
         let bodyPreview = String(msg.body.prefix(1500))
 
-        let instructions = Prompts.EmailFM.systemInstruction
+        let instructions = Prompts.EmailFM.systemInstruction(language: language) + "\n" + outputLanguageInstruction(language)
         let prompt = """
         현재 시각: \(AppDateFormat.llmString(from: now))
         발신자: \(msg.from)
         제목: \(msg.subject)
         본문: \(bodyPreview.isEmpty ? "(본문 없음)" : bodyPreview)
 
-        추가 출력 요구: title은 사용자가 수행할 일을 40자 이내 한국어 동사형으로 작성하세요. notes는 인사말 없이 핵심 내용과 액션 아이템만 1-3줄로 작성하세요.
+        추가 출력 요구: title은 사용자가 수행할 일을 40자 이내 \(language.outputLanguageName) 동사형으로 작성하세요. notes는 인사말 없이 핵심 내용과 액션 아이템만 1-3줄로 작성하세요.
         """
 
+        LLMDebugLogger.request(
+            provider: "AFM",
+            operation: "draftTodoFromEmail",
+            metadata: ["subject: \(msg.subject)", "bodyPreviewChars: \(bodyPreview.count)"],
+            systemPrompt: instructions,
+            userPrompt: prompt
+        )
         let session = LanguageModelSession(instructions: instructions)
         let response = try await session.respond(to: prompt, generating: FMEmailTodoDraftOutput.self)
         let output = response.content
+        LLMDebugLogger.response(provider: "AFM", operation: "draftTodoFromEmail", text: "title=\(output.title)\nnotes=\(output.notes)\ndueDateISO=\(output.dueDateISO) isAllDay=\(output.isAllDay) sender=\(output.sender) senderEmail=\(output.senderEmail)")
 
         let normalizedTitle = output.title.trimmingCharacters(in: .whitespacesAndNewlines)
         let title: String
@@ -431,21 +687,27 @@ struct FoundationModelsService {
         } else if !msg.subject.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             title = msg.subject.trimmingCharacters(in: .whitespacesAndNewlines)
         } else {
-            title = "메일 확인"
+            title = AppLanguage.localized(
+                "mail.checkEmail",
+                defaultValue: language == .english ? "Check Email" : "메일 확인",
+                language: language,
+                comment: "Email fallback Todo title"
+            )
         }
 
         var dueDate: Date?
         var isAllDay = false
-        if !output.dueDateISO.isEmpty, let parsed = AppDateFormat.parseLLMDate(output.dueDateISO), parsed > now {
+        if !output.dueDateISO.isEmpty, let parsed = AppDateFormat.parseMailDate(output.dueDateISO), parsed > now {
             var finalDate = parsed
             isAllDay = output.isAllDay
-            let comps = Calendar.current.dateComponents([.hour, .minute, .second], from: parsed)
+            let sourceCalendar = AppDateFormat.sourceCalendar(for: output.dueDateISO)
+            let comps = sourceCalendar.dateComponents([.hour, .minute, .second], from: parsed)
             if comps.hour == 0 && comps.minute == 0 && (comps.second ?? 0) == 0 {
                 isAllDay = true
-                var eod = Calendar.current.dateComponents([.year, .month, .day], from: parsed)
+                var eod = sourceCalendar.dateComponents([.year, .month, .day], from: parsed)
                 eod.hour = 23
                 eod.minute = 59
-                finalDate = Calendar.current.date(from: eod) ?? parsed
+                finalDate = sourceCalendar.date(from: eod) ?? parsed
             }
             dueDate = finalDate
         }
@@ -457,7 +719,14 @@ struct FoundationModelsService {
             : sender
         let senderEmail = output.senderEmail.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        var notesLines = ["[메일 요약]"]
+        var notesLines = [
+            AppLanguage.localized(
+                "mail.summaryHeader",
+                defaultValue: language == .english ? "[Email Summary]" : "[메일 요약]",
+                language: language,
+                comment: "Email summary header"
+            )
+        ]
         if !cleanNotes.isEmpty {
             notesLines.append(cleanNotes)
         } else if !msg.snippet.isEmpty {
@@ -465,9 +734,31 @@ struct FoundationModelsService {
         } else if !bodyPreview.isEmpty {
             notesLines.append(String(bodyPreview.prefix(500)).trimmingCharacters(in: .whitespacesAndNewlines))
         }
-        notesLines.append("(AI 요약)")
+        notesLines.append(
+            AppLanguage.localized(
+                "mail.aiSummary",
+                defaultValue: language == .english ? "(AI Summary)" : "(AI 요약)",
+                language: language,
+                comment: "AI-generated email summary marker"
+            )
+        )
         notesLines.append("")
-        notesLines.append("[발신자] \(parsedSender)")
+        notesLines.append(
+            {
+                let defaultValue = language == .english
+                    ? "[Sender] \(parsedSender)"
+                    : "[발신자] \(parsedSender)"
+                let localized = AppLanguage.localized(
+                    "mail.sender",
+                    defaultValue: defaultValue,
+                    language: language,
+                    comment: "Email sender label"
+                )
+                return localized == defaultValue
+                    ? localized
+                    : String(format: localized, locale: language.locale, parsedSender)
+            }()
+        )
 
         return EmailTodoDraft(
             title: title,
@@ -479,77 +770,15 @@ struct FoundationModelsService {
         )
     }
 
-    // MARK: - Prompt Builders (페르소나)
-
-    private func buildPersonaInstructions(existingPersona: String) -> String {
-        var text = Prompts.PersonaFM.baseInstruction
-        if !existingPersona.isEmpty { text += "\n" + Prompts.PersonaFM.refinementSuffix }
-        return text
-    }
-
-    private func buildPersonaPrompt(existingPersona: String, todos: [Todo]) -> String {
-        var lines: [String] = []
-
-        // E-4: 가변 길이 입력에 방어적 char 캡 적용
-        if !existingPersona.isEmpty {
-            lines += ["[기존 페르소나]", String(existingPersona.prefix(inputCharCap)), ""]
-        }
-
-        let memory = MemoryService.shared.summary
-        if !memory.isEmpty { lines += ["[행동 패턴 메모리]", String(memory.prefix(inputCharCap)), ""] }
-
-        let cal   = Calendar.current
-        let times = todos.filter { $0.isCompleted }.compactMap { $0.completedAt }
-        if !times.isEmpty {
-            let byHour = Dictionary(grouping: times) { cal.component(.hour, from: $0) }
-            let top = byHour.sorted { $0.value.count > $1.value.count }.prefix(3)
-                .map { "\($0.key)시(\($0.value.count)건)" }.joined(separator: ", ")
-            lines += ["[완료 시간대 패턴]", top, ""]
-        }
-
-        let allTags = todos.flatMap { $0.tags }
-        if !allTags.isEmpty {
-            let freq = Dictionary(allTags.map { ($0, 1) }, uniquingKeysWith: +)
-            let top  = freq.sorted { $0.value > $1.value }.prefix(6)
-                .map { "\($0.key)(\($0.value)회)" }.joined(separator: ", ")
-            lines += ["[자주 쓰는 태그]", top, ""]
-        }
-
-        // E-3: 제목 60자 절단 (이메일 출처 긴 제목이 입력·출력 양쪽을 비대화)
-        let done = todos.filter { $0.isCompleted }.prefix(15)
-        if !done.isEmpty {
-            lines.append("[최근 완료 할 일]")
-            lines += done.map { todo in
-                let title = String(todo.title.prefix(60))
-                return "• \(title)" + (todo.tags.isEmpty ? "" : " [\(todo.tags.joined(separator: ","))]")
-            }
-            lines.append("")
-        }
-
-        let active = todos.filter { !$0.isCompleted }.prefix(20)
-        if !active.isEmpty {
-            let rf = RelativeDateTimeFormatter(); rf.unitsStyle = .abbreviated
-            lines.append("[현재 할 일 (\(todos.filter { !$0.isCompleted }.count)개)]")
-            lines += active.map { todo in
-                let title = String(todo.title.prefix(60))  // E-3
-                var s = "• \(title)"
-                if let d = todo.dueDate { s += " [마감: \(rf.localizedString(for: d, relativeTo: Date()))]" }
-                if !todo.tags.isEmpty   { s += " [\(todo.tags.joined(separator: ","))]" }
-                return s
-            }
-            lines.append("")
-        }
-
-        lines.append("위 데이터를 바탕으로 페르소나를 \(existingPersona.isEmpty ? "생성" : "개선")해주세요.")
-        return lines.joined(separator: "\n")
-    }
 
     // MARK: - Prompt Builders (우선순위)
 
-    private func buildRankingInstructions(persona: PersonaContext) -> String {
-        var parts = [Prompts.RankingFM.baseInstruction]
+    private func buildRankingInstructions(
+        persona: PersonaContext,
+        language: AppLanguage
+    ) -> String {
+        var parts = [Prompts.RankingFM.baseInstruction(language: language)]
         if !persona.types.isEmpty { parts.append("사용자 유형: \(persona.displayNames)") }
-        // E-4: 가변 길이 입력 방어 캡
         if !persona.description.isEmpty {
             parts.append("사용자 가치관:\n\(String(persona.description.prefix(inputCharCap)))")
         }
@@ -561,6 +790,7 @@ struct FoundationModelsService {
         if !memory.isEmpty {
             parts.append("사용자 행동 패턴 (참고):\n\(String(memory.prefix(inputCharCap)))")
         }
+        parts.append(outputLanguageInstruction(language))
         return parts.joined(separator: "\n")
     }
 
@@ -568,35 +798,52 @@ struct FoundationModelsService {
     /// 제목은 E-3 가드(60자 절단) 적용.
     private func buildRankingPrompt(
         indexedBatch: [(idx: Int, todo: Todo)],
-        events: [CalendarService.CalendarEventSummary]
+        events: [CalendarService.CalendarEventSummary],
+        language: AppLanguage
     ) -> String {
         var lines = ["현재 시각: \(AppDateFormat.llmString(from: Date()))"]
         if !events.isEmpty {
             lines.append("\n[캘린더 이벤트 (향후 7일)]")
-            for e in events.prefix(5) { lines.append("• \(e.title) — \(AppDateFormat.llmString(from: e.startDate))") }
+            for e in events.prefix(5) {
+                lines.append("• \(e.title) — \(AppDateFormat.llmString(from: e.startDate))")
+            }
         }
         lines.append("\n[우선순위 평가 대상 할 일]")
         for (idx, todo) in indexedBatch {
-            // E-2: 정수 번호, E-3: 제목 60자 절단
             let title = String(todo.title.prefix(60))
             var ps = ["번호:\(idx)", "제목:\(title)"]
             if let due = todo.dueDate {
-                let remaining = AppDateFormat.remainingTimeDescription(for: due)
+                let remaining = AppDateFormat.remainingTimeDescription(
+                    for: due,
+                    now: Date(),
+                    language: language
+                )
                 ps.append("마감:\(AppDateFormat.llmString(from: due)) (\(remaining))")
             }
-            if !todo.tags.isEmpty     { ps.append("태그:\(todo.tags.joined(separator: ","))") }
+            if !todo.tags.isEmpty { ps.append("태그:\(todo.tags.joined(separator: ","))") }
             let src: String
             switch todo.todoSource {
-            case .manual:   src = "직접입력"
-            case .email:    src = "이메일"
+            case .manual: src = "직접입력"
+            case .email: src = "이메일"
             case .calendar: src = "캘린더"
+            case .meeting: src = "회의"
             }
             ps.append("출처:\(src)")
             if todo.isFixedSchedule { ps.append("고정(주기)") }
             lines.append("• " + ps.joined(separator: " | "))
         }
-        lines.append("\n위 할 일들의 우선순위를 rankings 배열로 반환하세요.")
+        lines.append(
+            language == .english
+                ? "\nReturn the rankings array for these to-dos."
+                : "\n위 할 일들의 우선순위를 rankings 배열로 반환하세요."
+        )
         return lines.joined(separator: "\n")
+    }
+
+    private func outputLanguageInstruction(_ language: AppLanguage) -> String {
+        language == .english
+            ? "Write every natural-language output field in English. Preserve source email content; do not translate it."
+            : "자연어 출력 필드는 모두 한국어로 작성하세요. 원문 이메일 내용은 번역하지 마세요."
     }
 }
 #endif

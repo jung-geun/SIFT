@@ -9,9 +9,27 @@ import FoundationModels
 /// "휴리스틱"이면 LLM 경로가 실패해 규칙 기반으로 폴백됐음을 의미한다.
 enum PriorityEngine: String, Sendable {
     case foundationModels = "Apple AI"   // ANE 실행
-    case onDeviceMLX      = "Qwen AI"    // GPU/MLX 실행
+    case onDeviceMLX      = "온디바이스 AI" // GPU/MLX 실행
     case gemini           = "Gemini AI"  // Gemini API 실행
     case heuristic        = "휴리스틱"   // LLM 실패 폴백 — 규칙 기반
+
+    var displayName: String {
+        displayName(language: .current)
+    }
+
+    func displayName(language: AppLanguage) -> String {
+        switch self {
+        case .foundationModels:
+            return "Apple AI"
+        case .onDeviceMLX:
+            return language == .english ? "On Device AI" : "온디바이스 AI"
+        case .gemini:
+            return "Gemini AI"
+        case .heuristic:
+            return language == .english ? "Heuristic" : "휴리스틱"
+        }
+    }
+
 }
 
 // MARK: - Result
@@ -95,12 +113,35 @@ enum IntelligenceRoutingError: LocalizedError, Sendable {
     case parseFailed(provider: PersonaAIProvider, reason: String)
 
     var errorDescription: String? {
+        errorDescription(language: .current)
+    }
+
+    func errorDescription(language: AppLanguage) -> String {
+        let providerName: String
         switch self {
-        case .backendUnavailable(_, let reason),
-             .backendNotConfigured(_, let reason),
-             .generationFailed(_, let reason),
-             .parseFailed(_, let reason):
-            return reason
+        case .backendUnavailable(let provider, _),
+             .backendNotConfigured(let provider, _),
+             .generationFailed(let provider, _),
+             .parseFailed(let provider, _):
+            providerName = provider.displayName(language: language)
+        }
+        switch self {
+        case .backendUnavailable:
+            return language == .english
+                ? "\(providerName) is unavailable on this device."
+                : "\(providerName)을 이 기기에서 사용할 수 없습니다."
+        case .backendNotConfigured:
+            return language == .english
+                ? "\(providerName) is not configured."
+                : "\(providerName)이(가) 설정되지 않았습니다."
+        case .generationFailed:
+            return language == .english
+                ? "\(providerName) could not generate a result."
+                : "\(providerName) 결과를 생성하지 못했습니다."
+        case .parseFailed:
+            return language == .english
+                ? "\(providerName) returned an invalid result."
+                : "\(providerName)이(가) 올바르지 않은 결과를 반환했습니다."
         }
     }
 }
@@ -119,8 +160,13 @@ private func emitResultEvents(
 ) {
     let total = results.count
     for (offset, result) in results.enumerated() {
-        let title = todos.first(where: { $0.id == result.todoID })?.title ?? "(제목 없음)"
-        progress?(.applying(index: offset + 1, total: total, title: title))
+        let title = todos.first(where: { $0.id == result.todoID })?.title
+            ?? AppLanguage.localized(
+                "todo.untitled",
+                defaultValue: AppLanguage.current == .english ? "(No Title)" : "(제목 없음)",
+                language: .current,
+                comment: "Untitled to-do progress label"
+            )
         progress?(.result(result, index: offset + 1, total: total, title: title))
     }
 }
@@ -214,7 +260,7 @@ struct HeuristicEngine: IntelligenceService {
             return PriorityResult(
                 todoID:            todo.id,
                 score:             score,
-                reason:            heuristicReason(todo: todo, persona: persona),
+                reason: heuristicReason(todo: todo, persona: persona, language: .current),
                 detail:            "",
                 needsNotification: isNearDeadline(todo: todo),
                 recommendedTime:   productiveHourTime(from: memory),
@@ -323,31 +369,51 @@ struct HeuristicEngine: IntelligenceService {
             || kw.contains(where: { todo.notes.localizedCaseInsensitiveContains($0) })
     }
 
-    private func heuristicReason(todo: Todo, persona: PersonaContext) -> String {
+    func heuristicReason(
+        todo: Todo,
+        persona: PersonaContext,
+        language: AppLanguage
+    ) -> String {
         let personaKeywords = persona.weightedKeywords
-        let personaMatch    = !personaKeywords.isEmpty && (
+        let personaMatch = !personaKeywords.isEmpty && (
             todo.tags.contains(where: { personaKeywords.contains($0) }) ||
             personaKeywords.contains(where: { todo.title.localizedCaseInsensitiveContains($0) }) ||
             personaKeywords.contains(where: { todo.notes.localizedCaseInsensitiveContains($0) })
         )
-        let personaSuffix = personaMatch && !persona.displayNames.isEmpty
-            ? " · 페르소나(\(persona.displayNames)) 관련" : ""
+        let personaNames = persona.types
+            .map { $0.displayName(language: language) }
+            .joined(separator: ", ")
+        let personaSuffix = personaMatch && !personaNames.isEmpty
+            ? (language == .english ? " · related to persona (\(personaNames))" : " · 페르소나(\(personaNames)) 관련")
+            : ""
 
         guard let due = todo.dueDate else {
-            return personaMatch ? "마감 없음\(personaSuffix)" : "마감 없음 — 낮은 기본 우선순위"
+            return personaMatch
+                ? (language == .english ? "No deadline" : "마감 없음") + personaSuffix
+                : (language == .english ? "No deadline — low default priority" : "마감 없음 — 낮은 기본 우선순위")
         }
         let hours = due.timeIntervalSinceNow / 3600
-        let dueStr: String
+        let dueString: String
         switch hours {
-        case ..<0:   dueStr = "마감 초과"
-        case ..<1:   dueStr = "1시간 이내 마감"
-        case ..<6:   dueStr = "6시간 이내 마감"
-        case ..<24:  dueStr = "오늘 마감"
-        case ..<72:  dueStr = "3일 이내 마감"
-        case ..<168: dueStr = "이번 주 마감"
-        default:     dueStr = "\(Int(hours / 24))일 후 마감"
+        case ..<0:
+            dueString = language == .english ? "Overdue" : "마감 초과"
+        case ..<1:
+            dueString = language == .english ? "Due within 1 hour" : "1시간 이내 마감"
+        case ..<6:
+            dueString = language == .english ? "Due within 6 hours" : "6시간 이내 마감"
+        case ..<24:
+            dueString = language == .english ? "Due today" : "오늘 마감"
+        case ..<72:
+            dueString = language == .english ? "Due within 3 days" : "3일 이내 마감"
+        case ..<168:
+            dueString = language == .english ? "Due this week" : "이번 주 마감"
+        default:
+            let days = Int(hours / 24)
+            dueString = language == .english
+                ? "Due in \(days) " + (days == 1 ? "day" : "days")
+                : "\(days)일 후 마감"
         }
-        return dueStr + personaSuffix
+        return dueString + personaSuffix
     }
 
     /// productiveHour 있으면 당일 해당 시각. 이미 지났으면 nil.
@@ -384,29 +450,33 @@ final class FoundationModelsEngine: IntelligenceService {
             let sorted = todos.filter { !$0.isCompleted }.sorted {
                 switch ($0.dueDate, $1.dueDate) {
                 case (let a?, let b?): return a < b
-                case (.some, .none):   return true
-                default:               return false
+                case (.some, .none): return true
+                default: return false
                 }
             }
             let active = Array(sorted.prefix(20))
             guard !active.isEmpty else { return [] }
+            let batchTitle = AppLanguage.current == .english
+                ? "\(active.count)-item batch"
+                : "일괄 요청 (\(active.count)개)"
             progress?(.requesting(
                 index: 1,
                 total: 1,
-                title: "일괄 요청 (\(active.count)개)",
-                provider: PriorityEngine.foundationModels.rawValue
+                title: batchTitle,
+                provider: PriorityEngine.foundationModels.displayName
             ))
             do {
                 let results = try await FoundationModelsService().rankTodos(
                     todos: active,
                     events: events,
-                    persona: persona
+                    persona: persona,
+                    language: .current
                 )
                 progress?(.received(
                     index: 1,
                     total: 1,
-                    title: "일괄 요청 (\(active.count)개)",
-                    provider: PriorityEngine.foundationModels.rawValue
+                    title: batchTitle,
+                    provider: PriorityEngine.foundationModels.displayName
                 ))
                 emitResultEvents(results, todos: active, progress: progress)
                 return results
@@ -431,7 +501,14 @@ final class FoundationModelsEngine: IntelligenceService {
         #endif
         throw IntelligenceRoutingError.backendUnavailable(
             provider: .foundationModels,
-            reason: "Apple Foundation Models를 이 기기에서 사용할 수 없습니다."
+            reason: AppLanguage.localized(
+                "error.intelligence.unavailable",
+                defaultValue: AppLanguage.current == .english
+                    ? "Apple Foundation Models are unavailable on this device."
+                    : "Apple Foundation Models를 이 기기에서 사용할 수 없습니다.",
+                language: .current,
+                comment: "Intelligence backend unavailable error"
+            )
         )
     }
 }
@@ -444,7 +521,9 @@ final class FoundationModelsEngine: IntelligenceService {
 /// 출력: ScheduleResponseV9 JSON (4축 scoring + reasoning + recommended_schedule).
 /// total_score는 모델 출력값을 무시하고 ScheduleScorer + 적응형 가중치로 재산출.
 final class OnDeviceLLMIntelligenceEngine: IntelligenceService {
-    private static let systemPrompt = ScheduleLLMAdapter.systemPrompt
+    private static func systemPrompt(language: AppLanguage = .current) -> String {
+        ScheduleLLMAdapter.systemPrompt(language: language)
+    }
 
     private static func buildScheduleInput(
         todos: [Todo],
@@ -482,15 +561,14 @@ final class OnDeviceLLMIntelligenceEngine: IntelligenceService {
                 reason: "이 기기는 현재 Qwen 로컬 실행 기준(메모리 6GB 이상)을 충족하지 않습니다."
             )
         }
-
         if !service.isModelLoaded && service.isModelCachedOnDisk {
             await service.loadModelIfNeeded()
         }
 
         guard service.isModelLoaded else {
             let reason = service.isModelCachedOnDisk
-                ? (service.loadError ?? "Qwen 모델을 로드할 수 없습니다.")
-                : "Qwen 모델이 아직 다운로드되지 않았습니다."
+                ? (service.loadError ?? "온디바이스 모델을 로드할 수 없습니다.")
+                : "온디바이스 모델이 아직 다운로드되지 않았습니다."
             throw IntelligenceRoutingError.backendUnavailable(provider: .onDevice, reason: reason)
         }
 
@@ -504,26 +582,40 @@ final class OnDeviceLLMIntelligenceEngine: IntelligenceService {
         let active = Array(sortedActive.prefix(15))
         guard !active.isEmpty else { return [] }
 
-        let batchTitle = "일괄 요청 (\(active.count)개)"
+        let batchTitle = AppLanguage.current == .english
+            ? "\(active.count)-item batch"
+            : "일괄 요청 (\(active.count)개)"
         let maxTokens = max(768, min(4096, active.count * 220))
+        let scheduleInput = Self.buildScheduleInput(todos: active, persona: persona, events: events)
+        debugLogRequest(
+            todos: active,
+            events: events,
+            persona: persona,
+            systemPrompt: Self.systemPrompt(language: AppLanguage.current),
+            scheduleInput: scheduleInput,
+            maxTokens: maxTokens,
+            modelID: service.modelID
+        )
+
         let text: String
         progress?(.requesting(
             index: 1,
             total: 1,
             title: batchTitle,
-            provider: PriorityEngine.onDeviceMLX.rawValue
+            provider: PriorityEngine.onDeviceMLX.displayName
         ))
         do {
             text = try await service.generate(
-                systemPrompt: Self.systemPrompt,
-                userPrompt:   Self.buildScheduleInput(todos: active, persona: persona, events: events),
+                systemPrompt: Self.systemPrompt(language: AppLanguage.current),
+                userPrompt:   scheduleInput,
                 maxTokens:    maxTokens
             )
+            debugLogRawOutput(text)
             progress?(.received(
                 index: 1,
                 total: 1,
                 title: batchTitle,
-                provider: PriorityEngine.onDeviceMLX.rawValue
+                provider: PriorityEngine.onDeviceMLX.displayName
             ))
         } catch let llmError as OnDeviceLLMService.LLMError {
             throw IntelligenceRoutingError.generationFailed(
@@ -539,13 +631,74 @@ final class OnDeviceLLMIntelligenceEngine: IntelligenceService {
 
         guard let parsed = parseScheduleResponseV9(text: text, todos: active, persona: persona),
               !parsed.isEmpty else {
+            LLMDebugLogger.event(
+                provider: "Qwen",
+                operation: "schedule",
+                title: "parseFailure",
+                details: "responseChars=\(text.count)"
+            )
             throw IntelligenceRoutingError.parseFailed(
                 provider: .onDevice,
                 reason: "Qwen 응답을 우선순위 JSON으로 해석하지 못했습니다."
             )
         }
+        debugLogParsedResults(parsed, todos: active)
         emitResultEvents(parsed, todos: active, progress: progress)
         return parsed
+    }
+
+    private func debugLogRequest(
+        todos: [Todo],
+        events: [CalendarService.CalendarEventSummary],
+        persona: PersonaContext,
+        systemPrompt: String,
+        scheduleInput: String,
+        maxTokens: Int,
+        modelID: String
+    ) {
+        LLMDebugLogger.request(
+            provider: "OnDeviceMLX",
+            operation: "rankTodos",
+            metadata: [
+                "modelID: \(modelID)",
+                "maxTokens: \(maxTokens)",
+                "todoCount: \(todos.count)",
+                "eventCount: \(events.count)",
+                "personaTypes: \(persona.displayNames.isEmpty ? "(none)" : persona.displayNames)",
+                "personaDescription: \(persona.description.isEmpty ? "(empty)" : persona.description)"
+            ],
+            systemPrompt: systemPrompt,
+            userPrompt: scheduleInput
+        )
+    }
+
+    private func debugLogRawOutput(_ text: String) {
+        LLMDebugLogger.response(provider: "OnDeviceMLX", operation: "rankTodos", text: text)
+    }
+
+    private func debugLogParsedResults(_ results: [PriorityResult], todos: [Todo]) {
+        let todoByID = Dictionary(uniqueKeysWithValues: todos.map { ($0.id, $0) })
+        let lines = results
+            .sorted { $0.score > $1.score }
+            .enumerated()
+            .map { index, result in
+                let todo = todoByID[result.todoID]
+                let title = todo?.title.isEmpty == false ? todo?.title ?? "(제목 없음)" : "(제목 없음)"
+                let dueDate = todo?.dueDate.map { AppDateFormat.llmString(from: $0) } ?? "nil"
+                let axes = result.axes.map {
+                    String(format: "deadline=%.1f urgency=%.1f importance=%.1f chaining=%.1f", $0.deadlineProximity, $0.urgency, $0.importance, $0.chaining)
+                } ?? "none"
+                let recommended = result.recommendedTime.map { AppDateFormat.llmString(from: $0) } ?? "nil"
+                return "#\(index + 1) score=\(String(format: "%.3f", result.score)) task=\(title) due=\(dueDate) axes=[\(axes)] notify=\(result.needsNotification) recommended=\(recommended) reason=\(result.reason) detail=\(result.detail.isEmpty ? "(empty)" : result.detail)"
+            }
+            .joined(separator: "\n")
+
+        LLMDebugLogger.event(
+            provider: "OnDeviceMLX",
+            operation: "rankTodos",
+            title: "ParsedResults",
+            details: "resultCount: \(results.count)\nsortedByScore:\n\(lines)"
+        )
     }
 }
 
@@ -666,7 +819,7 @@ final class RoutedIntelligenceEngine: IntelligenceService {
             requestedProvider: requestedProvider,
             fallbackReason: fallbackReason
         )
-        progress?(.completed(finalProvider: PriorityEngine.heuristic.rawValue, total: annotated.count))
+        progress?(.completed(finalProvider: PriorityEngine.heuristic.displayName, total: annotated.count))
         return annotated
     }
 

@@ -1,7 +1,6 @@
 import Foundation
 import Testing
 @testable import todo
-
 // MARK: - Tier 1: 파서 단위테스트 (FM 불필요, 결정론적)
 //
 // 모든 파서가 고정 픽스처 JSON/텍스트를 올바르게 처리하는지 검증한다.
@@ -35,31 +34,133 @@ struct DateParserTests {
             #expect(abs(back.timeIntervalSince(now)) < 1.0)
         }
     }
-}
 
-// MARK: -
-
-@Suite("PersonaGenerationService JSON 파서")
-struct PersonaJSONParserTests {
-
-    private let sut = PersonaGenerationService()
-
-    @Test("정상 JSON → persona·insights 추출")
-    func normal() {
-        let raw = #"{"persona":"테스트 페르소나 요약.","insights":["패턴 1","패턴 2"]}"#
-        let (persona, insights) = sut.parsePersonaJSON(raw)
-        #expect(persona == "테스트 페르소나 요약.")
-        #expect(insights == ["패턴 1", "패턴 2"])
+    @Test("메일 본문의 UTC+9 suffix를 절대시각으로 보존한다")
+    func parseMailDatePreservesUTCPlusNine() throws {
+        let parsed = try #require(AppDateFormat.parseMailDate("2026-07-10 17:30 UTC+9"))
+        let expected = try fixedDate("2026-07-10T17:30:00+09:00")
+        #expect(abs(parsed.timeIntervalSince(expected)) < 1.0)
     }
 
-    @Test("코드블록 래핑 → brace 추출 후 파싱")
-    func codeblock() {
-        let raw = "```json\n{\"persona\":\"요약\",\"insights\":[\"인사이트\"]}\n```"
-        let (persona, insights) = sut.parsePersonaJSON(raw)
-        #expect(persona == "요약")
-        #expect(insights == ["인사이트"])
+    @Test("Zulu 시각을 같은 절대시각으로 해석한다")
+    func parseMailDatePreservesZulu() throws {
+        let parsed = try #require(AppDateFormat.parseMailDate("2026-07-10 08:30 Z"))
+        let expected = try fixedDate("2026-07-10T17:30:00+09:00")
+        #expect(abs(parsed.timeIntervalSince(expected)) < 1.0)
+    }
+
+    @Test("offset 없는 메일 날짜도 기존처럼 파싱한다")
+    func parseMailDateOffsetlessStillParses() {
+        #expect(AppDateFormat.parseMailDate("2026-07-10T17:30:00") != nil)
+    }
+
+    @Test("날짜-only 마감은 같은 원문 시간대의 23:59로 보정한다")
+    func allDayDeadlineNormalizesToEndOfDay() throws {
+        let date = try fixedDate("2026-07-10T00:00:00+09:00")
+        let calendar = AppDateFormat.sourceCalendar(
+            for: "2026-07-10T00:00:00+09:00",
+            fallback: Calendar(identifier: .gregorian)
+        )
+        let expected = try fixedDate("2026-07-10T23:59:00+09:00")
+
+        let normalized = AppDateFormat.normalizedAllDayDeadline(date, calendar: calendar)
+
+        #expect(normalized.isAllDay)
+        #expect(abs(normalized.date.timeIntervalSince(expected)) < 1.0)
+    }
+
+    @Test("시각이 있는 마감은 보정하지 않는다")
+    func timedDeadlineIsNotNormalized() throws {
+        let date = try fixedDate("2026-07-10T17:30:00+09:00")
+        let normalized = AppDateFormat.normalizedAllDayDeadline(date)
+
+        #expect(normalized.isAllDay == false)
+        #expect(abs(normalized.date.timeIntervalSince(date)) < 1.0)
+    }
+
+    @Test("이메일 프롬프트는 시간대 보존 규칙을 명시한다")
+    func emailPromptRequiresTimezonePreservationContract() {
+        let instruction = Prompts.EmailFM.systemInstruction(language: .korean)
+        #expect(instruction.contains("UTC+9"))
+        #expect(instruction.contains("ISO8601 offset"))
+        #expect(instruction.contains("현지 offset"))
     }
 }
+
+@Suite("ReminderTiming regressions")
+struct ReminderTimingTests {
+
+    @Test("79시간 남은 일정은 72시간 전 자동 알림으로 분류한다")
+    func automaticOffsetUsesSeventyTwoHoursForFarFutureDueDate() throws {
+        let now = try fixedDate("2026-07-07T10:05:00+09:00")
+        let dueDate = try fixedDate("2026-07-10T17:30:00+09:00")
+
+        let offset = try #require(ReminderTiming.automaticOffset(now: now, dueDate: dueDate))
+        #expect(offset == TimeInterval(-72 * 3600))
+    }
+
+    @Test("알림 본문은 실제 2시간 리드를 그대로 보여준다")
+    func notificationBodyUsesExactTwoHourLead() throws {
+        let dueDate = try fixedDate("2026-07-10T12:00:00+09:00")
+        let calendar = AppDateFormat.sourceCalendar(
+            for: "2026-07-10T12:00:00+09:00",
+            fallback: Calendar(identifier: .gregorian)
+        )
+
+        let body = ReminderTiming.notificationBody(
+            offset: -2 * 3600,
+            dueDate: dueDate,
+            calendar: calendar,
+            language: .korean
+        )
+
+        #expect(body.contains("2시간 후 마감"))
+        #expect(body.contains("6시간") == false)
+    }
+
+    @Test("혼합 리드는 일 단위로 뭉개지지 않는다")
+    func detailLabelDoesNotFloorMixedLeadToThreeDays() {
+        let label = ReminderTiming.detailLabel(for: -(79 * 3600), language: .korean)
+
+        #expect(label == "마감 3일 7시간 전")
+        #expect(label != "마감 3일 전")
+    }
+
+    @Test("일+분 리드는 0시간 없이 정확하게 표시된다")
+    func detailLabelFormatsDayAndMinuteWithoutZeroHourSegment() {
+        let label = ReminderTiming.detailLabel(for: -(24 * 3600 + 30 * 60), language: .korean)
+
+        #expect(label == "마감 1일 30분 전")
+        #expect(label != "마감 1일 0시간 전")
+    }
+
+    @Test("review triage는 알림 스케줄 대상에서 제외된다")
+    func schedulableRejectsReviewTodos() throws {
+        let now = try fixedDate("2026-07-07T10:05:00+09:00")
+        let dueDate = try fixedDate("2026-07-10T17:30:00+09:00")
+        let todo = Todo(title: "등록 대기 일정", dueDate: dueDate, reminderOffsets: [-2 * 3600])
+        todo.triageStatus = TodoTriage.review.rawValue
+
+        #expect(ReminderTiming.schedulable(todo, now: now) == false)
+    }
+}
+
+
+@Suite("EmailContentAnalyzer timezone regressions")
+struct EmailContentAnalyzerTimezoneTests {
+    @Test("본문 밖 trailing UTC+9 토큰도 마감 시각에 반영한다")
+    func emailContentAnalyzerPreservesTrailingUTCPlusNine() throws {
+        let now = try fixedDate("2026-07-01T00:00:00+09:00")
+        let expectedDueDate = try fixedDate("2026-07-10T17:30:00+09:00")
+        let message = try makeGmailMessage(body: "Deadline: 2026-07-10 17:30 UTC+9까지 제출")
+
+        let extraction = EmailContentAnalyzer().analyze(message, now: now)
+        let dueDate = try #require(extraction?.dueDate)
+
+        #expect(abs(dueDate.timeIntervalSince(expectedDueDate)) < 1.0)
+    }
+}
+
 
 
 // MARK: -
@@ -87,6 +188,37 @@ struct ScheduleV9ParserTests {
         let compactResults = sut.parseScheduleResponseV9(text: compactJSON, todos: compactTodos, persona: .empty)
         #expect(compactResults?.count == 1)
         #expect(compactResults?.first?.todoID == compactTodos[1].id)
+    }
+
+    @Test("코드펜스와 잘린 루트 JSON에서도 완성된 task 객체를 회수한다")
+    func recoversCompletedTasksFromFencedPartialJSON() {
+        let todos = [Todo(title: "첫 번째"), Todo(title: "두 번째")]
+        let partialJSON = """
+        ```json
+        {
+          "scheduled_tasks": [
+            {
+              "task_id": "T1",
+              "scoring": {
+                "deadline_proximity": 5,
+                "urgency": 5,
+                "task_importance": 8,
+                "task_chaining": 2
+              },
+              "recommended_schedule": {
+                "start_time": ""
+              }
+            },
+            {
+              "task_id": "T2",
+              "scoring": {
+        """
+
+        let results = sut.parseScheduleResponseV9(text: partialJSON, todos: todos, persona: .empty)
+
+        #expect(results?.count == 1)
+        #expect(results?.first?.todoID == todos[0].id)
+        #expect(results?.first?.reason.isEmpty == false)
     }
 }
 
@@ -200,14 +332,15 @@ struct AnalysisHeuristicTests {
         return [study, meeting, finance, active]
     }
 
-    @Test("강화된 행동 패턴 휴리스틱은 마감 준수와 빠른 태그를 반영한다")
-    func memoryHeuristicCapturesDueDateSignals() {
-        let result = MemoryService.computeAnalysis(todos: makeHeuristicTodos())
+    @Test("행동 패턴 휴리스틱은 작은 표본을 페르소나 신호로 과대 해석하지 않는다")
+    func memoryHeuristicGatesSparseSignals() {
+        let result = MemoryService.computeAnalysis(todos: makeHeuristicTodos(), language: .korean)
 
         #expect(result.summary.isEmpty == false)
-        #expect(result.fastTags.isEmpty == false)
-        #expect(result.productiveHour != nil)
-        #expect(result.insights.contains { $0.contains("정시") || $0.contains("지연") })
+        #expect(result.fastTags.isEmpty)
+        #expect(result.productiveHour == nil)
+        #expect(result.behaviorProfile.insight(for: .overdueCompletionRate)?.denominator == 3)
+        #expect(result.behaviorProfile.insight(for: .completionConcentrationHour)?.confidence == .insufficient)
     }
 
     @Test("완료 기록이 없어도 7일 내 백로그 압박은 요약된다")
@@ -215,10 +348,10 @@ struct AnalysisHeuristicTests {
         let backlogOnly = Todo(title: "주간 보고 제출")
         backlogOnly.dueDate = makeDate(dayOffset: 3, hour: 18)
 
-        let result = MemoryService.computeAnalysis(todos: [backlogOnly])
+        let result = MemoryService.computeAnalysis(todos: [backlogOnly], language: .korean)
 
         #expect(result.summary.contains("7일 내 마감 미완료"))
-        #expect(result.insights.contains { $0.contains("미완료 항목") })
+        #expect(result.insights.contains { $0.contains("미완료 TODO") })
         #expect(result.productiveHour == nil)
     }
 
@@ -226,10 +359,40 @@ struct AnalysisHeuristicTests {
     func personaHeuristicGeneratesTextAndInsights() {
         let result = PersonaGenerationService().generateHeuristicPersona(
             existingPersona: "업무 마감과 회의 준비를 중시한다.",
-            todos: makeHeuristicTodos()
+            todos: makeHeuristicTodos(),
+            language: .korean
         )
-
         #expect(result.personaText.isEmpty == false)
         #expect((2...3).contains(result.insights.count))
+        #expect(!result.personaText.contains("과제 제출 준비"))
+        #expect(result.personaText.contains("최근 기록") || result.personaText.contains("분석 근거"))
+        #expect(!result.personaText.contains("자주 사용된 태그"))
     }
+}
+
+
+
+private func fixedDate(_ string: String) throws -> Date {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withColonSeparatorInTimeZone]
+    return try #require(formatter.date(from: string))
+}
+
+private func makeGmailMessage(
+    subject: String = "제출 일정 안내",
+    body: String
+) throws -> GmailMessage {
+    GmailMessage(
+        id: "msg-1",
+        threadID: "thread-1",
+        messageID: "<msg-1@example.com>",
+        subject: subject,
+        from: "PM <pm@example.com>",
+        snippet: body,
+        body: body,
+        htmlBody: nil,
+        receivedAt: try fixedDate("2026-07-01T00:00:00+09:00"),
+        labelIds: [],
+        isBulk: false
+    )
 }

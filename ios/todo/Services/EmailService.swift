@@ -2,6 +2,7 @@ import Foundation
 import AuthenticationServices
 import Security
 import OSLog
+import CryptoKit
 import SwiftData
 extension Array {
     func chunked(into size: Int) -> [[Element]] {
@@ -50,7 +51,10 @@ struct EmailCacheSyncResult: Sendable {
 
 private struct RecentMessageSyncSnapshot: Sendable {
     let messages: [GmailMessage]
-    let messageIDsInLookback: Set<String>
+    /// Broad mailbox IDs remain the authority for destructive stale checks.
+    let activeMailboxMessageIDs: Set<String>
+    /// The display snapshot is explicitly Gmail INBOX-only.
+    let recentInboxMessageIDs: Set<String>
     let lookbackCutoff: Date
 }
 
@@ -81,25 +85,78 @@ struct GmailMessage: Sendable {
     let labelIds: [String]
     /// List-Unsubscribe 또는 Precedence: bulk 헤더 존재 여부 (뉴스레터·대량발송 신호)
     let isBulk: Bool
+    /// Provider-native identity is retained separately from legacy `id`.
+    let provider: MailProvider
+    let providerMessageID: String
+    let sourceAccountNamespace: String
+
+    init(
+        id: String,
+        threadID: String,
+        messageID: String,
+        subject: String,
+        from: String,
+        snippet: String,
+        body: String,
+        htmlBody: String?,
+        receivedAt: Date,
+        labelIds: [String],
+        isBulk: Bool,
+        provider: MailProvider = .gmail,
+        providerMessageID: String = "",
+        sourceAccountNamespace: String = ""
+    ) {
+        self.id = id
+        self.threadID = threadID
+        self.messageID = messageID
+        self.subject = subject
+        self.from = from
+        self.snippet = snippet
+        self.body = body
+        self.htmlBody = htmlBody
+        self.receivedAt = receivedAt
+        self.labelIds = labelIds
+        self.isBulk = isBulk
+        self.provider = provider
+        self.providerMessageID = providerMessageID
+        self.sourceAccountNamespace = sourceAccountNamespace
+    }
 }
 
-// MARK: - Mail Provider Protocol
+// MARK: - Mailbox Provider Contract
 
-/// 메일 소스 추상화 프로토콜.
-/// 현재 구현: EmailService (Gmail OAuth).
-/// 향후 확장: IMAPProvider, GraphProvider(Outlook) 등.
-///
-/// ⚠️ 프라이버시 불변식: 어떤 구현이든 메일 본문은 온디바이스 전용
-/// (NSDataDetector/AFM-PCC). 외부 서드파티 클라우드 전송 금지.
-protocol MailProviderProtocol: AnyObject {
-    /// 메일 계정 인증 (OAuth 등)
-    func authenticate() async throws
+protocol MailboxPagingProvider: AnyObject {
+    var provider: MailProvider { get }
+    func fetchInboxPage(after cursor: String?) async throws -> MailboxPage
+    func fetchInboxMessageIDs() async throws -> Set<String>
+    func fetchMessageContent(messageID: String) async throws -> MailboxMessageContent
+    func markAsRead(messageID: String) async throws
+    func trashMessage(messageID: String) async throws
+}
 
-    /// 최근 메시지 목록 가져오기
-    func fetchRecentMessages() async throws -> [GmailMessage]
+enum MailboxMutationAction: String, Codable, Hashable, Sendable {
+    case markAsRead
+    case trash
+}
 
-    /// 인증 해제 및 세션 종료
-    func signOut()
+enum MailboxMutationError: LocalizedError {
+    case remoteCommittedLocalSaveFailed(
+        provider: MailProvider,
+        action: MailboxMutationAction
+    )
+
+    var errorDescription: String? {
+        errorDescription(language: .current)
+    }
+
+    func errorDescription(language: AppLanguage) -> String {
+        switch self {
+        case .remoteCommittedLocalSaveFailed:
+            return language == .english
+                ? "The change was applied by the provider, but the local state could not be saved. Sync the mailbox again."
+                : "프로바이더에는 반영되었지만 로컬 상태 저장에 실패했습니다. 메일 목록을 다시 동기화합니다."
+        }
+    }
 }
 
 // MARK: - Email Service
@@ -110,24 +167,44 @@ protocol MailProviderProtocol: AnyObject {
 /// 1. Google Cloud Console에서 OAuth 클라이언트 ID 발급 (iOS 앱 유형)
 /// 2. 리디렉트 URI 스킴을 Info.plist CFBundleURLSchemes에 등록
 /// 3. `clientID`와 `clientSecret`에 실제 값 입력
-final class EmailService: NSObject, MailProviderProtocol {
+final class EmailService: NSObject, MailboxPagingProvider {
     static let shared = EmailService()
+    let provider: MailProvider = .gmail
     private override init() {}
 
-    // MARK: - Configuration (실제 값으로 교체 필요)
-
+    // MARK: - Configuration
+    //
+    // Native OAuth clients are public clients. Authorization-code binding is
+    // provided by PKCE; do not embed a client secret in the application.
     private let clientID     = "746219534143-ij6p50gff6as4hn2bbhdc9a1u6os3jmp.apps.googleusercontent.com"
-    private let clientSecret = ""
     private let redirectURI  = "com.googleusercontent.apps.746219534143-ij6p50gff6as4hn2bbhdc9a1u6os3jmp:/oauth2callback"
     private let scope        = "openid email profile https://www.googleapis.com/auth/gmail.modify"
     private let requiredTokenScopeVersion = "gmail.modify.openid.v2"
     private let tokenScopeVersionAccount = "scope_version"
+    private let accessTokenExpiryAccount = "access_token_expires_at"
+    private let accessTokenRefreshSkew: TimeInterval = 300
 
     private let keychainService = "pieroot.todo.gmail"
     static var firebaseIDToken: String? {
         KeychainStore.get(service: "pieroot.todo.gmail", account: "id_token")
     }
+
+    /// Reads only the locally-held ID-token subject; callers must never persist it.
+    static var authenticatedAccountSubject: String? {
+        guard let token = firebaseIDToken,
+              let payloadPart = token.split(separator: ".").dropFirst().first
+        else { return nil }
+        let padding = String(repeating: "=", count: (4 - payloadPart.count % 4) % 4)
+        guard let data = Data(base64Encoded: String(payloadPart) + padding, options: .ignoreUnknownCharacters),
+              let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let subject = payload["sub"] as? String,
+              !subject.isEmpty
+        else { return nil }
+        return subject
+    }
     private let logger = Logger(subsystem: "pieroot.todo", category: "GmailOAuth")
+    private let tokenRefreshLock = NSLock()
+    private var activeTokenRefreshTask: Task<Void, Error>?
     
     var session: URLSession = .shared
 
@@ -165,7 +242,8 @@ final class EmailService: NSObject, MailProviderProtocol {
     @MainActor
     func authenticate() async throws {
         logger.info("Starting Gmail OAuth authentication")
-        guard let authURL = buildAuthURL() else {
+        let binding = makeOAuthBinding()
+        guard let authURL = buildAuthURL(state: binding.state, codeChallenge: binding.challenge) else {
             logger.error("Failed to build auth URL: invalid configuration")
             throw EmailError.invalidConfiguration
         }
@@ -184,23 +262,25 @@ final class EmailService: NSObject, MailProviderProtocol {
                 }
                 guard let url = callbackURL,
                       let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-                      let code = components.queryItems?.first(where: { $0.name == "code" })?.value
+                      let code = components.queryItems?.first(where: { $0.name == "code" })?.value,
+                      let returnedState = components.queryItems?.first(where: { $0.name == "state" })?.value,
+                      returnedState == binding.state
                 else {
-                    self?.logger.error("Authorization failed: missing code in callback URL")
+                    self?.logger.error("Authorization failed: missing code or invalid state")
                     continuation.resume(throwing: EmailError.authorizationFailed)
                     return
                 }
-                self?.logger.info("OAuth code received successfully")
+                self?.logger.info("OAuth callback validated")
                 continuation.resume(returning: code)
             }
 
             session.prefersEphemeralWebBrowserSession = true
             session.presentationContextProvider = WindowProvider.shared
-            authSession = session  // 인증 완료까지 세션 유지
+            authSession = session
             session.start()
         }
 
-        try await exchangeCodeForTokens(code: code)
+        try await exchangeCodeForTokens(code: code, codeVerifier: binding.verifier)
         logger.info("Gmail authentication completed successfully")
         NotificationCenter.default.post(name: .gmailAuthChanged, object: true)
     }
@@ -247,10 +327,11 @@ final class EmailService: NSObject, MailProviderProtocol {
     @discardableResult
     func syncRecentMessageCache(
         emailContext: ModelContext,
-        todoContext: ModelContext? = nil
+        todoContext _: ModelContext? = nil
     ) async throws -> EmailCacheSyncResult {
         let snapshot = try await fetchRecentMessageSyncSnapshot()
-        let existing = (try? emailContext.fetch(FetchDescriptor<EmailMessage>())) ?? []
+        let existing = ((try? emailContext.fetch(FetchDescriptor<EmailMessage>())) ?? [])
+            .filter { $0.provider == .gmail }
         let existingByID = Dictionary(uniqueKeysWithValues: existing.map { ($0.id, $0) })
 
         var upsertedMessageCount = 0
@@ -282,6 +363,14 @@ final class EmailService: NSObject, MailProviderProtocol {
                     email.isRead = serverIsRead
                     didChange = true
                 }
+                if email.labelIDs != msg.labelIds {
+                    email.labelIDs = msg.labelIds
+                    didChange = true
+                }
+                if !email.isInInbox {
+                    email.isInInbox = true
+                    didChange = true
+                }
                 if didChange {
                     upsertedMessageCount += 1
                 }
@@ -294,7 +383,9 @@ final class EmailService: NSObject, MailProviderProtocol {
                     snippet: msg.snippet,
                     body: msg.body,
                     htmlBody: msg.htmlBody,
-                    receivedAt: msg.receivedAt
+                    receivedAt: msg.receivedAt,
+                    labelIDs: msg.labelIds,
+                    isInInbox: true
                 )
                 email.isRead = serverIsRead
                 emailContext.insert(email)
@@ -302,62 +393,30 @@ final class EmailService: NSObject, MailProviderProtocol {
             }
         }
 
-        let emailIDsInLookback = snapshot.messageIDsInLookback
+
+        let activeMailboxMessageIDs = snapshot.activeMailboxMessageIDs
+        let deletionSafeActiveMessageIDs = activeMailboxMessageIDs
+            .union(snapshot.recentInboxMessageIDs)
         let inWindowMissingEmailIDs = Set(
             existing.lazy
-                .filter { $0.receivedAt >= snapshot.lookbackCutoff && !emailIDsInLookback.contains($0.id) }
+                .filter {
+                    $0.receivedAt >= snapshot.lookbackCutoff
+                        && !deletionSafeActiveMessageIDs.contains($0.id)
+                }
                 .map(\.id)
         )
 
-        var deletedRefs = inWindowMissingEmailIDs
-
-        var todos: [Todo] = []
-        if let todoContext {
-            todos = (try? todoContext.fetch(FetchDescriptor<Todo>())) ?? []
+        let staleEmails = existing.filter {
+            inWindowMissingEmailIDs.contains($0.id)
         }
-
-        let todoLinkedCandidateRefs = Set(
-            todos.lazy
-                .filter {
-                    $0.todoSource == .email
-                        && !$0.sourceRef.isEmpty
-                        && !deletedRefs.contains($0.sourceRef)
-                        && !emailIDsInLookback.contains($0.sourceRef)
-                }
-                .map(\.sourceRef)
-        )
-
-        if !todoLinkedCandidateRefs.isEmpty {
-            guard let token = loadTokens().accessToken else {
-                throw EmailError.notAuthenticated
-            }
-            for ref in todoLinkedCandidateRefs {
-                if try await messageIsInActiveMailbox(id: ref, token: token) == false {
-                    deletedRefs.insert(ref)
-                }
-            }
-        }
-
-        let staleEmails = existing.filter { deletedRefs.contains($0.id) }
         for email in staleEmails {
             emailContext.delete(email)
         }
 
-        var prunedTodoCount = 0
-        if let todoContext {
-            for todo in todos where deletedRefs.contains(todo.sourceRef) {
-                NotificationService.shared.cancel(todo: todo)
-                _ = CalendarService.shared.removeEmailCalendarArtifacts(for: todo)
-                todoContext.delete(todo)
-                prunedTodoCount += 1
-            }
-        }
+        let prunedTodoCount = 0
 
         if upsertedMessageCount > 0 || !staleEmails.isEmpty {
             try emailContext.save()
-        }
-        if let todoContext, prunedTodoCount > 0 {
-            try todoContext.save()
         }
 
         return EmailCacheSyncResult(
@@ -379,6 +438,7 @@ final class EmailService: NSObject, MailProviderProtocol {
         var todoCount = 0
         for todo in newTodos where !handledRefs.contains(todo.sourceRef) {
             context.insert(todo)
+            TaskBehaviorRecorder.recordCreation(of: todo, actor: .emailIngestion, in: context)
             handledRefs.insert(todo.sourceRef)
             insertedTodosByRef[todo.sourceRef] = todo
             todoCount += 1
@@ -475,11 +535,111 @@ final class EmailService: NSObject, MailProviderProtocol {
 
     /// 수동 등록용 메시지 요약 기반 할 일 초안을 생성합니다.
     /// allowFoundationModels=false 이면 규칙 기반 폴백을 사용합니다.
-    func makeManualTodo(from message: GmailMessage, allowFoundationModels: Bool = true) async -> Todo {
-        await EmailIngestionEngine().makeManualTodo(from: message, allowFoundationModels: allowFoundationModels)
+    func makeManualTodo(
+        from message: GmailMessage,
+        allowFoundationModels: Bool = true,
+        language: AppLanguage = .current
+    ) async -> Todo {
+        await EmailIngestionEngine().makeManualTodo(
+            from: message,
+            allowFoundationModels: allowFoundationModels,
+            language: language
+        )
     }
 
     // MARK: - Gmail API
+    func fetchInboxPage(after cursor: String?) async throws -> MailboxPage {
+        try await refreshTokenIfNeeded()
+        guard let token = loadTokens().accessToken else {
+            throw EmailError.notAuthenticated
+        }
+
+        let list = try await fetchMessageListPage(
+            token: token,
+            maxResults: 100,
+            requiredLabelID: "INBOX",
+            pageToken: cursor
+        )
+        let messageIDs = (list.messages ?? []).map(\.id)
+        var originalIndexByID = [String: Int]()
+        for (index, messageID) in messageIDs.enumerated()
+            where originalIndexByID[messageID] == nil {
+            originalIndexByID[messageID] = index
+        }
+
+        let outcomes = try await fetchMetadataOutcomes(ids: messageIDs, token: token)
+        let messages = outcomes.compactMap { outcome -> GmailMessage? in
+            switch outcome {
+            case .message(let message):
+                return message
+            case .notFound:
+                return nil
+            }
+        }
+        .sorted { lhs, rhs in
+            if lhs.receivedAt != rhs.receivedAt {
+                return lhs.receivedAt > rhs.receivedAt
+            }
+            return originalIndexByID[lhs.id, default: .max]
+                < originalIndexByID[rhs.id, default: .max]
+        }
+
+        logger.info(
+            "Gmail inbox page: hydrated \(messages.count)/\(messageIDs.count) IDs; hasMore=\(list.nextPageToken != nil)"
+        )
+        return MailboxPage(
+            messages: messages.map(mailboxMetadata),
+            nextCursor: list.nextPageToken
+        )
+    }
+
+    func fetchInboxMessageIDs() async throws -> Set<String> {
+        try await refreshTokenIfNeeded()
+        guard let token = loadTokens().accessToken else {
+            throw EmailError.notAuthenticated
+        }
+        return Set(
+            try await listMessageIDs(
+                token: token,
+                maxResults: 500,
+                requiredLabelID: "INBOX"
+            )
+        )
+    }
+
+    func fetchMessageContent(messageID: String) async throws -> MailboxMessageContent {
+        try await refreshTokenIfNeeded()
+        guard let token = loadTokens().accessToken else {
+            throw EmailError.notAuthenticated
+        }
+        guard let message = try await fetchMessage(id: messageID, token: token) else {
+            throw EmailError.apiFailed
+        }
+        return MailboxMessageContent(
+            metadata: mailboxMetadata(from: message),
+            body: message.body,
+            htmlBody: message.htmlBody ?? ""
+        )
+    }
+
+    private func mailboxMetadata(from message: GmailMessage) -> MailboxMessageMetadata {
+        MailboxMessageMetadata(
+            provider: .gmail,
+            providerMessageID: message.id,
+            threadID: message.threadID,
+            subject: message.subject,
+            from: message.from,
+            snippet: message.snippet,
+            receivedAt: message.receivedAt,
+            isRead: !message.labelIds.contains("UNREAD"),
+            isInInbox: message.labelIds.contains("INBOX"),
+            gmailLabelIDs: message.labelIds,
+            outlookInferenceClassificationRawValue: "",
+            providerCategoryNames: [],
+            providerFolderID: ""
+        )
+    }
+
 
     private func listRecentMessagesForExtraction(
         after historyID: String?,
@@ -491,30 +651,35 @@ final class EmailService: NSObject, MailProviderProtocol {
         }
 
         // 최근 수신 메일 ID 목록 조회
-        let lookbackDays = recentMessageLookbackDays(fallback: 3)
+        let lookbackDays = EmailAnalysisLookbackPolicy.storedLookbackDays()
 
         logger.info("Listing new messages for extraction, lookbackDays: \(lookbackDays)")
         if let ignoredHistoryID = historyID {
             logger.debug("historyID 기반 조회는 users.messages.list에서 미지원: \(ignoredHistoryID)")
         }
 
-        let list = try await fetchRecentMessageListPage(token: token, lookbackDays: lookbackDays)
+        let list = try await fetchMessageListPage(
+            token: token,
+            maxResults: 100,
+            requiredLabelID: "INBOX",
+            lookbackDays: lookbackDays
+        )
         guard let messageIDs = list.messages else {
             logger.info("No new messages found")
             return []
         }
 
-        logger.info("Found \(messageIDs.count) message IDs")
         // 각 메시지 본문 조회 (배치 처리로 429 방지)
         let cap = min(50, max(10, lookbackDays * 3))
         let targetIDs = messageIDs
             .filter { !excludingMessageIDs.contains($0.id) }
             .prefix(cap)
             .map { $0.id }
+        logger.info(
+            "Gmail analysis scan: listed \(messageIDs.count) recent inbox IDs; fetching \(targetIDs.count) unhandled messages (cap \(cap))"
+        )
 
-        let messages = try await fetchMessagesInBatches(ids: Array(targetIDs), token: token)
-        logger.info("Successfully fetched \(messages.count) messages")
-        return messages
+        return try await fetchMessagesInBatches(ids: Array(targetIDs), token: token)
     }
 
     private func fetchMessage(id: String, token: String) async throws -> GmailMessage? {
@@ -573,7 +738,9 @@ final class EmailService: NSObject, MailProviderProtocol {
             htmlBody: htmlBody,
             receivedAt: date,
             labelIds: labelIds,
-            isBulk: isBulk
+            isBulk: isBulk,
+            provider: .gmail,
+            providerMessageID: raw.id
         )
     }
 
@@ -587,58 +754,44 @@ final class EmailService: NSObject, MailProviderProtocol {
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
 
         let (data, response) = try await session.data(for: request)
-        if let http = response as? HTTPURLResponse, http.statusCode != 200 {
-            logger.error("fetchMessageMetadata failed for \(id): status \(http.statusCode)")
+        guard let http = response as? HTTPURLResponse else { throw EmailError.apiFailed }
+        if http.statusCode == 404 {
+            logger.debug("fetchMessageMetadata tombstone for \(id)")
             return nil
         }
-        guard let raw = try? JSONDecoder().decode(RawGmailMessage.self, from: data) else { return nil }
+        guard http.statusCode == 200 else {
+            logger.error("fetchMessageMetadata failed for \(id): status \(http.statusCode)")
+            throw EmailError.apiFailed
+        }
+        do {
+            let raw = try JSONDecoder().decode(RawGmailMessage.self, from: data)
 
-        let headers   = raw.payload.headers ?? []
-        let subject   = decodeRFC2047(headers.first { $0.name == "Subject"    }?.value ?? "(제목 없음)")
-        let from      = decodeRFC2047(headers.first { $0.name == "From"       }?.value ?? "")
-        let dateStr   = headers.first { $0.name == "Date"       }?.value ?? ""
-        let messageID = headers.first { $0.name == "Message-ID" }?.value ?? ""
+            let headers   = raw.payload.headers ?? []
+            let subject   = decodeRFC2047(headers.first { $0.name == "Subject"    }?.value ?? "(제목 없음)")
+            let from      = decodeRFC2047(headers.first { $0.name == "From"       }?.value ?? "")
+            let dateStr   = headers.first { $0.name == "Date"       }?.value ?? ""
+            let messageID = headers.first { $0.name == "Message-ID" }?.value ?? ""
 
-        let hasUnsubscribe = headers.contains { $0.name.lowercased() == "list-unsubscribe" }
-        let precedence     = headers.first { $0.name.lowercased() == "precedence" }?.value.lowercased() ?? ""
-        let isBulk         = hasUnsubscribe || precedence.contains("bulk") || precedence.contains("list")
-        let date           = raw.internalDate.flatMap { Double($0).map { Date(timeIntervalSince1970: $0 / 1000) } }
-                           ?? parseRFC2822Date(dateStr) ?? Date()
+            let hasUnsubscribe = headers.contains { $0.name.lowercased() == "list-unsubscribe" }
+            let precedence     = headers.first { $0.name.lowercased() == "precedence" }?.value.lowercased() ?? ""
+            let isBulk         = hasUnsubscribe || precedence.contains("bulk") || precedence.contains("list")
+            let date           = raw.internalDate.flatMap { Double($0).map { Date(timeIntervalSince1970: $0 / 1000) } }
+                               ?? parseRFC2822Date(dateStr) ?? Date()
 
-        return GmailMessage(
-            id: raw.id, threadID: raw.threadId ?? "", messageID: messageID,
-            subject: subject, from: from, snippet: raw.snippet ?? "",
-            body: "", htmlBody: nil,          // lazy-load on demand
-            receivedAt: date, labelIds: raw.labelIds ?? [], isBulk: isBulk
-        )
-    }
-
-    private func messageIsInActiveMailbox(id: String, token: String) async throws -> Bool {
-        let urlStr = "https://gmail.googleapis.com/gmail/v1/users/me/messages/\(id)?format=metadata"
-        var request = URLRequest(url: URL(string: urlStr)!)
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-
-        let (data, response) = try await session.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse else {
-            logger.error("messageIsInActiveMailbox failed: No HTTP response")
+            return GmailMessage(
+                id: raw.id, threadID: raw.threadId ?? "", messageID: messageID,
+                subject: subject, from: from, snippet: raw.snippet ?? "",
+                body: "", htmlBody: nil, receivedAt: date,
+                labelIds: raw.labelIds ?? [], isBulk: isBulk,
+                provider: .gmail, providerMessageID: raw.id
+            )
+        } catch {
+            logger.error("fetchMessageMetadata decode failed for \(id)")
             throw EmailError.apiFailed
         }
 
-        switch httpResponse.statusCode {
-        case 200:
-            guard let raw = try? JSONDecoder().decode(RawGmailMessage.self, from: data) else {
-                logger.error("messageIsInActiveMailbox failed for \(id): decode error")
-                throw EmailError.apiFailed
-            }
-            let labels = Set(raw.labelIds ?? [])
-            return !labels.contains("TRASH") && !labels.contains("SPAM")
-        case 404:
-            return false
-        default:
-            logger.error("messageIsInActiveMailbox failed for \(id): status \(httpResponse.statusCode)")
-            throw EmailError.apiFailed
-        }
     }
+
 
     /// 특정 메시지의 전체 본문(format=full)을 가져옴. 상세 화면 lazy-load용.
     func fetchFullMessage(id: String) async throws -> GmailMessage? {
@@ -678,6 +831,34 @@ final class EmailService: NSObject, MailProviderProtocol {
         return results
     }
 
+    /// Metadata sync preserves one outcome per requested ID. Full-body callers
+    /// intentionally keep using `fetchMessagesInBatches`.
+    private func fetchMetadataOutcomes(ids: [String], token: String) async throws -> [GmailMetadataOutcome] {
+        var outcomes = [GmailMetadataOutcome]()
+        let chunks = ids.chunked(into: 10)
+        for (index, chunk) in chunks.enumerated() {
+            let chunkOutcomes = try await withThrowingTaskGroup(of: GmailMetadataOutcome.self) { group in
+                for id in chunk {
+                    group.addTask { [weak self] in
+                        guard let self else { throw EmailError.apiFailed }
+                        guard let message = try await self.fetchMessageMetadata(id: id, token: token) else {
+                            return .notFound(id: id)
+                        }
+                        return .message(message)
+                    }
+                }
+                var results = [GmailMetadataOutcome]()
+                for try await outcome in group { results.append(outcome) }
+                return results
+            }
+            outcomes.append(contentsOf: chunkOutcomes)
+            if index < chunks.count - 1 {
+                try await Task.sleep(nanoseconds: 50_000_000)
+            }
+        }
+        return outcomes
+    }
+
     // MARK: - 이메일 뷰어: 최근 메일 전체 fetch
 
     /// 읽음/안읽음 관계없이 최근 메일 전체를 가져옴.
@@ -687,23 +868,26 @@ final class EmailService: NSObject, MailProviderProtocol {
         try await fetchRecentMessageSyncSnapshot().messages
     }
 
-    private func recentMessageLookbackDays(fallback defaultValue: Int) -> Int {
-        let value = UserDefaults.standard.integer(forKey: "pieroot.todo.emailLookbackDays")
-        return value > 0 ? min(max(value, 1), 30) : defaultValue
-    }
 
-    private func fetchRecentMessageListPage(
+    private func fetchMessageListPage(
         token: String,
-        lookbackDays: Int,
+        maxResults: Int,
+        requiredLabelID: String? = nil,
+        lookbackDays: Int? = nil,
         pageToken: String? = nil
     ) async throws -> MessageListResponse {
         var urlComponents = URLComponents(
             string: "https://gmail.googleapis.com/gmail/v1/users/me/messages"
         )!
         var queryItems = [
-            URLQueryItem(name: "q", value: "newer_than:\(lookbackDays)d"),
-            URLQueryItem(name: "maxResults", value: "100")
+            URLQueryItem(name: "maxResults", value: String(maxResults))
         ]
+        if let lookbackDays {
+            queryItems.append(URLQueryItem(name: "q", value: "newer_than:\(lookbackDays)d"))
+        }
+        if let requiredLabelID {
+            queryItems.append(URLQueryItem(name: "labelIds", value: requiredLabelID))
+        }
         if let pageToken, !pageToken.isEmpty {
             queryItems.append(URLQueryItem(name: "pageToken", value: pageToken))
         }
@@ -711,32 +895,54 @@ final class EmailService: NSObject, MailProviderProtocol {
 
         var request = URLRequest(url: urlComponents.url!)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-
         let (data, response) = try await session.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse else {
-            logger.error("Request failed: No HTTP response")
+        guard let httpResponse = response as? HTTPURLResponse,
+              httpResponse.statusCode == 200 else {
             throw EmailError.apiFailed
         }
-
-        logger.info("Response status: \(httpResponse.statusCode)")
-
-        guard httpResponse.statusCode == 200 else {
-            let errorBody = String(data: data, encoding: .utf8) ?? "no body"
-            logger.error("Request failed: \(errorBody)")
+        do {
+            return try JSONDecoder().decode(MessageListResponse.self, from: data)
+        } catch {
             throw EmailError.apiFailed
         }
-
-        return try JSONDecoder().decode(MessageListResponse.self, from: data)
     }
 
-    private func listAllMessageIDs(token: String, lookbackDays: Int) async throws -> [String] {
+    private func fetchGmailProfile(token: String) async throws -> GmailProfileResponse {
+        var request = URLRequest(url: URL(string: "https://gmail.googleapis.com/gmail/v1/users/me/profile")!)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        let (data, response) = try await session.data(for: request)
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw EmailError.apiFailed }
+        return try JSONDecoder().decode(GmailProfileResponse.self, from: data)
+    }
+
+    private func fetchGmailHistory(token: String, startHistoryID: String, pageToken: String? = nil) async throws -> GmailHistoryListResponse {
+        var components = URLComponents(string: "https://gmail.googleapis.com/gmail/v1/users/me/history")!
+        var query = [URLQueryItem(name: "startHistoryId", value: startHistoryID)]
+        if let pageToken { query.append(URLQueryItem(name: "pageToken", value: pageToken)) }
+        components.queryItems = query
+        var request = URLRequest(url: components.url!)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        let (data, response) = try await session.data(for: request)
+        guard let status = (response as? HTTPURLResponse)?.statusCode else { throw EmailError.apiFailed }
+        if status == 404 { throw GmailHistoryError.expiredCursor }
+        guard status == 200 else { throw EmailError.apiFailed }
+        return try JSONDecoder().decode(GmailHistoryListResponse.self, from: data)
+    }
+
+    private func listMessageIDs(
+        token: String,
+        maxResults: Int = 100,
+        requiredLabelID: String? = nil,
+        lookbackDays: Int? = nil
+    ) async throws -> [String] {
         var ids: [String] = []
         var seen = Set<String>()
         var pageToken: String?
-
         repeat {
-            let list = try await fetchRecentMessageListPage(
+            let list = try await fetchMessageListPage(
                 token: token,
+                maxResults: maxResults,
+                requiredLabelID: requiredLabelID,
                 lookbackDays: lookbackDays,
                 pageToken: pageToken
             )
@@ -745,7 +951,6 @@ final class EmailService: NSObject, MailProviderProtocol {
             }
             pageToken = list.nextPageToken
         } while pageToken != nil
-
         return ids
     }
 
@@ -753,17 +958,27 @@ final class EmailService: NSObject, MailProviderProtocol {
         try await refreshTokenIfNeeded()
         guard let token = loadTokens().accessToken else { throw EmailError.notAuthenticated }
 
-        let lookbackDays = recentMessageLookbackDays(fallback: 7)
+        let lookbackDays = EmailAnalysisLookbackPolicy.storedLookbackDays()
         let now = Date()
-        let messageIDs = try await listAllMessageIDs(token: token, lookbackDays: lookbackDays)
-        let targetIDs = Array(messageIDs.prefix(100))
-        let messages = try await fetchMessagesInBatches(ids: targetIDs, token: token, isMetadata: true)
-        let cutoff = now.addingTimeInterval(-Double(lookbackDays) * 24 * 3600)
+        let activeMailboxMessageIDs = try await listMessageIDs(
+            token: token
+        )
+        let recentInboxMessageIDs = try await listMessageIDs(
+            token: token,
+            requiredLabelID: "INBOX",
+            lookbackDays: lookbackDays
+        )
+        let messages = try await fetchMessagesInBatches(
+            ids: recentInboxMessageIDs,
+            token: token,
+            isMetadata: true
+        )
 
         return RecentMessageSyncSnapshot(
             messages: messages.sorted { $0.receivedAt > $1.receivedAt },
-            messageIDsInLookback: Set(messageIDs),
-            lookbackCutoff: cutoff
+            activeMailboxMessageIDs: Set(activeMailboxMessageIDs),
+            recentInboxMessageIDs: Set(recentInboxMessageIDs),
+            lookbackCutoff: EmailAnalysisLookbackPolicy.cutoff(now: now, lookbackDays: lookbackDays)
         )
     }
 
@@ -892,7 +1107,7 @@ final class EmailService: NSObject, MailProviderProtocol {
 
     // MARK: - Token Exchange
 
-    private func exchangeCodeForTokens(code: String) async throws {
+    private func exchangeCodeForTokens(code: String, codeVerifier: String) async throws {
         logger.info("Exchanging code for tokens")
         var request = URLRequest(url: URL(string: "https://oauth2.googleapis.com/token")!)
         request.httpMethod = "POST"
@@ -900,9 +1115,9 @@ final class EmailService: NSObject, MailProviderProtocol {
         let bodyParts = [
             "code": code,
             "client_id": clientID,
-            "client_secret": clientSecret,
             "redirect_uri": redirectURI,
-            "grant_type": "authorization_code"
+            "grant_type": "authorization_code",
+            "code_verifier": codeVerifier
         ]
         let bodyString = bodyParts.map { "\($0.key)=\($0.value.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "")" }
             .joined(separator: "&")
@@ -919,21 +1134,68 @@ final class EmailService: NSObject, MailProviderProtocol {
         }
 
         let tokens = try JSONDecoder().decode(TokenResponse.self, from: data)
-        saveTokens(accessToken: tokens.access_token, refreshToken: tokens.refresh_token, idToken: tokens.id_token)
+        saveTokens(
+            accessToken: tokens.access_token,
+            refreshToken: tokens.refresh_token,
+            idToken: tokens.id_token,
+            expiresIn: tokens.expires_in
+        )
         logger.info("Tokens saved successfully")
     }
+
     private func refreshTokenIfNeeded() async throws {
         clearTokensIfScopeIsStale()
-        guard let refresh = loadTokens().refreshToken else { 
-            logger.debug("No refresh token available, skipping refresh")
-            throw EmailError.notAuthenticated 
+        let tokens = loadTokens()
+        if let accessToken = tokens.accessToken,
+           !accessToken.isEmpty,
+           accessTokenIsFresh(tokens.accessTokenExpiry) {
+            return
         }
-        
+        guard let refresh = tokens.refreshToken else {
+            logger.debug("No refresh token available, skipping refresh")
+            throw EmailError.notAuthenticated
+        }
+
+        try await runSingleTokenRefresh(refreshToken: refresh)
+    }
+
+    private func runSingleTokenRefresh(refreshToken: String) async throws {
+        let (task, createdTask) = tokenRefreshTask(refreshToken: refreshToken)
+        defer {
+            if createdTask {
+                clearTokenRefreshTask()
+            }
+        }
+        try await task.value
+    }
+
+    private func tokenRefreshTask(refreshToken: String) -> (task: Task<Void, Error>, createdTask: Bool) {
+        tokenRefreshLock.lock()
+        defer { tokenRefreshLock.unlock() }
+
+        if let activeTokenRefreshTask {
+            return (activeTokenRefreshTask, false)
+        }
+
+        let task = Task { [self] in
+            try await performTokenRefresh(refreshToken: refreshToken)
+        }
+        activeTokenRefreshTask = task
+        return (task, true)
+    }
+
+    private func clearTokenRefreshTask() {
+        tokenRefreshLock.lock()
+        activeTokenRefreshTask = nil
+        tokenRefreshLock.unlock()
+    }
+
+    private func performTokenRefresh(refreshToken refresh: String) async throws {
         logger.info("Refreshing access token")
         var request = URLRequest(url: URL(string: "https://oauth2.googleapis.com/token")!)
         request.httpMethod = "POST"
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        let body = "grant_type=refresh_token&refresh_token=\(refresh)&client_id=\(clientID)&client_secret=\(clientSecret)"
+        let body = "grant_type=refresh_token&refresh_token=\(refresh)&client_id=\(clientID)"
         request.httpBody = body.data(using: .utf8)
 
         let (data, response) = try await session.data(for: request)
@@ -943,7 +1205,7 @@ final class EmailService: NSObject, MailProviderProtocol {
         }
 
         logger.info("Refresh token response status: \(httpResponse.statusCode)")
-        
+
         guard httpResponse.statusCode == 200 else {
             // 400 invalid_grant 등: refresh token 만료 → 키체인 삭제 후 재인증 안내
             let errorBody = String(data: data, encoding: .utf8) ?? "no body"
@@ -951,27 +1213,60 @@ final class EmailService: NSObject, MailProviderProtocol {
             deleteTokens()
             throw EmailError.notAuthenticated
         }
-        
+
         let tokens = try JSONDecoder().decode(TokenResponse.self, from: data)
-        saveTokens(accessToken: tokens.access_token, refreshToken: refresh, idToken: tokens.id_token)
+        saveTokens(
+            accessToken: tokens.access_token,
+            refreshToken: refresh,
+            idToken: tokens.id_token,
+            expiresIn: tokens.expires_in
+        )
         logger.info("Access token refreshed successfully")
     }
-    private func buildAuthURL() -> URL? {
+    private func buildAuthURL(state: String, codeChallenge: String) -> URL? {
         var components = URLComponents(string: "https://accounts.google.com/o/oauth2/v2/auth")!
         components.queryItems = [
-            URLQueryItem(name: "client_id",     value: clientID),
-            URLQueryItem(name: "redirect_uri",  value: redirectURI),
+            URLQueryItem(name: "client_id", value: clientID),
+            URLQueryItem(name: "redirect_uri", value: redirectURI),
             URLQueryItem(name: "response_type", value: "code"),
-            URLQueryItem(name: "scope",         value: scope),
-            URLQueryItem(name: "access_type",   value: "offline"),
-            URLQueryItem(name: "prompt",        value: "consent")
+            URLQueryItem(name: "scope", value: scope),
+            URLQueryItem(name: "access_type", value: "offline"),
+            URLQueryItem(name: "prompt", value: "consent"),
+            URLQueryItem(name: "state", value: state),
+            URLQueryItem(name: "code_challenge", value: codeChallenge),
+            URLQueryItem(name: "code_challenge_method", value: "S256")
         ]
         return components.url
     }
 
+    private func makeOAuthBinding() -> (state: String, verifier: String, challenge: String) {
+        let verifier = randomOAuthValue(byteCount: 32)
+        let challenge = Data(SHA256.hash(data: Data(verifier.utf8)))
+            .base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        return (state: randomOAuthValue(byteCount: 32), verifier: verifier, challenge: challenge)
+    }
+
+    private func randomOAuthValue(byteCount: Int) -> String {
+        var bytes = [UInt8](repeating: 0, count: byteCount)
+        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        return Data(bytes)
+            .base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+
     // MARK: - Keychain (KeychainStore 위임)
 
-    private func saveTokens(accessToken: String, refreshToken: String?, idToken: String?) {
+    private func saveTokens(
+        accessToken: String,
+        refreshToken: String?,
+        idToken: String?,
+        expiresIn: Int?
+    ) {
         KeychainStore.set(service: keychainService, account: "access_token", value: accessToken)
         if let rt = refreshToken {
             KeychainStore.set(service: keychainService, account: "refresh_token", value: rt)
@@ -979,17 +1274,30 @@ final class EmailService: NSObject, MailProviderProtocol {
         if let idToken, !idToken.isEmpty {
             KeychainStore.set(service: keychainService, account: "id_token", value: idToken)
         }
+        let expiry = Date().addingTimeInterval(TimeInterval(expiresIn ?? 3600)).timeIntervalSince1970
+        KeychainStore.set(service: keychainService, account: accessTokenExpiryAccount, value: String(expiry))
         KeychainStore.set(service: keychainService, account: tokenScopeVersionAccount, value: requiredTokenScopeVersion)
     }
 
-    private func loadTokens() -> (accessToken: String?, refreshToken: String?) {
-        (KeychainStore.get(service: keychainService, account: "access_token"),
-         KeychainStore.get(service: keychainService, account: "refresh_token"))
+    private func loadTokens() -> (accessToken: String?, refreshToken: String?, accessTokenExpiry: Date?) {
+        let accessToken = KeychainStore.get(service: keychainService, account: "access_token")
+        let refreshToken = KeychainStore.get(service: keychainService, account: "refresh_token")
+        let expiry = KeychainStore.get(service: keychainService, account: accessTokenExpiryAccount)
+            .flatMap(TimeInterval.init)
+            .map(Date.init(timeIntervalSince1970:))
+        return (accessToken, refreshToken, expiry)
+    }
+
+    private func accessTokenIsFresh(_ expiry: Date?, now: Date = Date()) -> Bool {
+        guard let expiry else { return false }
+        return expiry.timeIntervalSince(now) > accessTokenRefreshSkew
     }
 
     private func deleteTokens() {
         KeychainStore.deleteAny(service: keychainService, account: "access_token")
         KeychainStore.deleteAny(service: keychainService, account: "refresh_token")
+        KeychainStore.deleteAny(service: keychainService, account: "id_token")
+        KeychainStore.deleteAny(service: keychainService, account: accessTokenExpiryAccount)
         KeychainStore.deleteAny(service: keychainService, account: tokenScopeVersionAccount)
     }
 
@@ -1190,11 +1498,19 @@ enum EmailError: LocalizedError {
     case apiFailed
 
     var errorDescription: String? {
+        errorDescription(language: .current)
+    }
+
+    func errorDescription(language: AppLanguage) -> String {
         switch self {
-        case .invalidConfiguration: "Gmail OAuth 설정이 올바르지 않습니다."
-        case .authorizationFailed:  "Gmail 인증에 실패했습니다."
-        case .notAuthenticated:     "Gmail에 로그인되어 있지 않습니다."
-        case .apiFailed:            "Gmail API 호출에 실패했습니다."
+        case .invalidConfiguration:
+            return language == .english ? "Gmail OAuth configuration is invalid." : "Gmail OAuth 설정이 올바르지 않습니다."
+        case .authorizationFailed:
+            return language == .english ? "Gmail authorization failed." : "Gmail 인증에 실패했습니다."
+        case .notAuthenticated:
+            return language == .english ? "You are not signed in to Gmail." : "Gmail에 로그인되어 있지 않습니다."
+        case .apiFailed:
+            return language == .english ? "The Gmail API request failed." : "Gmail API 호출에 실패했습니다."
         }
     }
 }

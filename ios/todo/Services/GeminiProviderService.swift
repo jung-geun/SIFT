@@ -3,7 +3,9 @@ import Foundation
 // MARK: - Shared schedule JSON contract
 
 enum ScheduleLLMAdapter {
-    static let systemPrompt = Prompts.Schedule.systemInstruction
+    static func systemPrompt(language: AppLanguage = .current) -> String {
+        Prompts.Schedule.systemInstruction(language: language)
+    }
 
     static func buildScheduleInput(
         todos: [Todo],
@@ -31,7 +33,8 @@ enum ScheduleLLMAdapter {
             "availability": availability
         ]
 
-        let tasks: [[String: Any]] = todos.enumerated().map { index, todo in
+        let eligibleTodos = todos.filter { $0.triage == .todo }
+        let tasks: [[String: Any]] = eligibleTodos.enumerated().map { index, todo in
             let source: String
             switch todo.todoSource {
             case .manual:
@@ -40,6 +43,8 @@ enum ScheduleLLMAdapter {
                 source = "email"
             case .calendar:
                 source = "calendar"
+            case .meeting:
+                source = "meeting"
             }
             return [
                 "task_id": "T\(index + 1)",
@@ -69,22 +74,11 @@ enum ScheduleLLMAdapter {
         text: String,
         todos: [Todo],
         persona: PersonaContext,
-        engine: PriorityEngine
+        engine: PriorityEngine,
+        language: AppLanguage = .current
     ) -> [PriorityResult]? {
-        var trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let first = trimmed.range(of: "{"),
-              let last = trimmed.range(of: "}", options: .backwards)
-        else {
-            return nil
-        }
-        trimmed = String(trimmed[first.lowerBound..<last.upperBound])
-
-        guard let data = trimmed.data(using: .utf8),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let scheduledTasks = json["scheduled_tasks"] as? [[String: Any]]
-        else {
-            return nil
-        }
+        let scheduledTasks = scheduledTaskDictionaries(from: text)
+        guard !scheduledTasks.isEmpty else { return nil }
 
         let weights = ScheduleWeights.adaptive()
         let tokenToTodoID = Dictionary(
@@ -106,17 +100,30 @@ enum ScheduleLLMAdapter {
 
             let scoring = taskDict["scoring"] as? [String: Any] ?? [:]
             let axes = AxisScores(
-                deadlineProximity: max(0, min(10, (scoring["deadline_proximity"] as? Double) ?? 2.0)),
-                urgency: max(0, min(10, (scoring["urgency"] as? Double) ?? 5.0)),
-                importance: max(0, min(10, (scoring["task_importance"] as? Double) ?? 5.0)),
-                chaining: max(0, min(10, (scoring["task_chaining"] as? Double) ?? 2.0))
+                deadlineProximity: scoreValue(scoring["deadline_proximity"], defaultValue: 2.0),
+                urgency: scoreValue(scoring["urgency"], defaultValue: 5.0),
+                importance: scoreValue(scoring["task_importance"], defaultValue: 5.0),
+                chaining: scoreValue(scoring["task_chaining"], defaultValue: 2.0)
             )
             let score = ScheduleScorer.normalizedScore(axes, weights: weights)
 
             let reasoning = taskDict["reasoning"] as? [String: Any] ?? [:]
             let summary = (reasoning["summary"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             let chainingDetail = (reasoning["chaining_detail"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            let reasonText = !summary.isEmpty ? summary : chainingDetail
+            let fallbackReason = todos.first(where: { $0.id == todoID })?.dueDate == nil
+                ? AppLanguage.localized(
+                    "priority.reason.modelScore",
+                    defaultValue: language == .english ? "Sorted by model scores" : "모델 점수 기반 정렬",
+                    language: language,
+                    comment: "Priority reason shown when no model explanation is available and no deadline exists."
+                )
+                : AppLanguage.localized(
+                    "priority.reason.deadlineImportance",
+                    defaultValue: language == .english ? "Sorted by deadline and importance" : "마감과 중요도 기준 정렬",
+                    language: language,
+                    comment: "Priority reason shown when no model explanation is available and a deadline exists."
+                )
+            let reasonText = !summary.isEmpty ? summary : (!chainingDetail.isEmpty ? chainingDetail : fallbackReason)
             let detailText: String
             if !chainingDetail.isEmpty && chainingDetail != reasonText {
                 detailText = String(chainingDetail.prefix(160))
@@ -157,6 +164,90 @@ enum ScheduleLLMAdapter {
         }
 
         return results.isEmpty ? nil : results
+    }
+
+    private static func scheduledTaskDictionaries(from text: String) -> [[String: Any]] {
+        if let fullJSON = topLevelJSONObject(from: text),
+           let data = fullJSON.data(using: .utf8),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let scheduledTasks = json["scheduled_tasks"] as? [[String: Any]] {
+            return scheduledTasks
+        }
+
+        return partialScheduledTaskDictionaries(from: text)
+    }
+
+    private static func topLevelJSONObject(from text: String) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let first = trimmed.range(of: "{"),
+              let last = trimmed.range(of: "}", options: .backwards),
+              first.lowerBound <= last.lowerBound else {
+            return nil
+        }
+        return String(trimmed[first.lowerBound..<last.upperBound])
+    }
+
+    private static func partialScheduledTaskDictionaries(from text: String) -> [[String: Any]] {
+        guard let keyRange = text.range(of: "\"scheduled_tasks\""),
+              let arrayStart = text[keyRange.upperBound...].firstIndex(of: "[") else {
+            return []
+        }
+
+        var tasks: [[String: Any]] = []
+        var objectStart: String.Index?
+        var depth = 0
+        var inString = false
+        var isEscaped = false
+        var index = text.index(after: arrayStart)
+
+        while index < text.endIndex {
+            let char = text[index]
+            if inString {
+                if isEscaped {
+                    isEscaped = false
+                } else if char == "\\" {
+                    isEscaped = true
+                } else if char == "\"" {
+                    inString = false
+                }
+            } else {
+                if char == "\"" {
+                    inString = true
+                } else if char == "{" {
+                    if depth == 0 { objectStart = index }
+                    depth += 1
+                } else if char == "}" {
+                    depth -= 1
+                    if depth == 0, let startIndex = objectStart {
+                        let objectText = String(text[startIndex...index])
+                        if let data = objectText.data(using: .utf8),
+                           let task = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                            tasks.append(task)
+                        }
+                        objectStart = nil
+                    }
+                } else if char == "]", depth == 0 {
+                    break
+                }
+            }
+            index = text.index(after: index)
+        }
+
+        return tasks
+    }
+
+    private static func scoreValue(_ value: Any?, defaultValue: Double) -> Double {
+        let number: Double
+        if let value = value as? Double {
+            number = value
+        } else if let value = value as? Int {
+            number = Double(value)
+        } else if let value = value as? NSNumber {
+            number = value.doubleValue
+        } else {
+            number = defaultValue
+        }
+        return max(0, min(10, number))
     }
 }
 
@@ -206,6 +297,16 @@ struct GeminiProviderService: Sendable {
         let chosenModelID = modelID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? Self.defaultModelID
             : modelID.trimmingCharacters(in: .whitespacesAndNewlines)
+        LLMDebugLogger.request(
+            provider: "Gemini",
+            operation: "generateJSON",
+            metadata: [
+                "modelID: \(chosenModelID)",
+                "responseMimeType: application/json"
+            ],
+            systemPrompt: systemInstruction,
+            userPrompt: userPrompt
+        )
         guard let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/\(chosenModelID):generateContent") else {
             throw IntelligenceRoutingError.generationFailed(
                 provider: .gemini,
@@ -268,14 +369,18 @@ struct GeminiProviderService: Sendable {
                     reason: "Gemini 응답에 JSON 텍스트가 없습니다."
                 )
             }
+            LLMDebugLogger.response(provider: "Gemini", operation: "generateJSON", text: text)
             return text
         } catch let routingError as IntelligenceRoutingError {
+            LLMDebugLogger.failure(provider: "Gemini", operation: "generateJSON", error: routingError)
             throw routingError
         } catch {
-            throw IntelligenceRoutingError.generationFailed(
+            let wrapped = IntelligenceRoutingError.generationFailed(
                 provider: .gemini,
                 reason: error.localizedDescription
             )
+            LLMDebugLogger.failure(provider: "Gemini", operation: "generateJSON", error: wrapped)
+            throw wrapped
         }
     }
 }
@@ -315,11 +420,19 @@ final class GeminiIntelligenceEngine: IntelligenceService {
         guard !capped.isEmpty else { return [] }
 
         let modelID = GeminiProviderService.storedModelID
+        let language = AppLanguage.current
         var results: [PriorityResult] = []
         results.reserveCapacity(capped.count)
 
         for (offset, todo) in capped.enumerated() {
-            let title = todo.title.isEmpty ? "(제목 없음)" : todo.title
+            let title = todo.title.isEmpty
+                ? AppLanguage.localized(
+                    "todo.noTitle",
+                    defaultValue: language == .english ? "(No Title)" : "(제목 없음)",
+                    language: language,
+                    comment: "Placeholder title shown for a to-do without a title."
+                )
+                : todo.title
             let index = offset + 1
             progress?(.requesting(
                 index: index,
@@ -329,7 +442,7 @@ final class GeminiIntelligenceEngine: IntelligenceService {
             ))
             do {
                 let text = try await providerService.generateJSON(
-                    systemInstruction: ScheduleLLMAdapter.systemPrompt,
+                    systemInstruction: ScheduleLLMAdapter.systemPrompt(language: language),
                     userPrompt: ScheduleLLMAdapter.buildScheduleInput(todos: [todo], persona: persona, events: events),
                     modelID: modelID
                 )
@@ -343,7 +456,8 @@ final class GeminiIntelligenceEngine: IntelligenceService {
                     text: text,
                     todos: [todo],
                     persona: persona,
-                    engine: .gemini
+                    engine: .gemini,
+                    language: language
                 ), var first = parsed.first else {
                     throw IntelligenceRoutingError.parseFailed(
                         provider: .gemini,
@@ -351,6 +465,7 @@ final class GeminiIntelligenceEngine: IntelligenceService {
                     )
                 }
                 first.requestedProviderRawValue = PersonaAIProvider.gemini.rawValue
+                debugLogParsedResult(first, todo: todo, index: index, total: capped.count)
                 progress?(.applying(index: index, total: capped.count, title: title))
                 progress?(.result(first, index: index, total: capped.count, title: title))
                 results.append(first)
@@ -359,30 +474,34 @@ final class GeminiIntelligenceEngine: IntelligenceService {
                 case .backendNotConfigured:
                     throw routingError
                 default:
+                    let fallbackReason = routingError.errorDescription(language: language)
                     progress?(.fallback(
                         from: PriorityEngine.gemini.rawValue,
                         to: PriorityEngine.heuristic.rawValue,
-                        reason: routingError.localizedDescription
+                        reason: fallbackReason
                     ))
                     let fallback = try await heuristic.prioritize(todos: [todo], events: events, persona: persona, progress: nil)
                     if var first = fallback.first {
                         first.requestedProviderRawValue = PersonaAIProvider.gemini.rawValue
-                        first.fallbackReason = routingError.localizedDescription
+                        first.fallbackReason = fallbackReason
+                        debugLogParsedResult(first, todo: todo, index: index, total: capped.count)
                         progress?(.applying(index: index, total: capped.count, title: title))
                         progress?(.result(first, index: index, total: capped.count, title: title))
                         results.append(first)
                     }
                 }
             } catch {
+                let fallbackReason = userFacingFallbackReason(from: error, language: language)
                 progress?(.fallback(
                     from: PriorityEngine.gemini.rawValue,
                     to: PriorityEngine.heuristic.rawValue,
-                    reason: error.localizedDescription
+                    reason: fallbackReason
                 ))
                 let fallback = try await heuristic.prioritize(todos: [todo], events: events, persona: persona, progress: nil)
                 if var first = fallback.first {
                     first.requestedProviderRawValue = PersonaAIProvider.gemini.rawValue
-                    first.fallbackReason = error.localizedDescription
+                    first.fallbackReason = fallbackReason
+                    debugLogParsedResult(first, todo: todo, index: index, total: capped.count)
                     progress?(.applying(index: index, total: capped.count, title: title))
                     progress?(.result(first, index: index, total: capped.count, title: title))
                     results.append(first)
@@ -391,5 +510,33 @@ final class GeminiIntelligenceEngine: IntelligenceService {
         }
 
         return results
+    }
+
+    private func userFacingFallbackReason(from error: Error, language: AppLanguage) -> String {
+        if let routingError = error as? IntelligenceRoutingError {
+            return routingError.errorDescription(language: language)
+        }
+        return AppLanguage.localized(
+            "intelligence.gemini.fallback",
+            defaultValue: language == .english
+                ? "Gemini could not complete the request, so heuristic prioritization was used."
+                : "Gemini 요청을 완료하지 못해 휴리스틱 우선순위를 사용했습니다.",
+            language: language,
+            comment: "Fallback explanation shown when Gemini prioritization fails and heuristic prioritization is used."
+        )
+    }
+
+    private func debugLogParsedResult(_ result: PriorityResult, todo: Todo, index: Int, total: Int) {
+        let axes = result.axes.map {
+            String(format: "deadline=%.1f urgency=%.1f importance=%.1f chaining=%.1f", $0.deadlineProximity, $0.urgency, $0.importance, $0.chaining)
+        } ?? "none"
+        let dueDate = todo.dueDate.map { AppDateFormat.llmString(from: $0) } ?? "nil"
+        let recommended = result.recommendedTime.map { AppDateFormat.llmString(from: $0) } ?? "nil"
+        LLMDebugLogger.event(
+            provider: "Gemini",
+            operation: "rankTodos",
+            title: "ParsedResult \(index)/\(total)",
+            details: "score=\(String(format: "%.3f", result.score)) task=\(todo.title.isEmpty ? "(제목 없음)" : todo.title) due=\(dueDate) axes=[\(axes)] notify=\(result.needsNotification) recommended=\(recommended) reason=\(result.reason) detail=\(result.detail.isEmpty ? "(empty)" : result.detail) fallback=\(result.fallbackReason.isEmpty ? "(none)" : result.fallbackReason)"
+        )
     }
 }

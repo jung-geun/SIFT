@@ -6,10 +6,10 @@ import BackgroundTasks
 import EventKit
 import MSAL
 
+
 // MARK: - BGTask 식별자
 
 private let kEmailRefreshTaskID  = "pieroot.todo.emailRefresh"
-private let kMemoryAnalysisTaskID = "pieroot.todo.memoryAnalysis"
 
 
 // MARK: - App Delegate
@@ -38,9 +38,6 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         if !isPreview {
             BGTaskScheduler.shared.register(forTaskWithIdentifier: kEmailRefreshTaskID, using: nil) { task in
                 Task { await self.handleEmailRefresh(task: task as! BGAppRefreshTask) }
-            }
-            BGTaskScheduler.shared.register(forTaskWithIdentifier: kMemoryAnalysisTaskID, using: nil) { task in
-                Task { await self.handleMemoryAnalysis(task: task as! BGProcessingTask) }
             }
         }
 
@@ -77,22 +74,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         task.setTaskCompleted(success: success)
     }
 
-    // MARK: - BGProcessingTask: 메모리 분석 (2일+ 간격)
 
-    @MainActor
-    private func handleMemoryAnalysis(task: BGProcessingTask) async {
-        scheduleMemoryAnalysis()
-
-        task.expirationHandler = { task.setTaskCompleted(success: false) }
-
-        guard let ctx = modelContext else {
-            task.setTaskCompleted(success: false)
-            return
-        }
-        let todos = (try? ctx.fetch(FetchDescriptor<Todo>())) ?? []
-        MemoryService.shared.analyze(todos: todos)
-        task.setTaskCompleted(success: true)
-    }
 
     // MARK: - 이메일 fetch + todo 삽입 (공통)
 
@@ -175,13 +157,6 @@ func nextEmailRefreshDate(hour: Int) -> Date {
     return cal.date(byAdding: .day, value: 1, to: todayTarget) ?? Date(timeIntervalSinceNow: 86400)
 }
 
-func scheduleMemoryAnalysis() {
-    let request = BGProcessingTaskRequest(identifier: kMemoryAnalysisTaskID)
-    request.requiresNetworkConnectivity = false
-    request.requiresExternalPower = false
-    request.earliestBeginDate = Date(timeIntervalSinceNow: 2 * 24 * 3600)  // 최소 2일 후
-    try? BGTaskScheduler.shared.submit(request)
-}
 
 // MARK: - App Entry Point
 
@@ -197,7 +172,7 @@ struct todoApp: App {
     /// swappable 컨테이너 홀더 — iCloud 동기화 전환 시 재시작 없이 교체.
     /// init() 에서 AppDataContainer.shared 싱글턴이 설정되므로
     /// 서비스 레이어(MemoryService 등)도 AppDataContainer.shared.container로 접근 가능.
-    @StateObject private var appData = AppDataContainer()
+    @StateObject private var appData: AppDataContainer
 
     /// iCloud 동기화 모니터 — 앱 레벨로 승격하여 어느 탭에서든 알림 수신.
     @StateObject private var syncMonitor = CloudSyncMonitor()
@@ -215,6 +190,12 @@ struct todoApp: App {
     @AppStorage("pieroot.todo.iCloudSyncEnabled") private var iCloudSyncEnabled = false
     @StateObject private var tutorial = AppTutorialState()
     @State private var tabVisibility = AppTabVisibility(calendarVisible: false, mailVisible: false)
+    @State private var appLanguage = AppLanguage.current
+    private let vocabularyDependencies: UserVocabularyDependencies
+    private let vocabularyEnrichmentQueue: VocabularyEnrichmentQueue
+    private var uiTestShowsAllTabs: Bool {
+        ProcessInfo.processInfo.arguments.contains("-pieroot.todo.uiTestShowAllTabs")
+    }
 
     // MARK: - 페르소나 중복 제거 (PersonaSettingsView에서도 참조)
 
@@ -242,9 +223,18 @@ struct todoApp: App {
     // MARK: - Init
 
     init() {
-        // iCloud Key-Value Store(SettingsStore)를 앱 최시작 시점에 조기 초기화하여
-        // 초기 동기화(Initial Sync) 알림이 누락되지 않도록 방지합니다.
         _ = SettingsStore.shared
+        let container = AppDataContainer()
+        _appData = StateObject(wrappedValue: container)
+        let service = UserVocabularyService(modelContainer: container.meetingContainer)
+        let queue = VocabularyEnrichmentQueue(service: service)
+        vocabularyEnrichmentQueue = queue
+        vocabularyDependencies = UserVocabularyDependencies(
+            service: service,
+            observer: .live(service: service, enqueue: { request in
+                await queue.enqueue(request)
+            })
+        )
     }
 
     // MARK: - Body
@@ -282,9 +272,17 @@ struct todoApp: App {
                         .tabItem { Label("메일", systemImage: "envelope") }
                         .tag(AppTabID.mail.rawValue)
                 }
+
+                MeetingView()
+                    .modelContainer(appData.meetingContainer)
+                    .tabItem { Label("회의", systemImage: "person.2.wave.2") }
+                    .tag(AppTabID.meeting.rawValue)
             }
+            .environment(\.locale, appLanguage.locale)
+            .tint(AppTheme.accent)
             .environmentObject(syncMonitor)
             .environment(\.appTutorialState, tutorial)
+            .environment(\.userVocabulary, vocabularyDependencies)
             .onOpenURL { url in
                 MSALPublicClientApplication.handleMSALResponse(
                     url,
@@ -292,6 +290,7 @@ struct todoApp: App {
                 )
             }
             .onAppear {
+                SettingsStore.shared.migrateLegacyMemoryKeysIntoSwiftDataIfNeeded()
                 NSUbiquitousKeyValueStore.default.synchronize()
 
                 let ctx = appData.container.mainContext
@@ -310,7 +309,6 @@ struct todoApp: App {
                     }
                 }
                 scheduleEmailRefresh()
-                scheduleMemoryAnalysis()
 
                 // 어느 탭이든 앱 실행 시 iCloud 동기화 시작
                 if iCloudSyncEnabled {
@@ -360,6 +358,9 @@ struct todoApp: App {
                     selectedTab = AppTabID.todo.rawValue
                     tutorial.start(tabVisibility: tabVisibility)
                 }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: AppLanguage.didChangeNotification)) { _ in
+                appLanguage = AppLanguage.current
             }
             .onReceive(NotificationCenter.default.publisher(for: .settingsDismissRequested)) { _ in
                 Task { await refreshTabVisibility() }
@@ -420,11 +421,11 @@ struct todoApp: App {
     @MainActor
     private func refreshTabVisibility() async {
         CalendarService.shared.restoreAuthorizationIfGranted()
-        let calendarVisible = CalendarService.shared.isAuthorized
+        let calendarVisible = uiTestShowsAllTabs || CalendarService.shared.isAuthorized
         let outlookVisible = OutlookMailService.shared.isConfigured
             ? await OutlookMailService.shared.canAccessMailSilently()
             : false
-        let mailVisible = EmailService.shared.isAuthenticated || outlookVisible
+        let mailVisible = uiTestShowsAllTabs || EmailService.shared.isAuthenticated || outlookVisible
         tabVisibility = AppTabVisibility(calendarVisible: calendarVisible, mailVisible: mailVisible)
         selectedTab = tabVisibility.clamped(selectedTab)
         launchTab = tabVisibility.clamped(launchTab)

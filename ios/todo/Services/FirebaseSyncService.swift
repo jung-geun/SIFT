@@ -15,12 +15,48 @@ enum FirebaseSyncError: LocalizedError {
     case invalidPassphrase
 
     var errorDescription: String? {
+        errorDescription(language: .current)
+    }
+
+    func errorDescription(language: AppLanguage) -> String {
         switch self {
-        case .missingConfig: return "Firebase 설정 파일이 없습니다."
-        case .missingGoogleIDToken: return "Google ID 토큰이 없어 Firebase 동기화를 시작할 수 없습니다. Gmail 계정을 다시 연결해 주세요."
-        case .invalidResponse: return "Firebase 응답을 해석하지 못했습니다."
-        case .invalidSnapshot: return "Firebase에 저장된 스냅샷이 올바르지 않습니다."
-        case .invalidPassphrase: return "암호화 비밀번호는 8자 이상이어야 합니다."
+        case .missingConfig:
+            return AppLanguage.localized(
+                "error.firebase.missingConfig",
+                defaultValue: language == .english ? "Firebase configuration is missing." : "Firebase 설정 파일이 없습니다.",
+                language: language,
+                comment: "Firebase sync error shown when app configuration is unavailable."
+            )
+        case .missingGoogleIDToken:
+            return AppLanguage.localized(
+                "error.firebase.missingGoogleIDToken",
+                defaultValue: language == .english
+                    ? "Firebase sync cannot start because the Google ID token is missing. Please reconnect your Gmail account."
+                    : "Google ID 토큰이 없어 Firebase 동기화를 시작할 수 없습니다. Gmail 계정을 다시 연결해 주세요.",
+                language: language,
+                comment: "Firebase sync error shown when Gmail authentication is unavailable."
+            )
+        case .invalidResponse:
+            return AppLanguage.localized(
+                "error.firebase.invalidResponse",
+                defaultValue: language == .english ? "Could not read the Firebase response." : "Firebase 응답을 해석하지 못했습니다.",
+                language: language,
+                comment: "Firebase sync error shown when a server response cannot be decoded."
+            )
+        case .invalidSnapshot:
+            return AppLanguage.localized(
+                "error.firebase.invalidSnapshot",
+                defaultValue: language == .english ? "The snapshot saved in Firebase is invalid." : "Firebase에 저장된 스냅샷이 올바르지 않습니다.",
+                language: language,
+                comment: "Firebase sync error shown when a stored snapshot is invalid."
+            )
+        case .invalidPassphrase:
+            return AppLanguage.localized(
+                "error.firebase.invalidPassphrase",
+                defaultValue: language == .english ? "The encryption passphrase must be at least 8 characters." : "암호화 비밀번호는 8자 이상이어야 합니다.",
+                language: language,
+                comment: "Firebase sync error shown when the encryption passphrase is too short."
+            )
         }
     }
 }
@@ -168,7 +204,6 @@ struct FirebaseSyncService {
             return nil
         }
         guard
-            let kdf = stringField("kdf"),
             let salt = stringField("salt"),
             let iv = stringField("iv"),
             let ciphertext = stringField("ciphertext"),
@@ -176,6 +211,7 @@ struct FirebaseSyncService {
         else {
             throw FirebaseSyncError.invalidSnapshot
         }
+        let kdf = stringField("kdf") ?? "PBKDF2WithHmacSHA256"
         return FirebaseEncryptedEnvelope(version: 1, kdf: kdf, salt: salt, iterations: iterations, iv: iv, ciphertext: ciphertext)
     }
 

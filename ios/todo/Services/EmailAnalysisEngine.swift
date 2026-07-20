@@ -15,7 +15,11 @@ protocol EmailAnalysisEngine {
     ///   - msg: 분석할 Gmail 메시지 (subject + body + from 헤더 포함)
     ///   - now: 기준 시각 (테스트·재현 가능성을 위해 주입)
     /// - Returns: 마감일이 감지되면 EmailExtraction, 없으면 nil
-    func analyze(_ msg: GmailMessage, now: Date) async -> EmailExtraction?
+    func analyze(
+        _ msg: GmailMessage,
+        now: Date,
+        language: AppLanguage
+    ) async -> EmailExtraction?
 }
 
 // MARK: - On-Device Detector Engine (현재 기본 엔진)
@@ -25,8 +29,12 @@ protocol EmailAnalysisEngine {
 struct OnDeviceDetectorEngine: EmailAnalysisEngine {
     private let analyzer = EmailContentAnalyzer()
 
-    func analyze(_ msg: GmailMessage, now: Date) async -> EmailExtraction? {
-        analyzer.analyze(msg, now: now)
+    func analyze(
+        _ msg: GmailMessage,
+        now: Date,
+        language: AppLanguage
+    ) async -> EmailExtraction? {
+        analyzer.analyze(msg, now: now, language: language)
     }
 }
 
@@ -39,17 +47,25 @@ struct OnDeviceDetectorEngine: EmailAnalysisEngine {
 struct FoundationModelsEmailEngine: EmailAnalysisEngine {
     private let fallback = OnDeviceDetectorEngine()
 
-    func analyze(_ msg: GmailMessage, now: Date) async -> EmailExtraction? {
+    func analyze(
+        _ msg: GmailMessage,
+        now: Date,
+        language: AppLanguage
+    ) async -> EmailExtraction? {
         #if canImport(FoundationModels)
         if #available(iOS 26.0, *), FoundationModelsAvailability.isAvailable {
             do {
-                return try await FoundationModelsService().analyzeEmail(msg, now: now)
+                return try await FoundationModelsService().analyzeEmail(
+                    msg,
+                    now: now,
+                    language: language
+                )
             } catch {
                 print("[FoundationModelsEmailEngine] FM 실패 — NSDataDetector 폴백: \(error.localizedDescription)")
             }
         }
         #endif
-        return await fallback.analyze(msg, now: now)
+        return await fallback.analyze(msg, now: now, language: language)
     }
 }
 
@@ -80,31 +96,40 @@ struct GeminiEmailAnalysisEngine: EmailAnalysisEngine {
         self.providerService = providerService
     }
 
-    func analyze(_ msg: GmailMessage, now: Date) async -> EmailExtraction? {
+    func analyze(
+        _ msg: GmailMessage,
+        now: Date,
+        language: AppLanguage
+    ) async -> EmailExtraction? {
         let bodyPreview = String(msg.body.prefix(1500))
         guard !msg.subject.isEmpty else { return nil }
 
         let prompt = """
-현재 시각: \(AppDateFormat.llmString(from: now))
-발신자: \(msg.from)
-제목: \(msg.subject)
-\(bodyPreview.isEmpty ? "" : "본문:\n\(bodyPreview)")
-"""
+        현재 시각: \(AppDateFormat.llmString(from: now))
+        발신자: \(msg.from)
+        제목: \(msg.subject)
+        \(bodyPreview.isEmpty ? "" : "본문:\n\(bodyPreview)")
+        """
 
         do {
             let raw = try await providerService.generateJSON(
-                systemInstruction: Prompts.EmailFM.systemInstruction,
+                systemInstruction: Prompts.EmailFM.systemInstruction(language: language),
                 userPrompt: prompt,
                 modelID: GeminiProviderService.storedModelID
             )
-            return parseExtraction(raw, msg: msg, now: now)
+            return parseExtraction(raw, msg: msg, now: now, language: language)
         } catch {
             print("[GeminiEmailAnalysisEngine] Gemini 실패 — NSDataDetector 폴백: \(error.localizedDescription)")
-            return await fallback.analyze(msg, now: now)
+            return await fallback.analyze(msg, now: now, language: language)
         }
     }
 
-    private func parseExtraction(_ raw: String, msg: GmailMessage, now: Date) -> EmailExtraction? {
+    private func parseExtraction(
+        _ raw: String,
+        msg: GmailMessage,
+        now: Date,
+        language: AppLanguage
+    ) -> EmailExtraction? {
         var trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let first = trimmed.range(of: "{"),
               let last = trimmed.range(of: "}", options: .backwards) else {
@@ -119,21 +144,15 @@ struct GeminiEmailAnalysisEngine: EmailAnalysisEngine {
 
         let dueDateISO = (json["dueDateISO"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !dueDateISO.isEmpty,
-              let dueDate = AppDateFormat.parseLLMDate(dueDateISO),
+              let dueDate = AppDateFormat.parseMailDate(dueDateISO),
               dueDate > now else {
             return nil
         }
 
-        var isAllDay = (json["isAllDay"] as? Bool) ?? false
-        let comps = Calendar.current.dateComponents([.hour, .minute, .second], from: dueDate)
-        var finalDate = dueDate
-        if comps.hour == 0 && comps.minute == 0 && (comps.second ?? 0) == 0 {
-            isAllDay = true
-            var eod = Calendar.current.dateComponents([.year, .month, .day], from: dueDate)
-            eod.hour = 23
-            eod.minute = 59
-            finalDate = Calendar.current.date(from: eod) ?? dueDate
-        }
+        let sourceCalendar = AppDateFormat.sourceCalendar(for: dueDateISO)
+        let normalizedDeadline = AppDateFormat.normalizedAllDayDeadline(dueDate, calendar: sourceCalendar)
+        let isAllDay = ((json["isAllDay"] as? Bool) ?? false) || normalizedDeadline.isAllDay
+        let finalDate = normalizedDeadline.date
 
         let sender = (json["sender"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let senderEmail = (json["senderEmail"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -141,16 +160,64 @@ struct GeminiEmailAnalysisEngine: EmailAnalysisEngine {
         let deadlineSentence = (json["deadlineSentence"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let notesSummary = (json["notes"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
 
-        let df = DateFormatter()
-        df.locale = Locale(identifier: "ko_KR")
-        df.dateStyle = .long
-        df.timeStyle = isAllDay ? .none : .short
-
-        var notesLines = ["[Gemini 분석]", "⏰ \(df.string(from: finalDate))까지"]
-        if !notesSummary.isEmpty { notesLines += [notesSummary, "(AI 요약)"] }
+        let deadlineString = AppDateFormat.deadlineString(
+            from: finalDate,
+            isAllDay: isAllDay,
+            language: language
+        )
+        var notesLines = [
+            AppLanguage.localized(
+                "mail.analysis.header",
+                defaultValue: language == .english ? "[Email Summary]" : "[Gemini 분석]",
+                language: language,
+                comment: "Email analysis provenance"
+            ),
+            {
+                let defaultValue = language == .english
+                    ? "Due by \(deadlineString)"
+                    : "⏰ \(deadlineString)까지"
+                let localized = AppLanguage.localized(
+                    "mail.deadline",
+                    defaultValue: defaultValue,
+                    language: language,
+                    comment: "Detected email deadline"
+                )
+                return localized == defaultValue
+                    ? localized
+                    : String(format: localized, locale: language.locale, deadlineString)
+            }(),
+        ]
+        if !notesSummary.isEmpty {
+            notesLines += [
+                notesSummary,
+                AppLanguage.localized(
+                    "mail.aiSummary",
+                    defaultValue: language == .english ? "(AI Summary)" : "(AI 요약)",
+                    language: language,
+                    comment: "AI-generated email summary marker"
+                )
+            ]
+        }
         let resolvedSender = sender.isEmpty ? analyzer.parseSender(from: msg.from) : sender
-        if !resolvedSender.isEmpty { notesLines += ["", "[발신자] \(resolvedSender)"] }
-
+        if !resolvedSender.isEmpty {
+            notesLines += [
+                "",
+                {
+                    let defaultValue = language == .english
+                        ? "[Sender] \(resolvedSender)"
+                        : "[발신자] \(resolvedSender)"
+                    let localized = AppLanguage.localized(
+                        "mail.sender",
+                        defaultValue: defaultValue,
+                        language: language,
+                        comment: "Email sender label"
+                    )
+                    return localized == defaultValue
+                        ? localized
+                        : String(format: localized, locale: language.locale, resolvedSender)
+                }()
+            ]
+        }
         return EmailExtraction(
             dueDate: finalDate,
             isAllDay: isAllDay,
