@@ -37,6 +37,28 @@ struct LocalizationRuntimeTests {
         #expect(AppLanguage.english.outputLanguageName == "English")
     }
 
+    @Test("User language override persists and resets to system mode")
+    @MainActor
+    func persistedLanguageOverride() {
+        let defaults = UserDefaults.standard
+        let previous = defaults.string(forKey: AppLanguage.userOverrideKey)
+        defer {
+            if let previous {
+                defaults.set(previous, forKey: AppLanguage.userOverrideKey)
+            } else {
+                defaults.removeObject(forKey: AppLanguage.userOverrideKey)
+            }
+            NotificationCenter.default.post(name: AppLanguage.didChangeNotification, object: nil)
+        }
+
+        AppLanguage.setUserOverride(.english)
+        #expect(AppLanguage.userOverride == .english)
+        #expect(AppLanguage.current == .english)
+
+        AppLanguage.setUserOverride(nil)
+        #expect(AppLanguage.userOverride == nil)
+    }
+
     @Test("Missing localized resources use the supplied fallback")
     func missingResourceFallback() {
         #expect(

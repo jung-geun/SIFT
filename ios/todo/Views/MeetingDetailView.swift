@@ -613,8 +613,9 @@ struct MeetingDetailView: View {
             language: language,
             comment: "Meeting proofreading correction count."
         )
-        return String.localizedStringWithFormat(
-            format,
+        return String(
+            format: format,
+            locale: language.locale,
             Int64(corrections),
             engineLabel
         )

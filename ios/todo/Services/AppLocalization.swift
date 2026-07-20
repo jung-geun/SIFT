@@ -26,6 +26,7 @@ nonisolated struct AppLanguage: RawRepresentable, Hashable, Identifiable, Sendab
         return supportedIdentifiers
             .map(AppLanguage.init(rawValue:))
             .sorted { lhs, rhs in
+                if lhs == rhs { return false }
                 if lhs == current { return true }
                 if rhs == current { return false }
                 return lhs.displayName.localizedStandardCompare(rhs.displayName) == .orderedAscending
@@ -94,18 +95,22 @@ nonisolated struct AppLanguage: RawRepresentable, Hashable, Identifiable, Sendab
     }
 
     private static func matchingIdentifier(_ raw: String, in available: [String]) -> String? {
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        if let exact = available.first(where: { $0.caseInsensitiveCompare(trimmed) == .orderedSame }) {
-            return exact
+        let normalized = raw
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "_", with: "-")
+        guard !normalized.isEmpty else { return nil }
+        var candidates = normalized.split(separator: "-").map(String.init)
+        while !candidates.isEmpty {
+            let candidate = candidates.joined(separator: "-")
+            if let match = available.first(where: {
+                $0.replacingOccurrences(of: "_", with: "-")
+                    .caseInsensitiveCompare(candidate) == .orderedSame
+            }) {
+                return match
+            }
+            candidates.removeLast()
         }
-        guard let languageCode = Locale(identifier: trimmed).language.languageCode?.identifier
-                ?? trimmed.split(separator: "-").first.map(String.init)
-        else { return nil }
-        return available.first {
-            let candidate = Locale(identifier: $0).language.languageCode?.identifier ?? ""
-            return candidate.caseInsensitiveCompare(languageCode) == .orderedSame
-        }
+        return nil
     }
 }
 
@@ -127,8 +132,7 @@ extension AppLanguage {
             let value = languageBundle.localizedString(forKey: key, value: nil, table: table)
             if value != key { return value }
         }
-        let value = hostBundle.localizedString(forKey: key, value: nil, table: table)
-        return value == key ? defaultValue : value
+        return defaultValue
     }
 
     nonisolated static func localizedCount(
@@ -149,7 +153,7 @@ extension AppLanguage {
         return String(format: format, locale: language.locale, Int64(count))
     }
 
-    private var bundleCandidates: [String] {
+    nonisolated private var bundleCandidates: [String] {
         let languageCode = Locale(identifier: rawValue).language.languageCode?.identifier
         var candidates = [rawValue]
         if let languageCode, languageCode != rawValue {

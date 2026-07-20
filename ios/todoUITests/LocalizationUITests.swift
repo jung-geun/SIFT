@@ -10,8 +10,25 @@ final class LocalizationUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = [
             "-ApplePersistenceIgnoreState", "YES",
-            "-AppleLanguages", "(en)",
-            "-AppleLocale", "en_US",
+            "-AppleLanguages", "(ko)",
+            "-AppleLocale", "ko_KR",
+            "-pieroot.todo.appLanguageOverride", "en",
+            "-pieroot.todo.hasOnboarded", "YES",
+            "-pieroot.todo.hasCompletedTutorial", "YES",
+            "-pieroot.todo.launchBehavior", "lastUsed",
+            "-pieroot.todo.selectedTab", "0",
+            "-pieroot.todo.uiTestShowAllTabs"
+        ]
+        app.launch()
+        return app
+    }
+
+    private func launchSystemKorean() -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchArguments = [
+            "-ApplePersistenceIgnoreState", "YES",
+            "-AppleLanguages", "(ko)",
+            "-AppleLocale", "ko_KR",
             "-pieroot.todo.hasOnboarded", "YES",
             "-pieroot.todo.hasCompletedTutorial", "YES",
             "-pieroot.todo.launchBehavior", "lastUsed",
@@ -57,6 +74,7 @@ final class LocalizationUITests: XCTestCase {
         settings.tap()
 
         XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.descendants(matching: .any)["settings.languagePicker"].waitForExistence(timeout: 10))
         let appInfo = app.buttons["settings.appInfoRow"]
         XCTAssertTrue(appInfo.waitForExistence(timeout: 10))
         appInfo.tap()
@@ -68,5 +86,30 @@ final class LocalizationUITests: XCTestCase {
         XCTAssertTrue(app.navigationBars["Privacy Policy"].waitForExistence(timeout: 10))
         XCTAssertTrue(app.staticTexts["View Korean Original Online"].waitForExistence(timeout: 10))
         XCTAssertTrue(app.staticTexts["Information collected and purposes"].waitForExistence(timeout: 10))
+    }
+
+    @MainActor
+    func testLanguageOverrideCanResetToSystem() throws {
+        let app = launchSystemKorean()
+        let settings = app.buttons["todo.settingsButton"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 10))
+        settings.tap()
+
+        let picker = app.descendants(matching: .any)["settings.languagePicker"]
+        XCTAssertTrue(picker.waitForExistence(timeout: 10))
+        picker.tap()
+        let english = app.buttons["English"]
+        XCTAssertTrue(english.waitForExistence(timeout: 10))
+        english.tap()
+        XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 10))
+
+        picker.tap()
+        let systemLanguage = app.buttons["System Language"]
+        XCTAssertTrue(systemLanguage.waitForExistence(timeout: 10))
+        systemLanguage.tap()
+        XCTAssertTrue(app.navigationBars["설정"].waitForExistence(timeout: 10))
+
+        app.buttons["닫기"].tap()
+        XCTAssertTrue(app.tabBars.buttons["할 일"].waitForExistence(timeout: 10))
     }
 }

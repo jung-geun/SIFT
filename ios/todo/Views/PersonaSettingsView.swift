@@ -6,7 +6,7 @@ struct PersonaSettingsView: View {
     @AppStorage("pieroot.todo.iCloudSyncEnabled") private var iCloudSyncEnabled = false
     @ObservedObject private var settingsStore = SettingsStore.shared
     @State private var languageOverrideRaw = AppLanguage.userOverride?.rawValue ?? ""
-    @State private var localizationRevision = 0
+    @State private var selectedAppLanguage = AppLanguage.current
     var body: some View {
         Form {
             Section {
@@ -62,6 +62,7 @@ struct PersonaSettingsView: View {
                     let language = AppLanguage.supported.first { $0.rawValue == rawValue }
                     AppLanguage.setUserOverride(language)
                 }
+                .accessibilityIdentifier("settings.languagePicker")
             } header: {
                 Text(copy("settings.language.section", fallback: "언어"))
             } footer: {
@@ -80,10 +81,9 @@ struct PersonaSettingsView: View {
                 Text("검증 중인 기능을 사용자가 직접 선택할 수 있게 합니다. 회의 음성 노이즈 감소는 베타 기능을 켠 뒤 회의 화면에서 선택할 수 있습니다.")
             }
         }
-        .id(localizationRevision)
-        .environment(\.locale, AppLanguage.current.locale)
+        .environment(\.locale, selectedAppLanguage.locale)
         .onReceive(NotificationCenter.default.publisher(for: AppLanguage.didChangeNotification)) { _ in
-            localizationRevision += 1
+            selectedAppLanguage = AppLanguage.current
         }
         .safeAreaInset(edge: .bottom, spacing: 12) {
             if let tutorial, let hint = tutorial.hint(for: .settings) {
@@ -92,11 +92,10 @@ struct PersonaSettingsView: View {
                     .padding(.bottom, 12)
             }
         }
-        .navigationTitle("설정")
-        .navigationBarTitleDisplayMode(.large)
+        .navigationTitle(copy("settings.title", fallback: "설정"))
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
-                Button("닫기") { dismiss() }
+                Button(copy("action.close", fallback: "닫기")) { dismiss() }
             }
         }
         .task {
@@ -109,7 +108,12 @@ struct PersonaSettingsView: View {
     }
 
     private func copy(_ key: String, fallback: String) -> String {
-        AppLanguage.localized(key, defaultValue: fallback, language: .current, comment: "Settings localization copy.")
+        AppLanguage.localized(
+            key,
+            defaultValue: fallback,
+            language: selectedAppLanguage,
+            comment: "Settings localization copy."
+        )
     }
 
     private func settingsBinding<T>(key: String, defaultValue: T) -> Binding<T> {
