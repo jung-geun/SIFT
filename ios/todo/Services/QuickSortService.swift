@@ -28,17 +28,18 @@ enum QuickSortService {
         guard todo.manualPriority == nil else { return }
         let todoID = todo.id
 
-        let provider = SettingsStore.selectedProvider()
         let results: [PriorityResult]
         do {
-            results = try await RoutedIntelligenceEngine(requestedProvider: provider)
+            results = try await RoutedIntelligenceEngine()
                 .prioritize(todos: [todo], events: [], persona: persona)
+        } catch is CancellationError {
+            return
         } catch {
             let heuristic = try? await HeuristicEngine().prioritize(todos: [todo], events: [], persona: persona)
             results = heuristic?.map {
                 var updated = $0
-                updated.requestedProviderRawValue = provider.rawValue
-                updated.fallbackReason = error.localizedDescription
+                updated.executionPath = .rules(.providerExecutionFailed)
+                updated.fallbackReason = RuleFallbackReason.providerExecutionFailed.rawValue
                 return updated
             } ?? []
         }

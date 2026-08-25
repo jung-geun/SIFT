@@ -50,9 +50,8 @@ struct ICloudSyncDetailView: View {
             
             if iCloudSyncEnabled {
                 Section {
-                    syncManagementRow(title: "AI 자동화", key: "pieroot.todo.onDeviceLLMEnabled")
-                    syncManagementRow(title: "TODO 자동 정렬 AI", key: "selectedAIProvider")
                     syncManagementRow(title: "메일 자동 분석", key: "pieroot.todo.emailAutoAnalysisEnabled")
+                    syncManagementRow(title: "Gemini 메일 본문 공유", key: "pieroot.todo.providerEmailAnalysisEnabled")
                     syncManagementRow(title: "자동 동기화 시각", key: "pieroot.todo.emailRefreshHour")
                     syncManagementRow(title: "메일 분석 기간", key: EmailAnalysisLookbackPolicy.lookbackSettingKey)
                     syncManagementRow(title: "마감 자동 캘린더 등록", key: "pieroot.todo.calendarAutoRegister")
@@ -72,9 +71,8 @@ struct ICloudSyncDetailView: View {
         let localizedTitle: String = {
             let keyName: String
             switch key {
-            case "pieroot.todo.onDeviceLLMEnabled": keyName = "settings.sync.aiAutomation"
-            case "selectedAIProvider": keyName = "settings.sync.priorityAI"
             case "pieroot.todo.emailAutoAnalysisEnabled": keyName = "settings.sync.mailAnalysis"
+            case "pieroot.todo.providerEmailAnalysisEnabled": keyName = "settings.sync.mailBodySharing"
             case "pieroot.todo.emailRefreshHour": keyName = "settings.sync.refreshHour"
             case EmailAnalysisLookbackPolicy.lookbackSettingKey: keyName = "settings.sync.mailLookback"
             case "pieroot.todo.calendarAutoRegister": keyName = "settings.sync.calendarAutoRegister"

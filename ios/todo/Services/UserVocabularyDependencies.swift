@@ -72,7 +72,7 @@ func makeVocabularyMeetingDependencies(_ service: UserVocabularyService?) -> Mee
             )
         },
         analyze: { meetingID, result, hint, language in
-            await MeetingAnalysisEngine().analyze(
+            try await MeetingAnalysisEngine().analyze(
                 meetingID: meetingID,
                 result: result,
                 glossaryHint: hint,

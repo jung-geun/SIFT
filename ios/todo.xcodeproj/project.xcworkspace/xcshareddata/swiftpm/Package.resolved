@@ -2,15 +2,6 @@
   "originHash" : "665977f98b6a096fd7c9b47f98adbe5ffc4f9ae9d7037fb901b8ac4124fca08a",
   "pins" : [
     {
-      "identity" : "microsoft-authentication-library-for-objc",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/AzureAD/microsoft-authentication-library-for-objc",
-      "state" : {
-        "revision" : "856a252c77b5d92fd3f2352497c96a9bed15ba4e",
-        "version" : "2.13.0"
-      }
-    },
-    {
       "identity" : "mlx-swift",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/ml-explore/mlx-swift",

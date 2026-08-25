@@ -2,6 +2,7 @@ import Foundation
 import CoreData
 import Combine
 import SwiftUI
+import OSLog
 
 // MARK: - iCloud 동기화 페이즈
 
@@ -32,6 +33,7 @@ final class CloudSyncMonitor: ObservableObject {
     private var fallbackTask: Task<Void, Never>?
     private var completionTask: Task<Void, Never>?
     private var gotRealEvent = false
+    private let logger = Logger(subsystem: "pieroot.todo", category: "CloudSyncMonitor")
 
     // MARK: - Start / Stop
 
@@ -71,7 +73,7 @@ final class CloudSyncMonitor: ObservableObject {
             // 실제 이벤트 없음 — 타이머 기반 완료 처리 (변경사항이 없으면 이벤트가 오지 않을 수 있음)
             try? await Task.sleep(for: .seconds(5))
             guard !Task.isCancelled, phase == .importing else { return }
-            print("[CloudSyncMonitor] CloudKit 이벤트 미도착 (변경사항 없음 혹은 오프라인), 상태 완료로 전환")
+            logger.trace("CloudKit import event did not arrive; completing sync monitor fallback")
             finishImport()
         }
     }
@@ -110,6 +112,24 @@ final class CloudSyncMonitor: ObservableObject {
             NSPersistentCloudKitContainer.eventNotificationUserInfoKey
         ] as? NSPersistentCloudKitContainer.Event else { return }
 
+        if event.endDate != nil, !event.succeeded {
+            let operation: String
+            switch event.type {
+            case .import: operation = "import"
+            case .export: operation = "export"
+            case .setup: operation = "setup"
+            @unknown default: operation = "setup"
+            }
+            DiagnosticRecorder.shared.record(
+                error: event.error ?? DiagnosticFailure(
+                    code: 0,
+                    reason: "CloudKit event failed without an error object"
+                ),
+                component: "sync.cloudkit",
+                operation: operation
+            )
+        }
+
         // import 이벤트만 처리 (setup / export 무시)
         guard event.type == .import else { return }
 
@@ -123,7 +143,7 @@ final class CloudSyncMonitor: ObservableObject {
             }
         } else {
             // Import 완료
-            print("[CloudSyncMonitor] CloudKit import 완료 (succeeded: \(event.succeeded))")
+            logger.trace("CloudKit import completed; succeeded=\(event.succeeded)")
             finishImport()
         }
     }

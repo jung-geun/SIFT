@@ -11,6 +11,37 @@ enum TodoSource: String, Codable, Sendable {
     case meeting  = "meeting"
 }
 
+/// 캘린더 이벤트의 소유·생성 경로. 이벤트 URL 마커와 함께 저장해 재설치 후에도
+/// 외부 캘린더 import와 SIFT가 만든 일정을 구분한다.
+enum CalendarEventOrigin: String, Codable, Sendable, Equatable {
+    case externalCalendar = "externalCalendar"
+    case siftManual = "siftManual"
+    case siftEmail = "siftEmail"
+    case siftMeeting = "siftMeeting"
+    case siftRecommendation = "siftRecommendation"
+
+    static func inferred(from todo: Todo) -> CalendarEventOrigin {
+        // AI가 imported calendar Todo를 분석했더라도, 외부 이벤트의 소유권을
+        // SIFT 추천 일정으로 바꾸면 안 된다.
+        if todo.todoSource == .calendar {
+            return .externalCalendar
+        }
+        if todo.aiRecommendedTime != nil {
+            return .siftRecommendation
+        }
+        switch todo.todoSource {
+        case .calendar: return .externalCalendar
+        case .email: return .siftEmail
+        case .meeting: return .siftMeeting
+        case .manual: return .siftManual
+        }
+    }
+
+    var isSiftManaged: Bool {
+        self != .externalCalendar
+    }
+}
+
 /// 이메일 메일 triage 결과 — 메인 할 일 vs 참고함
 enum TodoTriage: String, Codable, Sendable {
     case todo   = "todo"    // 메인 할 일 목록에 표시
@@ -70,6 +101,9 @@ final class Todo {
 
     // MARK: - Scheduling
     var dueDate: Date?
+    /// 일정의 시작 시각. 시각이 있는 캘린더 일정에서 import되거나 상세 화면에서 지정된다.
+    /// nil = 시작 시각 없음(마감만 있는 기존 할 일). dueDate가 nil이면 항상 nil이다.
+    var startDate: Date?
     var isCompleted: Bool = false
     /// v3 메모리: 완료 시각 패턴 분석에 활용
     var completedAt: Date?
@@ -100,9 +134,9 @@ final class Todo {
     var sourceRef: String = ""
     /// 발신자 표시명 (이메일 출처일 때 From 헤더에서 파싱)
     var sourceSender: String = ""
-    /// RFC822 Message-ID 헤더 — Gmail 원본 permalink 생성용 (이메일 출처 전용)
+    /// RFC822 Message-ID header for provider-neutral email-source resolution.
     var sourceMessageID: String = ""
-    /// Gmail API threadId — Gmail 앱 딥링크(googlegmail://show?thread=)용. (이메일 출처 전용)
+    /// Provider thread identifier for grouping related email-source Todos.
     var sourceThreadID: String = ""
     /// 발신자 이메일 주소 — 학습 억제 키 (표시명보다 안정적, 예: "no-reply@coupang.com")
     var sourceSenderEmail: String = ""
@@ -121,6 +155,13 @@ final class Todo {
     /// EKEvent.calendarItemExternalIdentifier — iCloud 동기화 후에도 변하지 않는 안정 식별자.
     /// eventIdentifier는 기기마다 다르지만 externalIdentifier는 동일 → 다른 기기에서 중복 등록 방지.
     var calendarEventExternalID: String = ""
+    /// CalendarEventOrigin.rawValue. 빈 값은 이전 버전 데이터이며 source로 안전하게 추론한다.
+    var calendarEventOrigin: String = ""
+    /// 캘린더 동기화가 마지막으로 Todo에 반영한 EKEvent 제목.
+    /// 로컬 제목 편집과 캘린더 상류(EventKit) 변경을 구분하는 3-way merge 기준값.
+    /// 빈 문자열 = 기준선 없음(이전 버전 데이터).
+    var calendarSyncedTitle: String = ""
+
 
     // MARK: - v3 Forward-Compat
 
@@ -150,16 +191,20 @@ final class Todo {
     // MARK: - Init
 
     init(
+        id: UUID = UUID(),
         title: String = "",
         notes: String = "",
+        startDate: Date? = nil,
         dueDate: Date? = nil,
         source: TodoSource = .manual,
         sourceRef: String = "",
         tags: [String] = [],
         reminderOffsets: [Double] = []
     ) {
+        self.id = id
         self.title = title
         self.notes = notes
+        self.startDate = startDate
         self.dueDate = dueDate
         self.source = source.rawValue
         self.sourceRef = sourceRef
@@ -173,25 +218,16 @@ final class Todo {
         TodoSource(rawValue: source) ?? .manual
     }
 
+    var calendarOrigin: CalendarEventOrigin {
+        CalendarEventOrigin(rawValue: calendarEventOrigin)
+            ?? CalendarEventOrigin.inferred(from: self)
+    }
+
     /// 이메일 triage 결과 접근자 — 알 수 없는 값은 .todo로 폴백 (수동 항목 보호)
     var triage: TodoTriage {
         TodoTriage(rawValue: triageStatus) ?? .todo
     }
 
-    /// 원본 Gmail 메시지로 여는 permalink (RFC822 Message-ID 기반).
-    /// rfc822msgid: 검색 연산자는 Gmail 웹에서 확정 동작.
-    /// iOS가 Gmail 앱의 Universal Link 클레임을 처리하면 앱으로, 아니면 브라우저로 열림.
-    var emailURL: URL? {
-        guard todoSource == .email, !sourceMessageID.isEmpty else { return nil }
-        // RFC822 Message-ID 헤더는 <id@domain> 형태로 꺾쇠를 포함한다.
-        // rfc822msgid: 연산자는 꺾쇠 없는 id를 기대하므로 제거 후 보수적 인코딩.
-        let stripped = sourceMessageID.trimmingCharacters(in: CharacterSet(charactersIn: "<>"))
-        guard !stripped.isEmpty else { return nil }
-        // 영숫자 + 최소 안전문자만 허용 (urlHostAllowed는 꺾쇠 등 위험문자를 통과시킴)
-        let safeChars = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~@+"))
-        guard let enc = stripped.addingPercentEncoding(withAllowedCharacters: safeChars) else { return nil }
-        return URL(string: "https://mail.google.com/mail/u/0/#search/rfc822msgid:\(enc)")
-    }
 
     var manualPriorityEnum: TodoPriority? {
         guard let m = manualPriority else { return nil }
@@ -210,6 +246,15 @@ final class Todo {
     /// dueDate까지 남은 시간 (음수 = 이미 지남)
     var timeUntilDue: TimeInterval? {
         dueDate.map { $0.timeIntervalSinceNow }
+    }
+
+    /// 캘린더 발생분 조회·타임라인 배치의 기준 시각. 시작이 없으면 마감을 기준점으로 쓴다.
+    var scheduleAnchor: Date? { startDate ?? dueDate }
+
+    /// 시작~마감이 실제 구간을 이룰 때만 반환한다.
+    var scheduledRange: (start: Date, end: Date)? {
+        guard let startDate, let dueDate, dueDate > startDate else { return nil }
+        return (startDate, dueDate)
     }
 
     var isOverdue: Bool {
@@ -243,11 +288,10 @@ final class Todo {
     }
 }
 
-enum TodoAISortScope {
+enum TodoPriorityScope {
     static func candidates(from todos: [Todo]) -> [Todo] {
-        todos.filter { !$0.isCompleted && $0.triage == .todo }
+        todos.filter { !$0.isCompleted && $0.triage == .todo && $0.manualPriority == nil }
     }
-
     @discardableResult
     static func apply(_ result: PriorityResult, in candidates: [Todo]) -> Todo? {
         guard let todo = candidates.first(where: { $0.id == result.todoID }) else { return nil }

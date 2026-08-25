@@ -25,6 +25,109 @@ final class SettingsStore: ObservableObject {
     ]
 
     static let betaFeaturesKey = "pieroot.todo.betaFeaturesEnabled"
+    nonisolated static let betaFoundationModelsEnabledKey = "pieroot.todo.beta.foundationModelsEnabled"
+    nonisolated static let betaOnDeviceModelEnabledKey = "pieroot.todo.beta.onDeviceModelEnabled"
+    nonisolated static let betaGeminiEnabledKey = "pieroot.todo.beta.geminiEnabled"
+    nonisolated static let betaMeetingVoiceProcessingEnabledKey = "pieroot.todo.beta.meetingVoiceProcessingEnabled"
+    nonisolated static let betaSelectedProviderKey = "pieroot.todo.beta.selectedProvider"
+    nonisolated static let betaLegacySelectionMigratedKey = "pieroot.todo.beta.legacySelectionMigrated.v1"
+
+    nonisolated static func betaProviderEnabled(_ provider: BetaProvider) -> Bool {
+        let key: String
+        switch provider {
+        case .foundationModels: key = betaFoundationModelsEnabledKey
+        case .onDevice: key = betaOnDeviceModelEnabledKey
+        case .gemini: key = betaGeminiEnabledKey
+        }
+        let defaults = UserDefaults.standard
+        if provider == .foundationModels, defaults.object(forKey: key) == nil {
+            return true
+        }
+        return defaults.bool(forKey: key)
+    }
+
+    nonisolated static func betaProviderAccess() -> BetaProviderAccess {
+        BetaProviderAccess(
+            foundationModelsEnabled: betaProviderEnabled(.foundationModels),
+            onDeviceEnabled: betaProviderEnabled(.onDevice),
+            geminiEnabled: betaProviderEnabled(.gemini),
+            meetingVoiceProcessingEnabled: UserDefaults.standard.bool(
+                forKey: betaMeetingVoiceProcessingEnabledKey
+            )
+        )
+    }
+
+    nonisolated static func betaSelectedProvider() -> PersonaAIProvider? {
+        if let raw = UserDefaults.standard.string(forKey: betaSelectedProviderKey),
+           let provider = PersonaAIProvider(rawValue: raw) {
+            return provider
+        }
+        return betaProviderEnabled(.foundationModels) ? .foundationModels : nil
+    }
+
+    func setBetaProvider(_ provider: BetaProvider, enabled: Bool) {
+        let key: String
+        switch provider {
+        case .foundationModels: key = Self.betaFoundationModelsEnabledKey
+        case .onDevice: key = Self.betaOnDeviceModelEnabledKey
+        case .gemini: key = Self.betaGeminiEnabledKey
+        }
+        local.set(enabled, forKey: key)
+        normalizeBetaSelectedProvider()
+        objectWillChange.send()
+    }
+
+    func setBetaSelectedProvider(_ provider: PersonaAIProvider?) {
+        if let provider {
+            local.set(provider.rawValue, forKey: Self.betaSelectedProviderKey)
+        } else {
+            local.removeObject(forKey: Self.betaSelectedProviderKey)
+        }
+        objectWillChange.send()
+    }
+
+    func migrateLegacyBetaSelectedProviderIfNeeded() {
+        let defaults = UserDefaults.standard
+        if !defaults.bool(forKey: Self.betaLegacySelectionMigratedKey) {
+            let raw = defaults.string(forKey: Self.betaSelectedProviderKey)
+            let existingValidProvider = raw.flatMap(PersonaAIProvider.init(rawValue:))
+            if existingValidProvider == nil && Self.betaProviderEnabled(.foundationModels) {
+                setBetaSelectedProvider(.foundationModels)
+            }
+            defaults.set(true, forKey: Self.betaLegacySelectionMigratedKey)
+        }
+    }
+
+    func normalizeBetaSelectedProvider() {
+        let access = Self.betaProviderAccess()
+        if let selected = Self.betaSelectedProvider(), access.isEnabled(selected) {
+            return
+        }
+
+        let preferred = [PersonaAIProvider.foundationModels, .onDevice, .gemini]
+            .first(where: access.isEnabled)
+        setBetaSelectedProvider(preferred)
+    }
+    #if DEBUG
+    func resetBetaFeaturesForUITest() {
+        [
+            Self.betaFoundationModelsEnabledKey,
+            Self.betaOnDeviceModelEnabledKey,
+            Self.betaGeminiEnabledKey,
+            Self.betaMeetingVoiceProcessingEnabledKey,
+            Self.betaSelectedProviderKey,
+            Self.betaLegacySelectionMigratedKey
+        ].forEach(local.removeObject(forKey:))
+        objectWillChange.send()
+    }
+
+    func seedLegacyAISettingsForUITest() {
+        local.set(true, forKey: Self.betaFeaturesKey)
+        local.set(true, forKey: "pieroot.todo.onDeviceLLMEnabled")
+        local.set(PersonaAIProvider.gemini.rawValue, forKey: "selectedAIProvider")
+        objectWillChange.send()
+    }
+    #endif
 
     #if DEBUG
     nonisolated private static var isTestProcess: Bool {
@@ -51,17 +154,20 @@ final class SettingsStore: ObservableObject {
         set { set(Self.betaFeaturesKey, value: newValue) }
     }
 
+    /// Legacy key retained only so existing stored settings can be migrated or inspected.
     static let meetingVoiceProcessingKey = "pieroot.todo.meetingVoiceProcessingEnabled"
 
-    /// On-device voice processing (AEC + noise suppression + AGC) for meeting
-    /// capture. Default off while the feature remains beta.
+    /// On-device voice processing is a device-local beta opt-in.
     var meetingVoiceProcessingEnabled: Bool {
-        get { get(Self.meetingVoiceProcessingKey, defaultValue: false) }
-        set { set(Self.meetingVoiceProcessingKey, value: newValue) }
+        get { Self.betaProviderAccess().meetingVoiceProcessingEnabled }
+        set {
+            local.set(newValue, forKey: Self.betaMeetingVoiceProcessingEnabledKey)
+            objectWillChange.send()
+        }
     }
 
     var effectiveMeetingVoiceProcessingEnabled: Bool {
-        betaFeaturesEnabled && meetingVoiceProcessingEnabled
+        Self.betaProviderAccess().meetingVoiceProcessingEnabled
     }
 
     static let meetingAutoRefineKey = "pieroot.todo.meetingAutoRefineEnabled"

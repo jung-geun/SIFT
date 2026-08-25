@@ -5,6 +5,15 @@ final class LocalizationUITests: XCTestCase {
         continueAfterFailure = false
         XCUIApplication().terminate()
     }
+    @MainActor
+    private func scrollToHittable(_ element: XCUIElement, in app: XCUIApplication, maxSwipes: Int = 8) {
+        for _ in 0..<maxSwipes where !element.isHittable {
+            app.swipeUp()
+        }
+        XCTAssertTrue(element.waitForExistence(timeout: 2))
+        XCTAssertTrue(element.isHittable)
+    }
+
 
     private func launchEnglish() -> XCUIApplication {
         let app = XCUIApplication()
@@ -17,7 +26,8 @@ final class LocalizationUITests: XCTestCase {
             "-pieroot.todo.hasCompletedTutorial", "YES",
             "-pieroot.todo.launchBehavior", "lastUsed",
             "-pieroot.todo.selectedTab", "0",
-            "-pieroot.todo.uiTestShowAllTabs"
+            "-pieroot.todo.uiTestShowAllTabs",
+            "-ui-test-suppress-crash-prompt"
         ]
         app.launch()
         return app
@@ -33,7 +43,8 @@ final class LocalizationUITests: XCTestCase {
             "-pieroot.todo.hasCompletedTutorial", "YES",
             "-pieroot.todo.launchBehavior", "lastUsed",
             "-pieroot.todo.selectedTab", "0",
-            "-pieroot.todo.uiTestShowAllTabs"
+            "-pieroot.todo.uiTestShowAllTabs",
+            "-ui-test-suppress-crash-prompt"
         ]
         app.launch()
         return app
@@ -73,10 +84,8 @@ final class LocalizationUITests: XCTestCase {
         XCTAssertTrue(settings.waitForExistence(timeout: 10))
         settings.tap()
 
-        XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 10))
-        XCTAssertTrue(app.descendants(matching: .any)["settings.languagePicker"].waitForExistence(timeout: 10))
         let appInfo = app.buttons["settings.appInfoRow"]
-        XCTAssertTrue(appInfo.waitForExistence(timeout: 10))
+        scrollToHittable(appInfo, in: app)
         appInfo.tap()
         XCTAssertTrue(app.navigationBars["App Info"].waitForExistence(timeout: 10))
 
@@ -86,6 +95,36 @@ final class LocalizationUITests: XCTestCase {
         XCTAssertTrue(app.navigationBars["Privacy Policy"].waitForExistence(timeout: 10))
         XCTAssertTrue(app.staticTexts["View Korean Original Online"].waitForExistence(timeout: 10))
         XCTAssertTrue(app.staticTexts["Information collected and purposes"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Effective date: July 31, 2026"].waitForExistence(timeout: 10))
+        XCTAssertTrue(
+            app.staticTexts["1-6. User-consented diagnostic reporting (optional)"].waitForExistence(timeout: 10)
+        )
+        let excludedDiagnosticData = app.staticTexts
+            .matching(NSPredicate(
+                format: "label == %@",
+                "Excluded: recordings, transcripts, to-dos, email bodies, subjects, and addresses, personas, account identifiers, and authentication tokens."
+            ))
+            .firstMatch
+        XCTAssertTrue(excludedDiagnosticData.waitForExistence(timeout: 10))
+    }
+
+    @MainActor
+    func testEnglishDiagnosticReportingConsentScreen() throws {
+        let app = launchEnglish()
+        let settings = app.buttons["todo.settingsButton"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 10))
+        settings.tap()
+
+        let appInfo = app.buttons["settings.appInfoRow"]
+        scrollToHittable(appInfo, in: app)
+        appInfo.tap()
+
+        let diagnostics = app.buttons["appInfo.diagnosticReports"]
+        XCTAssertTrue(diagnostics.waitForExistence(timeout: 10))
+        diagnostics.tap()
+        XCTAssertTrue(app.navigationBars["Error Reports"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Diagnostics and privacy"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.switches["diagnostics.collectionToggle"].waitForExistence(timeout: 10))
     }
 
     @MainActor
@@ -96,7 +135,7 @@ final class LocalizationUITests: XCTestCase {
         settings.tap()
 
         let picker = app.descendants(matching: .any)["settings.languagePicker"]
-        XCTAssertTrue(picker.waitForExistence(timeout: 10))
+        scrollToHittable(picker, in: app)
         picker.tap()
         let english = app.buttons["English"]
         XCTAssertTrue(english.waitForExistence(timeout: 10))

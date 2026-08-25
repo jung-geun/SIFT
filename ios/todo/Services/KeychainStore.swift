@@ -1,4 +1,5 @@
 import Foundation
+import LocalAuthentication
 import Security
 import OSLog
 
@@ -17,24 +18,29 @@ enum KeychainStoreError: Error, Equatable {
     case security(OSStatus)
 }
 
-enum KeychainStore {
+enum DeviceOnlyCredentialAccess: Sendable {
+    case foregroundUserPresence
+    case backgroundAfterFirstUnlock
+}
+
+nonisolated enum KeychainStore {
     private static let logger = Logger(subsystem: "pieroot.todo", category: "KeychainStore")
 
     #if DEBUG
-    private static let testStoreLock = NSLock()
-    private static var testStore: [String: String] = [:]
-    private static var testDataStore: [String: Data] = [:]
+    nonisolated private static let testStoreLock = NSLock()
+    nonisolated(unsafe) private static var testStore: [String: String] = [:]
+    nonisolated(unsafe) private static var testDataStore: [String: Data] = [:]
 
     /// Explicit test seam. Unit-test hosts provide XCTestConfigurationFilePath;
     /// UI tests opt in through SIFT_UI_TESTING. Production always uses
     /// Security.framework.
-    private static var usesTestStore: Bool {
+    nonisolated private static var usesTestStore: Bool {
         let environment = ProcessInfo.processInfo.environment
         return environment["XCTestConfigurationFilePath"] != nil
             || environment["SIFT_UI_TESTING"] == "1"
     }
 
-    private static func testKey(service: String, account: String?) -> String {
+    nonisolated private static func testKey(service: String, account: String?) -> String {
         "\(service)\u{1F}\(account ?? "")"
     }
     #endif
@@ -66,7 +72,6 @@ enum KeychainStore {
             return
         }
         #endif
-        logger.debug("Setting keychain item: service=\(service), account=\(account ?? "nil")")
         guard let data = value.data(using: .utf8) else { return }
         let sync = shouldSync
         deleteAny(service: service, account: account)       // 잔존 항목 정리
@@ -82,6 +87,11 @@ enum KeychainStore {
         
         let status = SecItemAdd(attrs as CFDictionary, nil)
         if status != errSecSuccess {
+            DiagnosticRecorder.shared.record(
+                error: DiagnosticFailure(code: Int(status), reason: "Keychain operation failed"),
+                component: "security.keychain",
+                operation: "set"
+            )
             logger.error("Failed to add keychain item: status \(status)")
         }
     }
@@ -95,7 +105,6 @@ enum KeychainStore {
             return testStore[testKey(service: service, account: account)]
         }
         #endif
-        logger.debug("Getting keychain item: service=\(service), account=\(account ?? "nil")")
         var query: [String: Any] = [
             kSecClass as String:              kSecClassGenericPassword,
             kSecAttrService as String:        service,
@@ -113,6 +122,11 @@ enum KeychainStore {
         }
         
         if status != errSecSuccess && status != errSecItemNotFound {
+            DiagnosticRecorder.shared.record(
+                error: DiagnosticFailure(code: Int(status), reason: "Keychain operation failed"),
+                component: "security.keychain",
+                operation: "get"
+            )
             logger.error("Failed to get keychain item: status \(status)")
         }
         return nil
@@ -128,7 +142,6 @@ enum KeychainStore {
             return
         }
         #endif
-        logger.debug("Deleting keychain item: service=\(service), account=\(account ?? "nil")")
         var query: [String: Any] = [
             kSecClass as String:              kSecClassGenericPassword,
             kSecAttrService as String:        service,
@@ -138,12 +151,89 @@ enum KeychainStore {
         
         let status = SecItemDelete(query as CFDictionary)
         if status != errSecSuccess && status != errSecItemNotFound {
+            DiagnosticRecorder.shared.record(
+                error: DiagnosticFailure(code: Int(status), reason: "Keychain operation failed"),
+                component: "security.keychain",
+                operation: "delete"
+            )
             logger.error("Failed to delete keychain item: status \(status)")
         }
     }
 
     // MARK: - Device-only binary values
 
+
+    nonisolated static func setDeviceOnly(
+        service: String,
+        account: String,
+        data: Data,
+        access: DeviceOnlyCredentialAccess
+    ) throws {
+        #if DEBUG
+        if usesTestStore {
+            testStoreLock.lock()
+            testDataStore[testKey(service: service, account: account)] = data
+            testStoreLock.unlock()
+            return
+        }
+        #endif
+
+        // Keychain has no transaction. Stage the replacement first so a failed
+        // access-control write never destroys an App Password the user cannot
+        // recover from this UI.
+        let stagingAccount = "\(account).staging.\(UUID().uuidString)"
+        try addDeviceOnly(
+            service: service,
+            account: stagingAccount,
+            data: data,
+            access: access
+        )
+        defer { try? deleteDeviceOnly(service: service, account: stagingAccount) }
+
+        let priorData = try getDeviceOnly(service: service, account: account)
+        try deleteDeviceOnly(service: service, account: account)
+        do {
+            try addDeviceOnly(service: service, account: account, data: data, access: access)
+        } catch {
+            if let priorData {
+                // Preserve the secret even if the requested policy change failed.
+                try? addDeviceOnly(service: service, account: account, data: priorData, access: access)
+            }
+            throw error
+        }
+    }
+
+    private nonisolated static func addDeviceOnly(
+        service: String,
+        account: String,
+        data: Data,
+        access: DeviceOnlyCredentialAccess
+    ) throws {
+        var attributes: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecAttrSynchronizable as String: kCFBooleanFalse!,
+            kSecValueData as String: data
+        ]
+        switch access {
+        case .foregroundUserPresence:
+            var error: Unmanaged<CFError>?
+            guard let accessControl = SecAccessControlCreateWithFlags(
+                nil,
+                kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+                .userPresence,
+                &error
+            ) else {
+                throw KeychainStoreError.security(errSecAuthFailed)
+            }
+            attributes[kSecAttrAccessControl as String] = accessControl
+        case .backgroundAfterFirstUnlock:
+            attributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        }
+        let status = SecItemAdd(attributes as CFDictionary, nil)
+        guard status == errSecSuccess else { throw KeychainStoreError.security(status) }
+    }
     /// Stores a value outside the app's iCloud-keychain sync policy.
     nonisolated static func setDeviceOnly(service: String, account: String, data: Data) throws {
         #if DEBUG
@@ -192,6 +282,30 @@ enum KeychainStore {
             throw KeychainStoreError.security(status)
         }
         return data
+    }
+
+    /// Checks for a device-only item without reading secret bytes or presenting
+    /// a Keychain authentication prompt.
+    nonisolated static func hasDeviceOnlyItem(service: String, account: String) -> Bool {
+        #if DEBUG
+        if usesTestStore {
+            testStoreLock.lock()
+            defer { testStoreLock.unlock() }
+            return testDataStore[testKey(service: service, account: account)] != nil
+        }
+        #endif
+        let context = LAContext()
+        context.interactionNotAllowed = true
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecAttrSynchronizable as String: kCFBooleanFalse!,
+            kSecReturnAttributes as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecUseAuthenticationContext as String: context
+        ]
+        return SecItemCopyMatching(query as CFDictionary, nil) == errSecSuccess
     }
 
     nonisolated static func deleteDeviceOnly(service: String, account: String) throws {

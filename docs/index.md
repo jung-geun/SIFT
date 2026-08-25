@@ -19,6 +19,8 @@ description: 메일·캘린더에서 할 일을 자동으로 찾아내고, AI가
 <p>
   <a href="https://testflight.apple.com/join/qQNuSmj4"><strong>🧪 TestFlight 베타 신청</strong></a>
   &nbsp;·&nbsp;
+  <a href="./outlook-imap-setup.html">Outlook (레거시 IMAP)</a>
+  &nbsp;·&nbsp;
   <a href="./changes.html">변경사항</a>
   &nbsp;·&nbsp;
   <a href="./privacy-policy.html">개인정보 처리방침</a>
@@ -136,7 +138,6 @@ SIFT는 *"TODO를 열심히 관리하게 만드는 앱"* 이 아니라, **TODO �
 
 ### 🔄 진행 중
 
-- Outlook/MSAL 연동 배포 설정 검증 (MicrosoftClientID 구성 전 기본 빌드에서는 숨김)
 - Qwen3.5 4B 고성능 모델 기기 메모리 최적화
 - 백그라운드 캘린더·메일 변경 감지와 자동 동기화 고도화
 
@@ -208,8 +209,7 @@ SIFT는 스케줄 관리를 잘하는 사람을 위한 앱이라기보다, **스
 
 <strong>개발자</strong> jung-geun &nbsp;·&nbsp; <strong>연락처</strong> <a href="mailto:pieroot.02@gmail.com">pieroot.02@gmail.com</a>
 
-<br>
+<a href="./outlook-imap-setup.html">Outlook (레거시 IMAP)</a> &nbsp;·&nbsp; <a href="./changes.html">변경사항</a> &nbsp;·&nbsp; <a href="./privacy-policy.html">개인정보 처리방침</a> &nbsp;·&nbsp; <a href="./terms-of-service.html">서비스 약관</a>
 
-<a href="./changes.html">변경사항</a> &nbsp;·&nbsp; <a href="./privacy-policy.html">개인정보 처리방침</a> &nbsp;·&nbsp; <a href="./terms-of-service.html">서비스 약관</a>
 
 </div>

@@ -50,6 +50,14 @@ struct AppTutorialFlowTests {
         #expect(visibility.clamped(1) == 0)
         #expect(visibility.clamped(2) == 2)
     }
+    @Test("legacy search tab selection falls back to to-do")
+    func clampedLegacySearchTabFallsBackToTodo() {
+        let visibilityNoOptional = AppTabVisibility(calendarVisible: false, mailVisible: false)
+        let visibilityAllOptional = AppTabVisibility(calendarVisible: true, mailVisible: true)
+
+        #expect(visibilityNoOptional.clamped(4) == AppTabID.todo.rawValue)
+        #expect(visibilityAllOptional.clamped(4) == AppTabID.todo.rawValue)
+    }
 
     @Test("mail tutorial advances after viewing mail then returning to todo")
     @MainActor
@@ -59,7 +67,7 @@ struct AppTutorialFlowTests {
 
         tutorial.handleAddTodoDismissed()
         tutorial.handlePersonaDetailClosed()
-        tutorial.handleAIDetailClosed()
+        tutorial.handlePriorityRulesDetailClosed()
         tutorial.handleEmailDetailClosed()
         tutorial.handlePermissionsClosed()
         #expect(tutorial.currentStep == .calendarEnabled)
@@ -81,7 +89,7 @@ struct AppTutorialFlowTests {
 
         tutorial.handleAddTodoDismissed()
         tutorial.handlePersonaDetailClosed()
-        tutorial.handleAIDetailClosed()
+        tutorial.handlePriorityRulesDetailClosed()
         tutorial.handleEmailDetailClosed()
         tutorial.handlePermissionsClosed()
         #expect(tutorial.currentStep == .calendarEnabled)

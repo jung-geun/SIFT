@@ -45,6 +45,7 @@ struct VocabularyDetailView: View {
                     HStack {
                         if term.isRejected {
                             Button("다시 학습 허용") { allowRelearning(term) }
+                            Button("제거", role: .destructive) { removeRejected(term) }
                         } else if !term.isPromoted {
                             Button("확인") { confirm(term) }
                             Button("거절", role: .destructive) { reject(term) }
@@ -78,6 +79,7 @@ struct VocabularyDetailView: View {
     private func confirm(_ term: VocabularyTermSummary) { mutate { service in try await service.confirm(canonicalKey: term.canonicalKey) } }
     private func reject(_ term: VocabularyTermSummary) { mutate { service in try await service.reject(canonicalKey: term.canonicalKey) } }
     private func allowRelearning(_ term: VocabularyTermSummary) { mutate { service in try await service.allowRelearning(canonicalKey: term.canonicalKey) } }
+    private func removeRejected(_ term: VocabularyTermSummary) { mutate { service in try await service.removeRejected(canonicalKey: term.canonicalKey) } }
 
     private func mutate(_ action: @escaping (UserVocabularyService) async throws -> Void) {
         guard let service = vocabulary?.service else { return }

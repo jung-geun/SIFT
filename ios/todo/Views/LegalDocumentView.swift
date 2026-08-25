@@ -20,6 +20,14 @@ enum LegalDocument: String, CaseIterable {
         case .terms:   URL(string: "https://jung-geun.github.io/SIFT/terms-of-service.html")!
         }
     }
+
+    var effectiveDate: String {
+        let (key, fallback): (String, String) = switch self {
+        case .privacy: ("legal.privacy.effectiveDate", "시행일: 2026년 7월 31일")
+        case .terms: ("legal.terms.effectiveDate", "시행일: 2026년 6월 23일")
+        }
+        return AppLanguage.localized(key, defaultValue: fallback, language: .current, comment: "Effective date for this legal document.")
+    }
 }
 private func legalLocalized(_ source: String) -> String {
     AppLanguage.localized(
@@ -27,6 +35,15 @@ private func legalLocalized(_ source: String) -> String {
         defaultValue: source,
         language: .current,
         comment: "Localized legal document content; preserve the Korean source meaning and structure."
+    )
+}
+
+private func legalCopy(_ key: String, defaultValue: String) -> String {
+    AppLanguage.localized(
+        key,
+        defaultValue: defaultValue,
+        language: .current,
+        comment: "Localized user-facing legal disclosure."
     )
 }
 
@@ -65,9 +82,7 @@ struct LegalDocumentView: View {
                     systemImage: "person.circle"
                 )
                 Spacer()
-                Text(
-                    AppLanguage.localized("legal.effectiveDate", defaultValue: "시행일: 2026년 6월 23일", language: .current, comment: "Legal document effective date.")
-                )
+                Text(document.effectiveDate)
             }
             .font(.caption)
             .foregroundStyle(.secondary)
@@ -153,6 +168,23 @@ private struct LegalBullets: View {
     }
 }
 
+private struct LegalLocalizedBullets: View {
+    let items: [(key: String, defaultValue: String)]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            ForEach(items, id: \.key) { item in
+                HStack(alignment: .top, spacing: 8) {
+                    Text("•").font(.subheadline).foregroundStyle(.secondary)
+                    Text(legalCopy(item.key, defaultValue: item.defaultValue))
+                        .font(.subheadline)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+}
+
 private struct InfoBox: View {
     let text: String
     var body: some View {
@@ -167,9 +199,43 @@ private struct InfoBox: View {
 
 // MARK: - Table
 
+nonisolated private struct LegalTableCell: Hashable {
+    let key: String
+    let defaultValue: String
+
+    init(source: String) {
+        key = "legal.text.\(source)"
+        defaultValue = source
+    }
+
+    init(key: String, defaultValue: String) {
+        self.key = key
+        self.defaultValue = defaultValue
+    }
+
+    var localized: String {
+        AppLanguage.localized(
+            key,
+            defaultValue: defaultValue,
+            language: .current,
+            comment: "Localized legal table cell."
+        )
+    }
+}
+
 private struct LegalTable: View {
-    let headers: [String]
-    let rows: [[String]]
+    let headers: [LegalTableCell]
+    let rows: [[LegalTableCell]]
+
+    init(headers: [String], rows: [[String]]) {
+        self.headers = headers.map(LegalTableCell.init(source:))
+        self.rows = rows.map { $0.map(LegalTableCell.init(source:)) }
+    }
+
+    init(headers: [String], cells: [[LegalTableCell]]) {
+        self.headers = headers.map(LegalTableCell.init(source:))
+        rows = cells
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -184,10 +250,10 @@ private struct LegalTable: View {
     }
 
     @ViewBuilder
-    private func tableRow(cells: [String], isHeader: Bool, isEven: Bool) -> some View {
+    private func tableRow(cells: [LegalTableCell], isHeader: Bool, isEven: Bool) -> some View {
         HStack(alignment: .top, spacing: 0) {
             ForEach(Array(cells.enumerated()), id: \.offset) { i, cell in
-                Text(legalLocalized(cell))
+                Text(cell.localized)
                     .font(isHeader ? .caption.bold() : .caption)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -282,17 +348,34 @@ private struct PrivacyPolicyContent: View {
                 "Gemini를 선택하면 할 일 제목·메모·마감·페르소나·캘린더 컨텍스트가 Google Gemini API로 전송될 수 있음",
                 "이메일 본문은 별도 동의가 없으면 전송하지 않음",
             ])
+
+            Text(legalCopy(
+                "legal.privacy.diagnostics.title",
+                defaultValue: "1-6. 사용자 동의형 오류 진단 (선택)"
+            ))
+            .font(.subheadline.bold())
+            LegalLocalizedBullets(items: [
+                ("legal.privacy.diagnostics.collected", "수집 항목: 오류 발생 시각·반복 횟수, 오류가 발생한 기능 위치와 소스 파일·줄 번호, 오류 도메인·코드·유형·메시지(파일 경로와 이메일 주소 제거, 300자 제한)와 하위 오류 사슬, 앱 버전·빌드·설치 경로, 운영체제 버전, 기기 모델 식별자·메모리·저장 공간·화면 크기·프로세서 수, 언어·지역·시간대, 발열 상태·저전력 모드·앱 메모리 사용량·앱 실행 상태, 기능 설정 On/Off 값, 앱이 남긴 최근 오류 로그(최대 300건, 30분), Apple이 나중에 제공할 수 있는 충돌·멈춤·메모리 종료 진단"),
+                ("legal.privacy.diagnostics.excluded", "제외 항목: 음성 녹음, 전사문, 할 일, 이메일 본문·제목·주소, 페르소나, 계정 식별자, 인증 토큰"),
+                ("legal.privacy.diagnostics.storage", "명시적으로 허용한 경우에만 기기 로컬의 백업 제외·파일 보호 저장소에 제한된 개수로 보관하며, 동의 철회 또는 삭제 시 즉시 제거"),
+                ("legal.privacy.diagnostics.transmission", "앱은 진단 로그를 자동 전송하지 않으며, 사용자가 메일 또는 공유 시트에서 검토하고 보낼 때만 전송"),
+                ("legal.privacy.diagnostics.deliveryLimit", "Apple 시스템 진단은 지연되거나 제공되지 않을 수 있고 모든 강제 종료를 포착하지 않음"),
+            ])
         }
 
         LegalCard(number: 2, title: "정보 저장 위치") {
             LegalTable(
                 headers: ["저장소", "저장 항목"],
-                rows: [
-                    ["기기 내 로컬 (SwiftData)", "할 일·페르소나·Audit 이벤트·분석 결과 (iCloud 비활성 시)"],
-                    ["기기 내 로컬 전용 (emailContainer)", "Gmail 메시지 전체 — iCloud 동기화 완전 제외"],
-                    ["iCloud CloudKit 비공개 DB (선택)", "할 일·페르소나·Audit 이벤트·분석 결과 (iCloud 활성 시)"],
-                    ["iCloud Key-Value Store (선택)", "앱 설정값 (AI 제공자 선택 등)"],
-                    ["기기 Keychain", "Gmail OAuth 토큰"],
+                cells: [
+                    ["기기 내 로컬 (SwiftData)", "할 일·페르소나·Audit 이벤트·분석 결과 (iCloud 비활성 시)"].map(LegalTableCell.init(source:)),
+                    ["기기 내 로컬 전용 (emailContainer)", "Gmail 메시지 전체 — iCloud 동기화 완전 제외"].map(LegalTableCell.init(source:)),
+                    ["iCloud CloudKit 비공개 DB (선택)", "할 일·페르소나·Audit 이벤트·분석 결과 (iCloud 활성 시)"].map(LegalTableCell.init(source:)),
+                    ["iCloud Key-Value Store (선택)", "앱 설정값 (AI 제공자 선택 등)"].map(LegalTableCell.init(source:)),
+                    ["기기 Keychain", "Gmail OAuth 토큰"].map(LegalTableCell.init(source:)),
+                    [
+                        LegalTableCell(key: "legal.privacy.diagnostics.storeLabel", defaultValue: "기기 내 로컬 진단 저장소 (선택)"),
+                        LegalTableCell(key: "legal.privacy.diagnostics.storeDetail", defaultValue: "동의한 오류 시각·위치·코드·유형·메시지, 기기 사양·설정 스냅샷, 최근 앱 오류 로그 및 제한된 Apple 시스템 진단 — iCloud·백업 제외"),
+                    ],
                 ]
             )
             InfoBox(text: "기본적으로 이메일 본문은 기기 내 별도 로컬 저장소에만 보관됩니다. 사용자가 Gemini 제공자 또는 Gemini 메일 본문 분석을 명시적으로 켠 경우에만 선택된 TODO·페르소나·캘린더 컨텍스트와 선택적 Gmail 본문이 사용자의 API 키로 Google Gemini API에 전송될 수 있습니다. iCloud를 활성화하면 할 일 등 동기화 항목은 사용자의 비공개 CloudKit 데이터베이스에 저장됩니다.")
@@ -325,11 +408,16 @@ private struct PrivacyPolicyContent: View {
         LegalCard(number: 5, title: "정보 보관 및 파기") {
             LegalTable(
                 headers: ["정보", "보관 기간", "파기 방법"],
-                rows: [
-                    ["할 일·페르소나 등 앱 데이터", "앱 삭제 또는 직접 삭제 시까지", "기기 데이터 삭제 / iCloud 컨테이너 삭제"],
-                    ["이메일 메시지 (로컬)", "연동 해제 시 삭제 가능", "앱 데이터 삭제"],
-                    ["Gmail OAuth 토큰", "연동 해제 시 즉시 삭제", "Keychain SecItemDelete"],
-                    ["iCloud 데이터", "iCloud.com에서 직접 삭제 시", "Apple CloudKit 삭제"],
+                cells: [
+                    ["할 일·페르소나 등 앱 데이터", "앱 삭제 또는 직접 삭제 시까지", "기기 데이터 삭제 / iCloud 컨테이너 삭제"].map(LegalTableCell.init(source:)),
+                    ["이메일 메시지 (로컬)", "연동 해제 시 삭제 가능", "앱 데이터 삭제"].map(LegalTableCell.init(source:)),
+                    ["Gmail OAuth 토큰", "연동 해제 시 즉시 삭제", "Keychain SecItemDelete"].map(LegalTableCell.init(source:)),
+                    ["iCloud 데이터", "iCloud.com에서 직접 삭제 시", "Apple CloudKit 삭제"].map(LegalTableCell.init(source:)),
+                    [
+                        LegalTableCell(key: "legal.privacy.diagnostics.retentionLabel", defaultValue: "사용자 동의형 로컬 진단 로그"),
+                        LegalTableCell(key: "legal.privacy.diagnostics.retentionCondition", defaultValue: "동의 철회 또는 앱에서 삭제 시"),
+                        LegalTableCell(key: "legal.privacy.diagnostics.retentionDeletion", defaultValue: "기기 로컬 진단 저장소 삭제"),
+                    ],
                 ]
             )
         }

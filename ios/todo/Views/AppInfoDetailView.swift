@@ -4,6 +4,7 @@ import SwiftData
 // 8. 앱 정보
 struct AppInfoDetailView: View {
     @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var appUpdate: AppUpdateService
     @State private var showDevChanges = false
     
     var body: some View {
@@ -14,13 +15,38 @@ struct AppInfoDetailView: View {
                     let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "-"
                     Text("\(version) (\(build))")
                 }
+                if let updateInfo = appUpdate.updateInfo {
+                    LabeledContent("업데이트") {
+                        Text("최신 \(updateInfo.latestVersion)")
+                            .foregroundStyle(AppTheme.accent)
+                    }
+                    Button {
+                        appUpdate.openAppStore()
+                    } label: {
+                        Label("App Store에서 업데이트", systemImage: "arrow.down.circle")
+                    }
+                    .buttonStyle(.borderless)
+                }
                 LabeledContent("이메일 연동") { Text("Gmail (1계정)") }
+                NavigationLink(destination: DiagnosticReportView()) {
+                    Label(
+                        AppLanguage.localized(
+                            "diagnostics.settings.link",
+                            defaultValue: AppLanguage.current == .english ? "Error Reports" : "오류 보고",
+                            language: .current,
+                            comment: "Link to user-consented diagnostic reporting settings."
+                        ),
+                        systemImage: "exclamationmark.bubble"
+                    )
+                }
+                .accessibilityIdentifier("appInfo.diagnosticReports")
 
                 Button {
+                    UserDefaults.standard.set(false, forKey: "pieroot.todo.hasCompletedTutorial")
                     NotificationCenter.default.post(name: .settingsDismissRequested, object: nil)
                     dismiss()
                 } label: {
-                    Label("튜토리얼 다시 보기", systemImage: "questionmark.circle")
+                    Label(replayTutorialTitle, systemImage: "questionmark.circle")
                 }
                 .accessibilityIdentifier("appInfo.replayTutorial")
                 .buttonStyle(.borderless)
@@ -49,6 +75,10 @@ struct AppInfoDetailView: View {
         }
     }
     
+    private var replayTutorialTitle: String {
+        AppLanguage.current == .english ? "Replay Tutorial" : "튜토리얼 다시 시작"
+    }
+
     private var devChangesSheet: some View {
         NavigationStack {
             List {
@@ -106,6 +136,7 @@ struct AppInfoDetailView: View {
 #Preview {
     NavigationStack {
         PersonaSettingsView()
+            .environmentObject(AppUpdateService())
             .modelContainer(for: [Todo.self, Persona.self], inMemory: true)
     }
 }

@@ -36,10 +36,12 @@ struct AddTodoView: View {
                     TextField("제목 (필수)", text: $title)
                         .focused($isTitleFocused)
                         .font(.body)
+                        .appTutorialGlow(tutorial?.currentStep == .addTodoTitle)
                     TextField("메모 (선택)", text: $notes, axis: .vertical)
                         .lineLimit(2...5)
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
+                        .appTutorialGlow(tutorial?.currentStep == .addTodoTitle)
                 }
 
                 // 마감 일정
@@ -47,6 +49,7 @@ struct AddTodoView: View {
                     Toggle(isOn: $hasDueDate.animation()) {
                         Label("마감 시각 설정", systemImage: "calendar.badge.clock")
                     }
+                    .appTutorialGlow(tutorial?.currentStep == .addTodoDueDate)
 
                     if hasDueDate {
                         DatePicker(
@@ -56,6 +59,7 @@ struct AddTodoView: View {
                             displayedComponents: [.date, .hourAndMinute]
                         )
                         .datePickerStyle(.graphical)
+                        .appTutorialGlow(tutorial?.currentStep == .addTodoDueDate)
                     }
                 }
 
@@ -84,6 +88,7 @@ struct AddTodoView: View {
                         HStack(spacing: 8) {
                             Button {
                                 selectedPriority = nil
+                                tutorial?.handleAddTodoPriorityReviewed()
                             } label: {
                                 Text("자동")
                                     .font(.subheadline)
@@ -102,6 +107,7 @@ struct AddTodoView: View {
                             ForEach(TodoPriority.allCases, id: \.rawValue) { p in
                                 Button {
                                     selectedPriority = (selectedPriority == p) ? nil : p
+                                    tutorial?.handleAddTodoPriorityReviewed()
                                 } label: {
                                     Text(p.label)
                                         .font(.subheadline)
@@ -120,6 +126,7 @@ struct AddTodoView: View {
                         }
                         .padding(.vertical, 2)
                     }
+                    .appTutorialGlow(tutorial?.currentStep == .addTodoPriority)
                 }
 
                 // 알림 (마감 설정 시)
@@ -154,19 +161,33 @@ struct AddTodoView: View {
                     Button("취소") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("추가") {
+                    Button {
                         Task { await addTodo() }
+                    } label: {
+                        Text("추가")
+                            .fontWeight(.semibold)
+                            .appTutorialGlow(tutorial?.currentStep == .addTodoSave)
                     }
-                        .fontWeight(.semibold)
-                        .disabled(title.trimmingCharacters(in: .whitespaces).isEmpty)
+                    .disabled(title.trimmingCharacters(in: .whitespaces).isEmpty)
+                    .accessibilityIdentifier("todo.add.saveButton")
                 }
             }
-            .onAppear { isTitleFocused = true }
+            .onAppear {
+                isTitleFocused = true
+                updateAddTodoTutorialFromText()
+            }
+            .onChange(of: title) { _, _ in
+                updateAddTodoTutorialFromText()
+            }
+            .onChange(of: notes) { _, _ in
+                updateAddTodoTutorialFromText()
+            }
             .onChange(of: hasDueDate) { _, newValue in
                 // 마감 시각을 설정하면 캘린더 등록을 자동으로 켬
                 if newValue && CalendarService.shared.isAuthorized {
                     registerToCalendar = true
                 }
+                tutorial?.handleAddTodoDueDateEnabled(newValue)
             }
             .task {
                 calendarSources = CalendarService.shared.availableCalendars()
@@ -180,15 +201,17 @@ struct AddTodoView: View {
             }
         }
         .safeAreaInset(edge: .bottom, spacing: 12) {
-            if let tutorial, let hint = tutorial.hint(for: .addTodo) {
-                AppTutorialHintCard(hint: hint)
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 12)
+            if let tutorial {
+                AppTutorialTipHost(tutorial: tutorial, screen: .addTodo)
             }
         }
     }
 
     // MARK: - Action
+
+    private func updateAddTodoTutorialFromText() {
+        tutorial?.handleAddTodoTextChanged(title: title, notes: notes)
+    }
 
     private func addTodo() async {
         let trimmedTitle = title.trimmingCharacters(in: .whitespaces)
@@ -238,11 +261,14 @@ struct AddTodoView: View {
 
         do {
             try modelContext.save()
-            let document = VocabularySourceDocumentBuilder.todo(todo)
-            await userVocabulary?.observer.observeDocument(document, false)
         } catch {
-            modelContext.rollback()
+            DiagnosticRecorder.shared.record(error: error, component: "todo.add", operation: "save")
             return
+        }
+
+        if let observer = userVocabulary?.observer {
+            let document = VocabularySourceDocumentBuilder.todo(todo)
+            Task { await observer.observeDocument(document, false) }
         }
 
         // 수동 추가 즉시 온디바이스 AFM 약한 정렬 (비차단, ANE 실행)

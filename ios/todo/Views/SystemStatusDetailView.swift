@@ -32,6 +32,7 @@ struct SystemStatusDetailView: View {
                     if notificationStatus != .granted {
                         Button("허용") { Task { await requestNotification() } }
                             .font(.caption).buttonStyle(.bordered).controlSize(.small)
+                            .appTutorialGlow(tutorial?.currentStep == .permissions && notificationStatus != .granted)
                     }
                 }
 
@@ -44,6 +45,7 @@ struct SystemStatusDetailView: View {
                     if calendarStatus != .granted {
                         Button("허용") { Task { await requestCalendar() } }
                             .font(.caption).buttonStyle(.bordered).controlSize(.small)
+                            .appTutorialGlow(tutorial?.currentStep == .permissions && calendarStatus != .granted)
                     }
                 }
             }
@@ -57,11 +59,38 @@ struct SystemStatusDetailView: View {
             tutorial?.handlePermissionsClosed()
         }
         .safeAreaInset(edge: .bottom, spacing: 12) {
-            if let tutorial, let hint = tutorial.hint(for: .permissionsDetail) {
-                AppTutorialHintCard(hint: hint)
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 12)
+            if let tutorial, tutorial.currentStep == .permissions,
+               let hint = permissionTutorialHint {
+                AppTutorialTipView(hint: hint)
             }
+        }
+    }
+
+    private var permissionTutorialHint: AppTutorialHint? {
+        let needsNotification = notificationStatus != .granted
+        let needsCalendar = calendarStatus != .granted
+
+        switch (needsNotification, needsCalendar) {
+        case (true, true):
+            return AppTutorialHint(
+                title: "필요한 권한 허용",
+                body: "알림과 캘린더가 아직 허용되지 않았습니다. 각 행의 허용 버튼을 눌러 마감 알림과 캘린더 등록을 사용할 수 있게 해주세요."
+            )
+        case (true, false):
+            return AppTutorialHint(
+                title: "알림 권한 허용",
+                body: "알림이 아직 허용되지 않았습니다. 알림 행의 허용 버튼을 눌러 마감 알림을 받을 수 있게 해주세요."
+            )
+        case (false, true):
+            return AppTutorialHint(
+                title: "캘린더 권한 허용",
+                body: "캘린더가 아직 허용되지 않았습니다. 캘린더 행의 허용 버튼을 눌러 마감 일정을 자동 등록할 수 있게 해주세요."
+            )
+        case (false, false):
+            return AppTutorialHint(
+                title: "권한 확인 완료",
+                body: "필요한 권한이 허용되어 있습니다. 뒤로 돌아가 튜토리얼을 계속하세요."
+            )
         }
     }
     

@@ -27,11 +27,15 @@ final class AppDataContainer: ObservableObject {
     // MARK: - Init
 
     init() {
-        let useICloud = UserDefaults.standard.bool(forKey: "pieroot.todo.iCloudSyncEnabled")
-        if useICloud {
-            AppDataContainer.migrateLocalToICloudIfNeeded()
+        if Self.usesInMemoryUITestStore {
+            self.container = Self.buildInMemoryContainer()
+        } else {
+            let useICloud = UserDefaults.standard.bool(forKey: "pieroot.todo.iCloudSyncEnabled")
+            if useICloud {
+                AppDataContainer.migrateLocalToICloudIfNeeded()
+            }
+            self.container = AppDataContainer.buildContainer(useICloud: useICloud)
         }
-        self.container = AppDataContainer.buildContainer(useICloud: useICloud)
         AppDataContainer.shared = self
     }
 
@@ -60,6 +64,19 @@ final class AppDataContainer: ObservableObject {
 
     // MARK: - Container Builder
 
+    private static var usesInMemoryUITestStore: Bool {
+        #if DEBUG
+        ProcessInfo.processInfo.arguments.contains("-ui-test-in-memory-store")
+        #else
+        false
+        #endif
+    }
+
+    private static func buildInMemoryContainer() -> ModelContainer {
+        let config = ModelConfiguration(schema: appSchema, isStoredInMemoryOnly: true)
+        return try! ModelContainer(for: appSchema, configurations: [config])
+    }
+
     static func buildContainer(useICloud: Bool) -> ModelContainer {
         let schema = AppDataContainer.appSchema
         let config: ModelConfiguration
@@ -82,6 +99,11 @@ final class AppDataContainer: ObservableObject {
         do {
             return try ModelContainer(for: schema, configurations: [config])
         } catch {
+            DiagnosticRecorder.shared.record(
+                error: error,
+                component: "storage.swiftdata",
+                operation: "containerInitRetry"
+            )
             print("[SwiftData] 저장소 초기화 실패: \(error). 기존 파일 삭제 후 재시도.")
             let configURL = config.url
             try? FileManager.default.removeItem(at: configURL)
@@ -92,6 +114,11 @@ final class AppDataContainer: ObservableObject {
             do {
                 return try ModelContainer(for: schema, configurations: [config])
             } catch {
+                DiagnosticRecorder.shared.record(
+                    error: error,
+                    component: "storage.swiftdata",
+                    operation: "containerInitFallback"
+                )
                 print("[SwiftData] 재시도 실패: \(error). 메모리 전용 모드로 실행.")
                 let fallback = ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
                 return try! ModelContainer(for: schema, configurations: [fallback])
@@ -106,7 +133,8 @@ final class AppDataContainer: ObservableObject {
         Persona.self,
         TaskAuditEvent.self,
         TaskBehaviorEvent.self,
-        MemoryAnalysis.self
+        MemoryAnalysis.self,
+        MailAnalysisLedgerRecord.self
     ])
 
     // MARK: - Email Container (로컬 전용, CloudKit 절대 금지)
@@ -132,6 +160,11 @@ final class AppDataContainer: ObservableObject {
                 storeURL: AppDataContainer.emailStoreURL()
             )
         } catch {
+            DiagnosticRecorder.shared.record(
+                error: error,
+                component: "storage.swiftdata",
+                operation: "emailContainerFallback"
+            )
             print("[EmailContainer] 초기화 실패: \(error). 메모리 전용 모드로 실행.")
             let fallback = ModelConfiguration(
                 schema: AppDataContainer.emailSchema,
@@ -205,6 +238,11 @@ final class AppDataContainer: ObservableObject {
             AppDataContainer.protectMeetingStoreContents(at: directory)
             return container
         } catch {
+            DiagnosticRecorder.shared.record(
+                error: error,
+                component: "storage.swiftdata",
+                operation: "meetingContainerFallback"
+            )
             print("[MeetingContainer] initialization failed: \(error). Falling back to memory-only storage.")
             let fallback = ModelConfiguration(
                 schema: AppDataContainer.meetingSchema,
@@ -283,6 +321,11 @@ final class AppDataContainer: ObservableObject {
                     try? fileManager.copyItem(at: legacyWAL, to: localWAL)
                 }
             } catch {
+                DiagnosticRecorder.shared.record(
+                    error: error,
+                    component: "storage.swiftdata",
+                    operation: "migrateLegacyCopy"
+                )
                 print("[Migration] 기존 iCloud 저장소를 local_v2.store로 복사하지 못했습니다: \(error)")
             }
         }
@@ -301,6 +344,11 @@ final class AppDataContainer: ObservableObject {
                     try? fileManager.moveItem(at: defaultWAL, to: localWAL)
                 }
             } catch {
+                DiagnosticRecorder.shared.record(
+                    error: error,
+                    component: "storage.swiftdata",
+                    operation: "migrateLegacyMove"
+                )
                 print("[Migration] 레거시 default.store를 local_v2.store로 이동하지 못했습니다: \(error)")
             }
         }
@@ -332,6 +380,11 @@ final class AppDataContainer: ObservableObject {
                     try? fileManager.moveItem(at: defaultWAL, to: localWAL)
                 }
             } catch {
+                DiagnosticRecorder.shared.record(
+                    error: error,
+                    component: "storage.swiftdata",
+                    operation: "migrateFileMove"
+                )
                 print("[Migration] 레거시 파일 이동 실패: \(error)")
             }
         }
@@ -378,6 +431,7 @@ final class AppDataContainer: ObservableObject {
                 let newTodo = Todo(
                     title: todo.title,
                     notes: todo.notes,
+                    startDate: todo.startDate,
                     dueDate: todo.dueDate,
                     source: todo.todoSource,
                     sourceRef: todo.sourceRef,
@@ -400,6 +454,8 @@ final class AppDataContainer: ObservableObject {
                 newTodo.sourceAccountNamespace = todo.sourceAccountNamespace
                 newTodo.triageStatus = todo.triageStatus
                 newTodo.calendarEventID = todo.calendarEventID
+                newTodo.calendarEventExternalID = todo.calendarEventExternalID
+                newTodo.calendarEventOrigin = todo.calendarEventOrigin
                 newTodo.memoryNotes = todo.memoryNotes
                 newTodo.aiRecommendedTime = todo.aiRecommendedTime
                 newTodo.aiNeedsNotification = todo.aiNeedsNotification
@@ -415,6 +471,7 @@ final class AppDataContainer: ObservableObject {
             for event in localAuditEvents {
                 let newEvent = TaskAuditEvent(from: Todo())
                 newEvent.id = event.id
+                newEvent.todoID = event.todoID
                 newEvent.createdAt = event.createdAt
                 newEvent.completedAt = event.completedAt
                 newEvent.deletedAt = event.deletedAt
@@ -422,6 +479,8 @@ final class AppDataContainer: ObservableObject {
                 newEvent.triageType = event.triageType
                 newEvent.wasFixedSchedule = event.wasFixedSchedule
                 newEvent.hadDueDate = event.hadDueDate
+                newEvent.dueDate = event.dueDate
+                newEvent.tags = event.tags
                 icloudContext.insert(newEvent)
             }
 
@@ -446,6 +505,7 @@ final class AppDataContainer: ObservableObject {
                 newEvent.beforeManualPriority = event.beforeManualPriority
                 newEvent.afterManualPriority = event.afterManualPriority
                 newEvent.beforeComputedPriority = event.beforeComputedPriority
+                newEvent.todoCreatedAt = event.todoCreatedAt
                 newEvent.afterComputedPriority = event.afterComputedPriority
                 icloudContext.insert(newEvent)
             }
@@ -483,6 +543,11 @@ final class AppDataContainer: ObservableObject {
             if fileManager.fileExists(atPath: walURL.path) { try? fileManager.removeItem(at: walURL) }
             print("[Migration] 이전 로컬 백업 파일 정리 완료.")
         } catch {
+            DiagnosticRecorder.shared.record(
+                error: error,
+                component: "storage.swiftdata",
+                operation: "migrateToICloud"
+            )
             print("[Migration] 데이터베이스 마이그레이션 중 오류 발생: \(error)")
         }
     }

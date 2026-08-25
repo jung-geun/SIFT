@@ -1,8 +1,12 @@
 {
   "sourceLanguage" : "ko",
   "strings" : {
-    "" : {},
-    "· %@" : {},
+    "" : {
+
+    },
+    "· %@" : {
+
+    },
     "'마지막 화면'은 앱 종료 시 보던 탭으로 돌아옵니다. '고정 탭'은 항상 지정한 탭으로 시작합니다." : {
       "comment" : "Localized UI copy.",
       "extractionState" : "manual",
@@ -21,7 +25,11 @@
         }
       }
     },
+    "'메일 자동 분석'을 켜면 연결된 Gmail을 분석해 할 일 후보를 자동으로 정리합니다. 실행 시각은 기기 상태나 네트워크 상황에 따라 달라질 수 있습니다." : {
+
+    },
     "'메일 자동 분석'을 켜면 연결된 메일을 분석해 할 일 후보를 자동으로 정리합니다. 실행 시각은 기기 상태나 네트워크 상황에 따라 달라질 수 있습니다." : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -32,6 +40,7 @@
       }
     },
     "'온디바이스 AI' 선택 시 활성화됩니다. 최초 1회만 다운로드합니다. Wi-Fi 환경에서 진행을 권장합니다. 모델은 기기에만 저장되며 이메일 본문은 기기 밖으로 전송되지 않습니다." : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -61,15 +70,15 @@
     },
     "%@  /  %@" : {
       "localizations" : {
-        "ko" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "%1$@  /  %2$@"
-          }
-        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
+            "value" : "%1$@  /  %2$@"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "new",
             "value" : "%1$@  /  %2$@"
           }
         }
@@ -77,15 +86,15 @@
     },
     "%@ – %@" : {
       "localizations" : {
-        "ko" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "%1$@ – %2$@"
-          }
-        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
+            "value" : "%1$@ – %2$@"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "new",
             "value" : "%1$@ – %2$@"
           }
         }
@@ -93,47 +102,47 @@
     },
     "%@ · 근거 %lld건" : {
       "localizations" : {
-        "ko" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "%1$@ · 근거 %2$lld건"
-          }
-        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "%1$@ · Evidence %2$lld"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$@ · 근거 %2$lld건"
           }
         }
       }
     },
     "%@ · 근거 %lld건 · %@~%@" : {
       "localizations" : {
-        "ko" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "%1$@ · 근거 %2$lld건 · %3$@~%4$@"
-          }
-        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "%1$@ · Evidence %2$lld · %3$@–%4$@"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$@ · 근거 %2$lld건 · %3$@~%4$@"
           }
         }
       }
     },
     "%@ (%@)" : {
       "localizations" : {
-        "ko" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "%1$@ (%2$@)"
-          }
-        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
+            "value" : "%1$@ (%2$@)"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "new",
             "value" : "%1$@ (%2$@)"
           }
         }
@@ -141,21 +150,22 @@
     },
     "%@ / %@" : {
       "localizations" : {
-        "ko" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "%1$@ / %2$@"
-          }
-        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
+            "value" : "%1$@ / %2$@"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "new",
             "value" : "%1$@ / %2$@"
           }
         }
       }
     },
     "%@ 모델을 기기에 다운로드합니다. Wi-Fi 환경에서 진행을 권장하며, 모든 추론은 기기 내에서만 이루어집니다." : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -167,15 +177,15 @@
     },
     "%@–%@" : {
       "localizations" : {
-        "ko" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "%1$@–%2$@"
-          }
-        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
+            "value" : "%1$@–%2$@"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "new",
             "value" : "%1$@–%2$@"
           }
         }
@@ -251,6 +261,9 @@
         }
       }
     },
+    "A saved %@ App Password is available. The last connection attempt failed, but the password was not removed." : {
+
+    },
     "action.cancel" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -264,6 +277,24 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "취소"
+          }
+        }
+      }
+    },
+    "action.close" : {
+      "comment" : "Close button label.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Close"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "닫기"
           }
         }
       }
@@ -300,6 +331,24 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "삭제"
+          }
+        }
+      }
+    },
+    "action.discard" : {
+      "comment" : "Discard unsaved to-do edits.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Discard"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "폐기"
           }
         }
       }
@@ -353,6 +402,24 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "다시 시도"
+          }
+        }
+      }
+    },
+    "action.save" : {
+      "comment" : "Save to-do edits.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Save"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "저장"
           }
         }
       }
@@ -453,6 +520,12 @@
         }
       }
     },
+    "App Password 교체" : {
+
+    },
+    "App Store에서 업데이트" : {
+
+    },
     "appInfo.completed" : {
       "comment" : "Development status section.",
       "extractionState" : "manual",
@@ -521,6 +594,347 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Apple Foundation Models 정식 버전 대응 및 통합 재도입"
+          }
+        }
+      }
+    },
+    "beta.autoRefine.toggle" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Automatically refine transcripts"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "전사 자동 교정"
+          }
+        }
+      }
+    },
+    "beta.foundationModels.toggle" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Apple Foundation Models (AFM)"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Apple Foundation Models (AFM)"
+          }
+        }
+      }
+    },
+    "beta.gemini.apiKey" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Gemini API Key"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Gemini API 키"
+          }
+        }
+      }
+    },
+    "beta.gemini.deleteKey" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Delete key"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "키 삭제"
+          }
+        }
+      }
+    },
+    "beta.gemini.saveKey" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Save key"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "키 저장"
+          }
+        }
+      }
+    },
+    "beta.gemini.toggle" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Gemini connection"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Gemini 연결"
+          }
+        }
+      }
+    },
+    "beta.gemini.warning" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Using Gemini may send TODO titles, notes, due dates, persona, and calendar context to an external service. Email bodies are never sent without separate consent."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Gemini를 사용하면 TODO 제목·메모·마감·페르소나·캘린더 컨텍스트가 외부 서비스로 전송될 수 있습니다. 이메일 원문 본문은 별도 동의 없이는 전송하지 않습니다."
+          }
+        }
+      }
+    },
+    "beta.meeting.section" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Meeting beta features"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "회의 베타 기능"
+          }
+        }
+      }
+    },
+    "beta.model.delete" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Delete"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "삭제"
+          }
+        }
+      }
+    },
+    "beta.model.download" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Download model"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "모델 다운로드"
+          }
+        }
+      }
+    },
+    "beta.model.downloaded" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Downloaded"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "다운로드됨"
+          }
+        }
+      }
+    },
+    "beta.model.label" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Model"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "모델"
+          }
+        }
+      }
+    },
+    "beta.model.unsupported" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This device does not support downloaded on-device models."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "이 기기는 다운로드 온디바이스 모델을 지원하지 않습니다."
+          }
+        }
+      }
+    },
+    "beta.onDevice.toggle" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Downloaded on-device model"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "다운로드 온디바이스 모델"
+          }
+        }
+      }
+    },
+    "beta.providerPicker" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Beta provider to use"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "사용할 베타 provider"
+          }
+        }
+      }
+    },
+    "beta.providers.footer" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Each provider may be used for TODO prioritization, email analysis, and meeting analysis. Sending email bodies to Gemini still requires separate consent in Email settings."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "각 provider는 TODO 우선순위, 이메일 분석, 회의 분석에 사용될 수 있습니다. Gemini 메일 본문 전송은 이메일 설정의 별도 동의가 필요합니다."
+          }
+        }
+      }
+    },
+    "beta.providers.section" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Beta providers"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "베타 provider"
+          }
+        }
+      }
+    },
+    "beta.title" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Beta Features"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "베타 기능"
+          }
+        }
+      }
+    },
+    "beta.voiceProcessing.toggle" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Voice noise reduction"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "음성 노이즈 감소"
+          }
+        }
+      }
+    },
+    "beta.warning" : {
+      "comment" : "Beta feature warning.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Beta features are experimental and may be inaccurate or unavailable for some devices, languages, or data. Enable only the providers you need."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "베타 기능은 실험 중이며 일부 기기·언어·데이터에서 부정확하거나 동작하지 않을 수 있습니다. 필요한 provider만 직접 켜세요."
           }
         }
       }
@@ -614,6 +1028,12 @@
           }
         }
       }
+    },
+    "Checking the saved %@ App Password…" : {
+
+    },
+    "Connecting…" : {
+
     },
     "date.deadline.days" : {
       "comment" : "Relative deadline in days.",
@@ -737,6 +1157,348 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "diagnostics.clear" : {
+      "comment" : "Delete local diagnostic reports action.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Delete diagnostic logs on this device"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "기기에 저장된 진단 로그 삭제"
+          }
+        }
+      }
+    },
+    "diagnostics.collection.detail" : {
+      "comment" : "Diagnostic collection consent detail.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Only with your consent, error timestamps, locations, and source line numbers, error codes and messages, device specs and setting states, recent app error logs, app and OS versions, and Apple system diagnostics are kept on this device. Recordings, transcripts, to-dos, email content, and account information are excluded."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "동의한 경우에만 오류 발생 시각·위치·소스 줄 번호, 오류 코드·메시지, 기기 사양과 설정 상태, 최근 앱 오류 로그, 앱·OS 버전과 Apple 시스템 진단을 이 기기에 보관합니다. 음성 녹음, 전사문, TODO, 이메일 내용, 계정 정보는 포함하지 않습니다."
+          }
+        }
+      }
+    },
+    "diagnostics.collection.title" : {
+      "comment" : "Diagnostic collection section title.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Diagnostics and privacy"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "진단 및 개인정보"
+          }
+        }
+      }
+    },
+    "diagnostics.collection.toggle" : {
+      "comment" : "Diagnostic collection consent toggle.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Allow diagnostic log collection"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "진단 로그 수집 허용"
+          }
+        }
+      }
+    },
+    "diagnostics.events" : {
+      "comment" : "Stored diagnostic event count label.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Local error events"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "로컬 오류 이벤트"
+          }
+        }
+      }
+    },
+    "diagnostics.mail.body" : {
+      "comment" : "Diagnostic report email body.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The attached file contains only diagnostics you consented to share."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "아래 첨부 파일에는 사용자가 동의한 진단 정보만 포함됩니다."
+          }
+        }
+      }
+    },
+    "diagnostics.mail.subject" : {
+      "comment" : "Diagnostic report email subject.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SIFT Error Report"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SIFT 오류 보고"
+          }
+        }
+      }
+    },
+    "diagnostics.mail.unavailable" : {
+      "comment" : "Diagnostic report mail fallback.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mail can’t be sent from this device, so the report opens in the share sheet."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "이 기기에서 메일을 보낼 수 없어 공유 시트로 보고서를 내보냅니다."
+          }
+        }
+      }
+    },
+    "diagnostics.metricKit.detail" : {
+      "comment" : "MetricKit diagnostic delivery limitation.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Apple system diagnostics can later report crashes, hangs, and memory terminations. Delivery isn’t immediate in every case, and not every forced termination is captured."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Apple 시스템 진단은 충돌, 멈춤, 메모리 종료 등을 나중에 전달할 수 있습니다. 즉시 전달되거나 모든 강제 종료가 포착되는 것은 아닙니다."
+          }
+        }
+      }
+    },
+    "diagnostics.preparing" : {
+      "comment" : "Diagnostic report preparation progress.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Preparing report…"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "보고서를 준비하는 중…"
+          }
+        }
+      }
+    },
+    "diagnostics.recovery.detail" : {
+      "comment" : "Unexpected termination recovery explanation.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The previous app session appears to have ended unexpectedly. Allow diagnostic collection to create a minimal on-device report about this event. The app never sends information without your consent."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "이전 앱 세션이 예기치 않게 종료된 것으로 감지되었습니다. 진단 로그 수집을 허용하면 이 종료 사실만 포함한 최소 보고서를 이 기기에 만들 수 있습니다. 앱은 사용자의 동의 없이 정보를 전송하지 않습니다."
+          }
+        }
+      }
+    },
+    "diagnostics.recovery.title" : {
+      "comment" : "Unexpected termination recovery section title.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Previous session recovery"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "이전 세션 복구"
+          }
+        }
+      }
+    },
+    "diagnostics.send" : {
+      "comment" : "Send diagnostic report action.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Send error report"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "오류 보고서 보내기"
+          }
+        }
+      }
+    },
+    "diagnostics.send.detail" : {
+      "comment" : "Diagnostic report sending consent detail.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Selecting Send lets you review the report first. The app never transmits logs without your consent."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "보내기를 누르면 보고서를 검토할 수 있습니다. 앱은 동의 없이 로그를 네트워크로 전송하지 않습니다."
+          }
+        }
+      }
+    },
+    "diagnostics.send.title" : {
+      "comment" : "Diagnostic report sending section title.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Send to support"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "지원팀에 보내기"
+          }
+        }
+      }
+    },
+    "diagnostics.settings.link" : {
+      "comment" : "Link to user-consented diagnostic reporting settings.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Error Reports"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "오류 보고"
+          }
+        }
+      }
+    },
+    "diagnostics.stored.title" : {
+      "comment" : "Stored diagnostic report section title.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Stored on this device"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "기기에 저장됨"
+          }
+        }
+      }
+    },
+    "diagnostics.system" : {
+      "comment" : "Stored Apple system diagnostic count label.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Apple system diagnostics"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Apple 시스템 진단"
+          }
+        }
+      }
+    },
+    "diagnostics.title" : {
+      "comment" : "Diagnostic reporting screen title.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Error Reports"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "오류 보고"
           }
         }
       }
@@ -1003,6 +1765,24 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "마이크 권한이 필요합니다."
+          }
+        }
+      }
+    },
+    "error.meeting.capture.operation" : {
+      "comment" : "Generic meeting capture/finalization error; private diagnostics remain in logs.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The meeting recording could not be completed."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "회의 녹음을 완료하지 못했습니다."
           }
         }
       }
@@ -1559,75 +2339,8 @@
         }
       }
     },
-    "error.outlook.apiFailed" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "The Microsoft Graph API request failed."
-          }
-        },
-        "ko" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Microsoft Graph API 호출에 실패했습니다."
-          }
-        }
-      }
-    },
-    "error.outlook.invalidResponse" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "The Outlook response could not be decoded."
-          }
-        },
-        "ko" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Outlook 응답을 해석하지 못했습니다."
-          }
-        }
-      }
-    },
-    "error.outlook.missingClientID" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "The Microsoft Client ID is not configured in Info.plist."
-          }
-        },
-        "ko" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Microsoft Client ID가 Info.plist에 설정되어 있지 않습니다."
-          }
-        }
-      }
-    },
-    "error.outlook.notAuthenticated" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "You are not signed in to Outlook."
-          }
-        },
-        "ko" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Outlook에 로그인되어 있지 않습니다."
-          }
-        }
-      }
-    },
     "File → Add Package Dependencies\n%@\nbranch: main → MLXLLM, MLXLMCommon 선택" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1638,6 +2351,7 @@
       }
     },
     "Focused는 중요, Other는 기타로 표시합니다." : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1648,6 +2362,7 @@
       }
     },
     "Gemini API" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1658,6 +2373,7 @@
       }
     },
     "Gemini API Key" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1668,6 +2384,7 @@
       }
     },
     "Gemini 선택 시 TODO 제목·메모·마감·페르소나·캘린더 컨텍스트가 Google Gemini API로 전송됩니다. 이메일 원문 본문은 별도 동의 없이는 전송하지 않습니다." : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1725,15 +2442,8 @@
         }
       }
     },
-    "Gmail API가 제공한 원본 system category label을 그대로 사용합니다." : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "The original system category label provided by the Gmail API is used as-is."
-          }
-        }
-      }
+    "Gmail IMAP 연결" : {
+
     },
     "Gmail OAuth2 연동 및 메일 자동 분석 (할 일 자동 추출)" : {
       "comment" : "Development status UI copy.",
@@ -1771,16 +2481,6 @@
         }
       }
     },
-    "Gmail 또는 Outlook을 연결하면 받은편지함 전체를 볼 수 있습니다." : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Connecting Gmail or Outlook lets you view the entire inbox."
-          }
-        }
-      }
-    },
     "Gmail 연결" : {
       "comment" : "Localized UI copy.",
       "extractionState" : "manual",
@@ -1799,6 +2499,20 @@
         }
       }
     },
+    "Gmail 이메일 주소" : {
+
+    },
+    "Gmail을 연결하면 받은편지함 전체를 볼 수 있습니다." : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Connecting Gmail lets you view the entire inbox."
+          }
+        }
+      }
+    },
     "Google API Services User Data Policy" : {
       "localizations" : {
         "en" : {
@@ -1808,6 +2522,9 @@
           }
         }
       }
+    },
+    "Google App Password" : {
+
     },
     "iCloud" : {
       "localizations" : {
@@ -2155,24 +2872,6 @@
         }
       }
     },
-    "intelligence.model.option.mlx-community/LFM2.5-1.2B-Instruct-4bit" : {
-      "comment" : "Meeting setting copy.",
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "LFM2.5-1.2B · 4bit (Lightweight · Fast, ~0.65 GB)"
-          }
-        },
-        "ko" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "LFM2.5-1.2B · 4bit (경량·빠름, ~0.65GB)"
-          }
-        }
-      }
-    },
     "intelligence.model.option.mlx-community/Qwen3.5-2B-MLX-4bit" : {
       "comment" : "Meeting setting copy.",
       "extractionState" : "manual",
@@ -2205,6 +2904,24 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Qwen3.5-4B · 4bit (범용 고품질, ~2.4GB)"
+          }
+        }
+      }
+    },
+    "intelligence.model.option.openbmb/MiniCPM5-1B-MLX" : {
+      "comment" : "Meeting setting copy.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "MiniCPM5-1B · 4bit (Lightweight General, ~0.62 GB)"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "MiniCPM5-1B · 4bit (경량 범용, ~0.62GB)"
           }
         }
       }
@@ -2281,20 +2998,218 @@
         }
       }
     },
-    "legal.effectiveDate" : {
-      "comment" : "Localized UI copy.",
+    "legal.privacy.diagnostics.collected" : {
+      "comment" : "Privacy policy diagnostic data categories.",
       "extractionState" : "manual",
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Effective date: June 23, 2026"
+            "value" : "Collected: error timestamps and repeat counts, the feature location plus source file and line, error domain, code, type, and message (file paths and email addresses removed, capped at 300 characters) with the underlying error chain, app version, build, and install channel, OS version, device model identifier, memory, storage, screen size, and processor count, language, region, and time zone, thermal state, Low Power Mode, app memory footprint, and app run state, feature setting on/off values, the app's own recent error logs (up to 300 entries from the last 30 minutes), and crash, hang, and memory-termination diagnostics Apple may deliver later."
           }
         },
         "ko" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "시행일: 2026년 6월 23일"
+            "value" : "수집 항목: 오류 발생 시각·반복 횟수, 오류가 발생한 기능 위치와 소스 파일·줄 번호, 오류 도메인·코드·유형·메시지(파일 경로와 이메일 주소 제거, 300자 제한)와 하위 오류 사슬, 앱 버전·빌드·설치 경로, 운영체제 버전, 기기 모델 식별자·메모리·저장 공간·화면 크기·프로세서 수, 언어·지역·시간대, 발열 상태·저전력 모드·앱 메모리 사용량·앱 실행 상태, 기능 설정 On/Off 값, 앱이 남긴 최근 오류 로그(최대 300건, 30분), Apple이 나중에 제공할 수 있는 충돌·멈춤·메모리 종료 진단"
+          }
+        }
+      }
+    },
+    "legal.privacy.diagnostics.deliveryLimit" : {
+      "comment" : "Privacy policy MetricKit delivery limitation.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Apple system diagnostics may be delayed or unavailable and do not capture every forced termination"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Apple 시스템 진단은 지연되거나 제공되지 않을 수 있고 모든 강제 종료를 포착하지 않음"
+          }
+        }
+      }
+    },
+    "legal.privacy.diagnostics.excluded" : {
+      "comment" : "Privacy policy diagnostic data exclusions.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Excluded: recordings, transcripts, to-dos, email bodies, subjects, and addresses, personas, account identifiers, and authentication tokens."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "제외 항목: 음성 녹음, 전사문, 할 일, 이메일 본문·제목·주소, 페르소나, 계정 식별자, 인증 토큰"
+          }
+        }
+      }
+    },
+    "legal.privacy.diagnostics.retentionCondition" : {
+      "comment" : "Privacy policy diagnostic retention condition.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Until consent is withdrawn or logs are deleted in the app"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "동의 철회 또는 앱에서 삭제 시"
+          }
+        }
+      }
+    },
+    "legal.privacy.diagnostics.retentionDeletion" : {
+      "comment" : "Privacy policy diagnostic deletion method.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Delete the on-device diagnostic store"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "기기 로컬 진단 저장소 삭제"
+          }
+        }
+      }
+    },
+    "legal.privacy.diagnostics.retentionLabel" : {
+      "comment" : "Privacy policy diagnostic retention table label.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Consent-based local diagnostic logs"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "사용자 동의형 로컬 진단 로그"
+          }
+        }
+      }
+    },
+    "legal.privacy.diagnostics.storage" : {
+      "comment" : "Privacy policy diagnostic storage and deletion terms.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Kept in a limited on-device, backup-excluded, file-protected store only after explicit consent; removed immediately when consent is withdrawn or logs are deleted"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "명시적으로 허용한 경우에만 기기 로컬의 백업 제외·파일 보호 저장소에 제한된 개수로 보관하며, 동의 철회 또는 삭제 시 즉시 제거"
+          }
+        }
+      }
+    },
+    "legal.privacy.diagnostics.storeDetail" : {
+      "comment" : "Privacy policy diagnostic storage table detail.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Consented error timestamps, locations, codes, types, and messages, a device-spec and settings snapshot, recent app error logs, and limited Apple system diagnostics — excluded from iCloud and backups"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "동의한 오류 시각·위치·코드·유형·메시지, 기기 사양·설정 스냅샷, 최근 앱 오류 로그 및 제한된 Apple 시스템 진단 — iCloud·백업 제외"
+          }
+        }
+      }
+    },
+    "legal.privacy.diagnostics.storeLabel" : {
+      "comment" : "Privacy policy diagnostic storage table label.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Optional on-device diagnostic store"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "기기 내 로컬 진단 저장소 (선택)"
+          }
+        }
+      }
+    },
+    "legal.privacy.diagnostics.title" : {
+      "comment" : "Privacy policy title for user-consented diagnostic reporting.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "1-6. User-consented diagnostic reporting (optional)"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "1-6. 사용자 동의형 오류 진단 (선택)"
+          }
+        }
+      }
+    },
+    "legal.privacy.diagnostics.transmission" : {
+      "comment" : "Privacy policy diagnostic transmission consent terms.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The app never automatically transmits diagnostic logs. They are sent only when the user reviews and sends a report through Mail or the share sheet"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "앱은 진단 로그를 자동 전송하지 않으며, 사용자가 메일 또는 공유 시트에서 검토하고 보낼 때만 전송"
+          }
+        }
+      }
+    },
+    "legal.privacy.effectiveDate" : {
+      "comment" : "Effective date for the privacy policy.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Effective date: July 31, 2026"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "시행일: 2026년 7월 31일"
           }
         }
       }
@@ -2313,6 +3228,24 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "개인정보 처리방침"
+          }
+        }
+      }
+    },
+    "legal.terms.effectiveDate" : {
+      "comment" : "Effective date for the terms of service.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Effective date: June 23, 2026"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "시행일: 2026년 6월 23일"
           }
         }
       }
@@ -4784,19 +5717,19 @@
       }
     },
     "mail.account.outlook" : {
-      "comment" : "Localized UI copy.",
+      "comment" : "Mail account label.",
       "extractionState" : "manual",
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Outlook Account"
+            "value" : "Outlook IMAP"
           }
         },
         "ko" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Outlook 계정"
+            "value" : "Outlook IMAP"
           }
         }
       }
@@ -4815,6 +5748,24 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "(AI 요약)"
+          }
+        }
+      }
+    },
+    "mail.alert.bodyLoadError" : {
+      "comment" : "Mail body load alert title.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mail body load error"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "메일 본문 로드 오류"
           }
         }
       }
@@ -4851,6 +5802,24 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "메일 삭제 오류"
+          }
+        }
+      }
+    },
+    "mail.alert.readOnlyTitle" : {
+      "comment" : "Gmail IMAP read-only alert title.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Read-only mail notice"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "읽기 전용 안내"
           }
         }
       }
@@ -4986,6 +5955,204 @@
         }
       }
     },
+    "mail.analysis.fallback.consentMissing" : {
+      "comment" : "Email analysis fallback reason.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Email sharing consent is required."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "이메일 전송 동의가 필요합니다."
+          }
+        }
+      }
+    },
+    "mail.analysis.fallback.credentialMissing" : {
+      "comment" : "Email analysis fallback reason.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Provider credentials are missing."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "provider 인증 정보가 없습니다."
+          }
+        }
+      }
+    },
+    "mail.analysis.fallback.invalidResponse" : {
+      "comment" : "Email analysis fallback reason.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The provider returned an invalid response."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "provider 응답을 해석하지 못했습니다."
+          }
+        }
+      }
+    },
+    "mail.analysis.fallback.modelNotLoaded" : {
+      "comment" : "Email analysis fallback reason.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The on-device model is not loaded."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "온디바이스 모델이 로드되지 않았습니다."
+          }
+        }
+      }
+    },
+    "mail.analysis.fallback.noEligibleProvider" : {
+      "comment" : "Email analysis fallback reason.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No eligible provider is available."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "사용 가능한 provider가 없습니다."
+          }
+        }
+      }
+    },
+    "mail.analysis.fallback.noProviderOptIn" : {
+      "comment" : "Email analysis fallback reason.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No beta provider is enabled."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "활성화된 베타 provider가 없습니다."
+          }
+        }
+      }
+    },
+    "mail.analysis.fallback.providerDisabled" : {
+      "comment" : "Email analysis fallback reason.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The selected provider is disabled."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "선택한 provider가 비활성화되어 있습니다."
+          }
+        }
+      }
+    },
+    "mail.analysis.fallback.providerExecutionFailed" : {
+      "comment" : "Email analysis fallback reason.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The provider could not complete the analysis."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "provider 분석을 완료하지 못했습니다."
+          }
+        }
+      }
+    },
+    "mail.analysis.fallback.unavailable" : {
+      "comment" : "Email analysis fallback reason.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The provider is unavailable on this device."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "이 기기에서 provider를 사용할 수 없습니다."
+          }
+        }
+      }
+    },
+    "mail.analysis.geminiConsent" : {
+      "comment" : "Explicit opt-in for sending email bodies to Gemini.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Allow Gemini to summarize email bodies"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Gemini에 메일 본문 요약 허용"
+          }
+        }
+      }
+    },
+    "mail.analysis.geminiConsentDetail" : {
+      "comment" : "Explains the Gemini email-body sharing consent.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "When enabled, the selected Gmail message body is sent to Gemini using your API key."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "켜면 선택한 Gmail 메일 본문이 API 키로 Gemini에 전송됩니다."
+          }
+        }
+      }
+    },
     "mail.analysis.header" : {
       "comment" : "Email analysis provenance header.",
       "extractionState" : "manual",
@@ -5053,6 +6220,42 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "메일 분석 %1$d/%2$d"
+          }
+        }
+      }
+    },
+    "mail.analysis.ruleBased" : {
+      "comment" : "Email analysis rules fallback label.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Rule-based · %@"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "규칙 기반 · %@"
+          }
+        }
+      }
+    },
+    "mail.analysis.ruleBasedTitle" : {
+      "comment" : "Email detail title when a provider did not produce the summary.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Rule-based summary"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "규칙 기반 요약"
           }
         }
       }
@@ -5145,6 +6348,42 @@
         }
       }
     },
+    "mail.authentication.checking" : {
+      "comment" : "Status message displayed while checking mail authentication state.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Checking authentication…"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "인증 정보를 확인하는 중입니다…"
+          }
+        }
+      }
+    },
+    "mail.authentication.checking.accessibility" : {
+      "comment" : "Accessibility label for checking mail authentication status.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Checking mail authentication"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "메일 인증 정보를 확인하는 중"
+          }
+        }
+      }
+    },
     "mail.bodyExcerptDisclaimer" : {
       "comment" : "Disclaimer for a body excerpt.",
       "extractionState" : "manual",
@@ -5159,6 +6398,24 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "(본문 발췌 — AI 요약 아님)"
+          }
+        }
+      }
+    },
+    "mail.category.guide.gmailSource" : {
+      "comment" : "Explains where Gmail inbox tab categories come from.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Category classifications (category:) from Gmail search are queried via IMAP and used directly."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Gmail 검색의 카테고리(category:) 분류를 IMAP으로 조회해 그대로 사용합니다."
           }
         }
       }
@@ -5215,36 +6472,74 @@
         }
       }
     },
-    "mail.connection.outlook.error" : {
-      "extractionState" : "stale",
+    "mail.connection.outlook.emailPlaceholder" : {
+      "comment" : "Outlook email field placeholder.",
+      "extractionState" : "manual",
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Outlook Connection Error"
+            "value" : "Outlook email address"
           }
         },
         "ko" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Outlook 연결 오류"
+            "value" : "Outlook 이메일 주소"
           }
         }
       }
     },
-    "mail.connection.outlook.success" : {
-      "extractionState" : "stale",
+    "mail.connection.outlook.helpButton" : {
+      "comment" : "Outlook setup help button.",
+      "extractionState" : "manual",
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Outlook connected"
+            "value" : "View Setup Guide"
           }
         },
         "ko" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Outlook 연결 완료"
+            "value" : "설정 가이드 보기"
+          }
+        }
+      }
+    },
+    "mail.connection.outlook.legacyNotice" : {
+      "comment" : "Outlook legacy connection notice.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "⚠️ Outlook/Hotmail/Office365 IMAP legacy connection (beta/best-effort)\nMicrosoft policy may block basic/app-password authentication. Check the guide for details."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "⚠️ Outlook/Hotmail/Office365 IMAP 레거시 연결 (베타/best-effort)\nMicrosoft 정책상 기본/앱 비밀번호 인증이 차단되어 있을 수 있습니다. 가이드를 확인하세요."
+          }
+        }
+      }
+    },
+    "mail.connection.outlook.passwordPlaceholder" : {
+      "comment" : "Outlook password field placeholder.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Outlook App Password"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Outlook App Password"
           }
         }
       }
@@ -5341,6 +6636,42 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "새 항목 없음"
+          }
+        }
+      }
+    },
+    "mail.fetch.outlookFailed" : {
+      "comment" : "Outlook sync failure message.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Outlook Inbox sync failed"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Outlook 받은편지함 동기화 실패"
+          }
+        }
+      }
+    },
+    "mail.fetch.outlookSuccess" : {
+      "comment" : "Outlook sync success message.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Outlook Inbox sync complete"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Outlook 받은편지함 동기화 완료"
           }
         }
       }
@@ -5543,6 +6874,60 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "요약할 본문 없음"
+          }
+        }
+      }
+    },
+    "mail.notConnected.description" : {
+      "comment" : "Mail account not connected description.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Connect Gmail or Outlook to view your full inbox."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Gmail 또는 Outlook을 연결하면 받은편지함을 볼 수 있습니다."
+          }
+        }
+      }
+    },
+    "mail.notConnected.outlookConnect" : {
+      "comment" : "Outlook connect button in empty state.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Set Up Outlook IMAP"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Outlook IMAP 연결 설정"
+          }
+        }
+      }
+    },
+    "mail.notConnected.title" : {
+      "comment" : "Mail account not connected title.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mail Account Not Connected"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "메일 계정 미연결"
           }
         }
       }
@@ -5846,6 +7231,24 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "등록됨"
+          }
+        }
+      }
+    },
+    "meeting.action.reportDiagnostic" : {
+      "comment" : "Open diagnostic reporting after a meeting recording error.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Report Error"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "오류 보고"
           }
         }
       }
@@ -7077,6 +8480,24 @@
         }
       }
     },
+    "meeting.refinement.ruleBased" : {
+      "comment" : "Meeting refinement rules fallback label.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Rule-based · %@"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "규칙 기반 · %@"
+          }
+        }
+      }
+    },
     "meeting.section.deviceMeetings" : {
       "comment" : "Saved meetings section heading.",
       "extractionState" : "manual",
@@ -7329,6 +8750,42 @@
         }
       }
     },
+    "memory.analysis.footer" : {
+      "comment" : "Behavior-pattern analysis scope and AFM narrative explanation.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Current to-do state, user-deletion snapshots, and typed change events from the last 90 days are kept separate. Structured metrics and confidence are calculated identically on every supported device; when selected, AFM improves only the narrative describing those metrics. Results are saved only when you tap Apply."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "최근 90일의 현재 TODO 상태, 사용자 삭제 스냅샷, typed 변경 이벤트를 분리합니다. 구조화 지표와 신뢰도는 모든 지원 기기에서 동일하게 계산하고, AFM은 선택되었을 때 그 지표의 서술만 개선합니다. 결과는 적용을 눌러야 저장됩니다."
+          }
+        }
+      }
+    },
+    "memory.analysis.progress" : {
+      "comment" : "Behavior-pattern analysis progress.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Analyzing behavior patterns…"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "행동 패턴 분석 중…"
+          }
+        }
+      }
+    },
     "notification.todoReminder" : {
       "comment" : "Notification fallback title.",
       "extractionState" : "manual",
@@ -7348,57 +8805,22 @@
       }
     },
     "Outlook" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Outlook"
-          }
-        }
-      }
+
     },
-    "Outlook category 이름은 메일 행의 badge로 그대로 표시합니다." : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Outlook category names are shown as-is in mail row badges."
-          }
-        }
-      }
-    },
-    "Outlook 계정" : {
-      "comment" : "Localized UI copy.",
+    "Outlook IMAP 연결" : {
+      "comment" : "Outlook IMAP connection action.",
       "extractionState" : "manual",
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Outlook Account"
+            "value" : "Connect Outlook IMAP"
           }
         },
         "ko" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Outlook 계정"
-          }
-        }
-      }
-    },
-    "Outlook 연결" : {
-      "comment" : "Localized UI copy.",
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Connect Outlook"
-          }
-        },
-        "ko" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Outlook 연결"
+            "value" : "Outlook IMAP 연결"
           }
         }
       }
@@ -7601,6 +9023,246 @@
         }
       }
     },
+    "Replace App Password" : {
+
+    },
+    "Retry connection" : {
+
+    },
+    "search.empty.message" : {
+      "comment" : "Empty search results message.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Try a different search term or category."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "다른 검색어나 카테고리로 검색해보세요."
+          }
+        }
+      }
+    },
+    "search.empty.title" : {
+      "comment" : "Empty search results title.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No Results"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "검색 결과 없음"
+          }
+        }
+      }
+    },
+    "search.loading" : {
+      "comment" : "Search in progress indicator label.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Searching..."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "검색 중..."
+          }
+        }
+      }
+    },
+    "search.prompt" : {
+      "comment" : "Search bar prompt text.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Search todos, mail, meetings"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "할 일, 메일, 회의 검색"
+          }
+        }
+      }
+    },
+    "search.result.unavailable" : {
+      "comment" : "Deleted or missing search result notice.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This item is no longer available."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "이 항목은 더 이상 사용할 수 없습니다."
+          }
+        }
+      }
+    },
+    "search.scope.all" : {
+      "comment" : "All sources filter chip.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "All"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "전체"
+          }
+        }
+      }
+    },
+    "search.scope.mail" : {
+      "comment" : "Mail source filter chip.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mail"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "메일"
+          }
+        }
+      }
+    },
+    "search.scope.meeting" : {
+      "comment" : "Meeting source filter chip.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Meetings"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "회의"
+          }
+        }
+      }
+    },
+    "search.scope.todo" : {
+      "comment" : "Todo source filter chip.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Todos"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "할 일"
+          }
+        }
+      }
+    },
+    "settings.language.footer" : {
+      "comment" : "Language preference explanation.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The default follows the system language. An app selection applies only to this device."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "기본값은 시스템 언어입니다. 앱에서 선택한 언어는 이 기기에만 적용됩니다."
+          }
+        }
+      }
+    },
+    "settings.language.label" : {
+      "comment" : "Application language picker label.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "App Language"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "앱 언어"
+          }
+        }
+      }
+    },
+    "settings.language.section" : {
+      "comment" : "Language preference section title.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Language"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "언어"
+          }
+        }
+      }
+    },
+    "settings.language.system" : {
+      "comment" : "System language option.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "System Language"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "시스템 언어"
+          }
+        }
+      }
+    },
     "settings.sync.aiAutomation" : {
       "comment" : "Localized UI copy.",
       "extractionState" : "manual",
@@ -7709,6 +9371,24 @@
         }
       }
     },
+    "settings.sync.mailBodySharing" : {
+      "comment" : "Localized UI copy.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Gemini Email Body Sharing"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Gemini 메일 본문 공유"
+          }
+        }
+      }
+    },
     "settings.sync.mailLookback" : {
       "comment" : "Localized UI copy.",
       "extractionState" : "manual",
@@ -7759,6 +9439,24 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "자동 동기화 시각"
+          }
+        }
+      }
+    },
+    "settings.title" : {
+      "comment" : "Settings screen title.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Settings"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "설정"
           }
         }
       }
@@ -7871,6 +9569,9 @@
         }
       }
     },
+    "TODO 우선순위 규칙" : {
+
+    },
     "TODO 자동 정렬 AI" : {
       "comment" : "Localized UI copy.",
       "extractionState" : "manual",
@@ -7890,6 +9591,7 @@
       }
     },
     "TODO 자동 정렬 및 AI" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -8093,6 +9795,132 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "%@ 시작 중…"
+          }
+        }
+      }
+    },
+    "todo.detail.completeAction" : {
+      "comment" : "Complete a to-do from its detail screen.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mark Complete"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "완료 처리"
+          }
+        }
+      }
+    },
+    "todo.detail.navigationTitle" : {
+      "comment" : "To-do detail screen title.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "To-Do Details"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "할 일 세부"
+          }
+        }
+      }
+    },
+    "todo.detail.saveErrorTitle" : {
+      "comment" : "To-do save error title.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Save Error"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "저장 오류"
+          }
+        }
+      }
+    },
+    "todo.detail.startTimeLabel" : {
+      "comment" : "Start time picker label on the to-do detail screen.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Start"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "시작"
+          }
+        }
+      }
+    },
+    "todo.detail.startTimeToggle" : {
+      "comment" : "Toggle that gives a to-do a start time in addition to its deadline.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Set Start Time"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "시작 시각 설정"
+          }
+        }
+      }
+    },
+    "todo.detail.titleRequired" : {
+      "comment" : "Validation shown when saving a to-do without a title.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Enter a title."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "제목을 입력해주세요."
+          }
+        }
+      }
+    },
+    "todo.detail.unsavedChanges" : {
+      "comment" : "Unsaved to-do edits confirmation.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "You have unsaved changes"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "저장하지 않은 변경사항이 있습니다"
           }
         }
       }
@@ -9469,6 +11297,7 @@
       }
     },
     "Xcode에서 패키지를 먼저 추가해야 합니다" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -9617,6 +11446,7 @@
       }
     },
     "검증 중인 기능을 사용자가 직접 선택할 수 있게 합니다. 회의 음성 노이즈 감소는 베타 기능을 켠 뒤 회의 화면에서 선택할 수 있습니다." : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -9637,6 +11467,7 @@
       }
     },
     "결정론적 통계 분석 중…" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -9712,7 +11543,17 @@
         }
       }
     },
+    "규칙 기반 정렬은 베타 provider를 켜지 않아도 항상 사용할 수 있습니다." : {
+
+    },
+    "근거" : {
+
+    },
+    "기기가 잠긴 뒤에도 이 기기에서 App Password를 사용할 수 있습니다. 분실·탈옥·앱 침해 위험이 증가할 수 있습니다." : {
+
+    },
     "기기가 지원되지 않는 기능입니다" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -9900,6 +11741,9 @@
         }
       }
     },
+    "다시 연결" : {
+
+    },
     "다시 요약" : {
       "comment" : "Localized UI copy.",
       "extractionState" : "manual",
@@ -9947,17 +11791,18 @@
       }
     },
     "다운로드 (약 %lld.%lldGB)" : {
+      "extractionState" : "stale",
       "localizations" : {
-        "ko" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "다운로드 (약 %1$lld.%2$lldGB)"
-          }
-        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "Download (about %lld.%lld GB)"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "다운로드 (약 %1$lld.%2$lldGB)"
           }
         }
       }
@@ -10147,6 +11992,7 @@
       }
     },
     "되돌리기" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -10155,6 +12001,9 @@
           }
         }
       }
+    },
+    "두 번 탭하면 이 구간부터 재생" : {
+
     },
     "등록" : {
       "localizations" : {
@@ -10185,6 +12034,7 @@
       }
     },
     "등록 중…" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -10334,6 +12184,9 @@
         }
       }
     },
+    "마감일, 중요도, 태그, 출처와 행동 패턴을 사용해 우선순위를 정합니다." : {
+
+    },
     "마지막 동기화" : {
       "comment" : "Localized UI copy.",
       "extractionState" : "manual",
@@ -10427,6 +12280,7 @@
       }
     },
     "메일 계정 미연결" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -10446,6 +12300,9 @@
         }
       }
     },
+    "메일 본문 로딩 중…" : {
+
+    },
     "메일 본문 분석 허용" : {
       "comment" : "Localized UI copy.",
       "extractionState" : "manual",
@@ -10463,6 +12320,9 @@
           }
         }
       }
+    },
+    "메일 본문을 불러올 수 없습니다." : {
+
     },
     "메일 분류 기준" : {
       "comment" : "Localized UI copy.",
@@ -10593,17 +12453,18 @@
       }
     },
     "모델 다운로드 (약 %lld.%lldGB)" : {
+      "extractionState" : "stale",
       "localizations" : {
-        "ko" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "모델 다운로드 (약 %1$lld.%2$lldGB)"
-          }
-        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "Download Model (about %lld.%lld GB)"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "모델 다운로드 (약 %1$lld.%2$lldGB)"
           }
         }
       }
@@ -10671,6 +12532,15 @@
           }
         }
       }
+    },
+    "반복 일정" : {
+
+    },
+    "반복 일정 변경 범위를 선택하세요" : {
+
+    },
+    "반복 일정 삭제 범위를 선택하세요" : {
+
     },
     "받은편지함" : {
       "localizations" : {
@@ -10757,6 +12627,7 @@
       }
     },
     "발신자" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -10783,6 +12654,9 @@
           }
         }
       }
+    },
+    "백그라운드 메일 불러오기" : {
+
     },
     "백그라운드 캘린더 변경사항 감지 정확도 향상 및 자동 동기화 고도화" : {
       "comment" : "Development status UI copy.",
@@ -10903,6 +12777,9 @@
           }
         }
       }
+    },
+    "사용자가 지정한 우선순위는 항상 유지됩니다." : {
+
     },
     "삭제" : {
       "comment" : "Localized UI copy.",
@@ -11043,6 +12920,7 @@
       }
     },
     "생성된 페르소나" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -11053,6 +12931,7 @@
       }
     },
     "생성일" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -11079,6 +12958,9 @@
           }
         }
       }
+    },
+    "선택한 날짜의 일정, 이후 일정 또는 전체 시리즈에 적용할 수 있습니다." : {
+
     },
     "설정" : {
       "comment" : "Localized UI copy.",
@@ -11319,6 +13201,9 @@
           }
         }
       }
+    },
+    "신뢰도: %@" : {
+
     },
     "실행 취소" : {
       "comment" : "Localized UI copy.",
@@ -11570,6 +13455,15 @@
         }
       }
     },
+    "업데이트" : {
+
+    },
+    "업데이트 가능" : {
+
+    },
+    "업데이트 알림 닫기" : {
+
+    },
     "없음" : {
       "comment" : "Localized UI copy.",
       "extractionState" : "manual",
@@ -11615,6 +13509,9 @@
           }
         }
       }
+    },
+    "연결된 메일 계정으로 수동 메일 확인 및 받은편지함 조회가 가능합니다." : {
+
     },
     "연결됨" : {
       "comment" : "Localized UI copy.",
@@ -11745,6 +13642,7 @@
       }
     },
     "온디바이스 모델 관리" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -11837,6 +13735,7 @@
       }
     },
     "완료일" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -11948,7 +13847,11 @@
         }
       }
     },
+    "위험을 이해하고 활성화" : {
+
+    },
     "유형" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -12063,6 +13966,7 @@
       }
     },
     "이 기기는 온디바이스 AI 모델을 실행할 수 있는 메모리 요건을 충족하지 않습니다." : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -12100,12 +14004,33 @@
         }
       }
     },
+    "이 일정만" : {
+
+    },
     "이 페르소나 사용" : {
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "Use This Persona"
+          }
+        }
+      }
+    },
+    "일" : {
+      "comment" : "Localized UI copy.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "days"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "일"
           }
         }
       }
@@ -12137,6 +14062,9 @@
           }
         }
       }
+    },
+    "이메일 로드 오류" : {
+
     },
     "이메일 연동" : {
       "comment" : "Localized UI copy.",
@@ -12252,23 +14180,14 @@
         }
       }
     },
-    "일" : {
-      "comment" : "Localized UI copy.",
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "days"
-          }
-        },
-        "ko" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "일"
-          }
-        }
-      }
+    "이후 모든 일정" : {
+
+    },
+    "일반 Google 비밀번호가 아닌 App Password를 입력하세요. 저장 후 앱에서는 다시 표시하거나 복사할 수 없습니다." : {
+
+    },
+    "일반 일정" : {
+
     },
     "일시 정지" : {
       "comment" : "Localized UI copy.",
@@ -12307,6 +14226,9 @@
           }
         }
       }
+    },
+    "일정 정보" : {
+
     },
     "읽음 여부와 관계없이 받은편지함의 전체 기간을 페이지 단위로 불러옵니다." : {
       "localizations" : {
@@ -12353,6 +14275,9 @@
           }
         }
       }
+    },
+    "자동 백그라운드 메일 불러오기" : {
+
     },
     "자동 숨긴 발신자" : {
       "comment" : "Localized UI copy.",
@@ -12426,6 +14351,12 @@
         }
       }
     },
+    "저장된 %@ App Password가 있습니다. 마지막 연결 시도는 실패했지만 비밀번호는 삭제되지 않았습니다." : {
+
+    },
+    "저장된 %@ App Password를 확인하는 중입니다…" : {
+
+    },
     "저장된 분석" : {
       "localizations" : {
         "en" : {
@@ -12473,6 +14404,9 @@
           }
         }
       }
+    },
+    "적용하기 전에는 현재 설명과 유형이 변경되지 않습니다." : {
+
     },
     "전사 내용" : {
       "comment" : "Localized UI copy.",
@@ -12578,6 +14512,12 @@
         }
       }
     },
+    "전체 반복 일정 변경" : {
+
+    },
+    "전체 반복 일정 삭제" : {
+
+    },
     "전체 본문 로딩 중…" : {
       "localizations" : {
         "en" : {
@@ -12615,6 +14555,9 @@
           }
         }
       }
+    },
+    "제거" : {
+
     },
     "제목" : {
       "localizations" : {
@@ -12796,7 +14739,11 @@
         }
       }
     },
+    "초안" : {
+
+    },
     "최근 90일의 현재 TODO 상태, 사용자 삭제 스냅샷, typed 변경 이벤트를 분리합니다. 모든 지원 기기에서 동일한 구조화 지표와 신뢰도를 계산하며, 결과는 적용을 눌러야 저장됩니다." : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -12815,6 +14762,9 @@
           }
         }
       }
+    },
+    "최신 %@" : {
+
     },
     "최초 기동 시 iCloud 동기화 여부 설정 지원 (0단계 온보딩)" : {
       "comment" : "Development status UI copy.",
@@ -12863,6 +14813,7 @@
       }
     },
     "출처" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -13020,6 +14971,9 @@
         }
       }
     },
+    "캘린더 일정 편집" : {
+
+    },
     "캘린더 접근 권한 없음" : {
       "comment" : "Localized UI copy.",
       "extractionState" : "manual",
@@ -13095,6 +15049,7 @@
       }
     },
     "키 삭제" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -13105,6 +15060,7 @@
       }
     },
     "키 저장" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -13199,6 +15155,9 @@
           }
         }
       }
+    },
+    "페르소나 미리보기" : {
+
     },
     "페르소나 부합 항목" : {
       "localizations" : {
@@ -13380,6 +15339,9 @@
         }
       }
     },
+    "행동 프로필은 신뢰도와 갱신 시점이 충분할 때만 규칙을 개인화합니다." : {
+
+    },
     "허용" : {
       "comment" : "Localized UI copy.",
       "extractionState" : "manual",
@@ -13398,7 +15360,11 @@
         }
       }
     },
+    "현재" : {
+
+    },
     "현재 재생 구간" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -13407,6 +15373,9 @@
           }
         }
       }
+    },
+    "현재 재생 구간. 두 번 탭하면 이 구간부터 재생" : {
+
     },
     "현재 전사문과 분석 결과가 새 전사로 대체됩니다. 원본 음성은 보존됩니다." : {
       "comment" : "Localized UI copy.",
@@ -13580,132 +15549,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "휴지통으로 이동"
-          }
-        }
-      }
-    },
-    "error.meeting.capture.operation" : {
-      "comment" : "Generic meeting capture/finalization error; private diagnostics remain in logs.",
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "The meeting recording could not be completed."
-          }
-        },
-        "ko" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "회의 녹음을 완료하지 못했습니다."
-          }
-        }
-      }
-    },
-    "settings.language.section" : {
-      "comment" : "Language preference section title.",
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Language"
-          }
-        },
-        "ko" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "언어"
-          }
-        }
-      }
-    },
-    "settings.language.label" : {
-      "comment" : "Application language picker label.",
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "App Language"
-          }
-        },
-        "ko" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "앱 언어"
-          }
-        }
-      }
-    },
-    "settings.language.system" : {
-      "comment" : "System language option.",
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "System Language"
-          }
-        },
-        "ko" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "시스템 언어"
-          }
-        }
-      }
-    },
-    "settings.language.footer" : {
-      "comment" : "Language preference explanation.",
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "The default follows the system language. An app selection applies only to this device."
-          }
-        },
-        "ko" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "기본값은 시스템 언어입니다. 앱에서 선택한 언어는 이 기기에만 적용됩니다."
-          }
-        }
-      }
-    },
-    "settings.title" : {
-      "comment" : "Settings screen title.",
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Settings"
-          }
-        },
-        "ko" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "설정"
-          }
-        }
-      }
-    },
-    "action.close" : {
-      "comment" : "Close button label.",
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Close"
-          }
-        },
-        "ko" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "닫기"
           }
         }
       }

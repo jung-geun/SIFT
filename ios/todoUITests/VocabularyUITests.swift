@@ -15,7 +15,8 @@ final class VocabularyUITests: XCTestCase {
             "-AppleLocale", "ko_KR",
             "-pieroot.todo.hasOnboarded", "YES",
             "-pieroot.todo.hasCompletedTutorial", "YES",
-            "-pieroot.todo.selectedTab", "0"
+            "-pieroot.todo.selectedTab", "0",
+            "-ui-test-suppress-crash-prompt"
         ]
         app.launchEnvironment["SIFT_UI_TESTING"] = "1"
         app.launch()

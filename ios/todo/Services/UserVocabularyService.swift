@@ -307,6 +307,19 @@ actor UserVocabularyService {
         term.rejectedAt = nil; try modelContext.save()
     }
 
+    func removeRejected(canonicalKey: String) async throws {
+        try await ensureInitialized()
+        guard let term = try term(for: canonicalKey), term.rejectedAt != nil else {
+            throw VocabularyServiceError.missingTerm
+        }
+        let observations = try modelContext.fetch(FetchDescriptor<VocabularyObservation>()).filter {
+            $0.canonicalKey == canonicalKey || $0.surfaceKey == canonicalKey
+        }
+        observations.forEach(modelContext.delete)
+        modelContext.delete(term)
+        try modelContext.save()
+    }
+
     func resetAll() async throws {
         try await ensureInitialized()
         try modelContext.delete(model: VocabularyObservation.self)

@@ -4,27 +4,74 @@ import CloudKit
 import UserNotifications
 import BackgroundTasks
 import EventKit
-import MSAL
+import TipKit
+import OSLog
 
 
 // MARK: - BGTask 식별자
 
-private let kEmailRefreshTaskID  = "pieroot.todo.emailRefresh"
+private let kEmailRefreshTaskID = "pieroot.todo.emailRefresh"
+private let backgroundTaskLogger = Logger(subsystem: "pieroot.todo", category: "BackgroundTasks")
+
+/// Decides Mail-tab visibility solely from locally available account records.
+/// Remote credential validation belongs to `MailTabView` after the tab renders.
+func mailTabIsVisibleForStoredCredentials(
+    uiTestShowsAllTabs: Bool,
+    gmailAccount: String,
+    outlookAccount: String = ""
+) -> Bool {
+    uiTestShowsAllTabs || !gmailAccount.isEmpty || !outlookAccount.isEmpty
+}
+
+private final class BGTaskCompletionGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var didComplete = false
+    private let task: BGTask
+
+    init(task: BGTask) {
+        self.task = task
+    }
+
+    func finish(success: Bool) {
+        lock.lock()
+        guard !didComplete else {
+            lock.unlock()
+            return
+        }
+        didComplete = true
+        lock.unlock()
+        task.setTaskCompleted(success: success)
+    }
+}
 
 
 // MARK: - App Delegate
 
 class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
-
-    // 무음 푸시가 들어왔을 때 fetch한 새 todo를 SwiftData에 삽입하기 위한 컨텍스트.
-    // todoApp에서 설정됨.
     var modelContext: ModelContext?
+    private var emailRefreshTask: Task<Void, Never>?
 
     func application(
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
         UNUserNotificationCenter.current().delegate = self
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("-ui-test-seed-diagnostic-report") {
+            DiagnosticRecorder.shared.setCollectionEnabled(true)
+            DiagnosticRecorder.shared.record(
+                error: NSError(
+                    domain: "todo.UITestSeed",
+                    code: 42,
+                    userInfo: [NSLocalizedDescriptionKey: "seeded diagnostic"]
+                ),
+                component: "app.lifecycle",
+                operation: "uiTestSeed"
+            )
+        }
+        #endif
+        DiagnosticEnvironment.setAppState("active")
+        DiagnosticReportService.shared.configure()
 
         // Preview 모드에서는 BGTask 미지원 (Preview 컨테이너에 Info.plist 없음 → crash)
         let isPreview = ProcessInfo.processInfo.environment["XCODE_RUNNING_FOR_PREVIEWS"] == "1"
@@ -36,8 +83,23 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         ])
 
         if !isPreview {
-            BGTaskScheduler.shared.register(forTaskWithIdentifier: kEmailRefreshTaskID, using: nil) { task in
-                Task { await self.handleEmailRefresh(task: task as! BGAppRefreshTask) }
+            let didRegister = BGTaskScheduler.shared.register(forTaskWithIdentifier: kEmailRefreshTaskID, using: nil) { task in
+                guard let refreshTask = task as? BGAppRefreshTask else {
+                    task.setTaskCompleted(success: false)
+                    backgroundTaskLogger.error("Received unexpected BGTask type for \(kEmailRefreshTaskID, privacy: .public)")
+                    return
+                }
+                Task { @MainActor in
+                    self.beginEmailRefresh(task: refreshTask)
+                }
+            }
+            if !didRegister {
+                DiagnosticRecorder.shared.record(
+                    error: DiagnosticFailure(code: 0, reason: "BGTask handler registration failed"),
+                    component: "app.background",
+                    operation: "registerTaskHandler"
+                )
+                backgroundTaskLogger.error("Failed to register BGTask handler for \(kEmailRefreshTaskID, privacy: .public)")
             }
         }
 
@@ -57,21 +119,32 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
     // MARK: - BGAppRefreshTask 핸들러
 
     @MainActor
+    private func beginEmailRefresh(task: BGAppRefreshTask) {
+        emailRefreshTask?.cancel()
+        emailRefreshTask = Task { @MainActor [weak self] in
+            await self?.handleEmailRefresh(task: task)
+        }
+    }
+
+    @MainActor
     private func handleEmailRefresh(task: BGAppRefreshTask) async {
         // 다음 폴링 예약 (현재 작업 완료 전에 예약해야 OS가 취소 시에도 재예약됨)
         scheduleEmailRefresh()
+        let completion = BGTaskCompletionGate(task: task)
+        defer { emailRefreshTask = nil }
 
-        task.expirationHandler = {
-            task.setTaskCompleted(success: false)
+        task.expirationHandler = { [weak self] in
+            self?.emailRefreshTask?.cancel()
+            completion.finish(success: false)
         }
 
         guard let ctx = modelContext else {
-            task.setTaskCompleted(success: false)
+            completion.finish(success: false)
             return
         }
 
         let success = await fetchEmailTodos(context: ctx)
-        task.setTaskCompleted(success: success)
+        completion.finish(success: success && !Task.isCancelled)
     }
 
 
@@ -80,45 +153,47 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
 
     @MainActor @discardableResult
     private func fetchEmailTodos(context: ModelContext) async -> Bool {
+        let metadataOK = await MailboxIncrementalSyncCoordinator.shared.syncAvailableProviders(backgroundOnly: true)
+        guard !Task.isCancelled else { return false }
+
         // 메일 자동 분석 토글 — 배경(BGTask) 경로 독립 게이트 (마스터 onDeviceLLMEnabled와 무관)
         // register(defaults:)로 기본값 true 보장 → 기존 사용자 동작 그대로 유지
-        guard UserDefaults.standard.bool(forKey: "pieroot.todo.emailAutoAnalysisEnabled") else { return false }
+        guard UserDefaults.standard.bool(forKey: "pieroot.todo.emailAutoAnalysisEnabled") else { return metadataOK }
 
-        let gmailAuthenticated = EmailService.shared.isAuthenticated
-        let outlookAuthenticated = await OutlookMailService.shared.canAccessMailSilently()
-        guard gmailAuthenticated || outlookAuthenticated else { return false }
+        let imapAccount = UserDefaults.standard.string(forKey: "pieroot.todo.imap.account") ?? ""
+        let imapBackgroundEnabled = UserDefaults.standard.bool(forKey: "pieroot.todo.imap.backgroundEnabled")
+        guard !Task.isCancelled else { return false }
+        guard !imapAccount.isEmpty,
+              imapBackgroundEnabled,
+              IMAPCredentialStore.hasCredential(for: imapAccount),
+              !IMAPCredentialStore.isCredentialRejected(for: imapAccount)
+        else { return metadataOK }
 
         var didSucceed = false
         var failures: [String] = []
 
-        if gmailAuthenticated {
+        if !imapAccount.isEmpty && imapBackgroundEnabled {
             do {
-                _ = try await EmailService.shared.fetchAndStoreExtractedItems(
-                    context: context,
-                    allowFoundationModels: false
-                )
+                let emailContext = ModelContext(AppDataContainer.shared.emailContainer)
+                _ = try await GmailIMAPIngestionService(emailContext: emailContext)
+                    .sync(account: imapAccount, backgroundEnabled: true)
                 didSucceed = true
             } catch {
-                print("[EmailService] fetch 실패: \(error.localizedDescription)")
-                failures.append("gmail")
-            }
-        }
-
-        if outlookAuthenticated {
-            do {
-                _ = try await OutlookMailService.shared.fetchAndStoreExtractedItems(
-                    context: context,
-                    allowFoundationModels: false
+                DiagnosticRecorder.shared.record(
+                    error: error,
+                    component: "mail.gmail",
+                    operation: "backgroundFetch"
                 )
-                didSucceed = true
-            } catch {
-                print("[OutlookMailService] fetch 실패: \(error.localizedDescription)")
-                failures.append("outlook")
+                if case GmailIMAPError.credentialRejected = error {
+                    IMAPCredentialStore.markCredentialRejected(for: imapAccount)
+                }
+                print("[GmailIMAP] background fetch failed: \(error.localizedDescription)")
+                failures.append("gmail-imap")
             }
         }
 
         if didSucceed { return true }
-        return failures.isEmpty == false ? false : didSucceed
+        return (failures.isEmpty == false ? false : didSucceed) || metadataOK
     }
 
     // MARK: - Foreground 알림 표시
@@ -137,11 +212,34 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
 /// 다음 이메일 폴링을 BGTaskScheduler에 예약.
 /// OS best-effort: `earliestBeginDate`를 다음 설정 시각으로 지정하지만
 /// 실제 실행 시각은 OS가 배터리·네트워크 상황에 따라 결정.
+@MainActor
 func scheduleEmailRefresh() {
+#if targetEnvironment(simulator)
+    backgroundTaskLogger.debug("Skipping email refresh BGTask scheduling on Simulator")
+    return
+#else
+    guard UIApplication.shared.backgroundRefreshStatus == .available else {
+        backgroundTaskLogger.debug("Skipping email refresh BGTask scheduling because background refresh is unavailable")
+        return
+    }
+
     let hour = UserDefaults.standard.integer(forKey: "pieroot.todo.emailRefreshHour")
-    let request = BGAppRefreshTaskRequest(identifier: kEmailRefreshTaskID)
-    request.earliestBeginDate = nextEmailRefreshDate(hour: hour > 0 ? hour : 7)
-    try? BGTaskScheduler.shared.submit(request)
+    let earliestBeginDate = nextEmailRefreshDate(hour: hour > 0 ? hour : 7)
+    DispatchQueue.global(qos: .utility).async {
+        let request = BGAppRefreshTaskRequest(identifier: kEmailRefreshTaskID)
+        request.earliestBeginDate = earliestBeginDate
+        do {
+            try BGTaskScheduler.shared.submit(request)
+        } catch {
+            DiagnosticRecorder.shared.record(
+                error: error,
+                component: "app.background",
+                operation: "scheduleEmailRefresh"
+            )
+            backgroundTaskLogger.error("Failed to schedule email refresh BGTask: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+#endif
 }
 
 /// 설정된 시(hour)의 다음 발생 시각을 반환.
@@ -176,6 +274,7 @@ struct todoApp: App {
 
     /// iCloud 동기화 모니터 — 앱 레벨로 승격하여 어느 탭에서든 알림 수신.
     @StateObject private var syncMonitor = CloudSyncMonitor()
+    @StateObject private var unexpectedTerminationRecovery = UnexpectedTerminationRecoveryService.shared
 
     /// 선택된 탭 (lastUsed 복원용).
     @AppStorage("pieroot.todo.selectedTab") private var selectedTab = 0
@@ -189,12 +288,25 @@ struct todoApp: App {
     @AppStorage("pieroot.todo.launchTab") private var launchTab = 0
     @AppStorage("pieroot.todo.iCloudSyncEnabled") private var iCloudSyncEnabled = false
     @StateObject private var tutorial = AppTutorialState()
+    @StateObject private var appUpdate = AppUpdateService()
     @State private var tabVisibility = AppTabVisibility(calendarVisible: false, mailVisible: false)
+    @State private var mailAccessPolicy = MailboxCachedProviderAccess.current()
     @State private var appLanguage = AppLanguage.current
     private let vocabularyDependencies: UserVocabularyDependencies
     private let vocabularyEnrichmentQueue: VocabularyEnrichmentQueue
     private var uiTestShowsAllTabs: Bool {
         ProcessInfo.processInfo.arguments.contains("-pieroot.todo.uiTestShowAllTabs")
+    }
+
+    /// True only under the DEBUG mail UI-test fixture. Suppresses every live
+    /// IMAP/Graph auth attempt (foreground poll + background automation) so the
+    /// fixture's seeded rows render deterministically without network access.
+    private var uiTestSkipsLiveMailSync: Bool {
+        #if DEBUG
+        MailUITestFixture.isEnabled
+        #else
+        false
+        #endif
     }
 
     // MARK: - 페르소나 중복 제거 (PersonaSettingsView에서도 참조)
@@ -223,9 +335,25 @@ struct todoApp: App {
     // MARK: - Init
 
     init() {
-        _ = SettingsStore.shared
+        #if DEBUG
+        let launchArguments = ProcessInfo.processInfo.arguments
+        if launchArguments.contains("-ui-test-reset-beta") {
+            SettingsStore.shared.resetBetaFeaturesForUITest()
+        }
+        if launchArguments.contains("-ui-test-seed-legacy-ai") {
+            SettingsStore.shared.seedLegacyAISettingsForUITest()
+        }
+        #endif
+        SettingsStore.shared.migrateLegacyBetaSelectedProviderIfNeeded()
+        SettingsStore.shared.normalizeBetaSelectedProvider()
+        if #available(iOS 17.0, *) {
+            try? Tips.configure()
+        }
         let container = AppDataContainer()
         _appData = StateObject(wrappedValue: container)
+        #if DEBUG
+        MailUITestFixture.seedIfNeeded(into: container.emailContainer)
+        #endif
         let service = UserVocabularyService(modelContainer: container.meetingContainer)
         let queue = VocabularyEnrichmentQueue(service: service)
         vocabularyEnrichmentQueue = queue
@@ -235,6 +363,21 @@ struct todoApp: App {
                 await queue.enqueue(request)
             })
         )
+    }
+
+    @ViewBuilder
+    private var todoTab: some View {
+        let searchMailAccess: MailboxCachedProviderAccess? = tabVisibility.mailVisible && mailAccessPolicy.hasActiveProvider
+            ? mailAccessPolicy
+            : nil
+        TodoListView(
+            globalSearchAppContainer: appData.container,
+            globalSearchEmailContainer: appData.emailContainer,
+            globalSearchMeetingContainer: appData.meetingContainer,
+            globalSearchMailAccess: searchMailAccess
+        )
+        .tabItem { Label("할 일", systemImage: "checklist") }
+        .tag(AppTabID.todo.rawValue)
     }
 
     // MARK: - Body
@@ -256,9 +399,7 @@ struct todoApp: App {
                 }
             )
             TabView(selection: tabBinding) {
-                TodoListView()
-                    .tabItem { Label("할 일", systemImage: "checklist") }
-                    .tag(AppTabID.todo.rawValue)
+                todoTab
 
                 if tabVisibility.calendarVisible {
                     CalendarTabView()
@@ -281,15 +422,11 @@ struct todoApp: App {
             .environment(\.locale, appLanguage.locale)
             .tint(AppTheme.accent)
             .environmentObject(syncMonitor)
+            .environmentObject(appUpdate)
             .environment(\.appTutorialState, tutorial)
             .environment(\.userVocabulary, vocabularyDependencies)
-            .onOpenURL { url in
-                MSALPublicClientApplication.handleMSALResponse(
-                    url,
-                    sourceApplication: nil
-                )
-            }
             .onAppear {
+                mailAccessPolicy = MailboxCachedProviderAccess.current()
                 SettingsStore.shared.migrateLegacyMemoryKeysIntoSwiftDataIfNeeded()
                 NSUbiquitousKeyValueStore.default.synchronize()
 
@@ -298,6 +435,7 @@ struct todoApp: App {
                 todoApp.deduplicatePersonas(context: ctx)
 
                 CalendarService.shared.restoreAuthorizationIfGranted()
+                unexpectedTerminationRecovery.enterForeground()
                 Task {
                     await refreshTabVisibility()
                     if launchBehavior == "fixed" {
@@ -307,6 +445,7 @@ struct todoApp: App {
                         selectedTab = AppTabID.todo.rawValue
                         tutorial.start(tabVisibility: tabVisibility)
                     }
+                    await appUpdate.refreshIfNeeded()
                 }
                 scheduleEmailRefresh()
 
@@ -315,9 +454,12 @@ struct todoApp: App {
                     syncMonitor.startObserving(initialCount: 0)
                 }
 
-                // 콜드 런치: scenePhase는 이미 .active라 onChange가 발동하지 않음
-                Task {
-                    await LLMAutomationOrchestrator.shared.runIfEligible(context: ctx)
+                // Cold launches do not trigger the .active scene-phase transition.
+                if !uiTestSkipsLiveMailSync {
+                    Task {
+                        await EmailAutomationOrchestrator.shared.runIfEligible(context: ctx)
+                    }
+                    MailboxIncrementalSyncCoordinator.shared.startPolling()
                 }
                 Task {
                     await CalendarService.shared.runWeeklyImportIfDue(context: ctx)
@@ -344,19 +486,22 @@ struct todoApp: App {
                 }
             }
             .onReceive(NotificationCenter.default.publisher(for: .gmailAuthChanged)) { _ in
+                mailAccessPolicy = MailboxCachedProviderAccess.current()
                 Task { await refreshTabVisibility() }
             }
-            .onReceive(NotificationCenter.default.publisher(for: .outlookAuthChanged)) { _ in
+            .onReceive(NotificationCenter.default.publisher(for: Notification.Name("pieroot.todo.outlookAuthChanged"))) { _ in
+                mailAccessPolicy = MailboxCachedProviderAccess.current()
                 Task { await refreshTabVisibility() }
             }
             .onReceive(NotificationCenter.default.publisher(for: .calendarAuthorizationChanged)) { _ in
                 Task { await refreshTabVisibility() }
             }
             .onReceive(NotificationCenter.default.publisher(for: .appTutorialRequested)) { _ in
+                selectedTab = AppTabID.todo.rawValue
+                tutorial.start(tabVisibility: tabVisibility)
                 Task {
                     await refreshTabVisibility()
-                    selectedTab = AppTabID.todo.rawValue
-                    tutorial.start(tabVisibility: tabVisibility)
+                    tutorial.updateTabVisibility(tabVisibility)
                 }
             }
             .onReceive(NotificationCenter.default.publisher(for: AppLanguage.didChangeNotification)) { _ in
@@ -364,10 +509,17 @@ struct todoApp: App {
             }
             .onReceive(NotificationCenter.default.publisher(for: .settingsDismissRequested)) { _ in
                 Task { await refreshTabVisibility() }
+                mailAccessPolicy = MailboxCachedProviderAccess.current()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)) { _ in
+                unexpectedTerminationRecovery.enterBackground()
             }
             .onChange(of: scenePhase) { _, newPhase in
                 switch newPhase {
                 case .active:
+                    DiagnosticEnvironment.setAppState("active")
+                    unexpectedTerminationRecovery.enterForeground()
+                    mailAccessPolicy = MailboxCachedProviderAccess.current()
                     // 포그라운드 전환 시에도 동기화 시작 (탭 무관)
                     if iCloudSyncEnabled {
                         syncMonitor.startObserving(initialCount: 0)
@@ -377,10 +529,13 @@ struct todoApp: App {
                         if launchBehavior == "fixed" {
                             selectedTab = launchTab
                         }
+                        await appUpdate.refreshIfNeeded()
                     }
                     if let ctx = appDelegate.modelContext {
-                        Task {
-                            await LLMAutomationOrchestrator.shared.runIfEligible(context: ctx)
+                        if !uiTestSkipsLiveMailSync {
+                            Task {
+                                await EmailAutomationOrchestrator.shared.runIfEligible(context: ctx)
+                            }
                         }
                         Task {
                             await CalendarService.shared.runWeeklyImportIfDue(context: ctx)
@@ -391,8 +546,20 @@ struct todoApp: App {
                             await CalendarService.shared.cleanupOldCompletedTodos(context: ctx)
                         }
                     }
+                    if !uiTestSkipsLiveMailSync {
+                        MailboxIncrementalSyncCoordinator.shared.startPolling()
+                    }
                 case .background:
+                    // Persist the normal lifecycle transition before potentially
+                    // expensive MLX teardown. A suspend watchdog must not be shown
+                    // as an unexpected *foreground* termination next launch.
+                    unexpectedTerminationRecovery.enterBackground()
+                    DiagnosticEnvironment.setAppState("background")
                     OnDeviceLLMService.shared.unloadModel(reason: .background)
+                    MailboxIncrementalSyncCoordinator.shared.stopPolling()
+                case .inactive:
+                    DiagnosticEnvironment.setAppState("inactive")
+                    MailboxIncrementalSyncCoordinator.shared.stopPolling()
                 default:
                     break
                 }
@@ -402,6 +569,16 @@ struct todoApp: App {
                     selectedTab: $selectedTab,
                     tabVisibility: tabVisibility
                 )
+            }
+            .sheet(item: $unexpectedTerminationRecovery.pendingPrompt) { prompt in
+                NavigationStack {
+                    DiagnosticReportView(
+                        pendingError: prompt.error,
+                        component: "app.lifecycle",
+                        operation: "unexpectedForegroundTermination",
+                        showsCloseButton: true
+                    )
+                }
             }
         }
         .modelContainer(appData.container)
@@ -413,6 +590,7 @@ struct todoApp: App {
                 PersonaSettingsView()
             }
             .modelContainer(appData.container)
+            .environmentObject(appUpdate)
             .environment(\.appTutorialState, tutorial)
         }
         #endif
@@ -422,10 +600,11 @@ struct todoApp: App {
     private func refreshTabVisibility() async {
         CalendarService.shared.restoreAuthorizationIfGranted()
         let calendarVisible = uiTestShowsAllTabs || CalendarService.shared.isAuthorized
-        let outlookVisible = OutlookMailService.shared.isConfigured
-            ? await OutlookMailService.shared.canAccessMailSilently()
-            : false
-        let mailVisible = uiTestShowsAllTabs || EmailService.shared.isAuthenticated || outlookVisible
+        let mailVisible = mailTabIsVisibleForStoredCredentials(
+            uiTestShowsAllTabs: uiTestShowsAllTabs,
+            gmailAccount: UserDefaults.standard.string(forKey: "pieroot.todo.imap.account") ?? "",
+            outlookAccount: UserDefaults.standard.string(forKey: "pieroot.todo.outlook.account") ?? ""
+        )
         tabVisibility = AppTabVisibility(calendarVisible: calendarVisible, mailVisible: mailVisible)
         selectedTab = tabVisibility.clamped(selectedTab)
         launchTab = tabVisibility.clamped(launchTab)

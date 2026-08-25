@@ -23,6 +23,8 @@ private struct FirebaseSnapshotTodo: Codable {
     let notes: String
     let createdAt: Date
     let updatedAt: Date
+    /// Optional for backward-compatible imports of snapshots written before to-do start times existed.
+    let startDate: Date?
     let dueDate: Date?
     let isCompleted: Bool
     let completedAt: Date?
@@ -42,6 +44,10 @@ private struct FirebaseSnapshotTodo: Codable {
     let tags: [String]
     let calendarEventID: String?
     let calendarEventExternalID: String
+    /// Optional for backward-compatible imports of snapshots written before event provenance existed.
+    let calendarEventOrigin: String?
+    /// Optional for snapshots written before the calendar title baseline existed.
+    let calendarSyncedTitle: String?
     let memoryNotes: String
     let aiRecommendedTime: Date?
     let aiNeedsNotification: Bool
@@ -55,6 +61,7 @@ private struct FirebaseSnapshotTodo: Codable {
 
 private struct FirebaseSnapshotAudit: Codable {
     let id: UUID
+    let todoID: UUID?
     let createdAt: Date
     let completedAt: Date?
     let deletedAt: Date
@@ -62,9 +69,12 @@ private struct FirebaseSnapshotAudit: Codable {
     let triageType: String
     let wasFixedSchedule: Bool
     let hadDueDate: Bool
+    let dueDate: Date?
+    let tags: [String]?
 }
 
 private struct FirebaseSnapshotBehaviorEvent: Codable {
+    let todoCreatedAt: Date?
     let id: UUID
     let todoID: UUID
     let occurredAt: Date
@@ -129,6 +139,7 @@ enum FirebaseSnapshotStore {
                     notes: $0.notes,
                     createdAt: $0.createdAt,
                     updatedAt: $0.updatedAt,
+                    startDate: $0.startDate,
                     dueDate: $0.dueDate,
                     isCompleted: $0.isCompleted,
                     completedAt: $0.completedAt,
@@ -148,6 +159,8 @@ enum FirebaseSnapshotStore {
                     tags: $0.tags,
                     calendarEventID: $0.calendarEventID,
                     calendarEventExternalID: $0.calendarEventExternalID,
+                    calendarEventOrigin: $0.calendarEventOrigin,
+                    calendarSyncedTitle: $0.calendarSyncedTitle,
                     memoryNotes: $0.memoryNotes,
                     aiRecommendedTime: $0.aiRecommendedTime,
                     aiNeedsNotification: $0.aiNeedsNotification,
@@ -162,17 +175,21 @@ enum FirebaseSnapshotStore {
             audits: audits.map {
                 FirebaseSnapshotAudit(
                     id: $0.id,
+                    todoID: $0.todoID,
                     createdAt: $0.createdAt,
                     completedAt: $0.completedAt,
                     deletedAt: $0.deletedAt,
                     sourceType: $0.sourceType,
                     triageType: $0.triageType,
                     wasFixedSchedule: $0.wasFixedSchedule,
-                    hadDueDate: $0.hadDueDate
+                    hadDueDate: $0.hadDueDate,
+                    dueDate: $0.dueDate,
+                    tags: $0.tags
                 )
             },
             behaviorEvents: behaviorEvents.map {
                 FirebaseSnapshotBehaviorEvent(
+                    todoCreatedAt: $0.todoCreatedAt,
                     id: $0.id,
                     todoID: $0.todoID,
                     occurredAt: $0.occurredAt,
@@ -255,6 +272,7 @@ enum FirebaseSnapshotStore {
             todo.notes = payload.notes
             todo.createdAt = payload.createdAt
             todo.updatedAt = payload.updatedAt
+            todo.startDate = payload.startDate
             todo.dueDate = payload.dueDate
             todo.isCompleted = payload.isCompleted
             todo.completedAt = payload.completedAt
@@ -274,6 +292,8 @@ enum FirebaseSnapshotStore {
             todo.tags = payload.tags
             todo.calendarEventID = payload.calendarEventID
             todo.calendarEventExternalID = payload.calendarEventExternalID
+            todo.calendarEventOrigin = payload.calendarEventOrigin ?? ""
+            todo.calendarSyncedTitle = payload.calendarSyncedTitle ?? ""
             todo.memoryNotes = payload.memoryNotes
             todo.aiRecommendedTime = payload.aiRecommendedTime
             todo.aiNeedsNotification = payload.aiNeedsNotification
@@ -290,6 +310,7 @@ enum FirebaseSnapshotStore {
             let placeholder = Todo()
             let audit = TaskAuditEvent(from: placeholder)
             audit.id = payload.id
+            audit.todoID = payload.todoID ?? audit.id
             audit.createdAt = payload.createdAt
             audit.completedAt = payload.completedAt
             audit.deletedAt = payload.deletedAt
@@ -297,9 +318,10 @@ enum FirebaseSnapshotStore {
             audit.triageType = payload.triageType
             audit.wasFixedSchedule = payload.wasFixedSchedule
             audit.hadDueDate = payload.hadDueDate
+            audit.dueDate = payload.dueDate
+            audit.tags = payload.tags ?? []
             context.insert(audit)
         }
-
         for payload in envelope.behaviorEvents ?? [] {
             let event = TaskBehaviorEvent(
                 todo: Todo(),
@@ -309,6 +331,7 @@ enum FirebaseSnapshotStore {
             )
             event.id = payload.id
             event.todoID = payload.todoID
+            event.todoCreatedAt = payload.todoCreatedAt
             event.eventTypeRaw = payload.eventTypeRaw
             event.actorRaw = payload.actorRaw
             event.sourceType = payload.sourceType
@@ -349,5 +372,9 @@ enum FirebaseSnapshotStore {
         }
 
         try context.save()
+        let restoredTodos = (try? context.fetch(FetchDescriptor<Todo>())) ?? []
+        Task { @MainActor in
+            await TodoEligibilityReconciler.shared.reconcileAll(restoredTodos)
+        }
     }
 }

@@ -256,7 +256,7 @@ struct TodoApplyTests {
         let review = Todo(title: "등록 대기 후보")
         review.triageStatus = TodoTriage.review.rawValue
 
-        let candidates = TodoAISortScope.candidates(from: [todo, review])
+        let candidates = TodoPriorityScope.candidates(from: [todo, review])
 
         #expect(candidates.map(\.id) == [todo.id])
 
@@ -271,7 +271,7 @@ struct TodoApplyTests {
             engine: .onDeviceMLX,
             axes: AxisScores(deadlineProximity: 5, urgency: 5, importance: 5, chaining: 2)
         )
-        let rejected = TodoAISortScope.apply(reviewResult, in: candidates)
+        let rejected = TodoPriorityScope.apply(reviewResult, in: candidates)
 
         #expect(rejected == nil)
         #expect(review.computedPriorityScore == 0.0)
@@ -287,7 +287,7 @@ struct TodoApplyTests {
             engine: .onDeviceMLX,
             axes: AxisScores(deadlineProximity: 5, urgency: 5, importance: 5, chaining: 2)
         )
-        let applied = TodoAISortScope.apply(todoResult, in: candidates)
+        let applied = TodoPriorityScope.apply(todoResult, in: candidates)
 
         #expect(applied === todo)
         #expect(todo.computedPriorityScore == 0.73)

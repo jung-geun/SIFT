@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import todo
 
+@MainActor
 struct LocalizationRuntimeTests {
     @Test("App language resolution keeps supported tags stable")
     func resolvesLanguageTags() {
@@ -68,6 +69,19 @@ struct LocalizationRuntimeTests {
                 language: .english
             ) == "Sentinel fallback"
         )
+    }
+
+    @Test("To-do detail editing copy is localized")
+    func todoDetailEditingCopyIsLocalized() {
+        #expect(AppLanguage.localized("action.save", defaultValue: "저장", language: .english) == "Save")
+        #expect(AppLanguage.localized("action.discard", defaultValue: "폐기", language: .english) == "Discard")
+        #expect(AppLanguage.localized("todo.detail.navigationTitle", defaultValue: "할 일 세부", language: .english) == "To-Do Details")
+        #expect(AppLanguage.localized("todo.detail.unsavedChanges", defaultValue: "저장하지 않은 변경사항이 있습니다", language: .english) == "You have unsaved changes")
+        #expect(AppLanguage.localized("todo.detail.completeAction", defaultValue: "완료 처리", language: .english) == "Mark Complete")
+        #expect(AppLanguage.localized("todo.detail.saveErrorTitle", defaultValue: "저장 오류", language: .english) == "Save Error")
+        #expect(AppLanguage.localized("todo.detail.titleRequired", defaultValue: "제목을 입력해주세요.", language: .english) == "Enter a title.")
+        #expect(AppLanguage.localized("todo.detail.startTimeToggle", defaultValue: "시작 시각 설정", language: .english) == "Set Start Time")
+        #expect(AppLanguage.localized("todo.detail.startTimeLabel", defaultValue: "시작", language: .english) == "Start")
     }
 
     @Test("Explicit locale controls deadline and reminder copy")

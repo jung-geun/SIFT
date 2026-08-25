@@ -19,6 +19,11 @@ final class NotificationService {
             return try await UNUserNotificationCenter.current()
                 .requestAuthorization(options: [.alert, .sound, .badge])
         } catch {
+            DiagnosticRecorder.shared.record(
+                error: error,
+                component: "notification",
+                operation: "requestAuthorization"
+            )
             return false
         }
     }
@@ -45,6 +50,7 @@ final class NotificationService {
         }
 
         // 미완료 + 확정(todo) + future dueDate 있는 항목만 만료 임박순 정렬
+        var didRecordScheduleFailure = false
         let candidates = todos
             .filter { ReminderTiming.schedulable($0) }
             .sorted { ($0.dueDate ?? .distantFuture) < ($1.dueDate ?? .distantFuture) }
@@ -70,6 +76,14 @@ final class NotificationService {
                     try await center.add(request)
                     scheduled += 1
                 } catch {
+                    if !didRecordScheduleFailure {
+                        didRecordScheduleFailure = true
+                        DiagnosticRecorder.shared.record(
+                            error: error,
+                            component: "notification",
+                            operation: "schedule"
+                        )
+                    }
                     // 개별 알림 실패는 무시하고 계속
                 }
             }
@@ -84,6 +98,10 @@ final class NotificationService {
         Task {
             await cancel(todoID: todoID)
         }
+    }
+    /// Awaitable cancellation boundary used when eligibility changes.
+    func cancelAndWait(todo: Todo) async {
+        await cancel(todoID: todo.id.uuidString)
     }
 
     private func cancel(todoID: String) async {

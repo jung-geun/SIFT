@@ -1,20 +1,54 @@
 import SwiftUI
 import SwiftData
 
+/// 상세 화면 편집 초안. 저장을 눌러야 Todo에 반영된다.
+private struct TodoDraft: Equatable {
+    var title: String = ""
+    var notes: String = ""
+    var dueDate: Date?
+    var startDate: Date?
+    var manualPriority: Int?
+    var reminderOffsets: [Double] = []
+    var tags: [String] = []
+    var calendarLinked: Bool = false
+
+    init() {}
+
+    init(todo: Todo) {
+        title = todo.title
+        notes = todo.notes
+        dueDate = todo.dueDate
+        startDate = todo.startDate
+        manualPriority = todo.manualPriority
+        reminderOffsets = todo.reminderOffsets.sorted()
+        tags = todo.tags
+        calendarLinked = todo.calendarEventID != nil
+    }
+
+    /// 마감이 없거나 마감보다 이르지 않은 시작 시각은 저장하지 않는다.
+    var resolvedStartDate: Date? {
+        guard let dueDate, let startDate, startDate < dueDate else { return nil }
+        return startDate
+    }
+}
+
 struct TodoDetailView: View {
     @Bindable var todo: Todo
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
     @Environment(\.userVocabulary) private var userVocabulary
 
-    @State private var showDatePicker = false
-    @State private var showReminderPicker = false
+    @State private var draft = TodoDraft()
+    @State private var initialDraft = TodoDraft()
+    @State private var didLoadDraft = false
     @State private var calendarError: String?
-    @State private var isRegisteringCalendar = false
     @State private var showDeleteConfirm = false
+    @State private var showDiscardConfirm = false
+    @State private var saveError: String?
     /// 앱 내 메일 상세 시트 — 로컬 EmailMessage가 있을 때 표시
     @State private var showingEmail: EmailMessage?
-    @State private var vocabularyObservationTask: Task<Void, Never>?
+    @State private var isResolvingEmail = false
+    @State private var emailErrorWrapper: EmbeddedMailErrorWrapper?
 
     // MARK: - Body
 
@@ -27,142 +61,212 @@ struct TodoDetailView: View {
             calendarSection
             tagSection
             metaSection
+            completionSection
+            deleteSection
         }
         .listSectionSpacing(.compact)
-        .navigationTitle(todo.title.isEmpty ? "새 할 일" : todo.title)
+        .navigationTitle(AppLanguage.localized(
+            "todo.detail.navigationTitle",
+            defaultValue: "할 일 세부",
+            language: .current,
+            comment: "To-do detail screen title."
+        ))
         .navigationBarTitleDisplayMode(.inline)
+        .navigationBarBackButtonHidden(true)
+        .interactiveDismissDisabled(hasPendingChanges)
         .toolbar {
-            ToolbarItem(placement: .navigationBarTrailing) {
-                completeButton
-            }
-            ToolbarItem(placement: .bottomBar) {
-                Button(role: .destructive) {
-                    showDeleteConfirm = true
-                } label: {
-                    Label("삭제", systemImage: "trash")
-                        .foregroundStyle(.red)
-                }
+            ToolbarItem(placement: .cancellationAction) { cancelButton }
+            ToolbarItem(placement: .confirmationAction) { saveButton }
+        }
+        .onAppear {
+            if !didLoadDraft {
+                draft = TodoDraft(todo: todo)
+                initialDraft = draft
+                didLoadDraft = true
             }
         }
-        .alert("캘린더 오류", isPresented: .constant(calendarError != nil)) {
+        .alert(
+            "캘린더 오류",
+            isPresented: Binding(
+                get: { calendarError != nil },
+                set: { if !$0 { calendarError = nil } }
+            )
+        ) {
             Button("확인") { calendarError = nil }
         } message: {
             Text(calendarError ?? "")
         }
-        .confirmationDialog("할일을 삭제하시겠습니까?", isPresented: $showDeleteConfirm, titleVisibility: .visible) {
+        .confirmationDialog(
+            "할일을 삭제하시겠습니까?",
+            isPresented: $showDeleteConfirm,
+            titleVisibility: .visible
+        ) {
             Button("삭제", role: .destructive) { deleteTodo() }
             Button("취소", role: .cancel) { }
+        }
+        .confirmationDialog(
+            AppLanguage.localized(
+                "todo.detail.unsavedChanges",
+                defaultValue: "저장하지 않은 변경사항이 있습니다",
+                language: .current,
+                comment: "Unsaved to-do edits confirmation."
+            ),
+            isPresented: $showDiscardConfirm,
+            titleVisibility: .visible
+        ) {
+            Button(AppLanguage.localized(
+                "action.save",
+                defaultValue: "저장",
+                language: .current,
+                comment: "Save to-do edits."
+            )) {
+                commitAndDismiss()
+            }
+            Button(
+                AppLanguage.localized(
+                    "action.discard",
+                    defaultValue: "폐기",
+                    language: .current,
+                    comment: "Discard unsaved to-do edits."
+                ),
+                role: .destructive
+            ) {
+                dismiss()
+            }
+            Button(
+                AppLanguage.localized(
+                    "action.cancel",
+                    defaultValue: "취소",
+                    language: .current,
+                    comment: "Cancel to-do edits."
+                ),
+                role: .cancel
+            ) { }
+        }
+        .alert(
+            AppLanguage.localized(
+                "todo.detail.saveErrorTitle",
+                defaultValue: "저장 오류",
+                language: .current,
+                comment: "To-do save error title."
+            ),
+            isPresented: Binding(
+                get: { saveError != nil },
+                set: { if !$0 { saveError = nil } }
+            )
+        ) {
+            Button(AppLanguage.localized(
+                "action.close",
+                defaultValue: "닫기",
+                language: .current,
+                comment: "Dismiss to-do save error."
+            )) {
+                saveError = nil
+            }
+        } message: {
+            Text(saveError ?? "")
         }
         .sheet(item: $showingEmail) { email in
             MailDetailView(email: email)
                 .modelContainer(AppDataContainer.shared.emailContainer)
         }
-        .onChange(of: todo.title) { _, _ in scheduleVocabularyObservation() }
-        .onChange(of: todo.notes) { _, _ in scheduleVocabularyObservation() }
-        .onChange(of: todo.tags) { _, _ in scheduleVocabularyObservation() }
-        .onChange(of: todo.isCompleted) { _, completed in
-            if completed { vocabularyObservationTask?.cancel() }
+        .alert(item: $emailErrorWrapper) { wrapper in
+            Alert(
+                title: Text("이메일 로드 오류"),
+                message: Text(wrapper.error.localizedDescription),
+                primaryButton: .default(Text("다시 시도")) {
+                    openOriginalEmail()
+                },
+                secondaryButton: .cancel(Text("취소"))
+            )
         }
-        .onDisappear { vocabularyObservationTask?.cancel() }
     }
 
     // MARK: - Sections
 
     private var titleSection: some View {
         Section("제목 및 메모") {
-            TextField("제목", text: Binding(
-                get: { todo.title },
-                set: { newVal in
-                    todo.title = newVal
-                    todo.updatedAt = Date()
-                    if todo.calendarEventID != nil {
-                        _ = try? CalendarService.shared.registerOrUpdate(todo: todo)
-                    }
-                }
-            ))
+            TextField("제목", text: $draft.title)
                 .font(.body)
-            TextField("메모 (선택)", text: Binding(
-                get: { todo.notes },
-                set: { newVal in
-                    todo.notes = newVal
-                    todo.updatedAt = Date()
-                    if todo.calendarEventID != nil {
-                        _ = try? CalendarService.shared.registerOrUpdate(todo: todo)
-                    }
-                }
-            ), axis: .vertical)
+                .accessibilityIdentifier("todo.detail.titleField")
+            TextField("메모 (선택)", text: $draft.notes, axis: .vertical)
                 .lineLimit(3...8)
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
+                .accessibilityIdentifier("todo.detail.notesField")
         }
     }
 
     private var schedulingSection: some View {
         Section("마감 일정") {
-            // Due date toggle + picker
             Toggle(isOn: Binding(
-                get: { todo.dueDate != nil },
+                get: { draft.dueDate != nil },
                 set: { on in
-                    let previousDueDate = todo.dueDate
                     if on {
-                        todo.dueDate = Calendar.current.date(byAdding: .day, value: 1, to: Date())
-                        todo.updatedAt = Date()
-                        // 마감 첫 설정 시 자동 등록 정책 적용 (강제 우선순위 포함)
-                        CalendarService.shared.applyAutoRegistration(for: todo)
+                        draft.dueDate = Calendar.current.date(byAdding: .day, value: 1, to: Date())
                     } else {
-                        if let eventID = todo.calendarEventID {
-                            try? CalendarService.shared.removeEvent(eventID: eventID)
-                            todo.calendarEventID = nil
-                        }
-                        todo.dueDate = nil
-                        todo.reminderOffsets = []   // 마감 없으면 알림도 제거
-                        todo.updatedAt = Date()
-                        NotificationService.shared.cancel(todo: todo)
+                        draft.dueDate = nil
+                        draft.startDate = nil
+                        draft.reminderOffsets = []
                     }
-                    TaskBehaviorRecorder.recordDueDateChange(
-                        of: todo,
-                        from: previousDueDate,
-                        to: todo.dueDate,
-                        actor: .user,
-                        in: modelContext
-                    )
                 }
             )) {
                 Label("마감 시각 설정", systemImage: "calendar.badge.clock")
             }
 
-            if let _ = todo.dueDate {
+            if draft.dueDate != nil {
                 DatePicker(
                     "마감",
                     selection: Binding(
-                        get: { todo.dueDate ?? Date() },
-                        set: { newDate in
-                            let previousDueDate = todo.dueDate
-                            todo.dueDate = newDate
-                            todo.updatedAt = Date()
-                            if todo.calendarEventID != nil {
-                                _ = try? CalendarService.shared.registerOrUpdate(todo: todo)
-                            } else {
-                                CalendarService.shared.applyAutoRegistration(for: todo)
-                            }
-                            Task { await NotificationService.shared.update(todo: todo) }
-                            TaskBehaviorRecorder.recordDueDateChange(
-                                of: todo,
-                                from: previousDueDate,
-                                to: todo.dueDate,
-                                actor: .user,
-                                in: modelContext
-                            )
-                        }
+                        get: { draft.dueDate ?? Date() },
+                        set: { draft.dueDate = $0 }
                     ),
                     displayedComponents: [.date, .hourAndMinute]
                 )
                 .datePickerStyle(.graphical)
 
-                if todo.isOverdue {
+                if !todo.isCompleted, draft.dueDate.map({ $0 < Date() }) ?? false {
                     Label("기한이 초과되었습니다", systemImage: "exclamationmark.triangle.fill")
                         .font(.caption)
                         .foregroundStyle(.red)
+                }
+
+                if let due = draft.dueDate {
+                    Toggle(isOn: Binding(
+                        get: { draft.startDate != nil },
+                        set: { on in
+                            draft.startDate = on ? due.addingTimeInterval(-3600) : nil
+                        }
+                    )) {
+                        Label(
+                            AppLanguage.localized(
+                                "todo.detail.startTimeToggle",
+                                defaultValue: "시작 시각 설정",
+                                language: .current,
+                                comment: "Toggle that gives a to-do a start time in addition to its deadline."
+                            ),
+                            systemImage: "play.circle"
+                        )
+                    }
+                    .accessibilityIdentifier("todo.detail.startDateToggle")
+
+                    if draft.startDate != nil {
+                        DatePicker(
+                            AppLanguage.localized(
+                                "todo.detail.startTimeLabel",
+                                defaultValue: "시작",
+                                language: .current,
+                                comment: "Start time picker label on the to-do detail screen."
+                            ),
+                            selection: Binding(
+                                get: { draft.startDate ?? due.addingTimeInterval(-3600) },
+                                set: { draft.startDate = $0 }
+                            ),
+                            in: ...due.addingTimeInterval(-1),
+                            displayedComponents: [.date, .hourAndMinute]
+                        )
+                        .accessibilityIdentifier("todo.detail.startDatePicker")
+                    }
                 }
             }
         }
@@ -170,44 +274,23 @@ struct TodoDetailView: View {
 
     private var prioritySection: some View {
         Section("우선순위") {
-            // 수동 우선순위
             HStack {
                 Label("수동 우선순위", systemImage: "hand.raised")
                 Spacer()
-                if let p = todo.manualPriorityEnum {
-                    Text(p.label)
+                if let priority = draft.manualPriority.flatMap(TodoPriority.init(rawValue:)) {
+                    Text(priority.label)
                         .foregroundStyle(.secondary)
                 }
                 Menu {
                     Button("설정 안함") {
-                        let previousPriority = todo.manualPriority
-                        todo.manualPriority = nil
-                        todo.updatedAt = Date()
-                        TaskBehaviorRecorder.recordManualPriorityChange(
-                            of: todo,
-                            from: previousPriority,
-                            to: todo.manualPriority,
-                            actor: .user,
-                            in: modelContext
-                        )
+                        draft.manualPriority = nil
                     }
                     Divider()
-                    ForEach(TodoPriority.allCases, id: \.rawValue) { p in
+                    ForEach(TodoPriority.allCases, id: \.rawValue) { priority in
                         Button {
-                            let previousPriority = todo.manualPriority
-                            todo.manualPriority = p.rawValue
-                            todo.updatedAt = Date()
-                            // 긴급/최우선 선택 시 강제 등록 (마감 있을 때만)
-                            CalendarService.shared.applyAutoRegistration(for: todo)
-                            TaskBehaviorRecorder.recordManualPriorityChange(
-                                of: todo,
-                                from: previousPriority,
-                                to: todo.manualPriority,
-                                actor: .user,
-                                in: modelContext
-                            )
+                            draft.manualPriority = priority.rawValue
                         } label: {
-                            Label(p.label, systemImage: "flag")
+                            Label(priority.label, systemImage: "flag")
                         }
                     }
                 } label: {
@@ -218,7 +301,6 @@ struct TodoDetailView: View {
                 .accessibilityIdentifier("todo.priorityPicker")
             }
 
-            // AI 자동 우선순위 표시
             if !todo.priorityReason.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
@@ -239,10 +321,10 @@ struct TodoDetailView: View {
                             .foregroundStyle(.secondary)
                             .padding(.leading, 22)
                     }
-                    if let rec = todo.aiRecommendedTime {
+                    if let recommendation = todo.aiRecommendedTime {
                         HStack(spacing: 4) {
                             Image(systemName: "clock")
-                            Text("추천 처리 시각: \(rec.formatted(.dateTime.month().day().hour().minute()))")
+                            Text("추천 처리 시각: \(recommendation.formatted(.dateTime.month().day().hour().minute()))")
                         }
                         .font(.caption2)
                         .foregroundStyle(.blue)
@@ -279,13 +361,12 @@ struct TodoDetailView: View {
 
     private var remindersSection: some View {
         Section {
-            if todo.dueDate == nil {
+            if draft.dueDate == nil {
                 Text("마감 시각을 설정해야 알림을 추가할 수 있습니다.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else {
-                // 현재 오프셋 목록
-                ForEach(todo.reminderOffsets.sorted(), id: \.self) { offset in
+                ForEach(draft.reminderOffsets, id: \.self) { offset in
                     HStack {
                         Image(systemName: "bell.fill")
                             .foregroundStyle(.orange)
@@ -301,10 +382,9 @@ struct TodoDetailView: View {
                     }
                 }
 
-                // 프리셋 추가 메뉴
                 Menu {
                     ForEach(NotificationService.presetOffsets, id: \.offset) { preset in
-                        if !todo.reminderOffsets.contains(preset.offset) {
+                        if !draft.reminderOffsets.contains(preset.offset) {
                             Button(preset.label) { addOffset(preset.offset) }
                         }
                     }
@@ -315,7 +395,7 @@ struct TodoDetailView: View {
         } header: {
             Text("알림")
         } footer: {
-            if !todo.reminderOffsets.isEmpty {
+            if !draft.reminderOffsets.isEmpty {
                 Text("마감 기준 상대 시각으로 알림을 보냅니다.")
                     .font(.caption)
             }
@@ -324,30 +404,16 @@ struct TodoDetailView: View {
 
     private var calendarSection: some View {
         Section("캘린더 연동") {
-            if todo.dueDate == nil {
+            if draft.dueDate == nil {
                 Text("마감 시각을 설정해야 캘린더에 등록할 수 있습니다.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else if CalendarService.shared.isAuthorized {
-                Toggle(isOn: Binding(
-                    get: { todo.calendarEventID != nil },
-                    set: { on in
-                        if on { registerCalendarEvent() }
-                        else { unregisterCalendarEvent() }
-                    }
-                )) {
+                Toggle(isOn: $draft.calendarLinked) {
                     Label(
-                        todo.calendarEventID != nil ? "캘린더에 등록됨" : "캘린더에 등록",
+                        draft.calendarLinked ? "캘린더에 등록됨" : "캘린더에 등록",
                         systemImage: "calendar"
                     )
-                }
-                .disabled(isRegisteringCalendar)
-
-                if isRegisteringCalendar {
-                    HStack {
-                        ProgressView().controlSize(.small)
-                        Text("등록 중…").font(.caption).foregroundStyle(.secondary)
-                    }
                 }
             } else {
                 Button {
@@ -363,41 +429,47 @@ struct TodoDetailView: View {
 
     private var tagSection: some View {
         Section("태그") {
-            TagEditorView(tags: $todo.tags)
+            TagEditorView(tags: $draft.tags)
         }
     }
 
     private var metaSection: some View {
         Section {
-            LabeledContent("출처") {
+            metaRow("출처") {
                 sourceBadge
             }
             if todo.isFixedSchedule {
-                LabeledContent("유형") {
+                metaRow("유형") {
                     Label("고정 일정 (반복)", systemImage: "arrow.triangle.2.circlepath")
                         .foregroundStyle(.green)
                 }
             }
             if todo.todoSource == .email {
                 if !todo.sourceSender.isEmpty {
-                    LabeledContent("발신자") {
+                    metaRow("발신자") {
                         Text(todo.sourceSender)
                             .foregroundStyle(.secondary)
                     }
                 }
-                if todo.todoSource == .email, !todo.sourceRef.isEmpty {
+                if !todo.sourceRef.isEmpty {
                     Button { openOriginalEmail() } label: {
-                        Label("원본 메일 열기", systemImage: "arrow.up.right.square")
-                            .foregroundStyle(.blue)
+                        HStack(spacing: 6) {
+                            Label("원본 메일 열기", systemImage: "arrow.up.right.square")
+                            if isResolvingEmail {
+                                ProgressView().controlSize(.mini)
+                            }
+                        }
+                        .foregroundStyle(.blue)
                     }
+                    .disabled(isResolvingEmail)
                 }
             }
-            LabeledContent("생성일") {
+            metaRow("생성일") {
                 Text(todo.createdAt, style: .date)
                     .foregroundStyle(.secondary)
             }
             if let completed = todo.completedAt {
-                LabeledContent("완료일") {
+                metaRow("완료일") {
                     Text(completed, style: .date)
                         .foregroundStyle(.secondary)
                 }
@@ -406,33 +478,76 @@ struct TodoDetailView: View {
         .font(.subheadline)
     }
 
+    private var completionSection: some View {
+        Section {
+            Button { toggleCompletionAndDismiss() } label: {
+                Label(
+                    AppLanguage.localized(
+                        todo.isCompleted ? "action.undo" : "todo.detail.completeAction",
+                        defaultValue: todo.isCompleted ? "되돌리기" : "완료 처리",
+                        language: .current,
+                        comment: "Complete or undo to-do action."
+                    ),
+                    systemImage: todo.isCompleted ? "arrow.uturn.left" : "checkmark.circle.fill"
+                )
+                .foregroundStyle(todo.isCompleted ? AppTheme.warning : AppTheme.success)
+                .frame(maxWidth: .infinity, alignment: .center)
+            }
+            .disabled(draft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .accessibilityIdentifier("todo.detail.completeButton")
+        }
+    }
+
+    private var deleteSection: some View {
+        Section {
+            Button(role: .destructive) { showDeleteConfirm = true } label: {
+                Label(
+                    AppLanguage.localized("action.delete", defaultValue: "삭제", language: .current, comment: "Delete to-do action."),
+                    systemImage: "trash"
+                )
+                .foregroundStyle(AppTheme.destructive)
+                .frame(maxWidth: .infinity, alignment: .center)
+            }
+            .accessibilityIdentifier("todo.detail.deleteButton")
+        }
+    }
+
     // MARK: - Helpers
 
-    private var completeButton: some View {
+    private var saveButton: some View {
+        Button { commitAndDismiss() } label: {
+            Text(AppLanguage.localized("action.save", defaultValue: "저장", language: .current, comment: "Save to-do edits."))
+                .fontWeight(.semibold)
+        }
+        .disabled(draft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        .accessibilityIdentifier("todo.detail.saveButton")
+    }
+
+    private var cancelButton: some View {
         Button {
-            withAnimation {
-                let wasCompleted = todo.isCompleted
-                todo.isCompleted.toggle()
-                todo.completedAt = todo.isCompleted ? Date() : nil
-                todo.updatedAt = Date()
-                TaskBehaviorRecorder.recordCompletionChange(
-                    of: todo,
-                    from: wasCompleted,
-                    to: todo.isCompleted,
-                    actor: .user,
-                    in: modelContext
-                )
-                if todo.isCompleted {
-                    NotificationService.shared.cancel(todo: todo)
-                }
+            if hasPendingChanges {
+                showDiscardConfirm = true
+            } else {
+                dismiss()
             }
         } label: {
-            Label(
-                todo.isCompleted ? "되돌리기" : "완료",
-                systemImage: todo.isCompleted ? "arrow.uturn.left" : "checkmark.circle.fill"
-            )
+            Text(AppLanguage.localized("action.cancel", defaultValue: "취소", language: .current, comment: "Cancel to-do edits."))
         }
-        .tint(todo.isCompleted ? .orange : .green)
+        .accessibilityIdentifier("todo.detail.cancelButton")
+    }
+
+    private var hasPendingChanges: Bool {
+        didLoadDraft && draft != initialDraft
+    }
+
+    @ViewBuilder
+    private func metaRow<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        HStack(spacing: 8) {
+            Text(title)
+            Spacer(minLength: 12)
+            content()
+                .multilineTextAlignment(.trailing)
+        }
     }
 
     @ViewBuilder
@@ -449,90 +564,22 @@ struct TodoDetailView: View {
         }
     }
 
-    /// 원본 메일을 엽니다.
-    /// 1순위: 로컬 EmailMessage 캐시 → 앱 내 MailDetailView 시트로 표시.
-    /// 2순위: googlegmail:///cv={id} — Gmail 앱 딥링크.
-    /// 3순위: message:// — Mail.app 딥링크.
-    /// 4순위: Gmail 웹 URL 폴백.
+    /// 원본 메일을 앱 내에서 엽니다.
+    /// `EmbeddedTodoMailResolver`를 이용해 식별자 검증 및 캐시 미스시 원격 본문을 로드하고 `MailDetailView`로 표시합니다.
     private func openOriginalEmail() {
-        let ref = todo.sourceRef
-        if !ref.isEmpty {
-            let emailCtx = AppDataContainer.shared.emailContainer.mainContext
-            let descriptor = FetchDescriptor<EmailMessage>(
-                predicate: #Predicate { $0.id == ref }
-            )
-            if let found = try? emailCtx.fetch(descriptor).first {
-                showingEmail = found
-                return
+        guard !isResolvingEmail else { return }
+        isResolvingEmail = true
+        let emailContext = AppDataContainer.shared.emailContainer.mainContext
+        Task {
+            let result = await EmbeddedTodoMailResolver.shared.resolveAndHydrate(todo: todo, in: emailContext)
+            isResolvingEmail = false
+            switch result {
+            case .success(let email):
+                showingEmail = email
+            case .failure(let error):
+                emailErrorWrapper = EmbeddedMailErrorWrapper(error: error)
             }
         }
-        for url in mailDeepLinkCandidates() {
-            if UIApplication.shared.canOpenURL(url) {
-                UIApplication.shared.open(url)
-                return
-            }
-        }
-    }
-
-    private func mailDeepLinkCandidates() -> [URL] {
-        var candidates: [URL] = []
-
-        // 1순위 — googlegmail:///cv={id}/accountId=0 (슬래시 3개, 올바른 포맷)
-        // cv = conversation-view 식별자. threadId 우선, 없으면 Gmail message.id(sourceRef).
-        // accountId = Gmail 앱 계정 슬롯 인덱스. 슬롯 불명이므로 두 형식 모두 시도.
-        // ⚠️ 실기기 검증: cv가 threadId인지 message.id인지, accountId 동작 확인 필요.
-        let gmailCVID = todo.sourceThreadID.isEmpty ? todo.sourceRef : todo.sourceThreadID
-        if !gmailCVID.isEmpty {
-            if let url = URL(string: "googlegmail:///cv=\(gmailCVID)/accountId=0") {
-                candidates.append(url)
-            }
-            if let url = URL(string: "googlegmail:///cv=\(gmailCVID)") {
-                candidates.append(url)
-            }
-        }
-
-        // 2순위 — message:// Mail.app 딥링크 (iOS 7+)
-        // 전제조건: 동일 계정이 시스템 Mail.app에 추가·동기화돼 있어야 열림.
-        if let url = messageDeepLink(from: todo.sourceMessageID) {
-            candidates.append(url)
-        }
-
-        // 3순위 — Gmail 웹 threadId 직접 URL
-        if !todo.sourceThreadID.isEmpty,
-           let url = URL(string: "https://mail.google.com/mail/u/0/#all/\(todo.sourceThreadID)") {
-            candidates.append(url)
-        }
-
-        // 4순위 — rfc822msgid 검색 URL
-        if let url = todo.emailURL {
-            candidates.append(url)
-        }
-
-        // 폴백 — Gmail 웹 받은편지함
-        if let url = URL(string: "https://mail.google.com/mail/u/0/") {
-            candidates.append(url)
-        }
-
-        return candidates
-    }
-
-    /// RFC822 Message-ID를 message:// URL로 변환.
-    ///
-    /// Message-ID 헤더는 보통 `<id@domain>` 형태로 꺾쇠를 포함한다.
-    /// iOS Mail.app은 꺾쇠 포함 전체 값을 percent-encode한 URL을 기대한다.
-    /// 이중 인코딩·꺾쇠 누락 시 Mail.app이 메시지를 찾지 못하므로 주의.
-    private func messageDeepLink(from messageID: String) -> URL? {
-        guard !messageID.isEmpty else { return nil }
-        // 꺾쇠 정규화: 없으면 추가, 있으면 그대로
-        let normalized = messageID.hasPrefix("<") && messageID.hasSuffix(">")
-            ? messageID
-            : "<\(messageID)>"
-        // 영숫자 + 기본 안전문자만 허용 → <, >, @ 모두 인코딩 (NSHipster 검증 포맷)
-        let allowedChars = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
-        guard let encoded = normalized.addingPercentEncoding(withAllowedCharacters: allowedChars) else {
-            return nil
-        }
-        return URL(string: "message://\(encoded)")
     }
 
     private func offsetLabel(_ offset: Double) -> String {
@@ -540,63 +587,159 @@ struct TodoDetailView: View {
     }
 
     private func addOffset(_ offset: Double) {
-        guard !todo.reminderOffsets.contains(offset) else { return }
-        todo.reminderOffsets.append(offset)
-        todo.updatedAt = Date()
-        Task { await NotificationService.shared.update(todo: todo) }
+        guard !draft.reminderOffsets.contains(offset) else { return }
+        draft.reminderOffsets.append(offset)
+        draft.reminderOffsets.sort()
     }
 
     private func removeOffset(_ offset: Double) {
-        todo.reminderOffsets.removeAll { $0 == offset }
+        draft.reminderOffsets.removeAll { $0 == offset }
+    }
+
+    /// 초안을 Todo에 반영하고 캘린더·알림 부작용을 적용한다.
+    /// - Parameter rescheduleNotifications: 저장 직후 완료 처리할 때는 false로 넘겨
+    ///   update와 완료 취소가 경쟁해 알림이 남는 race를 막는다.
+    /// - Returns: 로컬 저장과 필요한 캘린더 쓰기가 모두 성공하면 true.
+    @discardableResult
+    private func commitDraft(rescheduleNotifications: Bool = true) -> Bool {
+        let previousTitle = todo.title
+        let previousDueDate = todo.dueDate
+        let previousPriority = todo.manualPriority
+        let wasLinked = todo.calendarEventID != nil
+        let trimmedTitle = draft.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTitle.isEmpty else {
+            saveError = AppLanguage.localized(
+                "todo.detail.titleRequired",
+                defaultValue: "제목을 입력해주세요.",
+                language: .current,
+                comment: "Validation shown when saving a to-do without a title."
+            )
+            return false
+        }
+
+        // 1. 초안 필드 일괄 반영.
+        todo.title = trimmedTitle
+        todo.notes = draft.notes
+        todo.startDate = draft.resolvedStartDate
+        todo.dueDate = draft.dueDate
+        todo.manualPriority = draft.manualPriority
+        todo.reminderOffsets = draft.dueDate == nil ? [] : draft.reminderOffsets
+        todo.tags = draft.tags
         todo.updatedAt = Date()
-        Task { await NotificationService.shared.update(todo: todo) }
-    }
 
-    private func registerCalendarEvent() {
-        isRegisteringCalendar = true
-        do {
-            if let eventID = try CalendarService.shared.registerOrUpdate(todo: todo) {
-                todo.calendarEventID = eventID
+        // 2. 이전 버전 데이터 기준선 백필: 지금까지의 제목은 캘린더가 준 값이다.
+        if todo.title != previousTitle,
+           todo.calendarSyncedTitle.isEmpty,
+           (todo.todoSource == .calendar || wasLinked) {
+            todo.calendarSyncedTitle = previousTitle
+        }
+
+        // 3. 캘린더 부작용
+        var calendarFailure: String?
+        if todo.dueDate == nil {
+            if todo.todoSource == .email {
+                _ = CalendarService.shared.removeEmailCalendarArtifacts(for: todo)
+            } else if let eventID = todo.calendarEventID {
+                _ = try? CalendarService.shared.removeEvent(eventID: eventID)
             }
+            todo.calendarEventID = nil
+            NotificationService.shared.cancel(todo: todo)
+        } else if todo.todoSource == .calendar {
+            // 캘린더에서 가져온 항목은 제목 저장 때문에 EventKit에 쓰지 않는다.
+            // 토글을 끈 경우에만 로컬 링크를 끊는다.
+            if wasLinked && !draft.calendarLinked {
+                todo.calendarEventID = nil
+            }
+        } else if draft.calendarLinked {
+            do {
+                if let eventID = try CalendarService.shared.registerOrUpdate(todo: todo) {
+                    todo.calendarEventID = eventID
+                }
+            } catch {
+                calendarFailure = error.localizedDescription
+            }
+        } else {
+            if wasLinked {
+                if todo.todoSource == .email {
+                    _ = CalendarService.shared.removeEmailCalendarArtifacts(for: todo)
+                } else if let eventID = todo.calendarEventID {
+                    _ = try? CalendarService.shared.removeEvent(eventID: eventID)
+                    todo.calendarEventID = nil
+                }
+            }
+            // 긴급·최우선 + 마감 있음 조합의 강제 등록 정책은 그대로 유지한다.
+            CalendarService.shared.applyAutoRegistration(for: todo)
+        }
+
+        // 4. 행동 로그 — 실제로 바뀐 항목만
+        if previousDueDate != todo.dueDate {
+            TaskBehaviorRecorder.recordDueDateChange(
+                of: todo,
+                from: previousDueDate,
+                to: todo.dueDate,
+                actor: .user,
+                in: modelContext
+            )
+        }
+        if previousPriority != todo.manualPriority {
+            TaskBehaviorRecorder.recordManualPriorityChange(
+                of: todo,
+                from: previousPriority,
+                to: todo.manualPriority,
+                actor: .user,
+                in: modelContext
+            )
+        }
+
+        // 5. 로컬 저장. 실패해도 공유 메인 컨텍스트를 rollback하지 않는다.
+        do {
+            try modelContext.save()
         } catch {
-            calendarError = error.localizedDescription
+            DiagnosticRecorder.shared.record(error: error, component: "todo.detail", operation: "commitDraft")
+            saveError = error.localizedDescription
+            return false
         }
-        isRegisteringCalendar = false
+
+        // 저장 성공 지점에서만 dirty 기준선을 전진시킨다.
+        initialDraft = TodoDraft(todo: todo)
+        draft = initialDraft
+
+        // 6. 저장된 값으로 알림 재예약 / 어휘 관찰
+        if rescheduleNotifications, todo.dueDate != nil {
+            Task { await NotificationService.shared.update(todo: todo) }
+        }
+        if !todo.isCompleted, let observer = userVocabulary?.observer {
+            let document = VocabularySourceDocumentBuilder.todo(todo)
+            Task { await observer.observeDocument(document, false) }
+        }
+
+        if let calendarFailure {
+            // 로컬 필드는 저장되었지만 외부 캘린더 갱신은 실패했다. 화면을 유지하고 사용자에게 알린다.
+            calendarError = calendarFailure
+            return false
+        }
+        return true
     }
 
-    private func unregisterCalendarEvent() {
-        guard let eventID = todo.calendarEventID else { return }
-        try? CalendarService.shared.removeEvent(eventID: eventID)
-        todo.calendarEventID = nil
+    private func commitAndDismiss() {
+        if commitDraft() {
+            dismiss()
+        }
     }
 
-    private func deleteTodo() {
-        vocabularyObservationTask?.cancel()
-        // 대기열(review) 항목은 캘린더 이벤트 보존 — 태스크(todo)로 승격된 경우만 함께 삭제
-        if todo.triage == .todo, let eventID = todo.calendarEventID {
-            try? CalendarService.shared.removeEvent(eventID: eventID)
-        }
-        NotificationService.shared.cancel(todo: todo)
-        TaskBehaviorRecorder.recordDeletion(of: todo, actor: .user, in: modelContext)
-        modelContext.insert(TaskAuditEvent(from: todo))
-        modelContext.delete(todo)
+    private func toggleCompletionAndDismiss() {
+        // 미저장 초안이 있으면 먼저 명시적 저장 경계를 통과시킨다.
+        // 완료 mutation이 알림을 취소하므로 그 직전에 update Task를 만들지 않는다.
+        guard commitDraft(rescheduleNotifications: false) else { return }
+        // 완료 상태 부작용/자동 저장은 목록과 동일한 단일 choke point가 담당한다.
+        TodoMutations.setCompleted(todo, completed: !todo.isCompleted, in: modelContext)
         dismiss()
     }
 
-    private func scheduleVocabularyObservation() {
-        vocabularyObservationTask?.cancel()
-        guard !todo.isCompleted, let observer = userVocabulary?.observer else { return }
-        let document = VocabularySourceDocumentBuilder.todo(todo)
-        vocabularyObservationTask = Task {
-            try? await Task.sleep(for: .milliseconds(300))
-            guard !Task.isCancelled else { return }
-            do {
-                try modelContext.save()
-                await observer.observeDocument(document, false)
-            } catch {
-                modelContext.rollback()
-            }
-        }
+    private func deleteTodo() {
+        // 삭제는 초안 내용을 저장하지 않는다. 확인 후 현재 Todo 자체를 삭제한다.
+        TodoMutations.delete(todo, in: modelContext)
+        dismiss()
     }
 }
 
@@ -707,6 +850,10 @@ private struct _FlowLayout: Layout {
     }
 }
 
+private struct EmbeddedMailErrorWrapper: Identifiable {
+    let id = UUID()
+    let error: EmbeddedMailError
+}
 #Preview {
     let config = ModelConfiguration(isStoredInMemoryOnly: true)
     let container = try! ModelContainer(for: Todo.self, configurations: config)

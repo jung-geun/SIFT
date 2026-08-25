@@ -7,7 +7,6 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		AE8A10112FEA0001006E59B5 /* MSAL in Frameworks */ = {isa = PBXBuildFile; productRef = AE8A10102FEA0001006E59B5 /* MSAL */; };
 		AEDC6C8B2FE3E978006E59B5 /* MLXLLM in Frameworks */ = {isa = PBXBuildFile; productRef = AEDC6C8A2FE3E978006E59B5 /* MLXLLM */; };
 		AEDC6C8D2FE3E978006E59B5 /* MLXLMCommon in Frameworks */ = {isa = PBXBuildFile; productRef = AEDC6C8C2FE3E978006E59B5 /* MLXLMCommon */; };
 /* End PBXBuildFile section */
@@ -73,7 +72,6 @@
 			files = (
 				AEDC6C8B2FE3E978006E59B5 /* MLXLLM in Frameworks */,
 				AEDC6C8D2FE3E978006E59B5 /* MLXLMCommon in Frameworks */,
-				AE8A10112FEA0001006E59B5 /* MSAL in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -136,7 +134,6 @@
 			packageProductDependencies = (
 				AEDC6C8A2FE3E978006E59B5 /* MLXLLM */,
 				AEDC6C8C2FE3E978006E59B5 /* MLXLMCommon */,
-				AE8A10102FEA0001006E59B5 /* MSAL */,
 			);
 			productName = todo;
 			productReference = AE58F1A22FDEFA3B00690FA6 /* todo.app */;
@@ -231,7 +228,6 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				AEDC6C852FE3E978006E59B5 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */,
-				AE8A100F2FEA0001006E59B5 /* XCRemoteSwiftPackageReference "microsoft-authentication-library-for-objc" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = AE58F1A32FDEFA3B00690FA6 /* Products */;
@@ -315,7 +311,7 @@
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
 				CODE_SIGN_ENTITLEMENTS = todo/todo.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEVELOPMENT_TEAM = VQXGRP23X5;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -332,7 +328,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0.7;
+				MARKETING_VERSION = 1.0.8;
 				PRODUCT_BUNDLE_IDENTIFIER = "pieroot.sift-todo";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -354,7 +350,7 @@
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
 				CODE_SIGN_ENTITLEMENTS = todo/todo.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEVELOPMENT_TEAM = VQXGRP23X5;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -371,7 +367,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0.7;
+				MARKETING_VERSION = 1.0.8;
 				PRODUCT_BUNDLE_IDENTIFIER = "pieroot.sift-todo";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -638,14 +634,6 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
-		AE8A100F2FEA0001006E59B5 /* XCRemoteSwiftPackageReference "microsoft-authentication-library-for-objc" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/AzureAD/microsoft-authentication-library-for-objc";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 2.5.1;
-			};
-		};
 		AEDC6C852FE3E978006E59B5 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/ml-explore/mlx-swift-lm";
@@ -657,11 +645,6 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
-		AE8A10102FEA0001006E59B5 /* MSAL */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = AE8A100F2FEA0001006E59B5 /* XCRemoteSwiftPackageReference "microsoft-authentication-library-for-objc" */;
-			productName = MSAL;
-		};
 		AEDC6C8A2FE3E978006E59B5 /* MLXLLM */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = AEDC6C852FE3E978006E59B5 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */;

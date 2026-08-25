@@ -45,13 +45,16 @@ private enum CalTimelineItem {
     var start: Date {
         switch self {
         case .event(let e): return e.startDate
-        case .todo(let t): return t.dueDate ?? Date()
+        case .todo(let t): return t.scheduleAnchor ?? Date()
         }
     }
     var end: Date {
         switch self {
         case .event(let e): return e.endDate
-        case .todo(let t): return (t.dueDate ?? Date()).addingTimeInterval(1800)
+        case .todo(let t):
+            let start = t.scheduleAnchor ?? Date()
+            let end = t.scheduledRange?.end ?? start
+            return max(end, start.addingTimeInterval(1800))
         }
     }
 }
@@ -184,10 +187,8 @@ struct CalendarTabView: View {
             scrollToTodayTrigger += 1
         }
         .safeAreaInset(edge: .bottom, spacing: 12) {
-            if let tutorial, let hint = tutorial.hint(for: .calendarTab) {
-                AppTutorialHintCard(hint: hint)
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 12)
+            if let tutorial {
+                AppTutorialTipHost(tutorial: tutorial, screen: .calendarTab)
             }
         }
         .onAppear {
@@ -484,7 +485,7 @@ private struct WeekRowView: View {
     private var todosByCol: [Int: [Todo]] {
         var d: [Int: [Todo]] = [:]
         for todo in allTodos where !todo.isCompleted {
-            guard let due = todo.dueDate, let col = colIndex(for: due) else { continue }
+            guard let anchor = todo.scheduleAnchor, let col = colIndex(for: anchor) else { continue }
             d[col, default: []].append(todo)
         }
         return d
@@ -742,6 +743,7 @@ struct DayDetailSheet: View {
     var onDataChanged: () -> Void = {}
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.modelContext) private var modelContext
     @State private var editingDetail: CalendarService.CalendarEventDetail?
     @State private var editingTodo: Todo?
     /// 현재 시각 (1분 타이머로 갱신)
@@ -762,8 +764,8 @@ struct DayDetailSheet: View {
 
     private var dayTodos: [Todo] {
         todos.filter {
-            guard !$0.isCompleted, let due = $0.dueDate else { return false }
-            return cal.isDate(due, inSameDayAs: date)
+            guard !$0.isCompleted, let anchor = $0.scheduleAnchor else { return false }
+            return cal.isDate(anchor, inSameDayAs: date)
         }
     }
 
@@ -805,10 +807,17 @@ struct DayDetailSheet: View {
         return (start: start, end: end)
     }
 
+    private func clippedTodoRange(for todo: Todo) -> (start: Date, end: Date)? {
+        guard let anchor = todo.scheduleAnchor else { return nil }
+        let start = max(anchor, dayStart)
+        let end = min(todo.scheduledRange?.end ?? anchor, dayEnd)
+        return (start: start, end: max(end, start))
+    }
+
     private var initialScrollHour: Int {
         let hours = timedEvents
             .map { cal.component(.hour, from: clippedEventRange(for: $0).start) }
-            + dayTodos.compactMap { $0.dueDate.map { cal.component(.hour, from: $0) } }
+            + dayTodos.compactMap { $0.scheduleAnchor.map { cal.component(.hour, from: $0) } }
         return max(0, (hours.min() ?? cal.component(.hour, from: Date())) - 1)
     }
 
@@ -847,7 +856,12 @@ struct DayDetailSheet: View {
                 }
             }
             .sheet(item: $editingDetail) { detail in
-                EventEditSheet(mode: .edit(detail: detail)) { onDataChanged() }
+                EventEditSheet(mode: .edit(detail: detail)) {
+                    Task { @MainActor in
+                        await CalendarService.shared.syncCalendarWithTodos(context: modelContext)
+                        onDataChanged()
+                    }
+                }
             }
             .sheet(item: $editingTodo) { todo in
                 NavigationStack { TodoDetailView(todo: todo) }
@@ -974,9 +988,10 @@ struct DayDetailSheet: View {
                     .frame(width: colWidth)
                     .offset(x: xOffset, y: yOffset(for: range.start))
             case .todo(let todo):
-                todoBlock(todo)
+                let range = clippedTodoRange(for: todo)
+                todoBlock(todo, start: range?.start ?? dayStart, end: range?.end ?? dayStart)
                     .frame(width: colWidth)
-                    .offset(x: xOffset, y: todo.dueDate.map { yOffset(for: $0) } ?? 0)
+                    .offset(x: xOffset, y: range.map { yOffset(for: $0.start) } ?? 0)
             }
         }
     }
@@ -1014,30 +1029,57 @@ struct DayDetailSheet: View {
     }
 
     @ViewBuilder
-    private func todoBlock(_ todo: Todo) -> some View {
-        Button { editingTodo = todo } label: {
-            HStack(spacing: 4) {
-                Image(systemName: "circle").font(.caption).foregroundStyle(AppTheme.accent)
-                Text(todo.title.isEmpty ? "(제목 없음)" : todo.title)
-                    .font(.caption.weight(.medium)).foregroundStyle(Color(.label)).lineLimit(1)
-                Spacer(minLength: 0)
-                if todo.todoSource == .calendar {
-                    Image(systemName: todo.isFixedSchedule
-                          ? "arrow.triangle.2.circlepath" : "calendar")
-                        .font(.caption2).foregroundStyle(.secondary)
-                } else if todo.todoSource == .email {
-                    Image(systemName: "envelope.fill").font(.caption2).foregroundStyle(.secondary)
+    private func todoBlock(_ todo: Todo, start: Date, end: Date) -> some View {
+        let linkedEvent = linkedCalendarEvent(for: todo)
+        let bh = max(CGFloat(max(end.timeIntervalSince(start), 1800) / 3600) * hourHeight, 30)
+        HStack(spacing: 2) {
+            Button { editingTodo = todo } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "circle").font(.caption).foregroundStyle(AppTheme.accent)
+                    Text(todo.title.isEmpty ? "(제목 없음)" : todo.title)
+                        .font(.caption.weight(.medium)).foregroundStyle(Color(.label)).lineLimit(1)
+                    Spacer(minLength: 0)
+                    if todo.todoSource == .calendar {
+                        Image(systemName: todo.isFixedSchedule
+                              ? "arrow.triangle.2.circlepath" : "calendar")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    } else if todo.todoSource == .email {
+                        Image(systemName: "envelope.fill").font(.caption2).foregroundStyle(.secondary)
+                    }
+                    if let range = todo.scheduledRange {
+                        Text("\(range.start, style: .time)–\(range.end, style: .time)")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    } else if let due = todo.dueDate {
+                        Text(due, style: .time).font(.caption2).foregroundStyle(.secondary)
+                    }
                 }
-                if let due = todo.dueDate {
-                    Text(due, style: .time).font(.caption2).foregroundStyle(.secondary)
-                }
+                .frame(maxWidth: .infinity, minHeight: bh, alignment: .leading)
             }
-            .padding(.horizontal, 6).padding(.vertical, 5)
-            .frame(minHeight: 30, alignment: .center)
-            .background(AppTheme.accentSubtle, in: RoundedRectangle(cornerRadius: 6))
-            .overlay(RoundedRectangle(cornerRadius: 6).stroke(AppTheme.accentStroke, lineWidth: 0.5))
+            .buttonStyle(.plain)
+
+            if let linkedEvent {
+                Button {
+                    openEventEdit(linkedEvent)
+                } label: {
+                    Image(systemName: linkedEvent.isRecurring
+                          ? "arrow.triangle.2.circlepath.circle.fill"
+                          : "calendar.circle.fill")
+                        .foregroundStyle(AppTheme.accent)
+                        .frame(minWidth: 30, minHeight: 30)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("캘린더 일정 편집")
+                .accessibilityIdentifier("calendar.editLinkedEvent")
+            }
         }
-        .buttonStyle(.plain)
+        .padding(.horizontal, 6).padding(.vertical, 5)
+        .background(AppTheme.accentSubtle, in: RoundedRectangle(cornerRadius: 6))
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(AppTheme.accentStroke, lineWidth: 0.5))
+    }
+
+    private func linkedCalendarEvent(for todo: Todo) -> CalendarService.CalendarEventSummary? {
+        guard let eventID = todo.calendarEventID else { return nil }
+        return dayEvents.first(where: { $0.identifier == eventID })
     }
 
     private func openEventEdit(_ event: CalendarService.CalendarEventSummary) {
@@ -1062,6 +1104,12 @@ enum EventEditMode {
     }
 }
 
+private enum RecurrenceMutation {
+    case save
+    case delete
+}
+
+
 // ─────────────────────────────────────────────────────────────
 // MARK: - EventEditSheet
 // ─────────────────────────────────────────────────────────────
@@ -1079,6 +1127,9 @@ struct EventEditSheet: View {
     @State private var calendarSources: [CalendarService.CalendarSourceGroup] = []
     @State private var errorMessage: String?
     @State private var showDeleteConfirm = false
+    @State private var showRecurrenceScope = false
+    @State private var recurrenceMutation: RecurrenceMutation = .save
+
 
     init(mode: EventEditMode, onSave: @escaping () -> Void) {
         self.mode   = mode
@@ -1115,6 +1166,18 @@ struct EventEditSheet: View {
                     TextField("메모 (선택 사항)", text: $notes, axis: .vertical)
                         .lineLimit(3...8)
                 }
+                if case .edit(let detail) = mode {
+                    Section("일정 정보") {
+                        Label(
+                            detail.isRecurring ? "반복 일정" : "일반 일정",
+                            systemImage: detail.isRecurring
+                                ? "arrow.triangle.2.circlepath"
+                                : "calendar"
+                        )
+                        Label(eventOriginLabel(for: detail), systemImage: "link")
+                    }
+                }
+
                 if !calendarSources.isEmpty {
                     Section("캘린더") {
                         Picker("캘린더 선택", selection: $calendarID) {
@@ -1158,8 +1221,27 @@ struct EventEditSheet: View {
             }
         }
         .confirmationDialog("이벤트를 삭제하시겠습니까?", isPresented: $showDeleteConfirm, titleVisibility: .visible) {
-            Button("삭제", role: .destructive) { deleteEvent() }
+            Button("삭제", role: .destructive) { requestDelete() }
             Button("취소", role: .cancel) { }
+        }
+        .confirmationDialog(
+            recurrenceMutation == .delete
+                ? "반복 일정 삭제 범위를 선택하세요"
+                : "반복 일정 변경 범위를 선택하세요",
+            isPresented: $showRecurrenceScope,
+            titleVisibility: .visible
+        ) {
+            Button("이 일정만") { performRecurrenceMutation(scope: .thisEvent) }
+            Button("이후 모든 일정") { performRecurrenceMutation(scope: .futureEvents) }
+            Button(
+                recurrenceMutation == .delete ? "전체 반복 일정 삭제" : "전체 반복 일정 변경",
+                role: recurrenceMutation == .delete ? .destructive : nil
+            ) {
+                performRecurrenceMutation(scope: .allEvents)
+            }
+            Button("취소", role: .cancel) { }
+        } message: {
+            Text("선택한 날짜의 일정, 이후 일정 또는 전체 시리즈에 적용할 수 있습니다.")
         }
         .task {
             calendarSources = CalendarService.shared.availableCalendars()
@@ -1182,7 +1264,27 @@ struct EventEditSheet: View {
         }
     }
 
+    private func eventOriginLabel(for detail: CalendarService.CalendarEventDetail) -> String {
+        switch detail.marker?.origin {
+        case .siftRecommendation:
+            return "SIFT 추천 일정"
+        case .siftManual, .siftEmail, .siftMeeting:
+            return "SIFT에서 생성한 일정"
+        case .externalCalendar, nil:
+            return "외부 캘린더 일정"
+        }
+    }
+
     private func save() {
+        guard case .edit(let detail) = mode, detail.isRecurring else {
+            persistSave(scope: nil)
+            return
+        }
+        recurrenceMutation = .save
+        showRecurrenceScope = true
+    }
+
+    private func persistSave(scope: CalendarRecurrenceScope?) {
         do {
             switch mode {
             case .create:
@@ -1190,10 +1292,16 @@ struct EventEditSheet: View {
                     title: title, startDate: startDate, endDate: endDate,
                     notes: notes, calendarID: calendarID.isEmpty ? nil : calendarID)
             case .edit(let detail):
-                if let occurrenceDate = detail.occurrenceDate {
+                if detail.isRecurring {
                     try CalendarService.shared.updateOccurrence(
-                        identifier: detail.identifier, on: occurrenceDate,
-                        title: title, startDate: startDate, endDate: endDate, notes: notes)
+                        identifier: detail.identifier,
+                        on: detail.occurrenceDate ?? detail.startDate,
+                        title: title,
+                        startDate: startDate,
+                        endDate: endDate,
+                        notes: notes,
+                        scope: scope ?? .thisEvent
+                    )
                 } else {
                     try CalendarService.shared.updateEvent(
                         identifier: detail.identifier,
@@ -1207,13 +1315,35 @@ struct EventEditSheet: View {
         }
     }
 
-    private func deleteEvent() {
+    private func requestDelete() {
+        guard case .edit(let detail) = mode, detail.isRecurring else {
+            deleteEvent(scope: nil)
+            return
+        }
+        recurrenceMutation = .delete
+        showRecurrenceScope = true
+    }
+
+    private func performRecurrenceMutation(scope: CalendarRecurrenceScope) {
+        switch recurrenceMutation {
+        case .save:
+            persistSave(scope: scope)
+        case .delete:
+            deleteEvent(scope: scope)
+        }
+    }
+
+    private func deleteEvent(scope: CalendarRecurrenceScope?) {
         guard case .edit(let detail) = mode else { return }
         do {
-            if let occurrenceDate = detail.occurrenceDate {
-                try CalendarService.shared.removeEventOccurrence(eventID: detail.identifier, on: occurrenceDate)
+            if detail.isRecurring {
+                try CalendarService.shared.removeEventOccurrence(
+                    eventID: detail.identifier,
+                    on: detail.occurrenceDate ?? detail.startDate,
+                    scope: scope ?? .thisEvent
+                )
             } else {
-                try CalendarService.shared.removeEvent(eventID: detail.identifier)
+                _ = try CalendarService.shared.removeEvent(eventID: detail.identifier)
             }
             onSave()
             dismiss()

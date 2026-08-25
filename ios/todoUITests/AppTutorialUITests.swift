@@ -17,7 +17,8 @@ final class AppTutorialUITests: XCTestCase {
             "-pieroot.todo.hasCompletedTutorial", "NO",
             "-pieroot.todo.launchBehavior", "lastUsed",
             "-pieroot.todo.launchTab", "0",
-            "-pieroot.todo.selectedTab", "0"
+            "-pieroot.todo.selectedTab", "0",
+            "-ui-test-suppress-crash-prompt"
         ]
         app.launch()
 
