@@ -3,7 +3,6 @@ import SwiftData
 import UIKit
 import WebKit
 import EventKit
-import MSAL
 
 // MARK: - MailTabView
 
@@ -134,20 +133,23 @@ func mailboxAnalysisCandidates(
 struct MailboxViewState: Equatable {
     var selectedProvider: MailProvider?
     var selectedGmailCategory: GmailInboxCategory = .primary
-    var selectedOutlookClassification: OutlookInboxClassification = .focused
     var pagingByProvider: [MailProvider: MailboxPagingState] = [:]
 
-    mutating func reconcileAuthenticatedProviders(_ authenticated: Set<MailProvider>) {
-        if let selectedProvider, authenticated.contains(selectedProvider) {
+    mutating func reconcileProviders(_ providers: Set<MailProvider>) {
+        if let selectedProvider, providers.contains(selectedProvider) {
             return
         }
-        if authenticated.contains(.gmail) {
+        if providers.contains(.gmail) {
             selectedProvider = .gmail
-        } else if authenticated.contains(.outlook) {
+        } else if providers.contains(.outlook) {
             selectedProvider = .outlook
         } else {
             selectedProvider = nil
         }
+    }
+
+    mutating func reconcileAuthenticatedProviders(_ authenticated: Set<MailProvider>) {
+        reconcileProviders(authenticated)
     }
 
     func pagingState(for provider: MailProvider) -> MailboxPagingState {
@@ -217,6 +219,19 @@ struct MailDetailAlert: Identifiable, Equatable {
     var id: String { "\(title)|\(message)" }
 }
 
+func mailErrorMessage(
+    _ error: Error,
+    language: AppLanguage = .current
+) -> String {
+    if let imapError = error as? GmailIMAPError {
+        return imapError.errorDescription(language: language)
+    }
+    if let mutationError = error as? MailboxMutationError {
+        return mutationError.errorDescription(language: language)
+    }
+    return error.localizedDescription
+}
+
 func mailDetailAlert(
     action: MailboxMutationAction,
     error: Error,
@@ -225,8 +240,18 @@ func mailDetailAlert(
     if error is MailboxMutationError {
         return MailDetailAlert(
             title: AppLanguage.localized("mail.alert.statusSaveError", defaultValue: "메일 상태 저장 오류", language: language, comment: "Mail mutation alert title."),
-            message: (error as? MailboxMutationError)?.errorDescription(language: language)
-                ?? error.localizedDescription
+            message: mailErrorMessage(error, language: language)
+        )
+    }
+    if let imapError = error as? GmailIMAPError {
+        return MailDetailAlert(
+            title: AppLanguage.localized(
+                action == .markAsRead ? "mail.alert.readSyncError" : "mail.alert.deleteError",
+                defaultValue: action == .markAsRead ? "읽음 동기화 오류" : "메일 삭제 오류",
+                language: language,
+                comment: "Mail mutation alert title."
+            ),
+            message: imapError.errorDescription(language: language)
         )
     }
     return MailDetailAlert(
@@ -236,18 +261,10 @@ func mailDetailAlert(
             language: language,
             comment: "Mail mutation alert title."
         ),
-        message: error.localizedDescription
+        message: mailErrorMessage(error, language: language)
     )
 }
 
-func mailboxProvider(for provider: MailProvider) -> any MailboxPagingProvider {
-    switch provider {
-    case .gmail:
-        EmailService.shared
-    case .outlook:
-        OutlookMailService.shared
-    }
-}
 
 struct HorizontalLockedScrollView<Content: View>: UIViewRepresentable {
     let showsIndicators: Bool
@@ -303,6 +320,154 @@ struct HorizontalLockedScrollView<Content: View>: UIViewRepresentable {
         }
     }
 }
+nonisolated enum MailAuthenticationLoadingState: Equatable {
+    case checking
+    case resolved
+}
+
+struct MailboxStartupPresentation: Equatable {
+    let authenticationState: MailAuthenticationLoadingState
+    let cachedProviders: Set<MailProvider>
+    let authenticatedProviders: Set<MailProvider>
+    let storedCredentialProviders: Set<MailProvider>
+
+    var visibleProviders: Set<MailProvider> {
+        cachedProviders
+            .intersection(storedCredentialProviders)
+            .union(authenticatedProviders)
+    }
+
+    var showsMailbox: Bool {
+        !visibleProviders.isEmpty
+    }
+
+    var showsAuthenticationCheckingStatus: Bool {
+        authenticationState == .checking
+    }
+}
+
+struct MailboxCachedProviderAccess: Equatable, Sendable {
+    let activeGmailNamespace: String
+    let activeOutlookNamespace: String
+
+    var hasActiveProvider: Bool {
+        !activeGmailNamespace.isEmpty || !activeOutlookNamespace.isEmpty
+    }
+
+    var locallyConfiguredProviders: Set<MailProvider> {
+        var providers = Set<MailProvider>()
+        if !activeGmailNamespace.isEmpty { providers.insert(.gmail) }
+        if !activeOutlookNamespace.isEmpty { providers.insert(.outlook) }
+        return providers
+    }
+
+    func isLocallyConfigured(_ provider: MailProvider) -> Bool {
+        locallyConfiguredProviders.contains(provider)
+    }
+
+    var storedCredentialProviders: Set<MailProvider> {
+        var providers = Set<MailProvider>()
+        if IMAPCredentialStore.hasCredential(for: activeGmailNamespace) {
+            providers.insert(.gmail)
+        }
+        if OutlookIMAPCredentialStore.hasCredential(for: activeOutlookNamespace) {
+            providers.insert(.outlook)
+        }
+        return providers
+    }
+
+    static func current() -> MailboxCachedProviderAccess {
+        let gmailRaw = UserDefaults.standard.string(forKey: "pieroot.todo.imap.account") ?? ""
+        let gmailNamespace = IMAPCredentialStore.canonicalAccount(gmailRaw) ?? ""
+        let outlookRaw = UserDefaults.standard.string(forKey: "pieroot.todo.outlook.account") ?? ""
+        let outlookNamespace = OutlookIMAPCredentialStore.canonicalAccount(outlookRaw) ?? ""
+        return MailboxCachedProviderAccess(
+            activeGmailNamespace: gmailNamespace,
+            activeOutlookNamespace: outlookNamespace
+        )
+    }
+
+    func permits(provider: MailProvider, sourceAccountNamespace: String) -> Bool {
+        guard !sourceAccountNamespace.isEmpty else { return false }
+        switch provider {
+        case .gmail:
+            return !activeGmailNamespace.isEmpty
+                && sourceAccountNamespace == activeGmailNamespace
+        case .outlook:
+            return !activeOutlookNamespace.isEmpty
+                && sourceAccountNamespace == activeOutlookNamespace
+        }
+    }
+}
+
+private struct MailSessionValidation: Sendable {
+    let isAuthenticated: Bool
+    let hasStoredCredential: Bool
+}
+
+@MainActor
+enum MailTrashUndoBatchPhase: Equatable {
+    case undoAvailable
+    case committing
+}
+
+@MainActor
+struct MailTrashUndoBatch: Identifiable {
+    let id: UUID
+    let emails: [EmailMessage]
+    let mutations: Set<PendingMailboxMutation>
+    fileprivate(set) var phase: MailTrashUndoBatchPhase = .undoAvailable
+}
+
+@MainActor
+struct MailTrashUndoQueue {
+    private(set) var batches: [MailTrashUndoBatch] = []
+
+    var pendingEmailIDs: Set<String> {
+        Set(batches.flatMap(\.emails).map(\.localListID))
+    }
+
+    var latestUndoableBatch: MailTrashUndoBatch? {
+        batches.last(where: { $0.phase == .undoAvailable })
+    }
+
+    @discardableResult
+    mutating func enqueue(
+        _ emails: [EmailMessage],
+        mutations: Set<PendingMailboxMutation> = []
+    ) -> MailTrashUndoBatch {
+        replaceUndoableBatch(with: emails, mutations: mutations).latest
+    }
+
+    @discardableResult
+    mutating func replaceUndoableBatch(
+        with emails: [EmailMessage],
+        mutations: Set<PendingMailboxMutation>
+    ) -> (latest: MailTrashUndoBatch, superseded: [MailTrashUndoBatch]) {
+        let superseded = batches.filter { $0.phase == .undoAvailable }
+        batches.removeAll { $0.phase == .undoAvailable }
+        let latest = MailTrashUndoBatch(id: UUID(), emails: emails, mutations: mutations)
+        batches.append(latest)
+        return (latest, superseded)
+    }
+
+    @discardableResult
+    mutating func beginCommit(id: UUID) -> MailTrashUndoBatch? {
+        guard let index = batches.firstIndex(where: { $0.id == id }),
+              batches[index].phase == .undoAvailable
+        else {
+            return nil
+        }
+        batches[index].phase = .committing
+        return batches[index]
+    }
+
+    @discardableResult
+    mutating func remove(id: UUID) -> MailTrashUndoBatch? {
+        guard let index = batches.firstIndex(where: { $0.id == id }) else { return nil }
+        return batches.remove(at: index)
+    }
+}
 
 struct MailTabView: View {
     @Environment(\.modelContext) private var modelContext
@@ -314,13 +479,16 @@ struct MailTabView: View {
     )
     private var cachedInboxEmails: [EmailMessage]
 
+    @State private var authenticationState: MailAuthenticationLoadingState = .checking
     @State private var viewState = MailboxViewState()
     @State private var alertTitle = AppLanguage.localized("mail.alert.connectionError", defaultValue: "메일 연결 오류", language: .current, comment: "Mail connection alert title.")
     @State private var isConnecting = false
     @State private var isGmailAuthenticated = false
     @State private var isOutlookAuthenticated = false
-    @State private var selectedEmail: EmailMessage?
+    @State private var storedCredentialProviders = Set<MailProvider>()
+    @State private var selectedEmail: MailDetailSelection?
     @State private var showCategoryGuide = false
+    @State private var showEmailSettingsSheet = false
     @State private var errorMessage: String?
     @State private var showError = false
     @State private var analysisProgress: MailAnalysisProgress?
@@ -328,8 +496,10 @@ struct MailTabView: View {
     @State private var autoRegisteringEmailID: String?
     @State private var retryLoadMoreByProvider: [MailProvider: Bool] = [:]
 
-    @State private var pendingTrashUndo: [EmailMessage] = []
-    @State private var trashUndoTask: Task<Void, Never>?
+    @State private var pendingTrashQueue = MailTrashUndoQueue()
+    @State private var trashUndoTasks: [UUID: Task<Void, Never>] = [:]
+
+
     private var authenticatedProviders: Set<MailProvider> {
         var providers = Set<MailProvider>()
         if isGmailAuthenticated { providers.insert(.gmail) }
@@ -337,10 +507,39 @@ struct MailTabView: View {
         return providers
     }
 
+    private var cachedProviderAccess: MailboxCachedProviderAccess {
+        MailboxCachedProviderAccess.current()
+    }
+
+    private var validCachedInboxEmails: [EmailMessage] {
+        cachedInboxEmails.filter {
+            cachedProviderAccess.permits(
+                provider: $0.provider,
+                sourceAccountNamespace: $0.sourceAccountNamespace
+            )
+        }
+    }
+
+    private var cachedProviders: Set<MailProvider> {
+        Set(validCachedInboxEmails.map(\.provider))
+    }
+
+    private var startupPresentation: MailboxStartupPresentation {
+        MailboxStartupPresentation(
+            authenticationState: authenticationState,
+            cachedProviders: cachedProviders,
+            authenticatedProviders: authenticatedProviders,
+            storedCredentialProviders: storedCredentialProviders
+        )
+    }
+
+    private func reconcileSelectedProviderForCurrentState() {
+        viewState.reconcileProviders(startupPresentation.visibleProviders)
+    }
+
     private var isAnyMailAuthenticated: Bool {
         !authenticatedProviders.isEmpty
     }
-
     private var isAnalyzing: Bool {
         mailAnalysisSyncGate.isAnalyzing
     }
@@ -349,6 +548,13 @@ struct MailTabView: View {
         viewState.selectedProvider
     }
 
+    private var activeGmailNamespace: String {
+        cachedProviderAccess.activeGmailNamespace
+    }
+
+    private var activeOutlookNamespace: String {
+        cachedProviderAccess.activeOutlookNamespace
+    }
     private var selectedPagingState: MailboxPagingState {
         guard let selectedProvider else { return MailboxPagingState() }
         return viewState.pagingState(for: selectedProvider)
@@ -356,28 +562,27 @@ struct MailTabView: View {
 
     private var selectedProviderEmails: [EmailMessage] {
         guard let selectedProvider else { return [] }
-        return cachedInboxEmails.filter { $0.provider == selectedProvider }
+        return validCachedInboxEmails.filter { $0.provider == selectedProvider }
     }
 
     private var selectedEmails: [EmailMessage] {
         guard let selectedProvider else { return [] }
-        let pendingIDs = Set(pendingTrashUndo.map(\.localListID))
-        let visible = selectedProviderEmails.filter { !pendingIDs.contains($0.localListID) }
+        let visible = selectedProviderEmails.filter {
+            !pendingTrashQueue.pendingEmailIDs.contains($0.localListID)
+        }
         switch selectedProvider {
         case .gmail:
             return visible.filter {
                 $0.gmailInboxCategories.contains(viewState.selectedGmailCategory)
             }
         case .outlook:
-            return visible.filter {
-                $0.outlookInboxClassification == viewState.selectedOutlookClassification
-            }
+            return visible
         }
     }
 
     var analysisCandidateEmails: [EmailMessage] {
         mailboxAnalysisCandidates(
-            from: cachedInboxEmails,
+            from: validCachedInboxEmails,
             lookbackDays: EmailAnalysisLookbackPolicy.storedLookbackDays()
         )
     }
@@ -396,11 +601,30 @@ struct MailTabView: View {
             comment: "Pending mail trash status."
         )
     }
+
+    /// True exactly when `emailID` is the first row of the currently loaded page and every
+    /// readiness guard for the top-of-list incremental-sync trigger is satisfied. Extracted so
+    /// the "only the first row fires, and only once ready" contract stays testable without a
+    /// dedicated zero-height sentinel `List` row.
+    nonisolated static func shouldTriggerTopSync(
+        emailID: String,
+        firstEmailID: String?,
+        authenticationState: MailAuthenticationLoadingState,
+        hasLoadedInitialPage: Bool,
+        hasProvider: Bool
+    ) -> Bool {
+        emailID == firstEmailID
+            && authenticationState == .resolved
+            && hasLoadedInitialPage
+            && hasProvider
+    }
     var body: some View {
         NavigationStack {
             Group {
-                if isAnyMailAuthenticated {
+                if startupPresentation.showsMailbox {
                     mailboxBrowser
+                } else if startupPresentation.showsAuthenticationCheckingStatus {
+                    authenticationCheckingView
                 } else {
                     notConnectedView
                 }
@@ -415,7 +639,8 @@ struct MailTabView: View {
                         Label(AppLanguage.localized("mail.analyze", defaultValue: "정리", language: .current, comment: "Analyze mail action."), systemImage: "sparkles")
                     }
                     .disabled(
-                        !isAnyMailAuthenticated
+                        startupPresentation.showsAuthenticationCheckingStatus
+                            || !isAnyMailAuthenticated
                             || selectedPagingState.isLoadingPage
                             || isAnalyzing
                     )
@@ -433,7 +658,7 @@ struct MailTabView: View {
                         }
                         .accessibilityLabel(AppLanguage.localized("mail.refresh.accessibilityLabel", defaultValue: "메일 새로고침", language: .current, comment: "Mail refresh button."))
                         .accessibilityIdentifier("mail.refreshButton")
-                        .disabled(selectedProvider == nil)
+                        .disabled(selectedProvider == nil || startupPresentation.showsAuthenticationCheckingStatus)
                     }
                 }
             }
@@ -455,15 +680,24 @@ struct MailTabView: View {
                 }
             }
             .refreshable {
-                await refreshSelectedMailbox(showSuccess: true)
+                if !startupPresentation.showsAuthenticationCheckingStatus {
+                    await refreshSelectedMailbox(showSuccess: true)
+                }
             }
-            .sheet(item: $selectedEmail) { email in
-                MailDetailView(email: email)
+            .sheet(item: $selectedEmail) { selection in
+                MailDetailSelectionView(selection: selection)
                     .modelContainer(modelContext.container)
             }
             .sheet(isPresented: $showCategoryGuide) {
                 MailCategoryGuideView()
                     .presentationDetents([.medium])
+            }
+            .sheet(isPresented: $showEmailSettingsSheet, onDismiss: {
+                Task { await refreshAuthenticationState() }
+            }) {
+                NavigationStack {
+                    EmailDetailView()
+                }
             }
             .alert(alertTitle, isPresented: $showError) {
                 Button("확인") {}
@@ -471,57 +705,56 @@ struct MailTabView: View {
                 if let errorMessage { Text(errorMessage) }
             }
             .task {
+                storedCredentialProviders = MailboxCachedProviderAccess.current().storedCredentialProviders
+                reconcileSelectedProviderForCurrentState()
                 await refreshAuthenticationState()
                 try? MailboxLocalStore.live.replayPendingMutations(in: modelContext)
-                if selectedProvider != nil {
+                if selectedProvider != nil && authenticationState == .resolved {
                     await refreshSelectedMailbox(showSuccess: false)
                 }
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .gmailAuthChanged)) { note in
             isGmailAuthenticated = note.object as? Bool
-                ?? EmailService.shared.isAuthenticated
+                ?? (!(UserDefaults.standard.string(forKey: "pieroot.todo.imap.account") ?? "").isEmpty)
+            viewState.pagingByProvider[.gmail] = MailboxPagingState()
             reconcileAuthenticatedProvidersAndRefresh()
         }
-        .onReceive(NotificationCenter.default.publisher(for: .outlookAuthChanged)) { note in
-            if note.object as? Bool == false || !OutlookMailService.shared.isConfigured {
-                isOutlookAuthenticated = false
-                reconcileAuthenticatedProvidersAndRefresh()
-            } else {
-                Task {
-                    isOutlookAuthenticated =
-                        await OutlookMailService.shared.canAccessMailSilently()
-                    reconcileAuthenticatedProvidersAndRefresh()
-                }
-            }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("pieroot.todo.outlookAuthChanged"))) { note in
+            isOutlookAuthenticated = note.object as? Bool
+                ?? (!(UserDefaults.standard.string(forKey: "pieroot.todo.outlook.account") ?? "").isEmpty)
+            viewState.pagingByProvider[.outlook] = MailboxPagingState()
+            reconcileAuthenticatedProvidersAndRefresh()
         }
         .safeAreaInset(edge: .bottom, spacing: 12) {
             VStack(spacing: 8) {
-                if !pendingTrashUndo.isEmpty {
+                if let batch = pendingTrashQueue.latestUndoableBatch {
                     HStack {
                         Text(
                             Self.pendingTrashMessage(
-                                count: pendingTrashUndo.count,
+                                count: batch.emails.count,
                                 language: .current
                             )
                         )
                         Spacer()
-                        Button("실행 취소") { cancelPendingTrash() }
+                        Button("실행 취소") { cancelPendingTrash(batchID: batch.id) }
                             .fontWeight(.semibold)
+                            .accessibilityIdentifier("mail.trash.undo.\(batch.id.uuidString)")
                     }
                     .padding(.horizontal, 16)
                     .padding(.vertical, 12)
                     .background(.regularMaterial, in: Capsule())
-                    .accessibilityIdentifier("mail.trash.undo")
                 }
-                if let tutorial, let hint = tutorial.hint(for: .mailTab) {
-                    AppTutorialHintCard(hint: hint)
-                        .padding(.horizontal, 16)
-                        .padding(.bottom, 12)
+                if let tutorial {
+                    AppTutorialTipHost(tutorial: tutorial, screen: .mailTab)
                 }
             }
         }
+        .onChange(of: cachedInboxEmails.map(\.localListID)) { _, _ in
+            reconcileSelectedProviderForCurrentState()
+        }
         .onAppear {
+            reconcileSelectedProviderForCurrentState()
             tutorial?.handleMailTabAppeared()
         }
     }
@@ -530,6 +763,9 @@ struct MailTabView: View {
         VStack(spacing: 0) {
             compactMailboxControls
             mailboxHeader
+            if startupPresentation.showsAuthenticationCheckingStatus {
+                authenticationCheckingStatusRow
+            }
             if let warning = selectedPagingState.indexWarningMessage {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Image(systemName: "exclamationmark.triangle")
@@ -541,6 +777,7 @@ struct MailTabView: View {
                     Button(AppLanguage.localized("mail.refresh", defaultValue: "새로고침", language: .current, comment: "Mail refresh button.")) {
                         Task { await refreshSelectedMailbox(showSuccess: false) }
                     }
+                    .disabled(startupPresentation.showsAuthenticationCheckingStatus)
                     .accessibilityLabel(AppLanguage.localized("mail.refresh.accessibilityLabel", defaultValue: "메일 새로고침", language: .current, comment: "Mail refresh button."))
                     .font(.footnote.weight(.semibold))
                 }
@@ -553,7 +790,7 @@ struct MailTabView: View {
 
     private var compactMailboxControls: some View {
         HStack(spacing: 10) {
-            if authenticatedProviders.count > 1 {
+            if startupPresentation.visibleProviders.count > 1 {
                 providerMenu
             } else if let selectedProvider {
                 Label(providerDisplayName(selectedProvider), systemImage: "envelope")
@@ -572,18 +809,18 @@ struct MailTabView: View {
 
     private var providerMenu: some View {
         Menu {
-            if isGmailAuthenticated {
+            if startupPresentation.visibleProviders.contains(.gmail) {
                 Button {
                     selectProvider(.gmail)
                 } label: {
                     Label("Gmail", systemImage: selectedProvider == .gmail ? "checkmark" : "envelope")
                 }
             }
-            if isOutlookAuthenticated {
+            if startupPresentation.visibleProviders.contains(.outlook) {
                 Button {
                     selectProvider(.outlook)
                 } label: {
-                    Label("Outlook", systemImage: selectedProvider == .outlook ? "checkmark" : "envelope.badge")
+                    Label("Outlook", systemImage: selectedProvider == .outlook ? "checkmark" : "envelope")
                 }
             }
         } label: {
@@ -614,25 +851,12 @@ struct MailTabView: View {
                             viewState.selectedGmailCategory = category
                         }
                     }
-                } else if selectedProvider == .outlook {
-                    ForEach(OutlookInboxClassification.allCases, id: \.rawValue) { classification in
-                        categoryButton(
-                            title: classification == .focused ? "중요" : "기타",
-                            systemImage: classification == .focused
-                                ? "person.crop.circle.badge.checkmark"
-                                : "tray",
-                            isSelected: viewState.selectedOutlookClassification == classification,
-                            accessibilityID: "mail.outlook.\(classification.rawValue)"
-                        ) {
-                            viewState.selectedOutlookClassification = classification
-                        }
-                    }
                 }
             }
         }
         .frame(height: 32)
-    }
 
+    }
     private func categoryButton(
         title: String,
         systemImage: String,
@@ -683,6 +907,7 @@ struct MailTabView: View {
         }
         .padding(.horizontal)
         .padding(.bottom, 8)
+        .accessibilityIdentifier("mail.mailboxHeader")
     }
 
     @ViewBuilder
@@ -717,15 +942,17 @@ struct MailTabView: View {
                         ? viewState.selectedGmailCategory.systemImage
                         : "tray"
                 )
-                pageFooter
+                pageFooter(autoLoadsOlder: false)
             }
         } else {
             List {
                 ForEach(selectedEmails, id: \.localListID) { email in
                     Button {
-                        selectedEmail = email
+                        selectedEmail = MailDetailSelection(email)
                     } label: {
                         MailMessageRow(email: email)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .swipeActions(edge: .leading, allowsFullSwipe: true) {
@@ -740,10 +967,25 @@ struct MailTabView: View {
                             .tint(AppTheme.success)
                         }
                     }
+                    .onAppear {
+                        guard Self.shouldTriggerTopSync(
+                            emailID: email.localListID,
+                            firstEmailID: selectedEmails.first?.localListID,
+                            authenticationState: authenticationState,
+                            hasLoadedInitialPage: selectedPagingState.hasLoadedInitialPage,
+                            hasProvider: selectedProvider != nil
+                        ), let selectedProvider else { return }
+                        Task {
+                            await MailboxIncrementalSyncCoordinator.shared.sync(
+                                provider: selectedProvider,
+                                minimumInterval: MailboxPagingPolicy.updatesMinimumInterval
+                            )
+                        }
+                    }
                 }
                 .onDelete(perform: deleteEmails)
 
-                pageFooter
+                pageFooter(autoLoadsOlder: true)
                     .listRowSeparator(.hidden)
             }
             .listStyle(.plain)
@@ -751,7 +993,7 @@ struct MailTabView: View {
     }
 
     @ViewBuilder
-    private var pageFooter: some View {
+    private func pageFooter(autoLoadsOlder: Bool) -> some View {
         if selectedPagingState.isLoadingPage
             && selectedPagingState.hasLoadedInitialPage {
             HStack {
@@ -763,13 +1005,24 @@ struct MailTabView: View {
         } else if selectedPagingState.pageErrorMessage != nil {
             pageRetryButton
         } else if selectedPagingState.canLoadMore {
-            Button("이전 메일 더 불러오기") {
-                guard let selectedProvider else { return }
-                Task { await loadPage(for: selectedProvider, loadMore: true) }
+            if autoLoadsOlder {
+                ProgressView()
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+                    .onAppear {
+                        guard let selectedProvider else { return }
+                        Task { await loadPage(for: selectedProvider, loadMore: true) }
+                    }
+                    .accessibilityIdentifier("mail.page.loadMore")
+            } else {
+                Button("이전 메일 더 불러오기") {
+                    guard let selectedProvider else { return }
+                    Task { await loadPage(for: selectedProvider, loadMore: true) }
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+                .accessibilityIdentifier("mail.page.loadMore")
             }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 12)
-            .accessibilityIdentifier("mail.page.loadMore")
         } else if selectedPagingState.hasLoadedInitialPage {
             Text("받은편지함을 모두 불러왔습니다")
                 .font(.footnote)
@@ -791,14 +1044,64 @@ struct MailTabView: View {
         .accessibilityIdentifier("mail.page.retry")
     }
 
+    private var authenticationCheckingView: some View {
+        VStack(spacing: 16) {
+            ProgressView()
+            Text(AppLanguage.localized(
+                "mail.authentication.checking",
+                defaultValue: "인증 정보를 확인하는 중입니다…",
+                language: .current,
+                comment: "Checking authentication status."
+            ))
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(AppLanguage.localized(
+            "mail.authentication.checking.accessibility",
+            defaultValue: "메일 인증 정보를 확인하는 중",
+            language: .current,
+            comment: "Checking mail authentication accessibility label."
+        ))
+        .accessibilityIdentifier("mail.authentication.checking")
+    }
+
+    private var authenticationCheckingStatusRow: some View {
+        HStack(spacing: 8) {
+            ProgressView()
+                .controlSize(.small)
+            Text(AppLanguage.localized(
+                "mail.authentication.checking",
+                defaultValue: "인증 정보를 확인하는 중입니다…",
+                language: .current,
+                comment: "Checking authentication status."
+            ))
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            Spacer()
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 6)
+        .background(.bar)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(AppLanguage.localized(
+            "mail.authentication.checking.accessibility",
+            defaultValue: "메일 인증 정보를 확인하는 중",
+            language: .current,
+            comment: "Checking mail authentication accessibility label."
+        ))
+        .accessibilityIdentifier("mail.authentication.checking")
+    }
+
     private var notConnectedView: some View {
         ContentUnavailableView {
             Label(
-                "메일 계정 미연결",
+                AppLanguage.localized("mail.notConnected.title", defaultValue: "메일 계정 미연결", language: .current, comment: "Mail account not connected title"),
                 systemImage: "envelope.badge.shield.half.filled"
             )
         } description: {
-            Text("Gmail 또는 Outlook을 연결하면 받은편지함 전체를 볼 수 있습니다.")
+            Text(AppLanguage.localized("mail.notConnected.description", defaultValue: "Gmail 또는 Outlook을 연결하면 받은편지함을 볼 수 있습니다.", language: .current, comment: "Mail account not connected description"))
         } actions: {
             VStack(spacing: 12) {
                 Button {
@@ -810,18 +1113,19 @@ struct MailTabView: View {
                 .disabled(isConnecting)
 
                 Button {
-                    Task { await connectOutlook() }
+                    showEmailSettingsSheet = true
                 } label: {
-                    Label("Outlook 연결", systemImage: "plus.circle")
+                    Label(
+                        AppLanguage.localized("mail.notConnected.outlookConnect", defaultValue: "Outlook IMAP 연결 설정", language: .current, comment: "Outlook connect button in empty state"),
+                        systemImage: "envelope.circle.fill"
+                    )
                 }
-                .buttonStyle(.bordered)
-                .disabled(isConnecting)
             }
         }
     }
 
     private func mailboxHeaderText(for provider: MailProvider) -> String {
-        let loadedCount = cachedInboxEmails.filter { $0.provider == provider }.count
+        let loadedCount = validCachedInboxEmails.filter { $0.provider == provider }.count
         let language = AppLanguage.current
         if let total = viewState.pagingState(for: provider).totalInboxCount {
             let format = AppLanguage.localized(
@@ -848,57 +1152,43 @@ struct MailTabView: View {
     }
 
     private func providerDisplayName(_ provider: MailProvider) -> String {
-        provider == .gmail ? "Gmail" : "Outlook"
+        switch provider {
+        case .gmail:
+            return "Gmail"
+        case .outlook:
+            return "Outlook"
+        }
     }
-
+    private func pagingProvider(for provider: MailProvider) -> any MailboxPagingProvider {
+        MailboxProviderRegistry.provider(for: provider)
+    }
     private func connectGmail() async {
-        isConnecting = true
-        defer { isConnecting = false }
-        do {
-            try await EmailService.shared.authenticate()
-        } catch {
-            let nsError = error as NSError
-            if nsError.domain ==
-                "com.apple.AuthenticationServices.WebAuthenticationSession",
-               nsError.code == 1 {
-                alertTitle = AppLanguage.localized("mail.alert.title", defaultValue: "알림", language: .current, comment: "Mail alert title.")
-                errorMessage = AppLanguage.localized("mail.auth.cancelled", defaultValue: "로그인이 취소되었습니다.", language: .current, comment: "Mail authentication cancellation.")
-            } else {
-                alertTitle = AppLanguage.localized("mail.connection.gmail.error", defaultValue: "Gmail 연결 오류", language: .current, comment: "Gmail connection error title.")
-                errorMessage = error.localizedDescription
-            }
-            showError = true
-        }
+        alertTitle = AppLanguage.localized(
+            "mail.connection.gmail.imapRequired",
+            defaultValue: "Gmail IMAP 연결 필요",
+            language: .current,
+            comment: "Gmail IMAP connection guidance."
+        )
+        errorMessage = AppLanguage.localized(
+            "mail.connection.gmail.imapSettings",
+            defaultValue: "설정의 이메일 연동에서 Gmail App Password로 IMAP을 연결하세요.",
+            language: .current,
+            comment: "Gmail IMAP settings guidance."
+        )
+        showError = true
     }
 
-    private func connectOutlook() async {
-        isConnecting = true
-        defer { isConnecting = false }
-        do {
-            try await OutlookMailService.shared.authenticate()
-        } catch OutlookMailError.missingClientID {
-            alertTitle = AppLanguage.localized("mail.connection.outlook.error", defaultValue: "Outlook 연결 오류", language: .current, comment: "Outlook connection error title.")
-            errorMessage = OutlookMailError.missingClientID.localizedDescription
-            showError = true
-        } catch {
-            let nsError = error as NSError
-            if nsError.domain == MSALErrorDomain
-                && nsError.code == MSALError.userCanceled.rawValue {
-                alertTitle = AppLanguage.localized("mail.alert.title", defaultValue: "알림", language: .current, comment: "Mail alert title.")
-                errorMessage = AppLanguage.localized("mail.auth.cancelled", defaultValue: "로그인이 취소되었습니다.", language: .current, comment: "Mail authentication cancellation.")
-            } else {
-                alertTitle = AppLanguage.localized("mail.connection.outlook.error", defaultValue: "Outlook 연결 오류", language: .current, comment: "Outlook connection error title.")
-                errorMessage = error.localizedDescription
-            }
-            showError = true
-        }
-    }
 
     @MainActor
     private func refreshSelectedMailbox(showSuccess: Bool) async {
-        guard mailAnalysisSyncGate.requestSync(),
+        #if DEBUG
+        if MailUITestFixture.isEnabled {
+            return
+        }
+        #endif
+        guard authenticationState == .resolved,
+              mailAnalysisSyncGate.requestSync(),
               let provider = selectedProvider else { return }
-
         do {
             try MailboxLocalStore.live.replayPendingMutations(in: modelContext)
         } catch {
@@ -930,14 +1220,17 @@ struct MailTabView: View {
         retryLoadMoreByProvider[provider] = nil
 
         do {
-            let page = try await mailboxProvider(for: provider)
+            let page = try await pagingProvider(for: provider)
                 .fetchInboxPage(after: cursor)
             try MailboxLocalStore.live.upsert(page, into: modelContext)
             try MailboxLocalStore.live.replayPendingMutations(in: modelContext)
+            if !loadMore {
+                MailboxIncrementalSyncCoordinator.shared.seedBaselineIfNeeded(for: provider, page: page)
+            }
             viewState.completePage(for: provider, nextCursor: page.nextCursor)
             retryLoadMoreByProvider[provider] = nil
         } catch {
-            viewState.failPage(for: provider, message: error.localizedDescription)
+            viewState.failPage(for: provider, message: mailErrorMessage(error))
             retryLoadMoreByProvider[provider] = loadMore
         }
     }
@@ -946,10 +1239,11 @@ struct MailTabView: View {
     private func reconcileInbox(for provider: MailProvider) async {
         guard viewState.beginIndex(for: provider) else { return }
         do {
-            let activeIDs = try await mailboxProvider(for: provider)
+            let activeIDs = try await pagingProvider(for: provider)
                 .fetchInboxMessageIDs()
             try MailboxLocalStore.live.reconcileInbox(
                 provider: provider,
+                sourceAccountNamespace: activeMailboxNamespace(for: provider),
                 activeMessageIDs: activeIDs,
                 in: modelContext
             )
@@ -963,9 +1257,21 @@ struct MailTabView: View {
         }
     }
 
+    private func activeMailboxNamespace(for provider: MailProvider) -> String {
+        switch provider {
+        case .gmail:
+            let raw = UserDefaults.standard.string(forKey: "pieroot.todo.imap.account") ?? ""
+            return IMAPCredentialStore.canonicalAccount(raw) ?? ""
+        case .outlook:
+            let raw = UserDefaults.standard.string(forKey: "pieroot.todo.outlook.account") ?? ""
+            return OutlookIMAPCredentialStore.canonicalAccount(raw) ?? ""
+        }
+    }
+
     @MainActor
     private func analyzeInbox() async {
-        guard !mailAnalysisSyncGate.isAnalyzing,
+        guard authenticationState == .resolved,
+              !mailAnalysisSyncGate.isAnalyzing,
               !selectedPagingState.isLoadingPage,
               isAnyMailAuthenticated else { return }
         let pendingEmails = analysisCandidateEmails
@@ -993,7 +1299,7 @@ struct MailTabView: View {
     private func analyzeEmail(_ email: EmailMessage) async {
         if email.body.isEmpty && email.htmlBody == nil {
             do {
-                let content = try await mailboxProvider(for: email.provider)
+                let content = try await pagingProvider(for: email.provider)
                     .fetchMessageContent(messageID: email.providerMessageID)
                 try MailboxLocalStore.live.updateContent(
                     content,
@@ -1006,7 +1312,7 @@ struct MailTabView: View {
                 return
             }
         }
-        await EmailMessageAnalysisService.shared.analyze(email, context: modelContext)
+        try? await EmailMessageAnalysisService.shared.analyze(email, context: modelContext)
     }
 
     @MainActor
@@ -1032,7 +1338,7 @@ struct MailTabView: View {
 
         if email.body.isEmpty && email.htmlBody == nil {
             do {
-                let content = try await mailboxProvider(for: email.provider)
+                let content = try await pagingProvider(for: email.provider)
                     .fetchMessageContent(messageID: email.providerMessageID)
                 try MailboxLocalStore.live.updateContent(
                     content,
@@ -1058,7 +1364,10 @@ struct MailTabView: View {
             htmlBody: email.htmlBody,
             receivedAt: email.receivedAt,
             labelIds: email.labelIDs,
-            isBulk: false
+            isBulk: false,
+            provider: email.provider,
+            providerMessageID: email.providerMessageID,
+            sourceAccountNamespace: email.sourceAccountNamespace
         )
         let todo = await EmailService.shared.makeManualTodo(from: synthetic)
 
@@ -1089,60 +1398,175 @@ struct MailTabView: View {
     @MainActor
     private func trashEmails(_ targets: [EmailMessage]) async {
         guard !targets.isEmpty else { return }
-        trashUndoTask?.cancel()
-        pendingTrashUndo = targets
-        trashUndoTask = Task {
-            try? await Task.sleep(for: .seconds(5))
-            guard !Task.isCancelled else { return }
-            let pending = pendingTrashUndo
-            pendingTrashUndo = []
-            await commitTrash(pending)
+        do {
+            let mutations = try MailboxLocalStore.live.stageTrash(targets, in: modelContext)
+            let replacement = pendingTrashQueue.replaceUndoableBatch(
+                with: targets,
+                mutations: mutations
+            )
+            for superseded in replacement.superseded {
+                trashUndoTasks.removeValue(forKey: superseded.id)?.cancel()
+                Task { @MainActor in
+                    await flushPendingTrash(superseded, now: .distantFuture)
+                }
+            }
+            let batch = replacement.latest
+            trashUndoTasks[batch.id] = Task { @MainActor [batchID = batch.id] in
+                try? await Task.sleep(for: .seconds(5))
+                guard !Task.isCancelled else { return }
+                await commitPendingTrash(batchID: batchID)
+            }
+        } catch {
+            let alert = mailDetailAlert(action: .trash, error: error)
+            alertTitle = alert.title
+            errorMessage = alert.message
+            showError = true
         }
     }
 
     @MainActor
-    private func cancelPendingTrash() {
-        trashUndoTask?.cancel()
-        trashUndoTask = nil
-        pendingTrashUndo = []
+    private func cancelPendingTrash(batchID: UUID) {
+        guard let batch = pendingTrashQueue.latestUndoableBatch,
+              batch.id == batchID
+        else {
+            return
+        }
+        do {
+            let restored = try MailboxLocalStore.live.restoreStagedTrash(
+                batch.emails,
+                mutations: batch.mutations,
+                in: modelContext
+            )
+            if restored {
+                trashUndoTasks.removeValue(forKey: batchID)?.cancel()
+                _ = pendingTrashQueue.remove(id: batchID)
+            } else if let committingBatch = pendingTrashQueue.beginCommit(id: batchID) {
+                trashUndoTasks.removeValue(forKey: batchID)?.cancel()
+                Task { @MainActor in
+                    await flushPendingTrash(committingBatch)
+                }
+            }
+        } catch {
+            let alert = mailDetailAlert(action: .trash, error: error)
+            alertTitle = alert.title
+            errorMessage = alert.message
+            showError = true
+        }
     }
 
     @MainActor
-    private func commitTrash(_ targets: [EmailMessage]) async {
-        for email in targets {
+    private func commitPendingTrash(batchID: UUID) async {
+        guard let batch = pendingTrashQueue.beginCommit(id: batchID) else { return }
+        trashUndoTasks[batchID] = nil
+        await flushPendingTrash(batch)
+    }
+
+    @MainActor
+    private func flushPendingTrash(
+        _ batch: MailTrashUndoBatch,
+        now: Date = Date()
+    ) async {
+        _ = await MailboxLocalStore.live.flushStagedTrash(
+            batch.mutations,
+            now: now
+        ) { mutation in
+            let providerKind = MailProvider(rawValue: mutation.providerRawValue) ?? .gmail
+            let provider = pagingProvider(for: providerKind)
             do {
-                let provider = mailboxProvider(for: email.provider)
-                try await MailboxLocalStore.live.trash(
-                    email,
-                    in: modelContext,
-                    remote: { try await provider.trashMessage(messageID: email.providerMessageID) }
+                try await provider.trashMessage(
+                    messageID: mutation.providerMessageID,
+                    expectedGlobalMessageID: mutation.expectedGlobalMessageID
                 )
-            } catch {
-                let alert = mailDetailAlert(action: .trash, error: error)
-                alertTitle = alert.title
-                errorMessage = alert.message
-                showError = true
-                return
-            }
+            } catch GmailIMAPError.credentialRejected {
+                IMAPCredentialStore.markCredentialRejected(for: mutation.sourceAccountNamespace)
+                throw GmailIMAPError.credentialRejected
+        }
+        }
+        _ = pendingTrashQueue.remove(id: batch.id)
+    }
+
+    private static func validateGmailSession(
+        account: String,
+        backgroundEnabled: Bool
+    ) async -> MailSessionValidation {
+        guard !account.isEmpty else {
+            return MailSessionValidation(isAuthenticated: false, hasStoredCredential: false)
+        }
+        do {
+            try await GmailIMAPService.shared.authenticate(
+                email: account,
+                backgroundEnabled: backgroundEnabled
+            )
+            return MailSessionValidation(isAuthenticated: true, hasStoredCredential: true)
+        } catch {
+            return MailSessionValidation(
+                isAuthenticated: false,
+                hasStoredCredential: MailCredentialFailurePolicy.hasStoredCredential(after: error)
+            )
+        }
+    }
+
+    private static func validateOutlookSession(
+        account: String,
+        backgroundEnabled: Bool
+    ) async -> MailSessionValidation {
+        guard !account.isEmpty else {
+            return MailSessionValidation(isAuthenticated: false, hasStoredCredential: false)
+        }
+        do {
+            try await OutlookIMAPService.shared.authenticate(
+                email: account,
+                backgroundEnabled: backgroundEnabled
+            )
+            return MailSessionValidation(isAuthenticated: true, hasStoredCredential: true)
+        } catch {
+            return MailSessionValidation(
+                isAuthenticated: false,
+                hasStoredCredential: MailCredentialFailurePolicy.hasStoredCredential(after: error)
+            )
         }
     }
 
     @MainActor
     private func refreshAuthenticationState() async {
-        isGmailAuthenticated = EmailService.shared.isAuthenticated
-        if OutlookMailService.shared.isConfigured {
-            isOutlookAuthenticated =
-                await OutlookMailService.shared.canAccessMailSilently()
-        } else {
-            isOutlookAuthenticated = false
+        #if DEBUG
+        if MailUITestFixture.isEnabled {
+            isGmailAuthenticated = true
+            isOutlookAuthenticated = true
+            storedCredentialProviders = [.gmail, .outlook]
+            viewState.reconcileAuthenticatedProviders(authenticatedProviders)
+            authenticationState = .resolved
+            reconcileSelectedProviderForCurrentState()
+            return
         }
+        #endif
+        let gmailAccount = UserDefaults.standard.string(forKey: "pieroot.todo.imap.account") ?? ""
+        let outlookAccount = UserDefaults.standard.string(forKey: "pieroot.todo.outlook.account") ?? ""
+        async let gmailValidation = Self.validateGmailSession(
+            account: gmailAccount,
+            backgroundEnabled: UserDefaults.standard.bool(forKey: "pieroot.todo.imap.backgroundEnabled")
+        )
+        async let outlookValidation = Self.validateOutlookSession(
+            account: outlookAccount,
+            backgroundEnabled: UserDefaults.standard.bool(forKey: "pieroot.todo.outlook.backgroundEnabled")
+        )
+        let (gmailValidationResult, outlookValidationResult) = await (gmailValidation, outlookValidation)
+        isGmailAuthenticated = gmailValidationResult.isAuthenticated
+        isOutlookAuthenticated = outlookValidationResult.isAuthenticated
+        storedCredentialProviders = Set([
+            gmailValidationResult.hasStoredCredential ? .gmail : nil,
+            outlookValidationResult.hasStoredCredential ? .outlook : nil
+        ].compactMap { $0 })
         viewState.reconcileAuthenticatedProviders(authenticatedProviders)
+        authenticationState = .resolved
+        reconcileSelectedProviderForCurrentState()
     }
 
     @MainActor
     private func reconcileAuthenticatedProvidersAndRefresh() {
         let previous = selectedProvider
         viewState.reconcileAuthenticatedProviders(authenticatedProviders)
+        reconcileSelectedProviderForCurrentState()
         guard let selectedProvider,
               previous != selectedProvider
                 || !viewState.pagingState(for: selectedProvider).hasLoadedInitialPage
@@ -1173,13 +1597,14 @@ private struct MailCategoryGuideView: View {
                         }
                         .padding(.vertical, 2)
                     }
-                    Text("Gmail API가 제공한 원본 system category label을 그대로 사용합니다.")
+                    Text(AppLanguage.localized(
+                        "mail.category.guide.gmailSource",
+                        defaultValue: "Gmail 검색의 카테고리(category:) 분류를 IMAP으로 조회해 그대로 사용합니다.",
+                        language: .current,
+                        comment: "Explains where Gmail inbox tab categories come from."
+                    ))
                 }
 
-                Section("Outlook") {
-                    Text("Focused는 중요, Other는 기타로 표시합니다.")
-                    Text("Outlook category 이름은 메일 행의 badge로 그대로 표시합니다.")
-                }
 
                 Section("받은편지함") {
                     Text("읽음 여부와 관계없이 받은편지함의 전체 기간을 페이지 단위로 불러옵니다.")
@@ -1232,18 +1657,6 @@ struct MailMessageRow: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
-            if email.provider == .outlook, !email.providerCategoryNames.isEmpty {
-                HStack(spacing: 6) {
-                    ForEach(email.providerCategoryNames.prefix(3), id: \.self) { category in
-                        Text(category)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(.quaternary, in: Capsule())
-                    }
-                }
-            }
         }
         .padding(.vertical, 4)
         .foregroundStyle(email.isRead ? .secondary : .primary)
@@ -1279,472 +1692,6 @@ struct MailMessageRow: View {
     }
 }
 
-
-// MARK: - MailDetailView
-
-struct MailDetailView: View {
-    let email: EmailMessage
-    @Environment(\.modelContext) private var modelContext
-    @Environment(\.dismiss) private var dismiss
-    @State private var webViewHeight: CGFloat = 300
-    @State private var showRegisterSheet = false
-    @State private var isLoadingBody = false
-    @State private var isSyncingRead = false
-    @State private var isTrashing = false
-    @State private var isReanalyzing = false
-    @State private var alert: MailDetailAlert?
-
-    var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(email.subject.isEmpty ? "(제목 없음)" : email.subject)
-                            .font(.title3)
-                            .fontWeight(.semibold)
-
-                        HStack(alignment: .top) {
-                            Text(email.from)
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(2)
-                            Spacer()
-                            Text(
-                                email.receivedAt.formatted(
-                                    .dateTime.month(.abbreviated).day().hour().minute()
-                                )
-                            )
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
-                        }
-                    }
-                    .padding()
-
-                    Divider()
-
-                    if email.analysisState == .analyzed,
-                       !email.analysisSummary.isEmpty {
-                        VStack(alignment: .leading, spacing: 8) {
-                            HStack {
-                                Label("AI 정리", systemImage: "sparkles")
-                                    .font(.caption.weight(.semibold))
-                                    .foregroundStyle(AppTheme.accent)
-                                Spacer()
-                                Button {
-                                    Task { await reanalyzeCurrentEmail() }
-                                } label: {
-                                    if isReanalyzing || email.analysisState == .analyzing {
-                                        ProgressView().controlSize(.mini)
-                                    } else {
-                                        Label("다시 요약", systemImage: "arrow.triangle.2.circlepath")
-                                            .labelStyle(.titleAndIcon)
-                                    }
-                                }
-                                .font(.caption.weight(.semibold))
-                                .buttonStyle(.bordered)
-                                .controlSize(.small)
-                                .disabled(isReanalyzing || isLoadingBody || email.analysisState == .analyzing)
-                                .accessibilityIdentifier("mail.detail.reanalyze")
-                            }
-                            Text(email.analysisSummary)
-                                .font(.subheadline)
-                            if !email.analysisKeyPoints.isEmpty {
-                                ForEach(email.analysisKeyPoints, id: \.self) { point in
-                                    Label(point, systemImage: "circle.fill")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-                            if !email.analysisActionItems.isEmpty {
-                                Divider()
-                                Text("확인/처리 필요")
-                                    .font(.caption.weight(.semibold))
-                                ForEach(email.analysisActionItems, id: \.self) { item in
-                                    Label(item, systemImage: "square")
-                                        .font(.caption)
-                                }
-                            }
-                        }
-                        .padding()
-                        .background(
-                            AppTheme.accentSubtle,
-                            in: RoundedRectangle(cornerRadius: 12)
-                        )
-                        .padding(.horizontal)
-                        .padding(.top, 12)
-                    } else if email.analysisState == .failed {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Label("AI 정리 실패", systemImage: "exclamationmark.triangle")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(AppTheme.warning)
-                            if !email.analysisError.isEmpty {
-                                Text(email.analysisError)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                            Button {
-                                Task { await reanalyzeCurrentEmail() }
-                            } label: {
-                                if isReanalyzing {
-                                    ProgressView().controlSize(.mini)
-                                } else {
-                                    Label("다시 요약", systemImage: "arrow.triangle.2.circlepath")
-                                }
-                            }
-                            .font(.caption.weight(.semibold))
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-                            .disabled(isReanalyzing || isLoadingBody)
-                            .accessibilityIdentifier("mail.detail.reanalyze")
-                        }
-                        .padding()
-                        .background(
-                            AppTheme.warning.opacity(0.08),
-                            in: RoundedRectangle(cornerRadius: 12)
-                        )
-                        .padding(.horizontal)
-                        .padding(.top, 12)
-                    } else if isReanalyzing || email.analysisState == .analyzing {
-                        HStack(spacing: 8) {
-                            ProgressView().controlSize(.small)
-                            Text("AI 정리 중...")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.secondary)
-                        }
-                        .padding()
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(
-                            AppTheme.accentSubtle,
-                            in: RoundedRectangle(cornerRadius: 12)
-                        )
-                        .padding(.horizontal)
-                        .padding(.top, 12)
-                    }
-
-                    if let html = email.htmlBody, !html.isEmpty {
-                        EmailWebView(htmlBody: html, contentHeight: $webViewHeight)
-                            .frame(height: webViewHeight)
-                    } else {
-                        let bodyText = email.body.isEmpty ? email.snippet : email.body
-                        if bodyText.isEmpty {
-                            HStack {
-                                Spacer()
-                                ProgressView()
-                                Spacer()
-                            }
-                            .padding()
-                        } else {
-                            Text(bodyText)
-                                .font(.body)
-                                .textSelection(.enabled)
-                                .padding()
-                        }
-                        if isLoadingBody {
-                            HStack(spacing: 6) {
-                                ProgressView().controlSize(.mini)
-                                Text("전체 본문 로딩 중…")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                            }
-                            .padding(.horizontal)
-                            .padding(.bottom, 8)
-                        }
-                    }
-                }
-            }
-            .navigationTitle("메일")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarLeading) {
-                    Button {
-                        showRegisterSheet = true
-                    } label: {
-                        Label("일정 등록하기", systemImage: "calendar.badge.plus")
-                    }
-                }
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button(role: .destructive) {
-                        Task { await trashCurrentEmail() }
-                    } label: {
-                        Label("휴지통", systemImage: "trash")
-                    }
-                    .disabled(isTrashing || isSyncingRead)
-                    .accessibilityIdentifier("mail.detail.trash")
-                }
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("닫기") { dismiss() }
-                }
-            }
-            .sheet(isPresented: $showRegisterSheet) {
-                MailRegisterSheet(email: email)
-            }
-            .task {
-                await synchronizeReadLoadContentAndAnalyze()
-            }
-        }
-        .alert(item: $alert) { alert in
-            Alert(
-                title: Text(alert.title),
-                message: Text(alert.message),
-                dismissButton: .cancel(Text("확인"))
-            )
-        }
-    }
-
-    @MainActor
-    private func synchronizeReadLoadContentAndAnalyze() async {
-        let provider = mailboxProvider(for: email.provider)
-        if !email.isRead {
-            isSyncingRead = true
-            do {
-                try await MailboxLocalStore.live.markAsRead(
-                    email,
-                    in: modelContext,
-                    remote: {
-                        try await provider.markAsRead(
-                            messageID: email.providerMessageID
-                        )
-                    }
-                )
-            } catch {
-                alert = mailDetailAlert(action: .markAsRead, error: error)
-            }
-            isSyncingRead = false
-        }
-
-        isLoadingBody = true
-        do {
-            let content = try await provider.fetchMessageContent(
-                messageID: email.providerMessageID
-            )
-            try MailboxLocalStore.live.updateContent(
-                content,
-                for: email,
-                in: modelContext
-            )
-        } catch {
-            if alert == nil {
-                alert = MailDetailAlert(
-                    title: "메일 본문 로드 오류",
-                    message: error.localizedDescription
-                )
-            }
-        }
-        isLoadingBody = false
-        await EmailMessageAnalysisService.shared.analyze(
-            email,
-            context: modelContext
-        )
-    }
-
-    @MainActor
-    private func reanalyzeCurrentEmail() async {
-        guard !isReanalyzing, !isLoadingBody else { return }
-        isReanalyzing = true
-        defer { isReanalyzing = false }
-
-        if email.body.isEmpty && email.htmlBody == nil {
-            isLoadingBody = true
-            do {
-                let content = try await mailboxProvider(for: email.provider)
-                    .fetchMessageContent(messageID: email.providerMessageID)
-                try MailboxLocalStore.live.updateContent(
-                    content,
-                    for: email,
-                    in: modelContext
-                )
-            } catch {
-                alert = MailDetailAlert(
-                    title: "메일 본문 로드 오류",
-                    message: error.localizedDescription
-                )
-                isLoadingBody = false
-                return
-            }
-            isLoadingBody = false
-        }
-
-        EmailAnalysisContract.resetAnalysis(email)
-        do {
-            try modelContext.save()
-        } catch {
-            alert = MailDetailAlert(
-                title: "AI 정리 오류",
-                message: error.localizedDescription
-            )
-            return
-        }
-
-        await EmailMessageAnalysisService.shared.analyze(
-            email,
-            context: modelContext
-        )
-    }
-
-    @MainActor
-    private func trashCurrentEmail() async {
-        guard !isTrashing, !isSyncingRead else { return }
-        isTrashing = true
-        defer { isTrashing = false }
-
-        let provider = mailboxProvider(for: email.provider)
-        do {
-            try await MailboxLocalStore.live.trash(
-                email,
-                in: modelContext,
-                remote: {
-                    try await provider.trashMessage(
-                        messageID: email.providerMessageID
-                    )
-                }
-            )
-            dismiss()
-        } catch {
-            alert = mailDetailAlert(action: .trash, error: error)
-        }
-    }
-}
-
-
-// MARK: - EmailWebView
-
-/// WKWebView 래퍼: HTML 이메일 렌더링 + 보안 세니타이징.
-/// - JavaScript 비활성화 (XSS / 추적 스크립트 차단)
-/// - 외부 링크 → Safari 오픈
-/// - KVO로 콘텐츠 높이 측정 → SwiftUI ScrollView와 협조
-struct EmailWebView: UIViewRepresentable {
-    let htmlBody: String
-    @Binding var contentHeight: CGFloat
-
-    func makeCoordinator() -> Coordinator { Coordinator(self) }
-
-    func makeUIView(context: Context) -> WKWebView {
-        let config = WKWebViewConfiguration()
-        config.defaultWebpagePreferences.allowsContentJavaScript = false
-
-        let webView = WKWebView(frame: .zero, configuration: config)
-        webView.scrollView.isScrollEnabled = false
-        webView.scrollView.bounces = false
-        webView.backgroundColor = .systemBackground
-        webView.isOpaque = false
-        webView.navigationDelegate = context.coordinator
-        webView.scrollView.addObserver(
-            context.coordinator,
-            forKeyPath: "contentSize",
-            options: .new,
-            context: nil
-        )
-        return webView
-    }
-
-    func updateUIView(_ webView: WKWebView, context: Context) {
-        let html = sanitizedHTML
-        guard context.coordinator.lastLoadedHTML != html else { return }
-        context.coordinator.lastLoadedHTML = html
-        webView.loadHTMLString(html, baseURL: nil)
-    }
-
-    static func dismantleUIView(_ webView: WKWebView, coordinator: Coordinator) {
-        webView.stopLoading()
-        webView.navigationDelegate = nil
-        webView.scrollView.removeObserver(coordinator, forKeyPath: "contentSize")
-    }
-
-    private var sanitizedHTML: String {
-        var html = htmlBody
-
-        // <script> 태그 전체 제거
-        if let re = try? NSRegularExpression(pattern: "<script[\\s\\S]*?</script>", options: .caseInsensitive) {
-            let range = NSRange(html.startIndex..., in: html)
-            html = re.stringByReplacingMatches(in: html, range: range, withTemplate: "")
-        }
-        // on* 이벤트 핸들러 제거 (onclick=, onerror= 등)
-        if let re = try? NSRegularExpression(pattern: #"\s+on\w+\s*=\s*(?:"[^"]*"|'[^']*')"#, options: .caseInsensitive) {
-            let range = NSRange(html.startIndex..., in: html)
-            html = re.stringByReplacingMatches(in: html, range: range, withTemplate: "")
-        }
-
-        let viewport = #"<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5">"#
-        let contentSecurityPolicy = #"<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: cid: blob:; style-src 'unsafe-inline'; font-src data:; connect-src 'none'; media-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'">"#
-        let css = """
-        <style>
-        body{font-family:-apple-system,Helvetica,sans-serif;font-size:15px;
-             color:#1c1c1e;max-width:100%;word-wrap:break-word;
-             padding:12px;margin:0;background:#fff;}
-        img{max-width:100%!important;height:auto!important;}
-        table{max-width:100%!important;}
-        a{color:#007AFF;}
-        *{box-sizing:border-box;}
-        </style>
-        """
-        let injectedHead = "\(viewport)\(contentSecurityPolicy)\(css)"
-
-        if html.range(of: "<head", options: .caseInsensitive) != nil {
-            // 기존 <head> 안에 삽입
-            html = html.replacingOccurrences(
-                of: "</head>", with: "\(injectedHead)</head>",
-                options: .caseInsensitive
-            )
-        } else {
-            html = """
-            <!DOCTYPE html>
-            <html><head>\(injectedHead)</head>
-            <body>\(html)</body></html>
-            """
-        }
-        return html
-    }
-
-    // MARK: Coordinator
-
-    final class Coordinator: NSObject, WKNavigationDelegate {
-        var parent: EmailWebView
-        init(_ parent: EmailWebView) { self.parent = parent }
-
-        // KVO: contentSize 변경 시 SwiftUI 프레임 갱신
-        override func observeValue(
-            forKeyPath keyPath: String?, of object: Any?,
-            change: [NSKeyValueChangeKey: Any]?, context: UnsafeMutableRawPointer?
-        ) {
-            guard keyPath == "contentSize",
-                  let scrollView = object as? UIScrollView,
-                  scrollView.contentSize.height > 0 else { return }
-            let h = scrollView.contentSize.height
-            DispatchQueue.main.async { self.parent.contentHeight = h }
-        }
-
-        var lastLoadedHTML: String?
-
-        // 외부 링크는 Safari로 열고, 메일 HTML 내부의 원격 리소스 요청은 차단한다.
-        func webView(
-            _ webView: WKWebView,
-            decidePolicyFor action: WKNavigationAction,
-            preferences: WKWebpagePreferences,
-            decisionHandler: @escaping (WKNavigationActionPolicy, WKWebpagePreferences) -> Void
-        ) {
-            preferences.allowsContentJavaScript = false
-            if action.navigationType == .linkActivated,
-               let url = action.request.url {
-                UIApplication.shared.open(url)
-                decisionHandler(.cancel, preferences)
-                return
-            }
-
-            if let url = action.request.url,
-               !Self.isAllowedEmbeddedResourceURL(url) {
-                decisionHandler(.cancel, preferences)
-                return
-            }
-
-            decisionHandler(.allow, preferences)
-        }
-
-        private static func isAllowedEmbeddedResourceURL(_ url: URL) -> Bool {
-            guard let scheme = url.scheme?.lowercased() else { return true }
-            return ["about", "data", "blob", "cid"].contains(scheme)
-        }
-    }
-}
 
 // MARK: - MailRegisterSheet
 
@@ -1858,8 +1805,8 @@ struct MailRegisterSheet: View {
         let syntheticMessageID = ""
         if email.body.isEmpty || email.htmlBody == nil {
             do {
-                let content = try await mailboxProvider(for: email.provider)
-                    .fetchMessageContent(messageID: email.providerMessageID)
+                let provider = MailboxProviderRegistry.provider(for: email.provider)
+                let content = try await provider.fetchMessageContent(messageID: email.providerMessageID)
                 try MailboxLocalStore.live.updateContent(
                     content,
                     for: email,
@@ -1882,7 +1829,10 @@ struct MailRegisterSheet: View {
             htmlBody: email.htmlBody,
             receivedAt: email.receivedAt,
             labelIds: [],
-            isBulk: false
+            isBulk: false,
+            provider: email.provider,
+            providerMessageID: email.providerMessageID,
+            sourceAccountNamespace: email.sourceAccountNamespace
         )
 
         let draftTodo = await EmailService.shared.makeManualTodo(from: synthetic, allowFoundationModels: false)
@@ -1955,6 +1905,7 @@ struct MailRegisterSheet: View {
                 source: .email,
                 sourceRef: ref
             )
+            todo.sourceAccountNamespace = email.sourceAccountNamespace
             todo.sourceSender = sourceSender.isEmpty ? EmailContentAnalyzer().parseSender(from: email.from) : sourceSender
             todo.sourceSenderEmail = sourceSenderEmail.isEmpty ? EmailContentAnalyzer().parseSenderEmail(from: email.from) : sourceSenderEmail
             todo.sourceMessageID = sourceMessageID
