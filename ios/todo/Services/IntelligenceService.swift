@@ -48,6 +48,7 @@ struct PriorityResult: Sendable, Equatable {
     var chainingDetail: String = ""
     var requestedProviderRawValue: String = ""
     var fallbackReason: String = ""
+    var executionPath: AnalysisExecutionPath = .rules(.noProviderOptIn)
 }
 
 enum IntelligenceProgressEvent: Equatable, Sendable {
@@ -244,187 +245,63 @@ struct HeuristicWeights {
 
 /// 4축 결정론적 산출 + ScheduleScorer 수동 계산 — 모델 폴백 시에도 동일 구조 보장.
 struct HeuristicEngine: IntelligenceService {
-
     func prioritize(
         todos: [Todo],
         events: [CalendarService.CalendarEventSummary],
         persona: PersonaContext,
         progress: IntelligenceProgressHandler?
     ) async throws -> [PriorityResult] {
-        let hw     = HeuristicWeights.adaptive(persona: persona, memory: MemoryService.shared)
-        let schedW = ScheduleWeights.adaptive()
-        let memory = MemoryService.shared
-        let results = todos.map { todo in
-            let axes  = heuristicAxes(todo: todo, persona: persona, memory: memory, allTodos: todos, weights: hw)
-            let score = ScheduleScorer.normalizedScore(axes, weights: schedW)
-            return PriorityResult(
-                todoID:            todo.id,
-                score:             score,
-                reason: heuristicReason(todo: todo, persona: persona, language: .current),
-                detail:            "",
-                needsNotification: isNearDeadline(todo: todo),
-                recommendedTime:   productiveHourTime(from: memory),
-                personaFit:        isPersonaFit(todo: todo, persona: persona),
-                engine:            .heuristic,
-                axes:              axes,
-                chainingDetail:    ""
-            )
+        let context = RuleAnalysisContextBuilder.make(
+            todos: todos,
+            calendarEvents: events,
+            persona: persona,
+            now: Date(),
+            calendar: Calendar.current
+        )
+        let eligible = context.candidates.filter {
+            !$0.isCompleted && $0.triage == .todo && $0.manualPriority == nil
         }
+        let results = eligible
+            .map { RuleBasedPriorityAnalyzer.classify($0, context: context) }
+            .sorted { left, right in
+                guard let lhs = eligible.first(where: { $0.id == left.todoID }),
+                      let rhs = eligible.first(where: { $0.id == right.todoID }) else {
+                    return left.todoID.uuidString < right.todoID.uuidString
+                }
+                return Self.higherPriorityFirst(left, right, lhs: lhs, rhs: rhs, now: context.now)
+            }
         emitResultEvents(results, todos: todos, progress: progress)
         return results
     }
-
-    // MARK: - 4축 산출
-
-    private func heuristicAxes(
-        todo: Todo,
-        persona: PersonaContext,
-        memory: MemoryService,
-        allTodos: [Todo],
-        weights: HeuristicWeights
-    ) -> AxisScores {
-
-        // 1. deadlineProximity (0~10): 잔여 시간 기반 × deadlineMultiplier
-        let rawDeadline: Double
-        if let dueDate = todo.dueDate {
-            let hours = dueDate.timeIntervalSinceNow / 3600
-            switch hours {
-            case ..<0:   rawDeadline = 10.0
-            case ..<1:   rawDeadline = 9.7
-            case ..<6:   rawDeadline = 9.0
-            case ..<24:  rawDeadline = 7.8
-            case ..<72:  rawDeadline = 6.0
-            case ..<168: rawDeadline = 4.0
-            case ..<720: rawDeadline = 2.5
-            default:     rawDeadline = 1.5
-            }
-        } else {
-            rawDeadline = 2.0
+    /// Legacy localization compatibility for callers that display the no-deadline explanation.
+    func heuristicReason(todo: Todo, persona: PersonaContext, language: AppLanguage) -> String {
+        guard todo.dueDate == nil else {
+            return language == .english ? "Rule-based priority" : "규칙 기반 우선순위"
         }
-        let deadlineProximity = min(10.0, rawDeadline * weights.deadlineMultiplier)
-
-        // 2. urgency (0~10): 즉시성 신호 (마감근접과 의도적으로 분리)
-        let urgencyKeywords = ["긴급", "즉시", "오늘", "마감", "asap", "urgent", "지금", "바로"]
-        let hasUrgentKeyword = urgencyKeywords.contains(where: {
-            todo.title.localizedCaseInsensitiveContains($0)
-                || todo.notes.localizedCaseInsensitiveContains($0)
-        })
-        let isEmailSource = todo.todoSource == .email
-        var urgency = deadlineProximity * 0.7
-        if hasUrgentKeyword { urgency += weights.urgencyKeywordBoost }
-        if isEmailSource    { urgency += weights.emailSourceBoost }
-        urgency = min(10.0, urgency)
-
-        // 3. importance (0~10): 태그·페르소나(제목+메모)·fastTags
-        let importantTags  = ["업무", "work", "마감", "중요", "긴급"]
-        let personaKeywords = persona.weightedKeywords
-        let titleTagMatch  = !personaKeywords.isEmpty && (
-            todo.tags.contains(where: { personaKeywords.contains($0) }) ||
-            personaKeywords.contains(where: { todo.title.localizedCaseInsensitiveContains($0) })
-        )
-        let notesMatch     = !personaKeywords.isEmpty &&
-            personaKeywords.contains(where: { todo.notes.localizedCaseInsensitiveContains($0) })
-        let fastTags = memory.fastTags
-        var importance = 5.0
-        if todo.tags.contains(where: importantTags.contains) { importance += weights.importantTagBoost }
-        if titleTagMatch  { importance += weights.personaKeywordBoost }
-        else if notesMatch { importance += weights.notesPersonaBoost }
-        if !fastTags.isEmpty && todo.tags.contains(where: { fastTags.contains($0) }) {
-            importance += weights.fastTagBoost
-        }
-        importance = min(10.0, importance)
-
-        // 4. chaining (0~10): 이메일 스레드 기반 (휴리스틱 한계 인정, 보수적)
-        let chaining: Double
-        if !todo.sourceThreadID.isEmpty {
-            let hasFollowUp = allTodos.contains {
-                $0.id != todo.id && $0.sourceThreadID == todo.sourceThreadID && !$0.isCompleted
-            }
-            chaining = hasFollowUp ? 9.0 : 6.0
-        } else {
-            chaining = 2.0
-        }
-
-        return AxisScores(
-            deadlineProximity: deadlineProximity,
-            urgency:           urgency,
-            importance:        importance,
-            chaining:          chaining
-        )
+        return language == .english
+            ? "No deadline — low default priority"
+            : "마감 없음 — 낮은 기본 우선순위"
     }
 
-    // MARK: - 보조
-
-    private func isNearDeadline(todo: Todo) -> Bool {
-        guard let due = todo.dueDate else { return false }
-        let hours = due.timeIntervalSinceNow / 3600
-        return hours >= 0 && hours < 24
-    }
-
-    private func isPersonaFit(todo: Todo, persona: PersonaContext) -> Bool {
-        let kw = persona.weightedKeywords
-        guard !kw.isEmpty else { return false }
-        return todo.tags.contains(where: { kw.contains($0) })
-            || kw.contains(where: { todo.title.localizedCaseInsensitiveContains($0) })
-            || kw.contains(where: { todo.notes.localizedCaseInsensitiveContains($0) })
-    }
-
-    func heuristicReason(
-        todo: Todo,
-        persona: PersonaContext,
-        language: AppLanguage
-    ) -> String {
-        let personaKeywords = persona.weightedKeywords
-        let personaMatch = !personaKeywords.isEmpty && (
-            todo.tags.contains(where: { personaKeywords.contains($0) }) ||
-            personaKeywords.contains(where: { todo.title.localizedCaseInsensitiveContains($0) }) ||
-            personaKeywords.contains(where: { todo.notes.localizedCaseInsensitiveContains($0) })
-        )
-        let personaNames = persona.types
-            .map { $0.displayName(language: language) }
-            .joined(separator: ", ")
-        let personaSuffix = personaMatch && !personaNames.isEmpty
-            ? (language == .english ? " · related to persona (\(personaNames))" : " · 페르소나(\(personaNames)) 관련")
-            : ""
-
-        guard let due = todo.dueDate else {
-            return personaMatch
-                ? (language == .english ? "No deadline" : "마감 없음") + personaSuffix
-                : (language == .english ? "No deadline — low default priority" : "마감 없음 — 낮은 기본 우선순위")
+    private static func higherPriorityFirst(
+        _ lhs: PriorityResult,
+        _ rhs: PriorityResult,
+        lhs left: TodoPriorityCandidateSnapshot,
+        rhs right: TodoPriorityCandidateSnapshot,
+        now: Date
+    ) -> Bool {
+        if lhs.score != rhs.score { return lhs.score > rhs.score }
+        let leftOverdue = left.dueDate.map { $0 < now } ?? false
+        let rightOverdue = right.dueDate.map { $0 < now } ?? false
+        if leftOverdue != rightOverdue { return leftOverdue }
+        switch (left.dueDate, right.dueDate) {
+        case let (a?, b?) where a != b: return a < b
+        case (nil, .some): return false
+        case (.some, nil): return true
+        default: break
         }
-        let hours = due.timeIntervalSinceNow / 3600
-        let dueString: String
-        switch hours {
-        case ..<0:
-            dueString = language == .english ? "Overdue" : "마감 초과"
-        case ..<1:
-            dueString = language == .english ? "Due within 1 hour" : "1시간 이내 마감"
-        case ..<6:
-            dueString = language == .english ? "Due within 6 hours" : "6시간 이내 마감"
-        case ..<24:
-            dueString = language == .english ? "Due today" : "오늘 마감"
-        case ..<72:
-            dueString = language == .english ? "Due within 3 days" : "3일 이내 마감"
-        case ..<168:
-            dueString = language == .english ? "Due this week" : "이번 주 마감"
-        default:
-            let days = Int(hours / 24)
-            dueString = language == .english
-                ? "Due in \(days) " + (days == 1 ? "day" : "days")
-                : "\(days)일 후 마감"
-        }
-        return dueString + personaSuffix
-    }
-
-    /// productiveHour 있으면 당일 해당 시각. 이미 지났으면 nil.
-    private func productiveHourTime(from memory: MemoryService) -> Date? {
-        guard let hour = memory.productiveHour else { return nil }
-        var comps    = Calendar.current.dateComponents([.year, .month, .day], from: Date())
-        comps.hour   = hour
-        comps.minute = 0
-        comps.second = 0
-        guard let date = Calendar.current.date(from: comps), date > Date() else { return nil }
-        return date
+        if left.createdAt != right.createdAt { return left.createdAt < right.createdAt }
+        return left.id.uuidString < right.id.uuidString
     }
 }
 
@@ -466,7 +343,7 @@ final class FoundationModelsEngine: IntelligenceService {
                 provider: PriorityEngine.foundationModels.displayName
             ))
             do {
-                let results = try await FoundationModelsService().rankTodos(
+                let results = try await rankTodosWithTimeout(
                     todos: active,
                     events: events,
                     persona: persona,
@@ -491,6 +368,8 @@ final class FoundationModelsEngine: IntelligenceService {
                     provider: .foundationModels,
                     reason: genErr.localizedDescription
                 )
+            } catch is CancellationError {
+                throw CancellationError()
             } catch {
                 throw IntelligenceRoutingError.generationFailed(
                     provider: .foundationModels,
@@ -510,6 +389,38 @@ final class FoundationModelsEngine: IntelligenceService {
                 comment: "Intelligence backend unavailable error"
             )
         )
+    }
+
+    private func rankTodosWithTimeout(
+        todos: [Todo],
+        events: [CalendarService.CalendarEventSummary],
+        persona: PersonaContext,
+        language: AppLanguage,
+        timeoutSeconds: UInt64 = 15
+    ) async throws -> [PriorityResult] {
+        try await withThrowingTaskGroup(of: [PriorityResult].self) { group in
+            group.addTask { @MainActor in
+                try await FoundationModelsService().rankTodos(
+                    todos: todos,
+                    events: events,
+                    persona: persona,
+                    language: language
+                )
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: timeoutSeconds * 1_000_000_000)
+                throw IntelligenceRoutingError.generationFailed(
+                    provider: .foundationModels,
+                    reason: AppLanguage.current == .english
+                        ? "Apple AI took too long to respond."
+                        : "Apple AI 응답 시간이 길어졌습니다."
+                )
+            }
+
+            guard let results = try await group.next() else { return [] }
+            group.cancelAll()
+            return results
+        }
     }
 }
 
@@ -561,8 +472,8 @@ final class OnDeviceLLMIntelligenceEngine: IntelligenceService {
                 reason: "이 기기는 현재 Qwen 로컬 실행 기준(메모리 6GB 이상)을 충족하지 않습니다."
             )
         }
-        if !service.isModelLoaded && service.isModelCachedOnDisk {
-            await service.loadModelIfNeeded()
+        if service.isModelCachedOnDisk {
+            await service.loadModelIfNeeded(use: .standardAnalysis)
         }
 
         guard service.isModelLoaded else {
@@ -585,7 +496,8 @@ final class OnDeviceLLMIntelligenceEngine: IntelligenceService {
         let batchTitle = AppLanguage.current == .english
             ? "\(active.count)-item batch"
             : "일괄 요청 (\(active.count)개)"
-        let maxTokens = max(768, min(4096, active.count * 220))
+        let isMiniCPM = service.modelID == OnDeviceLLMService.miniCPMModelID
+        let maxTokens = isMiniCPM ? max(360, min(760, active.count * 95)) : max(512, min(1_200, active.count * 140))
         let scheduleInput = Self.buildScheduleInput(todos: active, persona: persona, events: events)
         debugLogRequest(
             todos: active,
@@ -597,7 +509,7 @@ final class OnDeviceLLMIntelligenceEngine: IntelligenceService {
             modelID: service.modelID
         )
 
-        let text: String
+        var text: String
         progress?(.requesting(
             index: 1,
             total: 1,
@@ -605,11 +517,24 @@ final class OnDeviceLLMIntelligenceEngine: IntelligenceService {
             provider: PriorityEngine.onDeviceMLX.displayName
         ))
         do {
-            text = try await service.generate(
-                systemPrompt: Self.systemPrompt(language: AppLanguage.current),
-                userPrompt:   scheduleInput,
-                maxTokens:    maxTokens
-            )
+            print("[OnDeviceMLX][rankTodos] stage=generate-request todoCount=\(active.count) inputChars=\(scheduleInput.count) maxTokens=\(maxTokens) model=\(service.modelID) compact=\(isMiniCPM)")
+            if isMiniCPM {
+                text = try await compactJSONSchedule(
+                    service: service,
+                    todos: active,
+                    events: events,
+                    persona: persona,
+                    maxTokens: maxTokens
+                )
+            } else {
+                text = try await service.generate(
+                    systemPrompt: Self.systemPrompt(language: AppLanguage.current),
+                    userPrompt: scheduleInput,
+                    maxTokens: maxTokens,
+                    use: .standardAnalysis
+                )
+            }
+            print("[OnDeviceMLX][rankTodos] stage=generate-response chars=\(text.count) preview=\(Self.logPreview(text))")
             debugLogRawOutput(text)
             progress?(.received(
                 index: 1,
@@ -618,33 +543,130 @@ final class OnDeviceLLMIntelligenceEngine: IntelligenceService {
                 provider: PriorityEngine.onDeviceMLX.displayName
             ))
         } catch let llmError as OnDeviceLLMService.LLMError {
+            DiagnosticRecorder.shared.record(
+                error: llmError,
+                component: "ai.prioritize",
+                operation: "generateFailed"
+            )
+            print("[OnDeviceMLX][rankTodos] stage=generate-failed error=\(llmError.localizedDescription)")
             throw IntelligenceRoutingError.generationFailed(
                 provider: .onDevice,
                 reason: llmError.localizedDescription
             )
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
+            DiagnosticRecorder.shared.record(
+                error: error,
+                component: "ai.prioritize",
+                operation: "generateFailed"
+            )
+            print("[OnDeviceMLX][rankTodos] stage=generate-failed errorType=\(String(describing: type(of: error))) message=\(error.localizedDescription)")
             throw IntelligenceRoutingError.generationFailed(
                 provider: .onDevice,
                 reason: error.localizedDescription
             )
         }
 
-        guard let parsed = parseScheduleResponseV9(text: text, todos: active, persona: persona),
-              !parsed.isEmpty else {
-            LLMDebugLogger.event(
-                provider: "Qwen",
-                operation: "schedule",
-                title: "parseFailure",
-                details: "responseChars=\(text.count)"
-            )
-            throw IntelligenceRoutingError.parseFailed(
-                provider: .onDevice,
-                reason: "Qwen 응답을 우선순위 JSON으로 해석하지 못했습니다."
-            )
+        print("[OnDeviceMLX][rankTodos] stage=parse-start chars=\(text.count)")
+        if let parsed = parseScheduleResponseV9(text: text, todos: active, persona: persona), !parsed.isEmpty {
+            print("[OnDeviceMLX][rankTodos] stage=parse-success resultCount=\(parsed.count)")
+            debugLogParsedResults(parsed, todos: active)
+            emitResultEvents(parsed, todos: active, progress: progress)
+            return parsed
         }
-        debugLogParsedResults(parsed, todos: active)
-        emitResultEvents(parsed, todos: active, progress: progress)
-        return parsed
+
+        print("[OnDeviceMLX][rankTodos] stage=parse-failed responseChars=\(text.count) preview=\(Self.logPreview(text))")
+        DiagnosticRecorder.shared.record(
+            error: DiagnosticFailure(code: 0, reason: "Schedule ranking response failed to parse"),
+            component: "ai.prioritize",
+            operation: "parseFailed"
+        )
+        LLMDebugLogger.event(
+            provider: "OnDeviceMLX",
+            operation: "schedule",
+            title: "parseFailure",
+            details: "responseChars=\(text.count) preview=\(Self.logPreview(text))"
+        )
+
+        do {
+            print("[OnDeviceMLX][rankTodos] stage=json-retry-request reason=initialParseFailed")
+            text = try await retryJSONOnlySchedule(
+                service: service,
+                todos: active,
+                events: events,
+                persona: persona
+            )
+            print("[OnDeviceMLX][rankTodos] stage=json-retry-response chars=\(text.count) preview=\(Self.logPreview(text))")
+            if let parsed = parseScheduleResponseV9(text: text, todos: active, persona: persona), !parsed.isEmpty {
+                print("[OnDeviceMLX][rankTodos] stage=json-retry-parse-success resultCount=\(parsed.count)")
+                debugLogParsedResults(parsed, todos: active)
+                emitResultEvents(parsed, todos: active, progress: progress)
+                return parsed
+            }
+            print("[OnDeviceMLX][rankTodos] stage=json-retry-parse-failed responseChars=\(text.count) preview=\(Self.logPreview(text))")
+        }
+        catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            print("[OnDeviceMLX][rankTodos] stage=json-retry-failed errorType=\(String(describing: type(of: error))) message=\(error.localizedDescription)")
+        }
+
+        throw IntelligenceRoutingError.parseFailed(
+            provider: .onDevice,
+            reason: "온디바이스 모델 응답을 우선순위 JSON으로 해석하지 못했습니다."
+        )
+    }
+
+    private func retryJSONOnlySchedule(
+        service: OnDeviceLLMService,
+        todos: [Todo],
+        events: [CalendarService.CalendarEventSummary],
+        persona: PersonaContext
+    ) async throws -> String {
+        try await compactJSONSchedule(
+            service: service,
+            todos: todos,
+            events: events,
+            persona: persona,
+            maxTokens: max(420, min(900, todos.count * 110))
+        )
+    }
+
+    private func compactJSONSchedule(
+        service: OnDeviceLLMService,
+        todos: [Todo],
+        events: [CalendarService.CalendarEventSummary],
+        persona: PersonaContext,
+        maxTokens: Int
+    ) async throws -> String {
+        let system = """
+        Return exactly one compact JSON object and nothing else. No markdown. No list. No explanation.
+        Include scheduled_tasks for every task_id in the input. Scores are integers 1 to 10.
+        Empty start_time is allowed. New text must be Korean.
+        """
+        let user = """
+        Convert this JSON:
+        \(Self.buildScheduleInput(todos: todos, persona: persona, events: events))
+
+        Required output shape:
+        {"scheduled_tasks":[{"task_id":"T1","scoring":{"deadline_proximity":5,"urgency":5,"task_importance":5,"task_chaining":2},"reasoning":{"summary":"짧은 근거","chaining_detail":""},"recommended_schedule":{"start_time":""}}]}
+        """
+        return try await service.generate(
+            systemPrompt: system,
+            userPrompt: user,
+            maxTokens: maxTokens,
+            contextLength: OnDeviceLLMService.defaultContextLength,
+            use: .standardAnalysis
+        )
+    }
+
+    private static func logPreview(_ text: String, limit: Int = 240) -> String {
+        let singleLine = text
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\r", with: "")
+        if singleLine.count <= limit { return singleLine }
+        return String(singleLine.prefix(limit)) + "..."
     }
 
     private func debugLogRequest(
@@ -702,35 +724,23 @@ final class OnDeviceLLMIntelligenceEngine: IntelligenceService {
     }
 }
 
-private func hasGeminiRoutingKey() -> Bool {
-    GeminiProviderService.storedAPIKey != nil
-}
-
 enum IntelligenceProviderRouting {
-    static func chain(for requestedProvider: PersonaAIProvider, hasGeminiKey: Bool) -> [PersonaAIProvider] {
-        switch requestedProvider {
-        case .foundationModels:
-            return [.foundationModels]
-        case .onDevice:
-            var providers: [PersonaAIProvider] = [.onDevice]
-            if hasGeminiKey { providers.append(.gemini) }
-            providers.append(.foundationModels)
-            return providers
-        case .gemini:
-            return [.gemini, .foundationModels, .onDevice]
-        }
+    static func decision(
+        policy: BetaFeaturePolicy = BetaFeaturePolicy()
+    ) -> ProviderRoutingDecision {
+        policy.routingDecision(for: .standardAnalysis)
     }
 }
 
 final class RoutedIntelligenceEngine: IntelligenceService {
-    private let requestedProvider: PersonaAIProvider
+    private let policy: BetaFeaturePolicy
     private let foundationModels = FoundationModelsEngine()
     private let onDevice = OnDeviceLLMIntelligenceEngine()
     private let gemini = GeminiIntelligenceEngine()
     private let heuristic = HeuristicEngine()
 
-    init(requestedProvider: PersonaAIProvider = SettingsStore.selectedProvider()) {
-        self.requestedProvider = requestedProvider
+    init(policy: BetaFeaturePolicy = BetaFeaturePolicy()) {
+        self.policy = policy
     }
 
     func prioritize(
@@ -739,88 +749,69 @@ final class RoutedIntelligenceEngine: IntelligenceService {
         persona: PersonaContext,
         progress: IntelligenceProgressHandler?
     ) async throws -> [PriorityResult] {
-        let requestedProvider = self.requestedProvider
         let activeTodos = todos.filter { !$0.isCompleted }
-        progress?(.preparing(total: activeTodos.count, requestedProvider: requestedProvider.displayName))
+        let decision = IntelligenceProviderRouting.decision(policy: policy)
+        let requestedName: String
+        switch decision {
+        case .rules:
+            requestedName = PriorityEngine.heuristic.displayName
+        case .providers(let providers):
+            requestedName = providers.first?.displayName ?? PriorityEngine.heuristic.displayName
+        }
+        progress?(.preparing(total: activeTodos.count, requestedProvider: requestedName))
 
-        let hasGeminiKey = requestedProvider == .foundationModels ? false : hasGeminiRoutingKey()
-        let chain = IntelligenceProviderRouting.chain(
-            for: requestedProvider,
-            hasGeminiKey: hasGeminiKey
-        )
+        func heuristicResults(for reason: RuleFallbackReason) async throws -> [PriorityResult] {
+            let context = RuleAnalysisContextBuilder.make(
+                todos: todos,
+                calendarEvents: events,
+                persona: persona,
+                now: Date(),
+                calendar: Calendar.current
+            )
+            let results = context.candidates
+                .filter { !$0.isCompleted && $0.triage == .todo && $0.manualPriority == nil }
+                .map { RuleBasedPriorityAnalyzer.classify($0, context: context) }
+            let annotated = results.map { result in
+                var result = result
+                result.executionPath = .rules(reason)
+                result.fallbackReason = reason.rawValue
+                return result
+            }
+            progress?(.completed(finalProvider: PriorityEngine.heuristic.displayName, total: annotated.count))
+            return annotated
+        }
 
-        var failures: [String] = []
-        for (index, provider) in chain.enumerated() {
-            let routeReason = failures.joined(separator: " → ")
-            let providerProgress: IntelligenceProgressHandler? = progress.map { outerProgress in
-                { @MainActor @Sendable event in
-                    switch event {
-                    case .result(let result, let resultIndex, let total, let title):
-                        let annotated = annotateResults(
-                            [result],
-                            requestedProvider: requestedProvider,
-                            fallbackReason: routeReason
-                        )[0]
-                        outerProgress(.result(annotated, index: resultIndex, total: total, title: title))
-                    default:
-                        outerProgress(event)
-                    }
-                }
+        switch decision {
+        case .rules(let reason):
+            return try await heuristicResults(for: reason)
+
+        case .providers(let providers):
+            guard let provider = providers.first else {
+                return try await heuristicResults(for: .noEligibleProvider)
             }
             do {
                 let results = try await engine(for: provider).prioritize(
                     todos: todos,
                     events: events,
                     persona: persona,
-                    progress: providerProgress
+                    progress: progress
                 )
-                let annotated = annotateResults(results, requestedProvider: requestedProvider, fallbackReason: routeReason)
+                let annotated = results.map { result in
+                    var result = result
+                    result.requestedProviderRawValue = provider.rawValue
+                    result.executionPath = .beta(provider)
+                    return result
+                }
                 progress?(.completed(finalProvider: provider.displayName, total: annotated.count))
                 return annotated
-            } catch let routingError as IntelligenceRoutingError {
-                failures.append("\(provider.displayName): \(routingError.localizedDescription)")
-                if let nextProvider = chain.dropFirst(index + 1).first {
-                    progress?(.fallback(from: provider.displayName, to: nextProvider.displayName, reason: routingError.localizedDescription))
-                }
+            } catch is CancellationError {
+                throw CancellationError()
             } catch {
-                failures.append("\(provider.displayName): \(error.localizedDescription)")
-                if let nextProvider = chain.dropFirst(index + 1).first {
-                    progress?(.fallback(from: provider.displayName, to: nextProvider.displayName, reason: error.localizedDescription))
-                }
+                return try await heuristicResults(
+                    for: ProviderErrorMapper.fallbackReason(for: error) ?? .providerExecutionFailed
+                )
             }
         }
-
-        let fallbackReason = failures.isEmpty
-            ? "요청한 AI 백엔드를 사용할 수 없어 휴리스틱으로 처리했습니다."
-            : failures.joined(separator: " → ")
-        let heuristicProgress: IntelligenceProgressHandler? = progress.map { outerProgress in
-            { @MainActor @Sendable event in
-                switch event {
-                case .result(let result, let resultIndex, let total, let title):
-                    let annotated = annotateResults(
-                        [result],
-                        requestedProvider: requestedProvider,
-                        fallbackReason: fallbackReason
-                    )[0]
-                    outerProgress(.result(annotated, index: resultIndex, total: total, title: title))
-                default:
-                    outerProgress(event)
-                }
-            }
-        }
-        let heuristicResults = try await heuristic.prioritize(
-            todos: todos,
-            events: events,
-            persona: persona,
-            progress: heuristicProgress
-        )
-        let annotated = annotateResults(
-            heuristicResults,
-            requestedProvider: requestedProvider,
-            fallbackReason: fallbackReason
-        )
-        progress?(.completed(finalProvider: PriorityEngine.heuristic.displayName, total: annotated.count))
-        return annotated
     }
 
     private func engine(for provider: PersonaAIProvider) -> any IntelligenceService {

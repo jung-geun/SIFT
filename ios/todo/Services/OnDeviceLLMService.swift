@@ -9,7 +9,7 @@ import UIKit
 /// ⚠️ 프라이버시 불변식: 모든 추론은 기기 내에서 완결됨. 네트워크 미전송.
 ///   (최초 실행 시에만 HuggingFace에서 모델 가중치 다운로드 — 사용자 동의 필요)
 ///
-/// 기본 모델: mlx-community/Qwen3.5-4B-MLX-4bit (~2.3GB)
+/// 기본 모델: mlx-community/MiniCPM5-1B-4bit (~0.62GB)
 ///   - mlx-swift-lm 3.x + mlx-swift 0.31.4 기준 qwen3_5 타입 지원
 ///   - UserDefaults "pieroot.todo.onDeviceModelID"로 커스텀 모델 ID 지정 가능
 ///   - `isCapable`: 실제 메모리 6GB 이상 기기 (iPhone 15/16 이상)
@@ -23,6 +23,9 @@ import UIKit
 import MLXLLM
 import MLXLMCommon
 import MLX
+#if canImport(MLXHuggingFace)
+import MLXHuggingFace
+#endif
 
 @MainActor
 final class OnDeviceLLMService: ObservableObject {
@@ -44,21 +47,34 @@ final class OnDeviceLLMService: ObservableObject {
         /// 이 모델을 실행하기 위한 최소 물리 메모리(GiB, physicalMemory 보고값 기준).
         /// 6GB 기기(보고값 ~5.6–5.9 GiB)는 2B까지만, 4B는 8GB(보고값 ~7.3–7.9 GiB) 이상에서만.
         let minMemoryGiB: Double
-        /// 프롬프트 맨 앞에 붙일 접두(BOS 등). Qwen은 없음, LFM2는 "<|startoftext|>" 필요.
+        /// 프롬프트 맨 앞에 붙일 접두(BOS 등). 현재 지원 모델은 기본값을 사용한다.
         var promptPrefix: String = ""
-        /// assistant 턴 시작 뒤 프라이머. Qwen3.5는 빈 <think> 블록으로 thinking을 억제해
-        /// JSON을 직접 출력시킨다. LFM2 등 다른 계열은 강제 프라이머 없이 비운다.
+        /// JSON을 직접 출력하도록 assistant 턴 뒤에 붙일 프라이머.
+        /// 추론형 모델이 `<think>`를 먼저 열고 JSON 없이 토큰을 소진하는 것을 막는다.
         var assistantPrimer: String = "<think>\n\n</think>\n"
     }
+    struct InstalledModel: Identifiable, Hashable {
+        let id: String
+        let displayName: String
+        let sizeBytes: Int64
+        let cachePaths: [String]
+        let isSelected: Bool
+        let isLoaded: Bool
+
+        var sizeMB: Int {
+            Int((sizeBytes + 1_024 * 1_024 - 1) / (1_024 * 1_024))
+        }
+    }
+
     static let modelCatalog: [ModelOption] = [
-        // ── 경량 LFM2 (구형/저메모리 6GB 기기용, ChatML 호환) ──────────
+        // ── MiniCPM5 1B (MLX Community 4bit, HuggingFace chat template 사용) ─────────
         ModelOption(
-            id: "mlx-community/LFM2.5-1.2B-Instruct-4bit",
-            displayName: "LFM2.5-1.2B · 4bit (경량·빠름, ~0.65GB)",
-            sizeMB: 650,
+            id: "mlx-community/MiniCPM5-1B-4bit",
+            displayName: "MiniCPM5-1B · 4bit (경량 범용, ~0.62GB)",
+            sizeMB: 620,
             minMemoryGiB: 5.0,
-            promptPrefix: "<|startoftext|>",
-            assistantPrimer: ""
+            promptPrefix: "<s>",
+            assistantPrimer: "<think>\n\n</think>\n\n"
         ),
         // ── 범용 Qwen 모델 (성능 비교용) ──────────────────────────
         ModelOption(
@@ -81,29 +97,52 @@ final class OnDeviceLLMService: ObservableObject {
         Double(ProcessInfo.processInfo.physicalMemory) / (1_024 * 1_024 * 1_024)
     }
 
-    /// 최소 실행 요건(가장 작은 2B 모델) 충족을 판정하는 임계값.
+    /// 최소 실행 요건(가장 작은 MiniCPM5 1B 모델) 충족을 판정하는 임계값.
     /// 6GB 기기는 통과(iPhone 13 Pro/14/15/15 Plus 등), 4GB 기기(~3.7 GiB)는 제외.
     static let minCapableMemoryGiB: Double = 5.0
 
-    /// 현재 기기에서 실행 가능한(= 요구 메모리를 충족하는) 모델만 반환.
-    /// 6GB 기기에서는 2B만, 8GB+ 기기에서는 2B+4B 노출.
+    /// 현재 기기에서 실행 가능한 모델.
     static var availableModels: [ModelOption] {
         let mem = physicalMemoryGiB
-        return modelCatalog.filter { mem >= $0.minMemoryGiB }
+        return modelCatalog.filter { option in
+            mem >= option.minMemoryGiB
+        }
     }
-    /// 기본 모델: Qwen 2B 모델.
+    /// 기본 모델: MiniCPM5 1B 모델.
     /// UserDefaults "pieroot.todo.onDeviceModelID"로 기기당 재지정 가능.
-    static let defaultModelID = "mlx-community/Qwen3.5-2B-MLX-4bit"
+    static let defaultModelID = "mlx-community/MiniCPM5-1B-4bit"
+    static let qwenFallbackModelID = "mlx-community/Qwen3.5-2B-MLX-4bit"
+    static let retiredLFMModelID = "mlx-community/LFM2.5-1.2B-Instruct-4bit"
+    static let legacyOpenBMBMiniCPMModelID = "openbmb/MiniCPM5-1B-MLX"
+    static let miniCPMModelID = "mlx-community/MiniCPM5-1B-4bit"
+
+    static func normalizedModelID(_ storedModelID: String?) -> String {
+        let modelID = storedModelID?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let modelID, !modelID.isEmpty else { return defaultModelID }
+        if modelID == retiredLFMModelID || modelID == legacyOpenBMBMiniCPMModelID { return miniCPMModelID }
+        return modelID
+    }
     /// 입력 컨텍스트 최대 토큰 수. 기본 4K로 메모리 절약 (Qwen3.5-2B는 32K 지원).
     static let defaultContextLength = 4096
+    /// 메모리 경고가 와도 이 정도 헤드룸이 남아 있으면 진행 중인 생성은 취소하지 않는다.
+    private static let generationMemoryWarningFloorBytes = 768 * 1_024 * 1_024
+    private static let idleMemoryWarningFloorBytes = 1_024 * 1_024 * 1_024
+    private static let normalMLXCacheLimit = 256 * 1_024 * 1_024
+    private static let pressureMLXCacheLimit = 64 * 1_024 * 1_024
     /// MLXLLM 패키지가 Xcode에 추가되어 있는지 여부. false면 모든 기능이 stub.
     static let isMLXAvailable = true
 
-    /// UserDefaults에 저장된 커스텀 모델 ID. 없으면 defaultModelID 반환.
+    /// UserDefaults에 저장된 사용자 모델 ID. 퇴역한 LFM 선택값은 MiniCPM5로 영구 마이그레이션한다.
     var modelID: String {
-        UserDefaults.standard.string(forKey: "pieroot.todo.onDeviceModelID") ?? Self.defaultModelID
+        let storedModelID = UserDefaults.standard.string(forKey: "pieroot.todo.onDeviceModelID")
+        let normalizedModelID = Self.normalizedModelID(storedModelID)
+        if storedModelID == Self.retiredLFMModelID || storedModelID == Self.legacyOpenBMBMiniCPMModelID || storedModelID != normalizedModelID {
+            UserDefaults.standard.set(normalizedModelID, forKey: "pieroot.todo.onDeviceModelID")
+        }
+        return normalizedModelID
     }
 
+    private let runtime: (any OnDeviceModelRuntime)?
     private var container: ModelContainer?
     /// 실제 로드된 모델 ID — 삭제 시 정확한 캐시 경로 계산에 사용.
     private var loadedModelID: String?
@@ -126,28 +165,129 @@ final class OnDeviceLLMService: ObservableObject {
         Self.physicalMemoryGiB >= Self.minCapableMemoryGiB
     }
 
-    /// HuggingFace 캐시 디렉터리에 모델 파일이 있는지 확인.
+    /// HuggingFace 캐시 디렉터리에 현재 선택 모델 파일이 있는지 확인.
     var isModelCachedOnDisk: Bool {
-        let fm = FileManager.default
-        let slug = modelID.replacingOccurrences(of: "/", with: "--")
-        let dirs: [URL] = [
-            fm.urls(for: .cachesDirectory, in: .userDomainMask).first,
-            fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-        ].compactMap { $0 }
-        return dirs.contains { base in
-            fm.fileExists(atPath: base.appendingPathComponent("huggingface/hub/models--\(slug)").path)
+        !cacheDirectories(for: modelID).isEmpty
+    }
+
+    /// 현재 선택값과 무관하게 기기에 설치된 HuggingFace 모델 캐시를 모두 찾는다.
+    var installedModels: [InstalledModel] {
+        let selectedID = modelID
+        let loadedID = loadedModelID
+        let grouped = installedModelCacheDirectories()
+        return grouped.map { modelID, urls in
+            let catalogOption = Self.modelCatalog.first { $0.id == modelID }
+            return InstalledModel(
+                id: modelID,
+                displayName: catalogOption?.displayName ?? modelID,
+                sizeBytes: urls.reduce(Int64(0)) { $0 + directorySize(at: $1) },
+                cachePaths: urls.map(\.path).sorted(),
+                isSelected: modelID == selectedID,
+                isLoaded: modelID == loadedID
+            )
+        }
+        .sorted { lhs, rhs in
+            if lhs.isSelected != rhs.isSelected { return lhs.isSelected && !rhs.isSelected }
+            return lhs.displayName.localizedStandardCompare(rhs.displayName) == .orderedAscending
         }
     }
 
-    private init() {
+    private var huggingFaceHubRoots: [URL] {
+        let fm = FileManager.default
+        return [
+            fm.urls(for: .cachesDirectory, in: .userDomainMask).first,
+            fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+        ]
+        .compactMap { $0?.appendingPathComponent("huggingface/hub") }
+    }
+
+    private func cacheDirectories(for id: String) -> [URL] {
+        let slug = id.replacingOccurrences(of: "/", with: "--")
+        let fm = FileManager.default
+        return huggingFaceHubRoots
+            .map { $0.appendingPathComponent("models--\(slug)") }
+            .filter { fm.fileExists(atPath: $0.path) }
+    }
+
+    private func installedModelCacheDirectories() -> [String: [URL]] {
+        let fm = FileManager.default
+        var grouped = [String: [URL]]()
+        for root in huggingFaceHubRoots {
+            guard let contents = try? fm.contentsOfDirectory(
+                at: root,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+            ) else { continue }
+            for url in contents where url.lastPathComponent.hasPrefix("models--") {
+                let values = try? url.resourceValues(forKeys: [.isDirectoryKey])
+                guard values?.isDirectory == true else { continue }
+                let slug = String(url.lastPathComponent.dropFirst("models--".count))
+                let id = slug.replacingOccurrences(of: "--", with: "/")
+                grouped[id, default: []].append(url)
+            }
+        }
+        return grouped
+    }
+
+    private func directorySize(at url: URL) -> Int64 {
+        let keys: Set<URLResourceKey> = [.isRegularFileKey, .fileAllocatedSizeKey, .totalFileAllocatedSizeKey]
+        let enumerator = FileManager.default.enumerator(at: url, includingPropertiesForKeys: Array(keys))
+        var total: Int64 = 0
+        for case let fileURL as URL in enumerator ?? NSEnumerator() {
+            guard let values = try? fileURL.resourceValues(forKeys: keys), values.isRegularFile == true else { continue }
+            total += Int64(values.totalFileAllocatedSize ?? values.fileAllocatedSize ?? 0)
+        }
+        return total
+    }
+
+    private func tokenizerLoader(for id: String) -> any MLXLMCommon.TokenizerLoader {
+        #if canImport(MLXHuggingFace)
+        if id == Self.miniCPMModelID {
+            return #huggingFaceTokenizerLoader()
+        }
+        #endif
+        return JSONBPETokenizerLoader()
+    }
+
+    private func usesNativeChatTemplate(_ id: String) -> Bool {
+        #if canImport(MLXHuggingFace)
+        return id == Self.miniCPMModelID
+        #else
+        return false
+        #endif
+    }
+    init(runtime: (any OnDeviceModelRuntime)? = nil) {
+        self.runtime = runtime
         // 임계값 실측 검증용 진단 로그 — physicalMemory 보고값으로 6GB/4GB 판정 확인.
         print(String(format: "[OnDeviceLLM] 물리 메모리 %.2f GiB · isCapable=%@ · availableModels=%d",
                      Self.physicalMemoryGiB, isCapable ? "true" : "false", Self.availableModels.count))
         setupLifecycleObservers()
     }
 
-    func loadModelIfNeeded() async {
-        guard isCapable, !isModelLoaded, !isLoading else { return }
+    func loadModelIfNeeded(use: ProviderUse) async {
+        guard BetaFeaturePolicy().authorizes(.onDevice, for: use), isCapable, !isLoading else { return }
+        if let runtime {
+            isLoading = true
+            loadError = nil
+            downloadInterrupted = false
+            downloadProgress = 0
+            defer { isLoading = false }
+            do {
+                try await runtime.load()
+                loadedModelID = modelID
+                isModelLoaded = true
+                downloadProgress = 1
+            } catch is CancellationError {
+                downloadInterrupted = true
+            } catch {
+                loadError = error.localizedDescription
+            }
+            return
+        }
+        if isModelLoaded {
+            guard loadedModelID != modelID else { return }
+            unloadModel(reason: .manual)
+        }
         let task = Task<Void, Never> { [weak self] in await self?.performLoad() }
         loadingTask = task
         await task.value
@@ -189,7 +329,7 @@ final class OnDeviceLLMService: ObservableObject {
             let config = ModelConfiguration(id: idToLoad)
             container = try await LLMModelFactory.shared.loadContainer(
                 from: HuggingFaceHubDownloader(),
-                using: JSONBPETokenizerLoader(),
+                using: tokenizerLoader(for: idToLoad),
                 configuration: config,
                 progressHandler: { [weak self] progress in
                     Task { @MainActor [weak self] in
@@ -200,7 +340,7 @@ final class OnDeviceLLMService: ObservableObject {
             loadedModelID = idToLoad
             isModelLoaded = true
             downloadInterrupted = false
-            MLX.Memory.cacheLimit = 512 * 1_024 * 1_024
+            MLX.Memory.cacheLimit = Self.normalMLXCacheLimit
         } catch is CancellationError {
             // Task 취소 — 오류 메시지 없이 interrupted 상태로 처리
         } catch {
@@ -213,6 +353,7 @@ final class OnDeviceLLMService: ObservableObject {
         if generationTask != nil {
             print("[OnDeviceLLM] ⚠️ 진행 중인 generate 취소 — 사유: \(reason.rawValue)")
         }
+        runtime?.unload()
         loadingTask?.cancel()
         loadingTask = nil
         generationTask?.cancel()
@@ -245,20 +386,38 @@ final class OnDeviceLLMService: ObservableObject {
                 self?.unloadModel(reason: .background)
             }
         }
-        // 메모리 경고 시 언로드 (~1-2.4GB 상주 해제)
-        // os_proc_available_memory() 로그로 실제 헤드룸 측정 (defer-unload 판단용 데이터)
+        // 메모리 경고가 와도 os_proc_available_memory() 기준 헤드룸이 충분하면
+        // 진행 중인 generate를 취소하지 않는다. MLX/Metal 컴파일 직후 경고가 올라와도
+        // 실제 여유 메모리가 큰 경우가 있어, 무조건 언로드하면 정상 추론이 실패한다.
         memoryToken = NotificationCenter.default.addObserver(
             forName: UIApplication.didReceiveMemoryWarningNotification,
             object: nil,
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
-                guard let self, self.isModelLoaded else { return }
-                let avail = os_proc_available_memory()
-                print("[OnDeviceLLM] ⚠️ 메모리 경고 — 가용 메모리: \(avail / 1_024 / 1_024)MB → 언로드")
-                self.unloadModel(reason: .memoryWarning)
+                self?.handleMemoryWarning()
             }
         }
+    }
+
+    private func handleMemoryWarning() {
+        guard isModelLoaded else { return }
+        let availableBytes = os_proc_available_memory()
+        let isGenerating = generationTask != nil
+        let floor = isGenerating
+            ? Self.generationMemoryWarningFloorBytes
+            : Self.idleMemoryWarningFloorBytes
+        let availableMB = availableBytes / 1_024 / 1_024
+        let floorMB = floor / 1_024 / 1_024
+
+        if availableBytes > floor {
+            MLX.Memory.cacheLimit = Self.pressureMLXCacheLimit
+            print("[OnDeviceLLM] ⚠️ 메모리 경고 — 가용 메모리: \(availableMB)MB, 기준 \(floorMB)MB 초과 → MLX 캐시 축소 후 유지")
+            return
+        }
+
+        print("[OnDeviceLLM] ⚠️ 메모리 경고 — 가용 메모리: \(availableMB)MB, 기준 \(floorMB)MB 이하 → 언로드")
+        unloadModel(reason: .memoryWarning)
     }
 
     /// generate() 완료 후 호출. 120초 유휴 시 자동 언로드한다.
@@ -275,69 +434,144 @@ final class OnDeviceLLMService: ObservableObject {
     }
 
     func deleteDownloadedModel() async {
+        await deleteDownloadedModel(id: loadedModelID ?? modelID)
+    }
+
+    func deleteDownloadedModel(id idToDelete: String) async {
         isDeleting = true
         defer { isDeleting = false }
-        let idToDelete = loadedModelID ?? modelID
-        unloadModel(reason: .modelDelete)
-        loadedModelID = nil
-        downloadInterrupted = false
-        downloadProgress = 0
+        if loadedModelID == idToDelete || modelID == idToDelete {
+            unloadModel(reason: .modelDelete)
+            if loadedModelID == idToDelete { loadedModelID = nil }
+            downloadInterrupted = false
+            downloadProgress = 0
+        }
         let fm = FileManager.default
-        let slug = idToDelete.replacingOccurrences(of: "/", with: "--")
-        let searchDirs: [URL] = [
-            fm.urls(for: .cachesDirectory, in: .userDomainMask).first,
-            fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-        ].compactMap { $0 }
-        for base in searchDirs {
-            let candidate = base.appendingPathComponent("huggingface/hub/models--\(slug)")
+        for candidate in cacheDirectories(for: idToDelete) {
             try? fm.removeItem(at: candidate)
         }
+        objectWillChange.send()
+    }
+
+    nonisolated private static func trace(_ requestID: String, _ message: String) {
+        print("[OnDeviceLLM][\(requestID)] \(message)")
+    }
+
+    nonisolated private static func elapsedMS(since start: Date) -> Int {
+        Int(Date().timeIntervalSince(start) * 1_000)
     }
 
     /// 시스템 프롬프트 + 사용자 프롬프트로 텍스트 생성 (JSON 출력 용도).
-    /// Qwen3.5 ChatML + 빈 <think> 블록으로 thinking mode 비활성화 → JSON 직접 출력.
-    /// contextLength: 입력 최대 토큰 수(기본 8192). Qwen3.5-4B는 32K까지 지원하나 메모리 절약.
-    func generate(systemPrompt: String, userPrompt: String, maxTokens: Int = 512, contextLength: Int = 8192) async throws -> String {
+    /// MiniCPM5는 HuggingFace chat template을 그대로 쓰고, Qwen 계열은 수동 ChatML 프롬프트를 쓴다.
+    func generate(
+        systemPrompt: String,
+        userPrompt: String,
+        maxTokens: Int = 512,
+        contextLength: Int = 8192,
+        use: ProviderUse
+    ) async throws -> String {
+        guard BetaFeaturePolicy().authorizes(.onDevice, for: use) else {
+            throw IntelligenceRoutingError.backendUnavailable(
+                provider: .onDevice,
+                reason: RuleFallbackReason.providerDisabled.rawValue
+            )
+        }
+        if let runtime {
+            return try await runtime.generate(
+                systemPrompt: systemPrompt,
+                userPrompt: userPrompt,
+                maxTokens: maxTokens,
+                contextLength: contextLength
+            )
+        }
         guard let container else { throw LLMError.modelNotLoaded }
         guard UIApplication.shared.applicationState == .active else { throw LLMError.appInBackground }
         // 직전 generate의 유휴 타이머가 이번 추론 중 발화하지 못하도록 선제 차단
         idleTimer?.cancel()
         idleTimer = nil
         // 실측 가용 메모리 로깅 — defer-unload 판단 기준 데이터 수집
+        let requestID = String(UUID().uuidString.prefix(8))
+        let startedAt = Date()
+        let selectedModelID = modelID
         let availAtStart = os_proc_available_memory()
         print("[OnDeviceLLM] 🚀 generate 시작 — 가용 메모리: \(availAtStart / 1_024 / 1_024)MB, maxTokens: \(maxTokens)")
+        Self.trace(
+            requestID,
+            "stage=start model=\(selectedModelID) systemChars=\(systemPrompt.count) userChars=\(userPrompt.count) contextLength=\(contextLength) maxTokens=\(maxTokens) availableMB=\(availAtStart / 1_024 / 1_024)"
+        )
 
         let maxUserChars = max(200, contextLength * 3 - systemPrompt.count - 100)
         let trimmedUser = userPrompt.count > maxUserChars
             ? String(userPrompt.prefix(maxUserChars)) + "\n...[이하 생략]"
             : userPrompt
-        // 모델별 프롬프트 포맷 — Qwen/LFM2 모두 ChatML(<|im_start|>) 마커를 쓰지만
-        // LFM2는 BOS(<|startoftext|>) 접두가 필요하고 Qwen 전용 빈 <think> 프라이머는 쓰지 않는다.
-        let opt = Self.modelCatalog.first { $0.id == modelID }
+        // 모델별 프롬프트 포맷 — MiniCPM5는 모델의 tokenizer_config chat_template을 쓰고,
+        // Qwen 계열은 수동 ChatML과 빈 <think> 프라이머로 JSON 출력을 유도한다.
+        let opt = Self.modelCatalog.first { $0.id == selectedModelID }
         let prefix = opt?.promptPrefix ?? ""
         let primer = opt?.assistantPrimer ?? "<think>\n\n</think>\n"
-        let prompt = "\(prefix)<|im_start|>system\n\(systemPrompt)<|im_end|>\n<|im_start|>user\n\(trimmedUser)<|im_end|>\n<|im_start|>assistant\n\(primer)"
+        let useNativeChatTemplate = usesNativeChatTemplate(selectedModelID)
+        let prompt = useNativeChatTemplate
+            ? "\(systemPrompt)\n\n\(trimmedUser)"
+            : "\(prefix)<|im_start|>system\n\(systemPrompt)<|im_end|>\n<|im_start|>user\n\(trimmedUser)<|im_end|>\n<|im_start|>assistant\n\(primer)"
+        if trimmedUser.count != userPrompt.count {
+            Self.trace(requestID, "stage=prompt-trim originalUserChars=\(userPrompt.count) trimmedUserChars=\(trimmedUser.count) maxUserChars=\(maxUserChars)")
+        }
+        Self.trace(requestID, "stage=prompt-ready promptChars=\(prompt.count) primerChars=\(useNativeChatTemplate ? 0 : primer.count) nativeChatTemplate=\(useNativeChatTemplate) elapsedMS=\(Self.elapsedMS(since: startedAt))")
 
         let task = Task<String, Error> {
-            try await container.perform { context in
-                let input = try await context.processor.prepare(input: .init(prompt: prompt))
+            Self.trace(requestID, "stage=container-perform-enter elapsedMS=\(Self.elapsedMS(since: startedAt))")
+            return try await container.perform { context in
+                Self.trace(requestID, "stage=prepare-input-start nativeChatTemplate=\(useNativeChatTemplate) elapsedMS=\(Self.elapsedMS(since: startedAt))")
+                let userInput: UserInput
+                if useNativeChatTemplate {
+                    userInput = UserInput(
+                        chat: [
+                            .system(systemPrompt),
+                            .user(trimmedUser)
+                        ],
+                        additionalContext: ["enable_thinking": false]
+                    )
+                } else {
+                    userInput = UserInput(prompt: .text(prompt))
+                }
+                let input = try await context.processor.prepare(input: userInput)
+                Self.trace(requestID, "stage=prepare-input-done elapsedMS=\(Self.elapsedMS(since: startedAt))")
                 let stream = try MLXLMCommon.generate(
                     input: input,
                     parameters: GenerateParameters(maxTokens: maxTokens, temperature: 0.1),
                     context: context
                 )
+                Self.trace(requestID, "stage=stream-created elapsedMS=\(Self.elapsedMS(since: startedAt))")
                 var output = ""
+                var chunkCount = 0
+                var lastProgressLog = Date()
                 var iterator = stream.makeAsyncIterator()
                 while true {
                     // Metal GPU 명령 제출 전에 취소 확인 — for-await post-check 대비 race window 최소화
                     try Task.checkCancellation()
-                    guard let generation = await iterator.next() else { break }
+                    guard let generation = await iterator.next() else {
+                        Self.trace(requestID, "stage=stream-ended chunks=\(chunkCount) outputChars=\(output.count) elapsedMS=\(Self.elapsedMS(since: startedAt))")
+                        break
+                    }
                     if let chunk = generation.chunk {
                         output += chunk
+                        chunkCount += 1
+                        let shouldLogProgress = chunkCount == 1
+                            || chunkCount % 32 == 0
+                            || Date().timeIntervalSince(lastProgressLog) >= 3
+                        if shouldLogProgress {
+                            let availableMB = os_proc_available_memory() / 1_024 / 1_024
+                            Self.trace(requestID, "stage=stream-progress chunks=\(chunkCount) outputChars=\(output.count) lastChunkChars=\(chunk.count) availableMB=\(availableMB) elapsedMS=\(Self.elapsedMS(since: startedAt))")
+                            lastProgressLog = Date()
+                        }
                         if let completedJSON = Self.completedTopLevelJSONObject(in: output) {
                             output = completedJSON
+                            Self.trace(requestID, "stage=json-complete chunks=\(chunkCount) jsonChars=\(output.count) elapsedMS=\(Self.elapsedMS(since: startedAt))")
                             break
                         }
+                    } else if chunkCount == 0 || Date().timeIntervalSince(lastProgressLog) >= 3 {
+                        Self.trace(requestID, "stage=stream-heartbeat chunks=\(chunkCount) outputChars=\(output.count) elapsedMS=\(Self.elapsedMS(since: startedAt))")
+                        lastProgressLog = Date()
                     }
                 }
                 return output
@@ -350,11 +584,26 @@ final class OnDeviceLLMService: ObservableObject {
         do {
             result = try await task.value
         } catch is CancellationError {
-            throw LLMError.cancelled(reason: lastUnloadReason)
+            Self.trace(requestID, "stage=cancelled reason=\(lastUnloadReason?.rawValue ?? "unknown") elapsedMS=\(Self.elapsedMS(since: startedAt))")
+            throw CancellationError()
+        } catch {
+            DiagnosticRecorder.shared.record(
+                error: error,
+                component: "ai.onDeviceLLM",
+                operation: "generate"
+            )
+            Self.trace(requestID, "stage=failed errorType=\(String(describing: type(of: error))) message=\(error.localizedDescription) elapsedMS=\(Self.elapsedMS(since: startedAt))")
+            throw error
         }
+        MLX.Memory.cacheLimit = Self.normalMLXCacheLimit
         resetIdleTimer()
-        // LFM2 등 추론형 모델이 출력 앞에 <think>…</think>를 붙이면 JSON 파싱이 깨지므로 제거.
-        return Self.stripLeadingThinkBlock(result)
+        // 추론형 모델이 출력 앞에 <think>…</think>를 붙이면 JSON 파싱이 깨지므로 제거.
+        let stripped = Self.stripLeadingThinkBlock(result)
+        Self.trace(
+            requestID,
+            "stage=done rawChars=\(result.count) strippedChars=\(stripped.count) hadJSON=\(Self.completedTopLevelJSONObject(in: stripped) != nil) elapsedMS=\(Self.elapsedMS(since: startedAt))"
+        )
+        return stripped
     }
 
     /// 출력 맨 앞의 <think>…</think> 추론 블록을 제거해 후속 JSON 파싱을 보호한다.
@@ -638,7 +887,7 @@ private struct JSONBPETokenizerLoader: MLXLMCommon.TokenizerLoader, @unchecked S
 /// `applyChatTemplate` always throws `missingChatTemplate` so that
 /// `LLMUserInputProcessor` falls back to `encode(text:)`, which correctly
 /// encodes the pre-formatted ChatML prompt produced by `OnDeviceLLMService.generate`.
-private final class BPETokenizer: MLXLMCommon.Tokenizer, @unchecked Sendable {
+final class BPETokenizer: MLXLMCommon.Tokenizer, @unchecked Sendable {
 
     private let vocab: [String: Int]
     private let idToToken: [Int: String]
@@ -718,28 +967,38 @@ private final class BPETokenizer: MLXLMCommon.Tokenizer, @unchecked Sendable {
 
     func encode(text: String, addSpecialTokens: Bool) -> [Int] {
         guard !text.isEmpty else { return [] }
-        // Sort special tokens longest-first for greedy prefix matching
-        let sortedSpecials = addedTokens.keys.sorted { $0.count > $1.count }
         var ids = [Int]()
         var remaining = text
         while !remaining.isEmpty {
-            var foundSpecial = false
-            for special in sortedSpecials {
-                guard let range = remaining.range(of: special) else { continue }
-                // Encode text before the special token using BPE
-                let before = String(remaining[remaining.startIndex..<range.lowerBound])
-                if !before.isEmpty { ids += bpeEncodeText(before) }
-                if let sid = addedTokens[special] { ids.append(sid) }
-                remaining = String(remaining[range.upperBound...])
-                foundSpecial = true
-                break
-            }
-            if !foundSpecial {
+            guard let match = Self.nextSpecialToken(in: remaining, tokens: addedTokens) else {
                 ids += bpeEncodeText(remaining)
                 break
             }
+            let before = String(remaining[remaining.startIndex..<match.range.lowerBound])
+            if !before.isEmpty { ids += bpeEncodeText(before) }
+            ids.append(match.id)
+            remaining = String(remaining[match.range.upperBound...])
         }
         return ids
+    }
+
+    private static func nextSpecialToken(
+        in text: String,
+        tokens: [String: Int]
+    ) -> (range: Range<String.Index>, id: Int, token: String)? {
+        var nearest: (range: Range<String.Index>, id: Int, token: String)?
+        for (token, id) in tokens {
+            guard let range = text.range(of: token) else { continue }
+            guard let current = nearest else {
+                nearest = (range, id, token)
+                continue
+            }
+            if range.lowerBound < current.range.lowerBound
+                || (range.lowerBound == current.range.lowerBound && token.count > current.token.count) {
+                nearest = (range, id, token)
+            }
+        }
+        return nearest
     }
 
     func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
@@ -881,28 +1140,85 @@ final class OnDeviceLLMService: ObservableObject {
         let id: String; let displayName: String; let sizeMB: Int; let minMemoryGiB: Double
         var promptPrefix: String = ""; var assistantPrimer: String = "<think>\n\n</think>\n"
     }
+    struct InstalledModel: Identifiable, Hashable {
+        let id: String
+        let displayName: String
+        let sizeBytes: Int64
+        let cachePaths: [String]
+        let isSelected: Bool
+        let isLoaded: Bool
+        var sizeMB: Int { 0 }
+    }
     static let modelCatalog: [ModelOption] = [
-        ModelOption(id: "mlx-community/LFM2.5-1.2B-Instruct-4bit", displayName: "LFM2.5-1.2B · 4bit (경량·빠름, ~0.65GB)", sizeMB: 650, minMemoryGiB: 5.0, promptPrefix: "<|startoftext|>", assistantPrimer: ""),
+        ModelOption(id: "mlx-community/MiniCPM5-1B-4bit", displayName: "MiniCPM5-1B · 4bit (경량 범용, ~0.62GB)", sizeMB: 620, minMemoryGiB: 5.0),
         ModelOption(id: "mlx-community/Qwen3.5-2B-MLX-4bit", displayName: "Qwen3.5-2B · 4bit (범용, ~1.4GB)", sizeMB: 1400, minMemoryGiB: 5.0),
         ModelOption(id: "mlx-community/Qwen3.5-4B-MLX-4bit", displayName: "Qwen3.5-4B · 4bit (범용 고품질, ~2.4GB)", sizeMB: 2400, minMemoryGiB: 7.0),
     ]
     static var physicalMemoryGiB: Double { Double(ProcessInfo.processInfo.physicalMemory) / (1_024 * 1_024 * 1_024) }
     static let minCapableMemoryGiB: Double = 5.0
     static var availableModels: [ModelOption] { modelCatalog.filter { physicalMemoryGiB >= $0.minMemoryGiB } }
-    static let defaultModelID = "mlx-community/Qwen3.5-2B-MLX-4bit"
+    static let defaultModelID = "mlx-community/MiniCPM5-1B-4bit"
+    static let qwenFallbackModelID = "mlx-community/Qwen3.5-2B-MLX-4bit"
+    static let retiredLFMModelID = "mlx-community/LFM2.5-1.2B-Instruct-4bit"
+    static let legacyOpenBMBMiniCPMModelID = "openbmb/MiniCPM5-1B-MLX"
+    static let miniCPMModelID = "mlx-community/MiniCPM5-1B-4bit"
+    static func normalizedModelID(_ storedModelID: String?) -> String {
+        let modelID = storedModelID?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let modelID, !modelID.isEmpty else { return qwenFallbackModelID }
+        return modelID == retiredLFMModelID || modelID == legacyOpenBMBMiniCPMModelID || modelID == miniCPMModelID ? qwenFallbackModelID : modelID
+    }
     static let defaultContextLength = 4096
     static let isMLXAvailable = false   // 패키지 미설치 — Xcode GUI로 추가 필요
     var modelID: String {
-        UserDefaults.standard.string(forKey: "pieroot.todo.onDeviceModelID") ?? Self.defaultModelID
+        let storedModelID = UserDefaults.standard.string(forKey: "pieroot.todo.onDeviceModelID")
+        let normalizedModelID = Self.normalizedModelID(storedModelID)
+        if storedModelID == Self.retiredLFMModelID {
+            UserDefaults.standard.set(normalizedModelID, forKey: "pieroot.todo.onDeviceModelID")
+        }
+        return normalizedModelID
     }
     var isCapable: Bool { false }
     var isModelCachedOnDisk: Bool { false }
-    private init() {}
-    func loadModelIfNeeded() async {}
-    func unloadModel() {}
+    var installedModels: [InstalledModel] { [] }
+    private let runtime: (any OnDeviceModelRuntime)?
+    init(runtime: (any OnDeviceModelRuntime)? = nil) {
+        self.runtime = runtime
+    }
+    func loadModelIfNeeded(use: ProviderUse) async {
+        guard BetaFeaturePolicy().authorizes(.onDevice, for: use), let runtime else { return }
+        do {
+            try await runtime.load()
+            isModelLoaded = true
+        } catch {
+            loadError = error.localizedDescription
+        }
+    }
+    func unloadModel() {
+        runtime?.unload()
+        isModelLoaded = false
+    }
     func deleteDownloadedModel() async {}
-    func generate(systemPrompt: String, userPrompt: String, maxTokens: Int = 512, contextLength: Int = 8192) async throws -> String {
-        throw LLMError.modelNotLoaded
+    func deleteDownloadedModel(id: String) async {}
+    func generate(
+        systemPrompt: String,
+        userPrompt: String,
+        maxTokens: Int = 512,
+        contextLength: Int = 8192,
+        use: ProviderUse
+    ) async throws -> String {
+        guard BetaFeaturePolicy().authorizes(.onDevice, for: use) else {
+            throw IntelligenceRoutingError.backendUnavailable(
+                provider: .onDevice,
+                reason: RuleFallbackReason.providerDisabled.rawValue
+            )
+        }
+        guard let runtime else { throw LLMError.modelNotLoaded }
+        return try await runtime.generate(
+            systemPrompt: systemPrompt,
+            userPrompt: userPrompt,
+            maxTokens: maxTokens,
+            contextLength: contextLength
+        )
     }
     enum LLMError: LocalizedError {
         case modelNotLoaded

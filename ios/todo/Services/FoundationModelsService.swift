@@ -155,6 +155,40 @@ struct FMEmailOutput {
     var notes: String
 }
 
+/// 이메일 상세 화면의 구조화된 요약 출력.
+@Generable
+struct FMEmailSummaryOutput {
+    @Guide(description: "A concise factual email summary in the requested output language. Include the purpose and any explicit deadline or required response. Do not repeat greetings, legal boilerplate, or raw markup.")
+    var summary: String
+
+    @Guide(description: "Zero to three distinct factual key points in the requested output language. Do not repeat the summary.")
+    var keyPoints: [String]
+
+    @Guide(description: "Zero to three explicit actions required of the recipient in the requested output language. Return an empty array when none are explicitly requested.")
+    var actionItems: [String]
+}
+
+/// 페르소나 초안의 설명과 근거를 개선하는 출력. 분류와 신뢰도는 결정론적 분석값을 유지한다.
+@Generable
+struct FMPersonaNarrativeOutput {
+    @Guide(description: "A two-to-four sentence persona description grounded only in the supplied deterministic behavior facts, in the requested output language. Do not prescribe actions or invent personal attributes.")
+    var descriptionText: String
+
+    @Guide(description: "Zero to three concise, non-duplicated factual evidence statements grounded only in the supplied behavior facts, in the requested output language.")
+    var evidence: [String]
+}
+
+/// 결정론적 행동 지표를 설명하는 출력. 수치와 프로필 구조는 호출부가 보존한다.
+@Generable
+struct FMBehaviorNarrativeOutput {
+    @Guide(description: "A concise factual behavior-pattern summary grounded only in the supplied deterministic statistics, in the requested output language. Do not give recommendations, advice, or infer unsupported traits.")
+    var summary: String
+
+    @Guide(description: "Two to four distinct factual observations grounded only in the supplied deterministic statistics, in the requested output language. Do not give recommendations or advice.")
+    var insights: [String]
+}
+
+
 /// 이메일 수동 등록용 요약/마감 초안 출력.
 @Generable
 struct FMEmailTodoDraftOutput {
@@ -245,6 +279,12 @@ struct FMTranscriptCorrectionOutput {
 @available(iOS 26.0, *)
 struct FoundationModelsService {
 
+    private let runtime: any FoundationModelsRuntime
+
+    init(runtime: any FoundationModelsRuntime = LiveFoundationModelsRuntime()) {
+        self.runtime = runtime
+    }
+
     // E-1: 배치 크기 — FM 컨텍스트 창(~4096 토큰, 입력+출력 합산)에 맞게 분할.
     // 배치당 추정: instructions ~400 + schema ~400 + prompt ~300 + output(4×~100) = ~1500 토큰.
     private let fmBatchSize = 4
@@ -279,6 +319,12 @@ struct FoundationModelsService {
         persona: PersonaContext,
         language: AppLanguage = .current
     ) async throws -> [PriorityResult] {
+        guard BetaFeaturePolicy().authorizes(.foundationModels, for: .standardAnalysis) else {
+            throw IntelligenceRoutingError.backendUnavailable(
+                provider: .foundationModels,
+                reason: RuleFallbackReason.providerDisabled.rawValue
+            )
+        }
         guard !todos.isEmpty else { return [] }
 
         // E-2: 전역 1-based 정수 인덱스 맵 구성 (UUID 역참조용)
@@ -318,9 +364,11 @@ struct FoundationModelsService {
                 systemPrompt: instructions,
                 userPrompt: prompt
             )
-            let session  = LanguageModelSession(instructions: instructions)
-            let response = try await session.respond(to: prompt, generating: FMPriorityRankingList.self, options: genOptions)
-            let output   = response.content
+            let output = try await runtime.rankTodos(
+                instructions: instructions,
+                userPrompt: prompt,
+                options: genOptions
+            )
             LLMDebugLogger.response(
                 provider: "AFM",
                 operation: operation,
@@ -360,6 +408,12 @@ struct FoundationModelsService {
         now: Date,
         language: AppLanguage = .current
     ) async throws -> EmailExtraction? {
+        guard BetaFeaturePolicy().authorizes(.foundationModels, for: .standardAnalysis) else {
+            throw IntelligenceRoutingError.backendUnavailable(
+                provider: .foundationModels,
+                reason: RuleFallbackReason.providerDisabled.rawValue
+            )
+        }
         let bodyPreview = String(msg.body.prefix(1500))
         guard !msg.subject.isEmpty else { return nil }
 
@@ -377,9 +431,10 @@ struct FoundationModelsService {
             systemPrompt: instructions,
             userPrompt: prompt
         )
-        let session  = LanguageModelSession(instructions: instructions)
-        let response = try await session.respond(to: prompt, generating: FMEmailOutput.self)
-        let output   = response.content
+        let output = try await runtime.analyzeEmail(
+            instructions: instructions,
+            userPrompt: prompt
+        )
         LLMDebugLogger.response(provider: "AFM", operation: "analyzeEmail", text: "dueDateISO=\(output.dueDateISO) isAllDay=\(output.isAllDay) sender=\(output.sender) senderEmail=\(output.senderEmail) keywordScore=\(output.keywordScore) deadlineSentence=\(output.deadlineSentence) notes=\(output.notes)")
 
         // 마감일 파싱
@@ -455,6 +510,170 @@ struct FoundationModelsService {
         )
     }
 
+    /// Generates the structured detail-card summary entirely through Apple Foundation Models.
+    /// The caller falls back to deterministic rules if this foreground-only inference is unavailable.
+    func summarizeEmail(
+        subject: String,
+        sender: String,
+        body: String,
+        language: AppLanguage = .current
+    ) async throws -> EmailSummaryResult {
+        guard BetaFeaturePolicy().authorizes(.foundationModels, for: .standardAnalysis) else {
+            throw IntelligenceRoutingError.backendUnavailable(
+                provider: .foundationModels,
+                reason: RuleFallbackReason.providerDisabled.rawValue
+            )
+        }
+
+        let bodyPreview = String(body.prefix(1_500))
+        let instructions = Prompts.EmailSummaryFM.systemInstruction(language: language)
+        let prompt = """
+        Sender: \(sender)
+        Subject: \(subject)
+        <email>
+        \(bodyPreview)
+        </email>
+        """
+        LLMDebugLogger.request(
+            provider: "AFM",
+            operation: "summarizeEmail",
+            metadata: ["subject: \(subject)", "bodyPreviewChars: \(bodyPreview.count)"],
+            systemPrompt: instructions,
+            userPrompt: prompt
+        )
+        let output = try await runtime.summarizeEmail(
+            instructions: instructions,
+            userPrompt: prompt
+        )
+        let summary = output.summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        let keyPoints = output.keyPoints
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        let actionItems = output.actionItems
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !summary.isEmpty || !keyPoints.isEmpty || !actionItems.isEmpty else {
+            throw IntelligenceRoutingError.parseFailed(
+                provider: .foundationModels,
+                reason: RuleFallbackReason.invalidResponse.rawValue
+            )
+        }
+        LLMDebugLogger.response(
+            provider: "AFM",
+            operation: "summarizeEmail",
+            text: "summary=\(summary)\nkeyPoints=\(keyPoints)\nactionItems=\(actionItems)"
+        )
+        return EmailSummaryResult(
+            summary: summary,
+            keyPoints: keyPoints,
+            actionItems: actionItems
+        )
+    }
+
+    // MARK: - Persona and behavior narratives
+
+    /// Improves the user-confirmed persona preview without changing deterministic type or confidence data.
+    func generatePersonaNarrative(
+        existingPersona: String,
+        fallback: PersonaRuleDraft,
+        behaviorProfile: BehaviorProfile,
+        language: AppLanguage = .current
+    ) async throws -> PersonaNarrative {
+        guard BetaFeaturePolicy().authorizes(.foundationModels, for: .standardAnalysis) else {
+            throw IntelligenceRoutingError.backendUnavailable(
+                provider: .foundationModels,
+                reason: RuleFallbackReason.providerDisabled.rawValue
+            )
+        }
+        let instructions = Prompts.PersonaNarrativeFM.systemInstruction + "\n" + narrativeLanguageInstruction(language)
+        let prompt = """
+        [Existing persona]
+        \(String(existingPersona.prefix(inputCharCap)))
+
+        [Deterministic persona draft]
+        \(fallback.descriptionText)
+
+        [Deterministic evidence]
+        \(fallback.evidence.joined(separator: "\n"))
+
+        [Persona types]
+        \(fallback.personaTypes.map(\.displayName).joined(separator: ", "))
+
+        [Deterministic behavior facts]
+        \(behaviorFacts(behaviorProfile))
+
+        Return a grounded narrative only from the supplied deterministic facts.
+        """
+        LLMDebugLogger.request(
+            provider: "AFM",
+            operation: "generatePersonaNarrative",
+            metadata: ["evidenceCount: \(fallback.evidence.count)", "sampleCount: \(behaviorProfile.sampleCount)"],
+            systemPrompt: instructions,
+            userPrompt: prompt
+        )
+        let output = try await runtime.generatePersonaNarrative(
+            instructions: instructions,
+            userPrompt: prompt
+        )
+        let narrative = PersonaNarrative(
+            descriptionText: output.descriptionText,
+            evidence: output.evidence
+        )
+        LLMDebugLogger.response(
+            provider: "AFM",
+            operation: "generatePersonaNarrative",
+            text: "description=\(narrative.descriptionText)\nevidence=\(narrative.evidence)"
+        )
+        return narrative
+    }
+
+    /// Improves only the prose in a behavior preview; deterministic metrics remain authoritative.
+    func narrateBehavior(
+        baseline: MemoryAnalysisResult,
+        language: AppLanguage = .current
+    ) async throws -> BehaviorNarrative {
+        guard BetaFeaturePolicy().authorizes(.foundationModels, for: .standardAnalysis) else {
+            throw IntelligenceRoutingError.backendUnavailable(
+                provider: .foundationModels,
+                reason: RuleFallbackReason.providerDisabled.rawValue
+            )
+        }
+        let instructions = Prompts.BehaviorNarrativeFM.systemInstruction + "\n" + narrativeLanguageInstruction(language)
+        let prompt = """
+        [Deterministic summary]
+        \(baseline.summary)
+
+        [Deterministic insights]
+        \(baseline.insights.joined(separator: "\n"))
+
+        [Deterministic behavior facts]
+        \(behaviorFacts(baseline.behaviorProfile))
+
+        [Record scope]
+        \(baseline.accessScopeSummary)
+
+        Rewrite the supplied deterministic facts only; do not add recommendations or unsupported analysis.
+        """
+        LLMDebugLogger.request(
+            provider: "AFM",
+            operation: "narrateBehavior",
+            metadata: ["sampleCount: \(baseline.behaviorProfile.sampleCount)", "insightCount: \(baseline.insights.count)"],
+            systemPrompt: instructions,
+            userPrompt: prompt
+        )
+        let output = try await runtime.narrateBehavior(
+            instructions: instructions,
+            userPrompt: prompt
+        )
+        let narrative = BehaviorNarrative(summary: output.summary, insights: output.insights)
+        LLMDebugLogger.response(
+            provider: "AFM",
+            operation: "narrateBehavior",
+            text: "summary=\(narrative.summary)\ninsights=\(narrative.insights)"
+        )
+        return narrative
+    }
+
     // MARK: - 회의 전사 분석
 
     /// 회의 전사문을 온디바이스 LLM으로 분석해 요약·결정·질문·액션 후보를 만든다.
@@ -467,6 +686,12 @@ struct FoundationModelsService {
         language: AppLanguage,
         transcriptCharCap: Int = 6_000
     ) async throws -> ProviderMeetingExtraction {
+        guard BetaFeaturePolicy().authorizes(.foundationModels, for: .standardAnalysis) else {
+            throw IntelligenceRoutingError.backendUnavailable(
+                provider: .foundationModels,
+                reason: RuleFallbackReason.providerDisabled.rawValue
+            )
+        }
         // 컨텍스트 창(~4096토큰) 방어: 문자 예산 안에서만 구간을 전달한다.
         var numbered = [String]()
         var included = [MeetingSegment]()   // 1-based 번호 → segment 매핑
@@ -499,9 +724,10 @@ struct FoundationModelsService {
             systemPrompt: Prompts.MeetingFM.systemInstruction(language: language),
             userPrompt: prompt
         )
-        let session = LanguageModelSession(instructions: Prompts.MeetingFM.systemInstruction(language: language))
-        let response = try await session.respond(to: prompt, generating: FMMeetingExtractionOutput.self)
-        let output = response.content
+        let output = try await runtime.analyzeMeeting(
+            instructions: Prompts.MeetingFM.systemInstruction(language: language),
+            userPrompt: prompt
+        )
         LLMDebugLogger.response(
             provider: "AFM",
             operation: "analyzeMeeting",
@@ -551,6 +777,12 @@ struct FoundationModelsService {
         language: AppLanguage,
         batchCharCap: Int = 2_000
     ) async throws -> TranscriptCorrectionBatchResult {
+        guard BetaFeaturePolicy().authorizes(.foundationModels, for: .transcriptRefinement) else {
+            throw IntelligenceRoutingError.backendUnavailable(
+                provider: .foundationModels,
+                reason: RuleFallbackReason.providerDisabled.rawValue
+            )
+        }
         guard !segments.isEmpty else {
             return TranscriptCorrectionBatchResult(
                 segments: segments,
@@ -602,14 +834,17 @@ struct FoundationModelsService {
                 userPrompt: prompt
             )
             do {
-                let session = LanguageModelSession(instructions: Prompts.MeetingCorrectionFM.systemInstruction(language: language))
-                let response = try await session.respond(to: prompt, generating: FMTranscriptCorrectionOutput.self, options: genOptions)
+                let output = try await runtime.correctTranscript(
+                    instructions: Prompts.MeetingCorrectionFM.systemInstruction(language: language),
+                    userPrompt: prompt,
+                    options: genOptions
+                )
                 LLMDebugLogger.response(
                     provider: "AFM",
                     operation: operation,
-                    text: response.content.corrections.map { "#\($0.sourceSegmentNumber) \($0.correctedText)" }.joined(separator: "\n")
+                    text: output.corrections.map { "#\($0.sourceSegmentNumber) \($0.correctedText)" }.joined(separator: "\n")
                 )
-                for correction in response.content.corrections {
+                for correction in output.corrections {
                     let local = correction.sourceSegmentNumber - 1
                     guard local >= 0, local < batch.count else { continue }
                     let globalIndex = batch[local]
@@ -618,6 +853,8 @@ struct FoundationModelsService {
                     corrected[globalIndex].text = newText
                 }
                 succeededBatchCount += 1
+            } catch is CancellationError {
+                throw CancellationError()
             } catch {
                 LLMDebugLogger.failure(provider: "AFM", operation: operation, error: error)
                 failedBatchCount += 1
@@ -656,6 +893,12 @@ struct FoundationModelsService {
         now: Date,
         language: AppLanguage = .current
     ) async throws -> EmailTodoDraft {
+        guard BetaFeaturePolicy().authorizes(.foundationModels, for: .standardAnalysis) else {
+            throw IntelligenceRoutingError.backendUnavailable(
+                provider: .foundationModels,
+                reason: RuleFallbackReason.providerDisabled.rawValue
+            )
+        }
         let bodyPreview = String(msg.body.prefix(1500))
 
         let instructions = Prompts.EmailFM.systemInstruction(language: language) + "\n" + outputLanguageInstruction(language)
@@ -675,9 +918,10 @@ struct FoundationModelsService {
             systemPrompt: instructions,
             userPrompt: prompt
         )
-        let session = LanguageModelSession(instructions: instructions)
-        let response = try await session.respond(to: prompt, generating: FMEmailTodoDraftOutput.self)
-        let output = response.content
+        let output = try await runtime.draftTodoFromEmail(
+            instructions: instructions,
+            userPrompt: prompt
+        )
         LLMDebugLogger.response(provider: "AFM", operation: "draftTodoFromEmail", text: "title=\(output.title)\nnotes=\(output.notes)\ndueDateISO=\(output.dueDateISO) isAllDay=\(output.isAllDay) sender=\(output.sender) senderEmail=\(output.senderEmail)")
 
         let normalizedTitle = output.title.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -840,10 +1084,44 @@ struct FoundationModelsService {
         return lines.joined(separator: "\n")
     }
 
+    private func behaviorFacts(_ profile: BehaviorProfile) -> String {
+        let metrics = profile.insights.map { insight in
+            "\(insight.metric.rawValue): value=\(insight.value), numerator=\(insight.numerator), denominator=\(insight.denominator), confidence=\(insight.confidence.rawValue), trend=\(insight.trend.rawValue)"
+        }
+        let classifications = profile.classifications.map { classification in
+            "\(classification.dimension.rawValue): \(classification.label.rawValue), confidence=\(classification.confidence.rawValue)"
+        }
+        return (metrics + classifications + [
+            "sampleCount=\(profile.sampleCount)",
+            "effectiveSampleSize=\(profile.effectiveSampleSize)",
+            "overallConfidence=\(profile.confidence.rawValue)"
+        ]).joined(separator: "\n")
+    }
+
+    private func narrativeLanguageInstruction(_ language: AppLanguage) -> String {
+        language == .english
+            ? "Write every generated natural-language field in English. Do not translate or invent source facts."
+            : "생성하는 모든 자연어 필드는 한국어로 작성하세요. 입력에 없는 사실을 만들거나 과장하지 마세요."
+    }
+
     private func outputLanguageInstruction(_ language: AppLanguage) -> String {
         language == .english
             ? "Write every natural-language output field in English. Preserve source email content; do not translate it."
             : "자연어 출력 필드는 모두 한국어로 작성하세요. 원문 이메일 내용은 번역하지 마세요."
+    }
+}
+@available(iOS 26.0, *)
+extension FoundationModelsService: MeetingRefinementProvider {
+    func correct(
+        segments: [MeetingSegment],
+        glossaryHint: String,
+        language: AppLanguage
+    ) async throws -> TranscriptCorrectionBatchResult {
+        try await correctTranscript(
+            segments: segments,
+            glossaryHint: glossaryHint,
+            language: language
+        )
     }
 }
 #endif

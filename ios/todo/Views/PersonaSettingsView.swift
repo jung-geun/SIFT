@@ -3,6 +3,7 @@ import SwiftUI
 struct PersonaSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.appTutorialState) private var tutorial
+    @EnvironmentObject private var appUpdate: AppUpdateService
     @AppStorage("pieroot.todo.iCloudSyncEnabled") private var iCloudSyncEnabled = false
     @ObservedObject private var settingsStore = SettingsStore.shared
     @State private var languageOverrideRaw = AppLanguage.userOverride?.rawValue ?? ""
@@ -12,6 +13,7 @@ struct PersonaSettingsView: View {
             Section {
                 NavigationLink(destination: PersonaDetailView()) {
                     Label("나의 페르소나", systemImage: "person.circle")
+                        .appTutorialGlow(tutorial?.currentStep == .persona)
                 }
                 NavigationLink(destination: MemoryDetailView()) {
                     Label("행동 패턴 분석", systemImage: "brain.head.profile")
@@ -22,10 +24,16 @@ struct PersonaSettingsView: View {
                 }
                 .accessibilityIdentifier("settings.vocabularyRow")
                 NavigationLink(destination: IntelligenceDetailView()) {
-                    Label("TODO 자동 정렬 및 AI", systemImage: "brain")
+                    Label("TODO 우선순위 규칙", systemImage: "slider.horizontal.3")
+                        .appTutorialGlow(tutorial?.currentStep == .priorityRules)
                 }
+                NavigationLink(destination: BetaFeaturesView()) {
+                    Label("베타 기능", systemImage: "testtube.2")
+                }
+                .accessibilityIdentifier("settings.betaFeaturesRow")
                 NavigationLink(destination: EmailDetailView()) {
                     Label("이메일 연동", systemImage: "envelope")
+                        .appTutorialGlow(tutorial?.currentStep == .emailOptional)
                 }
                 NavigationLink(destination: CalendarDetailView()) {
                     Label("캘린더 설정", systemImage: "calendar")
@@ -37,12 +45,21 @@ struct PersonaSettingsView: View {
 
                 NavigationLink(destination: SystemStatusDetailView()) {
                     Label("시스템 권한 및 상태", systemImage: "shield")
+                        .appTutorialGlow(tutorial?.currentStep == .permissions)
                 }
                 NavigationLink(destination: ICloudSyncDetailView()) {
                     Label("iCloud 동기화", systemImage: "icloud")
                 }
                 NavigationLink(destination: AppInfoDetailView()) {
-                    Label("앱 정보", systemImage: "info.circle")
+                    HStack {
+                        Label("앱 정보", systemImage: "info.circle")
+                        Spacer()
+                        if appUpdate.hasUpdate {
+                            Text("업데이트 가능")
+                                .font(.caption)
+                                .foregroundStyle(AppTheme.accent)
+                        }
+                    }
                 }
                 .accessibilityIdentifier("settings.appInfoRow")
             }
@@ -72,24 +89,14 @@ struct PersonaSettingsView: View {
                 ))
             }
 
-            Section {
-                Toggle("베타 기능", isOn: settingsBinding(
-                    key: SettingsStore.betaFeaturesKey,
-                    defaultValue: false
-                ))
-            } footer: {
-                Text("검증 중인 기능을 사용자가 직접 선택할 수 있게 합니다. 회의 음성 노이즈 감소는 베타 기능을 켠 뒤 회의 화면에서 선택할 수 있습니다.")
-            }
         }
         .environment(\.locale, selectedAppLanguage.locale)
         .onReceive(NotificationCenter.default.publisher(for: AppLanguage.didChangeNotification)) { _ in
             selectedAppLanguage = AppLanguage.current
         }
         .safeAreaInset(edge: .bottom, spacing: 12) {
-            if let tutorial, let hint = tutorial.hint(for: .settings) {
-                AppTutorialHintCard(hint: hint)
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 12)
+            if let tutorial {
+                AppTutorialTipHost(tutorial: tutorial, screen: .settings)
             }
         }
         .navigationTitle(copy("settings.title", fallback: "설정"))

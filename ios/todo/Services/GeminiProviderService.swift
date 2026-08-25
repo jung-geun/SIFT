@@ -254,11 +254,19 @@ enum ScheduleLLMAdapter {
 // MARK: - Gemini provider service
 
 struct GeminiProviderService: Sendable {
-    static let keychainService = "pieroot.todo.gemini"
-    static let apiKeyAccount = "api_key"
+    nonisolated static let keychainService = "pieroot.todo.gemini"
+    nonisolated static let apiKeyAccount = "api_key"
     static let defaultModelID = "gemini-2.0-flash"
 
-    var session: URLSession = .shared
+    private let transport: any GeminiHTTPTransport
+
+    init(session: URLSession = .shared) {
+        self.transport = URLSessionGeminiHTTPTransport(session: session)
+    }
+
+    init(transport: any GeminiHTTPTransport) {
+        self.transport = transport
+    }
 
     static var storedAPIKey: String? {
         guard let raw = KeychainStore.get(service: keychainService, account: apiKeyAccount) else {
@@ -286,102 +294,313 @@ struct GeminiProviderService: Sendable {
         return raw.isEmpty ? defaultModelID : raw
     }
 
-    func generateJSON(systemInstruction: String, userPrompt: String, modelID: String) async throws -> String {
+    func rankTodos(
+        todos: [Todo],
+        events: [CalendarService.CalendarEventSummary],
+        persona: PersonaContext,
+        language: AppLanguage = .current
+    ) async throws -> [PriorityResult] {
+        let (apiKey, modelID) = try preflight()
+        _ = apiKey
+        let prompt = ScheduleLLMAdapter.buildScheduleInput(todos: todos, persona: persona, events: events)
+        let raw = try await generateJSON(
+            systemInstruction: ScheduleLLMAdapter.systemPrompt(language: language),
+            userPrompt: prompt,
+            modelID: modelID
+        )
+        guard let results = ScheduleLLMAdapter.parseScheduleResponseV9(
+            text: raw,
+            todos: todos,
+            persona: persona,
+            engine: .gemini,
+            language: language
+        ) else {
+            throw IntelligenceRoutingError.parseFailed(
+                provider: .gemini,
+                reason: "Gemini 응답을 우선순위 JSON으로 해석하지 못했습니다."
+            )
+        }
+        return results
+    }
+
+    func analyzeEmail(
+        _ msg: GmailMessage,
+        now: Date,
+        language: AppLanguage = .current
+    ) async throws -> EmailExtraction? {
+        let (_, modelID) = try preflight(requireEmailConsent: true)
+        guard !msg.subject.isEmpty else { return nil }
+        let instructions = language == .english
+            ? "Extract an explicit future email deadline. Return JSON with dueDateISO, isAllDay, sender, senderEmail, keywordScore, deadlineSentence, notes. Return an empty dueDateISO when no explicit deadline exists."
+            : "메일에 명시된 미래 마감일을 추출하세요. dueDateISO, isAllDay, sender, senderEmail, keywordScore, deadlineSentence, notes JSON만 반환하세요. 명시적 마감일이 없으면 dueDateISO를 빈 문자열로 반환하세요."
+        let prompt = "현재 시각: \(AppDateFormat.llmString(from: now))\n발신자: \(msg.from)\n제목: \(msg.subject)\n본문:\n\(String(msg.body.prefix(8_000)))"
+        let raw = try await generateJSON(
+            systemInstruction: instructions,
+            userPrompt: prompt,
+            modelID: modelID
+        )
+        return Self.parseEmailExtraction(raw, message: msg, now: now, language: language)
+    }
+
+    func summarizeEmail(
+        subject: String,
+        body: String,
+        language: AppLanguage = .current
+    ) async throws -> EmailSummaryResult {
+        let (_, modelID) = try preflight(requireEmailConsent: true)
+        let instructions = language == .english
+            ? "Summarize this email. Return JSON with summary, keyPoints, and actionItems."
+            : "이메일을 요약하세요. summary, keyPoints, actionItems 키를 가진 JSON만 반환하세요."
+        let prompt = "제목: \(subject)\n본문:\n\(String(body.prefix(8_000)))"
+        let raw = try await generateJSON(
+            systemInstruction: instructions,
+            userPrompt: prompt,
+            modelID: modelID
+        )
+        guard let result = Self.parseSummary(raw) else {
+            throw IntelligenceRoutingError.parseFailed(
+                provider: .gemini,
+                reason: "Gemini 이메일 요약 응답을 해석하지 못했습니다."
+            )
+        }
+        return result
+    }
+
+    private static func parseEmailExtraction(
+        _ raw: String,
+        message: GmailMessage,
+        now: Date,
+        language: AppLanguage
+    ) -> EmailExtraction? {
+        guard let object = jsonDictionary(from: raw),
+              let iso = object["dueDateISO"] as? String,
+              !iso.isEmpty,
+              let dueDate = AppDateFormat.parseMailDate(iso),
+              dueDate > now else { return nil }
+        let normalized = AppDateFormat.normalizedAllDayDeadline(
+            dueDate,
+            calendar: AppDateFormat.sourceCalendar(for: iso)
+        )
+        let sender = (object["sender"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? message.from
+        let senderEmail = (object["senderEmail"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let sentence = (object["deadlineSentence"] as? String) ?? ""
+        let notes = (object["notes"] as? String) ?? sentence
+        return EmailExtraction(
+            dueDate: normalized.date,
+            isAllDay: (object["isAllDay"] as? Bool) == true || normalized.isAllDay,
+            sender: sender,
+            senderEmail: senderEmail,
+            keywordScore: object["keywordScore"] as? Int ?? 1,
+            deadlineSentence: sentence,
+            notes: notes.isEmpty
+                ? (language == .english ? "Detected by Gemini." : "Gemini가 감지한 마감일입니다.")
+                : notes
+        )
+    }
+
+
+    func analyzeMeeting(
+        meetingID: String,
+        result: MeetingResult,
+        glossaryHint: String = "",
+        language: AppLanguage
+    ) async throws -> MeetingResult {
+        let (apiKey, modelID) = try preflight()
+        _ = apiKey
+        let context = Self.meetingPromptContext(
+            segments: result.segments,
+            glossaryHint: glossaryHint,
+            language: language
+        )
+        guard !context.included.isEmpty else { return result }
+        let prompt = """
+        \(context.glossaryBlock)[전사 구간]
+        \(context.numbered.joined(separator: "\n"))
+
+        \(Prompts.MeetingAnalysisLocal.requestSuffix(language: language))
+        """
+        let raw = try await generateJSON(
+            systemInstruction: Prompts.MeetingAnalysisLocal.systemInstruction(language: language),
+            userPrompt: prompt,
+            modelID: modelID
+        )
+        guard let json = Self.jsonDictionary(from: raw) else {
+            throw IntelligenceRoutingError.parseFailed(
+                provider: .gemini,
+                reason: "Gemini 회의 분석 응답을 해석하지 못했습니다."
+            )
+        }
+        var updated = result
+        updated.title = (json["title"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        updated.summary = (json["summary"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        updated.decisions = (json["decisions"] as? [String] ?? []).filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        updated.unresolvedQuestions = (json["unresolved_questions"] as? [String] ?? json["unresolvedQuestions"] as? [String] ?? [])
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        var actions: [MeetingActionDraft] = []
+        for item in (json["actions"] as? [[String: Any]] ?? []) {
+            guard let title = (item["title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !title.isEmpty,
+                  let number = item["sourceSegmentNumber"] as? Int,
+                  number > 0,
+                  number <= context.included.count else { continue }
+            let segment = context.included[number - 1]
+            let due = (item["dueDateISO"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            actions.append(
+                MeetingActionDraft(
+                    title: title,
+                    notes: (item["notes"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
+                    dueAtISO8601: due?.isEmpty == true ? nil : due,
+                    sourceSegmentIDs: [segment.id],
+                    confidence: 0.7,
+                    requiresReview: true,
+                    meetingID: meetingID
+                )
+            )
+        }
+        updated.actionDrafts = actions
+        return updated
+    }
+
+    private func preflight(
+        requireEmailConsent: Bool = false
+    ) throws -> (apiKey: String, modelID: String) {
+        guard BetaFeaturePolicy().authorizes(.gemini, for: .standardAnalysis) else {
+            throw IntelligenceRoutingError.backendUnavailable(
+                provider: .gemini,
+                reason: RuleFallbackReason.providerDisabled.rawValue
+            )
+        }
+        if requireEmailConsent,
+           !SettingsStore.shared.get("pieroot.todo.providerEmailAnalysisEnabled", defaultValue: false) {
+            throw IntelligenceRoutingError.backendNotConfigured(
+                provider: .gemini,
+                reason: RuleFallbackReason.consentMissing.rawValue
+            )
+        }
         guard let apiKey = Self.storedAPIKey else {
             throw IntelligenceRoutingError.backendNotConfigured(
                 provider: .gemini,
                 reason: "Gemini API key is missing"
             )
         }
+        let modelID = Self.storedModelID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !modelID.isEmpty else {
+            throw IntelligenceRoutingError.backendNotConfigured(
+                provider: .gemini,
+                reason: "Gemini model is missing"
+            )
+        }
+        return (apiKey, modelID)
+    }
 
-        let chosenModelID = modelID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? Self.defaultModelID
-            : modelID.trimmingCharacters(in: .whitespacesAndNewlines)
+    private func generateJSON(
+        systemInstruction: String,
+        userPrompt: String,
+        modelID: String
+    ) async throws -> String {
+        guard let apiKey = Self.storedAPIKey else {
+            throw IntelligenceRoutingError.backendNotConfigured(
+                provider: .gemini,
+                reason: "Gemini API key is missing"
+            )
+        }
         LLMDebugLogger.request(
             provider: "Gemini",
             operation: "generateJSON",
-            metadata: [
-                "modelID: \(chosenModelID)",
-                "responseMimeType: application/json"
-            ],
+            metadata: ["modelID: \(modelID)", "responseMimeType: application/json"],
             systemPrompt: systemInstruction,
             userPrompt: userPrompt
         )
-        guard let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/\(chosenModelID):generateContent") else {
+        guard let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/\(modelID):generateContent") else {
             throw IntelligenceRoutingError.generationFailed(
                 provider: .gemini,
                 reason: "Gemini URL 구성이 잘못되었습니다."
             )
         }
-
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.timeoutInterval = 20
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
         request.httpBody = try JSONSerialization.data(withJSONObject: [
-            "systemInstruction": [
-                "parts": [["text": systemInstruction]]
-            ],
-            "contents": [[
-                "role": "user",
-                "parts": [["text": userPrompt]]
-            ]],
-            "generationConfig": [
-                "temperature": 0.1,
-                "responseMimeType": "application/json"
-            ]
+            "systemInstruction": ["parts": [["text": systemInstruction]]],
+            "contents": [["role": "user", "parts": [["text": userPrompt]]]],
+            "generationConfig": ["temperature": 0.1, "responseMimeType": "application/json"]
         ])
 
         do {
-            let (data, response) = try await session.data(for: request)
+            let (data, response) = try await transport.data(for: request)
             guard let http = response as? HTTPURLResponse else {
-                throw IntelligenceRoutingError.generationFailed(
-                    provider: .gemini,
-                    reason: "Gemini 응답이 HTTP가 아닙니다."
-                )
+                throw IntelligenceRoutingError.generationFailed(provider: .gemini, reason: "Gemini 응답이 HTTP가 아닙니다.")
             }
-
             guard (200...299).contains(http.statusCode) else {
                 let rawBody = String(data: data, encoding: .utf8) ?? ""
                 let snippet = String(rawBody.prefix(200))
-                let reason: String
-                switch http.statusCode {
-                case 401, 403:
-                    reason = "HTTP 401/403"
-                case 429:
-                    reason = "HTTP 429"
-                default:
-                    reason = snippet.isEmpty ? "HTTP \(http.statusCode)" : "HTTP \(http.statusCode): \(snippet)"
-                }
+                let reason = [401, 403].contains(http.statusCode)
+                    ? "HTTP 401/403"
+                    : (http.statusCode == 429 ? "HTTP 429" : (snippet.isEmpty ? "HTTP \(http.statusCode)" : "HTTP \(http.statusCode): \(snippet)"))
                 throw IntelligenceRoutingError.generationFailed(provider: .gemini, reason: reason)
             }
-
             guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let candidates = json["candidates"] as? [[String: Any]],
-                  let candidate = candidates.first,
-                  let content = candidate["content"] as? [String: Any],
+                  let content = candidates.first?["content"] as? [String: Any],
                   let parts = content["parts"] as? [[String: Any]],
                   let text = parts.first?["text"] as? String,
                   !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                throw IntelligenceRoutingError.parseFailed(
-                    provider: .gemini,
-                    reason: "Gemini 응답에 JSON 텍스트가 없습니다."
-                )
+                throw IntelligenceRoutingError.parseFailed(provider: .gemini, reason: "Gemini 응답에 JSON 텍스트가 없습니다.")
             }
             LLMDebugLogger.response(provider: "Gemini", operation: "generateJSON", text: text)
             return text
+        } catch is CancellationError {
+            throw CancellationError()
         } catch let routingError as IntelligenceRoutingError {
-            LLMDebugLogger.failure(provider: "Gemini", operation: "generateJSON", error: routingError)
             throw routingError
         } catch {
-            let wrapped = IntelligenceRoutingError.generationFailed(
-                provider: .gemini,
-                reason: error.localizedDescription
-            )
-            LLMDebugLogger.failure(provider: "Gemini", operation: "generateJSON", error: wrapped)
-            throw wrapped
+            throw IntelligenceRoutingError.generationFailed(provider: .gemini, reason: error.localizedDescription)
         }
+    }
+
+    private static func parseSummary(_ raw: String) -> EmailSummaryResult? {
+        guard let json = jsonDictionary(from: raw) else { return nil }
+        let summary = (json["summary"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let keyPoints = (json["keyPoints"] as? [String] ?? []).filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        let actionItems = (json["actionItems"] as? [String] ?? []).filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        guard !summary.isEmpty || !keyPoints.isEmpty || !actionItems.isEmpty else { return nil }
+        return EmailSummaryResult(summary: summary, keyPoints: keyPoints, actionItems: actionItems)
+    }
+
+    private static func jsonDictionary(from raw: String) -> [String: Any]? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let first = trimmed.firstIndex(of: "{"),
+              let last = trimmed.lastIndex(of: "}"),
+              first <= last else { return nil }
+        return try? JSONSerialization.jsonObject(with: Data(trimmed[first...last].utf8)) as? [String: Any]
+    }
+
+    private struct MeetingPromptContext {
+        let numbered: [String]
+        let included: [MeetingSegment]
+        let glossaryBlock: String
+    }
+
+    private static func meetingPromptContext(
+        segments: [MeetingSegment],
+        glossaryHint: String,
+        language: AppLanguage
+    ) -> MeetingPromptContext {
+        var numbered = [String]()
+        var included = [MeetingSegment]()
+        var used = 0
+        for segment in segments {
+            let line = "\(included.count + 1). \(segment.text)"
+            if used + line.count > 6_000, !included.isEmpty { break }
+            included.append(segment)
+            numbered.append(line)
+            used += line.count
+        }
+        let trimmedHint = glossaryHint.trimmingCharacters(in: .whitespacesAndNewlines)
+        let glossaryBlock = trimmedHint.isEmpty ? "" : "[사용자 단어장]\n\(trimmedHint)\n\n"
+        return MeetingPromptContext(numbered: numbered, included: included, glossaryBlock: glossaryBlock)
     }
 }
 
@@ -419,7 +638,6 @@ final class GeminiIntelligenceEngine: IntelligenceService {
         let capped = Array(active.prefix(20))
         guard !capped.isEmpty else { return [] }
 
-        let modelID = GeminiProviderService.storedModelID
         let language = AppLanguage.current
         var results: [PriorityResult] = []
         results.reserveCapacity(capped.count)
@@ -441,34 +659,30 @@ final class GeminiIntelligenceEngine: IntelligenceService {
                 provider: PriorityEngine.gemini.rawValue
             ))
             do {
-                let text = try await providerService.generateJSON(
-                    systemInstruction: ScheduleLLMAdapter.systemPrompt(language: language),
-                    userPrompt: ScheduleLLMAdapter.buildScheduleInput(todos: [todo], persona: persona, events: events),
-                    modelID: modelID
-                )
+                guard var first = try await providerService.rankTodos(
+                    todos: [todo],
+                    events: events,
+                    persona: persona,
+                    language: language
+                ).first else {
+                    throw IntelligenceRoutingError.parseFailed(
+                        provider: .gemini,
+                        reason: "Gemini 응답을 우선순위 JSON으로 해석하지 못했습니다."
+                    )
+                }
                 progress?(.received(
                     index: index,
                     total: capped.count,
                     title: title,
                     provider: PriorityEngine.gemini.rawValue
                 ))
-                guard let parsed = ScheduleLLMAdapter.parseScheduleResponseV9(
-                    text: text,
-                    todos: [todo],
-                    persona: persona,
-                    engine: .gemini,
-                    language: language
-                ), var first = parsed.first else {
-                    throw IntelligenceRoutingError.parseFailed(
-                        provider: .gemini,
-                        reason: "Gemini 응답을 우선순위 JSON으로 해석하지 못했습니다."
-                    )
-                }
                 first.requestedProviderRawValue = PersonaAIProvider.gemini.rawValue
                 debugLogParsedResult(first, todo: todo, index: index, total: capped.count)
                 progress?(.applying(index: index, total: capped.count, title: title))
                 progress?(.result(first, index: index, total: capped.count, title: title))
                 results.append(first)
+            } catch is CancellationError {
+                throw CancellationError()
             } catch let routingError as IntelligenceRoutingError {
                 switch routingError {
                 case .backendNotConfigured:

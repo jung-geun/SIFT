@@ -33,26 +33,151 @@ enum PersonaAIProvider: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+
+struct PersonaRuleDraft: Equatable, Sendable {
+    let personaTypes: [PersonaType]
+    let descriptionText: String
+    let evidence: [String]
+    let confidence: BehaviorConfidence
+}
+
+/// AFM may improve only the narrative of a deterministic persona draft.
+struct PersonaNarrative: Equatable, Sendable {
+    let descriptionText: String
+    let evidence: [String]
+}
+
+
 // MARK: - Service
 
 struct PersonaGenerationService {
+    typealias NarrativeProvider = @Sendable (
+        _ existingPersona: String,
+        _ fallback: PersonaRuleDraft,
+        _ behaviorProfile: BehaviorProfile,
+        _ language: AppLanguage
+    ) async throws -> PersonaNarrative
+    typealias RoutingDecisionProvider = @Sendable () -> ProviderRoutingDecision
+    typealias AvailabilityProvider = () -> Bool
+
+    private let narrativeProvider: NarrativeProvider
+    private let routingDecisionProvider: RoutingDecisionProvider
+    private let availabilityProvider: AvailabilityProvider
+
+    init(
+        narrativeProvider: @escaping NarrativeProvider = Self.liveNarrative,
+        routingDecisionProvider: @escaping RoutingDecisionProvider = {
+            BetaFeaturePolicy().routingDecision(for: .standardAnalysis)
+        },
+        availabilityProvider: @escaping AvailabilityProvider = {
+            FoundationModelsAvailability.isAvailable
+        }
+    ) {
+        self.narrativeProvider = narrativeProvider
+        self.routingDecisionProvider = routingDecisionProvider
+        self.availabilityProvider = availabilityProvider
+    }
+
 
     // MARK: Entry Point
 
     func generate(
         existingPersona: String,
         todos: [Todo],
-        auditEvents: [TaskAuditEvent] = [],
-        behaviorEvents: [TaskBehaviorEvent] = [],
-        provider _: PersonaAIProvider,
+        context: BehaviorAnalysisContext,
+        now: Date,
         language: AppLanguage = .current
-    ) async throws -> (personaText: String, insights: [String]) {
-        generateHeuristicPersona(
+    ) async throws -> PersonaRuleDraft {
+        let fallback = generateRuleBased(
             existingPersona: existingPersona,
             todos: todos,
-            auditEvents: auditEvents,
-            behaviorEvents: behaviorEvents,
+            context: context,
+            now: now,
             language: language
+        )
+        guard routingDecisionProvider() == .providers([.foundationModels]),
+              availabilityProvider()
+        else {
+            return fallback
+        }
+
+        do {
+            let narrative = try await narrativeProvider(
+                existingPersona,
+                fallback,
+                context.behaviorProfile,
+                language
+            )
+            let description = narrative.descriptionText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !description.isEmpty else { return fallback }
+            let evidence = narrative.evidence
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            return PersonaRuleDraft(
+                personaTypes: fallback.personaTypes,
+                descriptionText: description,
+                evidence: evidence.isEmpty ? fallback.evidence : Array(evidence.prefix(3)),
+                confidence: fallback.confidence
+            )
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            return fallback
+        }
+
+    }
+
+    func generateRuleBased(
+        existingPersona: String,
+        todos _: [Todo],
+        context: BehaviorAnalysisContext,
+        now _: Date,
+        language: AppLanguage = .current
+    ) -> PersonaRuleDraft {
+        let tagCounts = context.todos
+            .filter { !$0.isDeleted && $0.triage == .todo }
+            .flatMap(\.tags)
+            .reduce(into: [String: Int]()) { counts, tag in counts[tag, default: 0] += 1 }
+        let topTags = tagCounts
+            .filter { $0.value >= 5 }
+            .sorted { $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value }
+            .prefix(3)
+            .map(\.key)
+        let typeNames = context.personaTypes.map { $0.displayName }.joined(separator: language == .english ? ", " : ", ")
+        let classificationNames = context.behaviorProfile.classifications
+            .map { $0.label.rawValue }
+            .sorted()
+        let metricNames = context.behaviorProfile.insights
+            .filter { $0.confidence.allowsPersonalization }
+            .map { $0.metric.rawValue }
+            .sorted()
+        var evidence: [String] = []
+        if !topTags.isEmpty {
+            evidence.append(language == .english
+                ? "Frequent tags: \(topTags.joined(separator: ", "))"
+                : "자주 사용한 태그: \(topTags.joined(separator: ", "))")
+        }
+        if !classificationNames.isEmpty {
+            evidence.append(language == .english
+                ? "Behavior classifications: \(classificationNames.joined(separator: ", "))"
+                : "행동 분류: \(classificationNames.joined(separator: ", "))")
+        }
+        if !metricNames.isEmpty {
+            evidence.append(language == .english
+                ? "Reliable metrics: \(metricNames.prefix(3).joined(separator: ", "))"
+                : "신뢰 가능한 지표: \(metricNames.prefix(3).joined(separator: ", "))")
+        }
+        let existingNote = existingPersona.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? ""
+            : language == .english ? " Existing description remains unchanged until you apply this draft." : " 적용하기 전까지 기존 설명은 변경되지 않는다."
+        let description = language == .english
+            ? "Rule-based persona for \(typeNames.isEmpty ? "the selected life context" : typeNames).\(existingNote)"
+            : "\(typeNames.isEmpty ? "선택된 생활 맥락" : typeNames)을 위한 규칙 기반 페르소나이다.\(existingNote)"
+        return PersonaRuleDraft(
+            personaTypes: context.personaTypes,
+            descriptionText: description,
+            evidence: Array(evidence.prefix(3)),
+            confidence: context.behaviorProfile.confidence
         )
     }
 
@@ -154,6 +279,33 @@ struct PersonaGenerationService {
             personaText: Array(personaSentences.prefix(4)).joined(separator: " "),
             insights: Array(insights.prefix(3))
         )
+    }
+
+    private static func liveNarrative(
+        existingPersona: String,
+        fallback: PersonaRuleDraft,
+        behaviorProfile: BehaviorProfile,
+        language: AppLanguage
+    ) async throws -> PersonaNarrative {
+        #if canImport(FoundationModels)
+        guard #available(iOS 26.0, *), FoundationModelsAvailability.isAvailable else {
+            throw IntelligenceRoutingError.backendUnavailable(
+                provider: .foundationModels,
+                reason: RuleFallbackReason.unavailable.rawValue
+            )
+        }
+        return try await FoundationModelsService().generatePersonaNarrative(
+            existingPersona: existingPersona,
+            fallback: fallback,
+            behaviorProfile: behaviorProfile,
+            language: language
+        )
+        #else
+        throw IntelligenceRoutingError.backendUnavailable(
+            provider: .foundationModels,
+            reason: RuleFallbackReason.unavailable.rawValue
+        )
+        #endif
     }
 
 }

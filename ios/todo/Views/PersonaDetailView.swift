@@ -11,7 +11,7 @@ struct PersonaDetailView: View {
     @Query private var behaviorEvents: [TaskBehaviorEvent]
     
     @State private var isGenerating = false
-    @State private var generationResult: (personaText: String, insights: [String])?
+    @State private var generationResult: PersonaRuleDraft?
     @State private var errorMessage: String?
     @State private var showError = false
     @State private var showOnboardingResetup = false
@@ -88,7 +88,11 @@ struct PersonaDetailView: View {
                     
                     
                     if let result = generationResult {
-                        generationResultCard(result)
+                        generationResultCard(
+                            result,
+                            existingDescription: desc,
+                            existingTypes: types
+                        )
                     }
                 } else {
                     ProgressView()
@@ -122,10 +126,8 @@ struct PersonaDetailView: View {
             tutorial?.handlePersonaDetailClosed()
         }
         .safeAreaInset(edge: .bottom, spacing: 12) {
-            if let tutorial, let hint = tutorial.hint(for: .personaDetail) {
-                AppTutorialHintCard(hint: hint)
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 12)
+            if let tutorial {
+                AppTutorialTipHost(tutorial: tutorial, screen: .personaDetail)
             }
         }
         .sheet(isPresented: $showOnboardingResetup) {
@@ -139,43 +141,88 @@ struct PersonaDetailView: View {
     }
     
     @ViewBuilder
-    private func generationResultCard(_ result: (personaText: String, insights: [String])) -> some View {
+    private func generationResultCard(
+        _ result: PersonaRuleDraft,
+        existingDescription: String,
+        existingTypes: [PersonaType]
+    ) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            Label("생성된 페르소나", systemImage: "checkmark.circle")
+            Label("페르소나 미리보기", systemImage: "person.crop.circle.badge.checkmark")
                 .font(.subheadline.bold())
                 .foregroundStyle(.green)
-            
-            Text(result.personaText)
-                .font(.body)
-                .padding(10)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
-            
-            if !result.insights.isEmpty {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("발견된 패턴")
+
+            HStack(alignment: .top, spacing: 8) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("현재")
                         .font(.caption.bold())
                         .foregroundStyle(.secondary)
-                    ForEach(result.insights, id: \.self) { insight in
+                    Text(existingTypes.map(\.displayName).joined(separator: ", ").isEmpty
+                         ? "선택된 유형 없음"
+                         : existingTypes.map(\.displayName).joined(separator: ", "))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(existingDescription.isEmpty ? "설명 없음" : existingDescription)
+                        .font(.body)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+                .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("초안")
+                        .font(.caption.bold())
+                        .foregroundStyle(.tint)
+                    Text(result.personaTypes.map(\.displayName).joined(separator: ", ").isEmpty
+                         ? "선택된 유형 없음"
+                         : result.personaTypes.map(\.displayName).joined(separator: ", "))
+                        .font(.caption)
+                        .foregroundStyle(.tint)
+                    Text(result.descriptionText)
+                        .font(.body)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+                .background(Color.accentColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
+            }
+
+            Label(
+                "신뢰도: \(result.confidence.label(language: .current))",
+                systemImage: "checkmark.seal"
+            )
+            .font(.caption.bold())
+            .foregroundStyle(.secondary)
+
+            if !result.evidence.isEmpty {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("근거")
+                        .font(.caption.bold())
+                        .foregroundStyle(.secondary)
+                    ForEach(result.evidence, id: \.self) { insight in
                         Text("• \(insight)")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                 }
             }
-            
+
+            Text("적용하기 전에는 현재 설명과 유형이 변경되지 않습니다.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
             HStack(spacing: 8) {
                 Button("이 페르소나 사용") { applyGeneratedPersona() }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
-                
+
                 Button("다시 생성") {
                     generationResult = nil
                     Task { await runGeneration() }
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
-                
+
                 Button("취소") { generationResult = nil }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
@@ -190,24 +237,39 @@ struct PersonaDetailView: View {
         defer { isGenerating = false }
         do {
             let existing = personas.first?.descriptionText ?? ""
-            let provider = SettingsStore.selectedProvider()
-            let result = try await generationService.generate(
-                existingPersona: existing,
+            let now = Date()
+            let analysis = MemoryService.computeAnalysis(
                 todos: todos,
                 auditEvents: auditEvents,
                 behaviorEvents: behaviorEvents,
-                provider: provider
+                now: now,
+                language: .current
             )
-            generationResult = result
+            let context = BehaviorAnalysisContextBuilder.make(
+                todos: todos,
+                auditEvents: auditEvents,
+                behaviorEvents: behaviorEvents,
+                now: now,
+                calendar: Calendar.current,
+                behaviorProfile: analysis.behaviorProfile,
+                personaTypes: personas.first?.personaTypes ?? []
+            )
+            generationResult = try await generationService.generate(
+                existingPersona: existing,
+                todos: todos,
+                context: context,
+                now: now
+            )
         } catch {
             errorMessage = error.localizedDescription
             showError = true
         }
+
     }
-    
     private func applyGeneratedPersona() {
         guard let result = generationResult, let p = personas.first else { return }
-        p.descriptionText = result.personaText
+        p.personaTypes = result.personaTypes
+        p.descriptionText = result.descriptionText
         p.updatedAt = Date()
         generationResult = nil
     }

@@ -83,6 +83,121 @@ struct FMAvailabilityMessagingTests {
 #if canImport(FoundationModels)
 import FoundationModels
 
+
+@available(iOS 26.0, *)
+private final class CapturingEmailSummaryRuntime: @unchecked Sendable, FoundationModelsRuntime {
+    private let output: FMEmailSummaryOutput
+    private let lock = NSLock()
+    private var lastInstructions = ""
+    private var lastPrompt = ""
+
+    init(output: FMEmailSummaryOutput) {
+        self.output = output
+    }
+
+    func rankTodos(
+        instructions: String,
+        userPrompt: String,
+        options: GenerationOptions
+    ) async throws -> FMPriorityRankingList { fatalError("unexpected runtime call") }
+
+    func analyzeEmail(
+        instructions: String,
+        userPrompt: String
+    ) async throws -> FMEmailOutput { fatalError("unexpected runtime call") }
+
+    func summarizeEmail(
+        instructions: String,
+        userPrompt: String
+    ) async throws -> FMEmailSummaryOutput {
+        lock.withLock {
+            lastInstructions = instructions
+            lastPrompt = userPrompt
+        }
+        return output
+    }
+
+    func generatePersonaNarrative(
+        instructions: String,
+        userPrompt: String
+    ) async throws -> FMPersonaNarrativeOutput { fatalError("unexpected runtime call") }
+
+    func narrateBehavior(
+        instructions: String,
+        userPrompt: String
+    ) async throws -> FMBehaviorNarrativeOutput { fatalError("unexpected runtime call") }
+
+
+    func analyzeMeeting(
+        instructions: String,
+        userPrompt: String
+    ) async throws -> FMMeetingExtractionOutput { fatalError("unexpected runtime call") }
+
+    func correctTranscript(
+        instructions: String,
+        userPrompt: String,
+        options: GenerationOptions
+    ) async throws -> FMTranscriptCorrectionOutput { fatalError("unexpected runtime call") }
+
+    func draftTodoFromEmail(
+        instructions: String,
+        userPrompt: String
+    ) async throws -> FMEmailTodoDraftOutput { fatalError("unexpected runtime call") }
+
+    func request() async -> (instructions: String, prompt: String) {
+        lock.withLock {
+            (lastInstructions, lastPrompt)
+        }
+    }
+}
+
+@available(iOS 26.0, *)
+private struct NarrativeRuntime: FoundationModelsRuntime {
+    let personaOutput: FMPersonaNarrativeOutput
+    let behaviorOutput: FMBehaviorNarrativeOutput
+
+    func rankTodos(
+        instructions: String,
+        userPrompt: String,
+        options: GenerationOptions
+    ) async throws -> FMPriorityRankingList { fatalError("unexpected runtime call") }
+
+    func analyzeEmail(
+        instructions: String,
+        userPrompt: String
+    ) async throws -> FMEmailOutput { fatalError("unexpected runtime call") }
+
+    func summarizeEmail(
+        instructions: String,
+        userPrompt: String
+    ) async throws -> FMEmailSummaryOutput { fatalError("unexpected runtime call") }
+
+    func generatePersonaNarrative(
+        instructions: String,
+        userPrompt: String
+    ) async throws -> FMPersonaNarrativeOutput { personaOutput }
+
+    func narrateBehavior(
+        instructions: String,
+        userPrompt: String
+    ) async throws -> FMBehaviorNarrativeOutput { behaviorOutput }
+
+    func analyzeMeeting(
+        instructions: String,
+        userPrompt: String
+    ) async throws -> FMMeetingExtractionOutput { fatalError("unexpected runtime call") }
+
+    func correctTranscript(
+        instructions: String,
+        userPrompt: String,
+        options: GenerationOptions
+    ) async throws -> FMTranscriptCorrectionOutput { fatalError("unexpected runtime call") }
+
+    func draftTodoFromEmail(
+        instructions: String,
+        userPrompt: String
+    ) async throws -> FMEmailTodoDraftOutput { fatalError("unexpected runtime call") }
+}
 // MARK: - 가용성 프로브
 
 @Suite("FM 가용성 프로브")
@@ -101,10 +216,127 @@ struct FMAvailabilityProbeTests {
     }
 }
 
+@Suite("FM email summary adapter", .serialized)
+@MainActor
+struct FMEmailSummaryAdapterTests {
+    @Test("Guided Generation output is normalized into a detail-card summary")
+    func summarizesEmailWithTypedOutput() async throws {
+        guard #available(iOS 26.0, *) else { return }
+        try await AIProviderTestIsolation.shared.withLock {
+            let defaults = UserDefaults.standard
+            let enabledKey = SettingsStore.betaFoundationModelsEnabledKey
+            let selectedKey = SettingsStore.betaSelectedProviderKey
+            let originalEnabled = defaults.object(forKey: enabledKey)
+            let originalSelection = defaults.object(forKey: selectedKey)
+            defer {
+                if let originalEnabled {
+                    defaults.set(originalEnabled, forKey: enabledKey)
+                } else {
+                    defaults.removeObject(forKey: enabledKey)
+                }
+                if let originalSelection {
+                    defaults.set(originalSelection, forKey: selectedKey)
+                } else {
+                    defaults.removeObject(forKey: selectedKey)
+                }
+            }
+            defaults.set(true, forKey: enabledKey)
+            defaults.set(PersonaAIProvider.foundationModels.rawValue, forKey: selectedKey)
+
+            let body = String(repeating: "x", count: 1_500) + "TRUNCATED"
+            let runtime = CapturingEmailSummaryRuntime(
+                output: FMEmailSummaryOutput(
+                    summary: "  Submit the proposal by Friday.  ",
+                    keyPoints: [" Deadline: Friday ", "", "Owner: Product team"],
+                    actionItems: [" Reply with the final proposal ", ""]
+                )
+            )
+            let service = FoundationModelsService(runtime: runtime)
+            let result = try await service.summarizeEmail(
+                subject: "Proposal review",
+                sender: "Product team <product@example.com>",
+                body: body,
+                language: .english
+            )
+            let request = await runtime.request()
+
+            #expect(result.summary == "Submit the proposal by Friday.")
+            #expect(result.keyPoints == ["Deadline: Friday", "Owner: Product team"])
+            #expect(result.actionItems == ["Reply with the final proposal"])
+            #expect(request.instructions.contains("single email"))
+            #expect(request.instructions.contains("untrusted data"))
+            #expect(request.prompt.contains("<email>"))
+            #expect(request.prompt.contains("</email>"))
+            #expect(request.prompt.contains("Proposal review"))
+            #expect(request.prompt.contains("Product team <product@example.com>"))
+            #expect(request.prompt.contains(String(repeating: "x", count: 1_500)))
+            #expect(!request.prompt.contains("TRUNCATED"))
+        }
+    }
+
+    @Test("Guided Generation outputs map to persona and behavior narratives")
+    func mapsNarrativeOutputs() async throws {
+        guard #available(iOS 26.0, *) else { return }
+        try await AIProviderTestIsolation.shared.withLock {
+            let defaults = UserDefaults.standard
+            let enabledKey = SettingsStore.betaFoundationModelsEnabledKey
+            let selectedKey = SettingsStore.betaSelectedProviderKey
+            let originalEnabled = defaults.object(forKey: enabledKey)
+            let originalSelection = defaults.object(forKey: selectedKey)
+            defer {
+                if let originalEnabled { defaults.set(originalEnabled, forKey: enabledKey) }
+                else { defaults.removeObject(forKey: enabledKey) }
+                if let originalSelection { defaults.set(originalSelection, forKey: selectedKey) }
+                else { defaults.removeObject(forKey: selectedKey) }
+            }
+            defaults.set(true, forKey: enabledKey)
+            defaults.set(PersonaAIProvider.foundationModels.rawValue, forKey: selectedKey)
+
+            let runtime = NarrativeRuntime(
+                personaOutput: FMPersonaNarrativeOutput(
+                    descriptionText: "Grounded persona.",
+                    evidence: ["Observed evidence."]
+                ),
+                behaviorOutput: FMBehaviorNarrativeOutput(
+                    summary: "Observed behavior summary.",
+                    insights: ["Observed insight."]
+                )
+            )
+            let service = FoundationModelsService(runtime: runtime)
+            let baseline = MemoryService.computeAnalysis(todos: [], language: .english)
+            let persona = try await service.generatePersonaNarrative(
+                existingPersona: "",
+                fallback: PersonaRuleDraft(
+                    personaTypes: [],
+                    descriptionText: "Rule draft.",
+                    evidence: [],
+                    confidence: baseline.behaviorProfile.confidence
+                ),
+                behaviorProfile: baseline.behaviorProfile,
+                language: .english
+            )
+            let behavior = try await service.narrateBehavior(
+                baseline: baseline,
+                language: .english
+            )
+
+            #expect(persona == PersonaNarrative(
+                descriptionText: "Grounded persona.",
+                evidence: ["Observed evidence."]
+            ))
+            #expect(behavior == BehaviorNarrative(
+                summary: "Observed behavior summary.",
+                insights: ["Observed insight."]
+            ))
+        }
+    }
+}
+
 
 // MARK: - 우선순위 랭킹 스모크
 
 @Suite("FM 우선순위 랭킹 스모크")
+@MainActor
 struct FMRankingsSmokeTests {
 
     @Test("rankTodos: score 0.01~1.0, todoID 역참조 성공")
@@ -112,7 +344,7 @@ struct FMRankingsSmokeTests {
         if #available(iOS 26.0, *) {
             guard FoundationModelsAvailability.isAvailable else { return }
             let service = FoundationModelsService()
-            var todos = makeTodos(["iOS 26 마이그레이션", "주간 회의 준비", "유닛 테스트 작성"])
+            let todos = makeTodos(["iOS 26 마이그레이션", "주간 회의 준비", "유닛 테스트 작성"])
             todos[0].dueDate = Date().addingTimeInterval(86_400 * 3)   // 3일 후 마감
             let persona = PersonaContext(types: [], description: "iOS 개발자")
             let results = try await service.rankTodos(todos: todos, events: [], persona: persona)
@@ -132,6 +364,7 @@ struct FMRankingsSmokeTests {
 // MARK: - 이메일 마감 추출 스모크
 
 @Suite("FM 이메일 마감 추출 스모크")
+@MainActor
 struct FMEmailSmokeTests {
 
     @Test("마감 포함 메일 → dueDate > now (추론 정상)")
@@ -184,7 +417,7 @@ struct FMEmailSmokeTests {
 
 private func makeTodos(_ titles: [String]) -> [Todo] {
     titles.map { title in
-        var t = Todo()
+        let t = Todo()
         t.title = title
         return t
     }
