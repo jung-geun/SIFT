@@ -47,3 +47,7 @@ Thumbs.db
 /artifacts/
 /backend/meeting-api/node_modules/
 /backend/meeting-api/dist/
+
+# Local Xcode build artifacts
+/ios/.xcode-derived-data/
+/ios/.derived-data-log-*
