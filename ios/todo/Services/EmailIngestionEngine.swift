@@ -53,11 +53,12 @@ struct EmailIngestionEngine {
         language: AppLanguage = .current
     ) async throws -> [Todo] {
         let engine = EmailAnalysisEngineFactory.makeEngine(allowFoundationModels: allowFoundationModels)
-        guard let extraction = await engine.analyze(
+        let outcome = try await engine.analyze(
             message,
             now: Date(),
             language: language
-        ) else {
+        )
+        guard let extraction = outcome.value else {
             return []
         }
 

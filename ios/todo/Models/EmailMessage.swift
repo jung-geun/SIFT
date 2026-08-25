@@ -1,12 +1,12 @@
 import Foundation
 import SwiftData
 
-enum MailProvider: String, Codable, CaseIterable, Hashable, Sendable {
+nonisolated enum MailProvider: String, Codable, CaseIterable, Hashable, Sendable {
     case gmail
     case outlook
 }
 
-enum EmailAnalysisState: String, Codable, CaseIterable {
+nonisolated enum EmailAnalysisState: String, Codable, CaseIterable {
     case unanalyzed
     case analyzing
     case analyzed
@@ -30,6 +30,8 @@ final class EmailMessage {
     var isRead: Bool = false
     var providerRawValue: String = MailProvider.gmail.rawValue
     var rawMessageID: String = ""
+    /// Provider-native immutable message identity: Gmail X-GM-MSGID or Outlook RFC Message-ID.
+    var providerGlobalMessageID: String = ""
     var labelIDs: [String] = []
     var isInInbox: Bool = false
     var outlookInferenceClassificationRawValue: String = ""
@@ -45,6 +47,8 @@ final class EmailMessage {
     var analysisKeyPoints: [String] = []
     var analysisActionItems: [String] = []
     var analysisError: String = ""
+    /// Stable provider/rules fallback reason; legacy rows remain unknown.
+    var analysisFailureReasonRaw: String? = nil
     var analyzedBodyFingerprint: String = ""
     var analyzedAt: Date? = nil
     /// Bump when the structured summary prompt or model contract changes.
@@ -102,6 +106,7 @@ final class EmailMessage {
         isRead: Bool = false,
         provider: MailProvider = .gmail,
         rawMessageID: String? = nil,
+        providerGlobalMessageID: String = "",
         labelIDs: [String] = [],
         isInInbox: Bool = false,
         outlookInferenceClassificationRawValue: String = "",
@@ -120,6 +125,7 @@ final class EmailMessage {
         self.isRead = isRead
         self.providerRawValue = provider.rawValue
         self.rawMessageID = rawMessageID ?? id
+        self.providerGlobalMessageID = providerGlobalMessageID
         self.labelIDs = labelIDs
         self.isInInbox = isInInbox
         self.outlookInferenceClassificationRawValue = outlookInferenceClassificationRawValue
@@ -205,10 +211,12 @@ enum OutlookInboxClassification: String, Codable, CaseIterable, Hashable, Sendab
     case other
 }
 
-struct MailboxMessageMetadata: Sendable {
+nonisolated struct MailboxMessageMetadata: Sendable {
     let provider: MailProvider
     let providerMessageID: String
-    let sourceAccountNamespace: String = ""
+    /// Provider-native immutable identity: Gmail X-GM-MSGID or Outlook RFC Message-ID.
+    let providerGlobalMessageID: String
+    let sourceAccountNamespace: String
     let threadID: String
     let subject: String
     let from: String
@@ -220,20 +228,82 @@ struct MailboxMessageMetadata: Sendable {
     let outlookInferenceClassificationRawValue: String
     let providerCategoryNames: [String]
     let providerFolderID: String
+
+    init(
+        provider: MailProvider,
+        providerMessageID: String,
+        providerGlobalMessageID: String = "",
+        sourceAccountNamespace: String = "",
+        threadID: String,
+        subject: String,
+        from: String,
+        snippet: String,
+        receivedAt: Date,
+        isRead: Bool,
+        isInInbox: Bool,
+        gmailLabelIDs: [String],
+        outlookInferenceClassificationRawValue: String,
+        providerCategoryNames: [String],
+        providerFolderID: String
+    ) {
+        self.provider = provider
+        self.providerMessageID = providerMessageID
+        self.providerGlobalMessageID = providerGlobalMessageID
+        self.sourceAccountNamespace = sourceAccountNamespace
+        self.threadID = threadID
+        self.subject = subject
+        self.from = from
+        self.snippet = snippet
+        self.receivedAt = receivedAt
+        self.isRead = isRead
+        self.isInInbox = isInInbox
+        self.gmailLabelIDs = gmailLabelIDs
+        self.outlookInferenceClassificationRawValue = outlookInferenceClassificationRawValue
+        self.providerCategoryNames = providerCategoryNames
+        self.providerFolderID = providerFolderID
+    }
 }
 
-struct MailboxPage: Sendable {
+nonisolated struct MailboxPage: Sendable {
     let messages: [MailboxMessageMetadata]
+    /// Cursor for the next strictly-older UI page. nil = oldest mail reached.
     let nextCursor: String?
+    /// Proposed durable cursor for the next newer-sync request. The caller persists
+    /// it only after this page's local upsert/reconciliation succeeds.
+    let newestCursor: String?
+    /// True when the current newer-sync round has another provider continuation page.
+    let hasMoreUpdates: Bool
+    /// Provider-scoped local rows removed from the active inbox by this delta page.
+    let removedMessageKeys: Set<EmailMessageKey>
+    /// True on the final page of a provider full-resync recovery or a Gmail UIDVALIDITY mismatch;
+    /// the caller must run the existing full inbox-ID reconciliation because pre-reset deletions
+    /// or stale namespace IDs are not present in a new initial delta / head round.
+    let requiresInboxReconcile: Bool
+
+    init(
+        messages: [MailboxMessageMetadata],
+        nextCursor: String?,
+        newestCursor: String? = nil,
+        hasMoreUpdates: Bool = false,
+        removedMessageKeys: Set<EmailMessageKey> = [],
+        requiresInboxReconcile: Bool = false
+    ) {
+        self.messages = messages
+        self.nextCursor = nextCursor
+        self.newestCursor = newestCursor
+        self.hasMoreUpdates = hasMoreUpdates
+        self.removedMessageKeys = removedMessageKeys
+        self.requiresInboxReconcile = requiresInboxReconcile
+    }
 }
 
-struct MailboxMessageContent: Sendable {
+nonisolated struct MailboxMessageContent: Sendable {
     let metadata: MailboxMessageMetadata
     let body: String
     let htmlBody: String
 }
 
-struct EmailMessageKey: Hashable, Sendable {
+nonisolated struct EmailMessageKey: Hashable, Sendable {
     let providerRawValue: String
     let sourceAccountNamespace: String
     let providerMessageID: String
@@ -301,4 +371,11 @@ struct MailboxPagingState: Equatable {
     var canLoadMore: Bool {
         hasLoadedInitialPage && nextCursor != nil
     }
+}
+
+enum MailboxPagingPolicy {
+    nonisolated static let pageSize = 100
+    nonisolated static let updatesMinimumInterval: TimeInterval = 30
+    nonisolated static let pollInterval: TimeInterval = 5 * 60
+    nonisolated static let maxUpdateDrainPages = 10
 }

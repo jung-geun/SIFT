@@ -31,7 +31,7 @@ struct MailboxMutationTests {
         into context: ModelContext
     ) throws -> EmailMessage {
         let email = EmailMessage(
-            id: "message-id",
+            id: provider == .gmail ? "gmail-imap:global-message-id" : "message-id",
             subject: "Subject",
             provider: provider,
             rawMessageID: "message-id",
@@ -130,7 +130,8 @@ struct MailboxMutationTests {
                 PendingMailboxMutation(
                     providerRawValue: MailProvider.gmail.rawValue,
                     providerMessageID: "message-id",
-                    action: .markAsRead
+                    action: .markAsRead,
+                    expectedGlobalMessageID: "global-message-id"
                 )
             ]
         )
@@ -165,11 +166,11 @@ struct MailboxMutationTests {
         #expect(remoteCallCount == 1)
     }
 
-    @Test("trash remote 실패는 row를 유지하고 성공은 remote 뒤 local delete한다")
+    @Test("trash remote failure keeps the row and success hides its retained cache")
     func testTrashOrderingAndRemoteFailure() async throws {
         let failedContainer = try makeContainer()
         let failedContext = ModelContext(failedContainer)
-        let failedEmail = try insertEmail(provider: .outlook, into: failedContext)
+        let failedEmail = try insertEmail(provider: .gmail, into: failedContext)
         let store = MailboxLocalStore(
             defaults: try makeDefaults(),
             saveContext: { try $0.save() }
@@ -185,24 +186,30 @@ struct MailboxMutationTests {
 
         let successContainer = try makeContainer()
         let successContext = ModelContext(successContainer)
-        let successEmail = try insertEmail(provider: .outlook, into: successContext)
-        var observedBeforeLocalDelete = false
+        let successEmail = try insertEmail(provider: .gmail, into: successContext)
+        successEmail.analysisKeyPoints = ["Retained after trash"]
+        try successContext.save()
+        var observedBeforeLocalHide = false
         var remoteCallCount = 0
         try await store.trash(successEmail, in: successContext) {
             remoteCallCount += 1
-            observedBeforeLocalDelete = successEmail.isInInbox
+            observedBeforeLocalHide = successEmail.isInInbox
                 && !successEmail.isDeleted
         }
-        #expect(observedBeforeLocalDelete)
+        #expect(observedBeforeLocalHide)
         #expect(remoteCallCount == 1)
-        #expect(try successContext.fetch(FetchDescriptor<EmailMessage>()).isEmpty)
+        let retained = try #require(successContext.fetch(FetchDescriptor<EmailMessage>()).first)
+        #expect(!retained.isInInbox)
+        #expect(retained.analysisKeyPoints == ["Retained after trash"])
     }
 
-    @Test("trash local save 실패는 pending을 남기고 replay가 row를 삭제한다")
+    @Test("trash local save failure leaves pending and replay hides the retained row")
     func testTrashLocalSaveFailureReplaysWithoutRemoteRetry() async throws {
         let container = try makeContainer()
         let context = ModelContext(container)
-        let email = try insertEmail(provider: .outlook, into: context)
+        let email = try insertEmail(provider: .gmail, into: context)
+        email.analysisKeyPoints = ["Retained after replay"]
+        try context.save()
         let defaults = try makeDefaults()
         var remoteCallCount = 0
         let failingStore = MailboxLocalStore(
@@ -220,7 +227,7 @@ struct MailboxMutationTests {
                 Issue.record("Unexpected mailbox mutation error")
                 return
             }
-            #expect(provider == .outlook)
+            #expect(provider == .gmail)
             #expect(action == .trash)
         }
         #expect(remoteCallCount == 1)
@@ -228,9 +235,10 @@ struct MailboxMutationTests {
         #expect(
             MailboxPendingMutationStore(defaults: defaults).mutations.contains(
                 PendingMailboxMutation(
-                    providerRawValue: MailProvider.outlook.rawValue,
+                    providerRawValue: MailProvider.gmail.rawValue,
                     providerMessageID: "message-id",
-                    action: .trash
+                    action: .trash,
+                    expectedGlobalMessageID: "global-message-id"
                 )
             )
         )
@@ -242,8 +250,320 @@ struct MailboxMutationTests {
             saveContext: { try $0.save() }
         )
         try replayStore.replayPendingMutations(in: replayContext)
-        #expect(try replayContext.fetch(FetchDescriptor<EmailMessage>()).isEmpty)
+        let replayed = try #require(replayContext.fetch(FetchDescriptor<EmailMessage>()).first)
+        #expect(!replayed.isInInbox)
+        #expect(replayed.analysisKeyPoints == ["Retained after replay"])
         #expect(MailboxPendingMutationStore(defaults: defaults).mutations.isEmpty)
         #expect(remoteCallCount == 1)
+    }
+
+    @Test("new deletion replaces the undo action and returns the superseded batch for commit")
+    func testLatestDeletionReplacesUndoAction() throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let first = try insertEmail(provider: .gmail, into: context)
+        let second = try insertEmail(provider: .outlook, into: context)
+        var queue = MailTrashUndoQueue()
+
+        let firstBatch = queue.enqueue([first])
+        let replacement = queue.replaceUndoableBatch(with: [second], mutations: [])
+
+        #expect(replacement.superseded.map(\.id) == [firstBatch.id])
+        #expect(queue.latestUndoableBatch?.id == replacement.latest.id)
+        #expect(queue.pendingEmailIDs == Set([second.localListID]))
+
+        let committing = queue.beginCommit(id: replacement.latest.id)
+        #expect(committing?.phase == .committing)
+        #expect(queue.latestUndoableBatch == nil)
+    }
+
+    @Test("local-first trash hides immediately and undo restores the cached row")
+    func testStageTrashAndUndoAreLocalFirst() throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let email = try insertEmail(provider: .gmail, into: context)
+        let defaults = try makeDefaults()
+        let store = MailboxLocalStore(
+            defaults: defaults,
+            saveContext: { try $0.save() }
+        )
+
+        let mutations = try store.stageTrash([email], in: context)
+
+        #expect(!email.isInInbox)
+        #expect(try context.fetch(FetchDescriptor<EmailMessage>()).count == 1)
+        #expect(store.stagedTrashMutations == mutations)
+
+        #expect(try store.restoreStagedTrash([email], mutations: mutations, in: context))
+
+        #expect(email.isInInbox)
+        #expect(store.stagedTrashMutations.isEmpty)
+    }
+
+    @Test("detail-style trash hides locally before the remote IMAP request")
+    func testDetailStyleTrashHidesBeforeRemoteFlush() async throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let email = try insertEmail(provider: .gmail, into: context)
+        let store = MailboxLocalStore(
+            defaults: try makeDefaults(),
+            saveContext: { try $0.save() }
+        )
+
+        let mutations = try store.stageTrash([email], in: context)
+        #expect(!email.isInInbox)
+
+        var remoteObservedLocalHide = false
+        let flushed = await store.flushStagedTrash(
+            mutations,
+            now: .distantFuture
+        ) { _ in
+            remoteObservedLocalHide = !email.isInInbox
+        }
+
+        #expect(flushed == 1)
+        #expect(remoteObservedLocalHide)
+        #expect(store.stagedTrashMutations.isEmpty)
+    }
+
+    @Test("Outlook trash without a persisted Message-ID is rejected before local staging")
+    func testStageTrashRejectsOutlookWithoutMessageIdentity() throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let email = try insertEmail(provider: .outlook, into: context)
+        let store = MailboxLocalStore(
+            defaults: try makeDefaults(),
+            saveContext: { try $0.save() }
+        )
+
+        #expect(throws: MailboxMutationError.self) {
+            _ = try store.stageTrash([email], in: context)
+        }
+        #expect(email.isInInbox)
+        #expect(store.stagedTrashMutations.isEmpty)
+    }
+
+    @Test("an Outlook UID reuse cannot apply a staged-trash mask to a new Message-ID")
+    func testStagedOutlookTrashMaskRequiresOriginalMessageIdentity() throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let email = try insertEmail(provider: .outlook, into: context)
+        email.providerGlobalMessageID = "original-message-id"
+        try context.save()
+        let store = MailboxLocalStore(
+            defaults: try makeDefaults(),
+            saveContext: { try $0.save() }
+        )
+        let mutations = try store.stageTrash([email], in: context, now: .distantPast)
+
+        email.providerGlobalMessageID = "reused-uid-new-message-id"
+        email.isInInbox = true
+        try context.save()
+        try store.replayPendingMutations(in: context)
+
+        #expect(email.isInInbox)
+        #expect(store.stagedTrashMutations == mutations)
+    }
+
+    @Test("Outlook UID reuse in upsert clears stale body and analysis when identity changes")
+    func testOutlookUIDReuseClearsStaleBodyAndAnalysis() throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let email = try insertEmail(provider: .outlook, into: context)
+        email.providerGlobalMessageID = "msg-1"
+        email.body = "Old body"
+        email.htmlBody = "<p>Old body</p>"
+        email.analysisState = .analyzed
+        email.analysisSummary = "Old summary"
+        try context.save()
+
+        let store = MailboxLocalStore(
+            defaults: try makeDefaults(),
+            saveContext: { try $0.save() }
+        )
+
+        let newMetadata = MailboxMessageMetadata(
+            provider: .outlook,
+            providerMessageID: email.providerMessageID,
+            providerGlobalMessageID: "msg-2",
+            sourceAccountNamespace: email.sourceAccountNamespace,
+            threadID: "",
+            subject: "New Subject",
+            from: "sender@outlook.com",
+            snippet: "New snippet",
+            receivedAt: Date(),
+            isRead: false,
+            isInInbox: true,
+            gmailLabelIDs: [],
+            outlookInferenceClassificationRawValue: "",
+            providerCategoryNames: [],
+            providerFolderID: "INBOX"
+        )
+
+        try store.upsert(MailboxPage(messages: [newMetadata], nextCursor: nil), into: context)
+
+        #expect(email.providerGlobalMessageID == "msg-2")
+        #expect(email.subject == "New Subject")
+        #expect(email.body.isEmpty)
+        #expect(email.htmlBody == nil)
+        #expect(email.analysisState == .unanalyzed)
+        #expect(email.analysisSummary.isEmpty)
+    }
+    @Test("legacy Outlook row without providerGlobalMessageID clears body and analysis on UID reuse with header mismatch")
+    func testLegacyOutlookUIDReuseClearsBodyAndAnalysisOnHeaderMismatch() throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let email = try insertEmail(provider: .outlook, into: context)
+        email.providerGlobalMessageID = ""
+        email.subject = "Old Legacy Subject"
+        email.from = "old@example.com"
+        email.receivedAt = Date(timeIntervalSince1970: 1_000)
+        email.body = "Old legacy body"
+        email.htmlBody = "<p>Old legacy body</p>"
+        email.analysisState = .analyzed
+        email.analysisSummary = "Old summary"
+        try context.save()
+
+        let store = MailboxLocalStore(
+            defaults: try makeDefaults(),
+            saveContext: { try $0.save() }
+        )
+
+        let newMetadata = MailboxMessageMetadata(
+            provider: .outlook,
+            providerMessageID: email.providerMessageID,
+            providerGlobalMessageID: "msg-reused-uid",
+            sourceAccountNamespace: email.sourceAccountNamespace,
+            threadID: "",
+            subject: "Reused UID New Subject",
+            from: "new@example.com",
+            snippet: "New snippet",
+            receivedAt: Date(timeIntervalSince1970: 2_000),
+            isRead: false,
+            isInInbox: true,
+            gmailLabelIDs: [],
+            outlookInferenceClassificationRawValue: "",
+            providerCategoryNames: [],
+            providerFolderID: "INBOX"
+        )
+
+        try store.upsert(MailboxPage(messages: [newMetadata], nextCursor: nil), into: context)
+
+        #expect(email.providerGlobalMessageID == "msg-reused-uid")
+        #expect(email.subject == "Reused UID New Subject")
+        #expect(email.body.isEmpty)
+        #expect(email.htmlBody == nil)
+        #expect(email.analysisState == .unanalyzed)
+        #expect(email.analysisSummary.isEmpty)
+    }
+
+    @Test("updateContent rejects mismatched providerGlobalMessageID")
+    func testUpdateContentRejectsMismatchedGlobalMessageID() throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let email = try insertEmail(provider: .outlook, into: context)
+        email.providerGlobalMessageID = "msg-1"
+        try context.save()
+
+        let store = MailboxLocalStore(
+            defaults: try makeDefaults(),
+            saveContext: { try $0.save() }
+        )
+
+        let contentMetadata = MailboxMessageMetadata(
+            provider: .outlook,
+            providerMessageID: email.providerMessageID,
+            providerGlobalMessageID: "msg-2",
+            sourceAccountNamespace: email.sourceAccountNamespace,
+            threadID: "",
+            subject: "New Subject",
+            from: "sender@outlook.com",
+            snippet: "New snippet",
+            receivedAt: Date(),
+            isRead: false,
+            isInInbox: true,
+            gmailLabelIDs: [],
+            outlookInferenceClassificationRawValue: "",
+            providerCategoryNames: [],
+            providerFolderID: "INBOX"
+        )
+        let content = MailboxMessageContent(metadata: contentMetadata, body: "New body", htmlBody: "")
+
+        #expect(throws: MailboxLocalStoreError.contentIdentityMismatch) {
+            try store.updateContent(content, for: email, in: context)
+        }
+    }
+
+    @Test("superseded trash flushes immediately before its undo deadline")
+    func testSupersededTrashForcesImmediateRemoteFlush() async throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let email = try insertEmail(provider: .gmail, into: context)
+        let store = MailboxLocalStore(
+            defaults: try makeDefaults(),
+            saveContext: { try $0.save() }
+        )
+        let mutations = try store.stageTrash([email], in: context)
+        var remoteCalls = 0
+
+        let flushed = await store.flushStagedTrash(
+            mutations,
+            now: .distantFuture
+        ) { _ in
+            remoteCalls += 1
+        }
+
+        #expect(flushed == 1)
+        #expect(remoteCalls == 1)
+        #expect(store.stagedTrashMutations.isEmpty)
+    }
+
+    @Test("deferred trash flush retries remote failures without restoring the local row")
+    func testStagedTrashFlushPersistsUntilRemoteSuccess() async throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let email = try insertEmail(provider: .gmail, into: context)
+        let store = MailboxLocalStore(
+            defaults: try makeDefaults(),
+            saveContext: { try $0.save() }
+        )
+        let stagedAt = Date(timeIntervalSince1970: 1_000)
+        let mutations = try store.stageTrash([email], in: context, now: stagedAt)
+        var remoteCalls = 0
+
+        let earlyFlushes = await store.flushStagedTrash(
+            mutations,
+            now: stagedAt.addingTimeInterval(4)
+        ) { _ in
+            remoteCalls += 1
+        }
+
+        #expect(earlyFlushes == 0)
+        #expect(remoteCalls == 0)
+
+        let failedFlushes = await store.flushStagedTrash(
+            mutations,
+            now: stagedAt.addingTimeInterval(5)
+        ) { _ in
+            remoteCalls += 1
+            throw MailboxMutationTestError.remote
+        }
+
+        #expect(failedFlushes == 0)
+        #expect(remoteCalls == 1)
+        #expect(!email.isInInbox)
+        #expect(store.stagedTrashMutations == mutations)
+
+        let successfulFlushes = await store.flushStagedTrash(
+            mutations,
+            now: stagedAt.addingTimeInterval(5)
+        ) { _ in
+            remoteCalls += 1
+        }
+
+        #expect(successfulFlushes == 1)
+        #expect(remoteCalls == 2)
+        #expect(!email.isInInbox)
+        #expect(store.stagedTrashMutations.isEmpty)
     }
 }

@@ -2,13 +2,17 @@ import Foundation
 
 // MARK: - Email Analysis Engine Protocol
 
+struct EmailAnalysisOutcome<Value> {
+    let value: Value
+    let executionPath: AnalysisExecutionPath
+}
+
 /// 이메일 제목·본문·발신자를 받아 마감일 추출 결과를 반환하는 엔진 프로토콜.
 ///
-/// 포그라운드: FoundationModelsEmailEngine (AFM 온디바이스, 미가용 시 NSDataDetector 폴백).
+/// 포그라운드: 사용자가 선택한 AI provider(AFΜ/Gemini/온디바이스)로 분석.
 /// 백그라운드: OnDeviceDetectorEngine (NSDataDetector, 결정론적).
 ///
-/// ⚠️ 프라이버시 불변식 — 메일 본문은 온디바이스 엔진에만 전달.
-/// 절대 외부 서비스로 전달하지 않는다.
+/// ⚠️ 프라이버시 불변식 — 외부 provider(Gemini)는 사용자가 해당 provider를 선택한 경우에만 사용한다.
 protocol EmailAnalysisEngine {
     /// GmailMessage를 분석해 마감일을 추출한다.
     /// - Parameters:
@@ -19,116 +23,134 @@ protocol EmailAnalysisEngine {
         _ msg: GmailMessage,
         now: Date,
         language: AppLanguage
-    ) async -> EmailExtraction?
+    ) async throws -> EmailAnalysisOutcome<EmailExtraction?>
 }
 
-// MARK: - On-Device Detector Engine (현재 기본 엔진)
+// MARK: - On-Device Detector Engine (deterministic fallback)
 
 /// NSDataDetector 기반 온디바이스 분석 엔진.
 /// EmailContentAnalyzer를 래핑한다. 네트워크·AFM 없이 완전 로컬.
 struct OnDeviceDetectorEngine: EmailAnalysisEngine {
     private let analyzer = EmailContentAnalyzer()
+    private let fallbackReason: RuleFallbackReason
+
+    init(fallbackReason: RuleFallbackReason = .noProviderOptIn) {
+        self.fallbackReason = fallbackReason
+    }
 
     func analyze(
         _ msg: GmailMessage,
         now: Date,
         language: AppLanguage
-    ) async -> EmailExtraction? {
-        analyzer.analyze(msg, now: now, language: language)
+    ) async throws -> EmailAnalysisOutcome<EmailExtraction?> {
+        EmailAnalysisOutcome(
+            value: analyzer.analyze(msg, now: now, language: language),
+            executionPath: .rules(fallbackReason)
+        )
     }
 }
 
-// MARK: - Foundation Models Email Engine (C: AFM 실 구현)
+// MARK: - Foundation Models Email Engine
 
-/// Apple Foundation Models(온디바이스 / PCC) 기반 분석 엔진.
-///
-/// 포그라운드 전용 — makeEngine(allowFoundationModels: false) 경로(백그라운드)에서는 미사용.
-/// 이메일 본문은 Apple 온디바이스 / PCC 경로로만 전달한다.
 struct FoundationModelsEmailEngine: EmailAnalysisEngine {
-    private let fallback = OnDeviceDetectorEngine()
-
     func analyze(
         _ msg: GmailMessage,
         now: Date,
         language: AppLanguage
-    ) async -> EmailExtraction? {
+    ) async throws -> EmailAnalysisOutcome<EmailExtraction?> {
         #if canImport(FoundationModels)
         if #available(iOS 26.0, *), FoundationModelsAvailability.isAvailable {
             do {
-                return try await FoundationModelsService().analyzeEmail(
+                let value = try await FoundationModelsService().analyzeEmail(
                     msg,
                     now: now,
                     language: language
                 )
+                return EmailAnalysisOutcome(value: value, executionPath: .beta(.foundationModels))
+            } catch is CancellationError {
+                throw CancellationError()
             } catch {
-                print("[FoundationModelsEmailEngine] FM 실패 — NSDataDetector 폴백: \(error.localizedDescription)")
+                return EmailAnalysisOutcome(
+                    value: EmailContentAnalyzer().analyze(msg, now: now, language: language),
+                    executionPath: .rules(ProviderErrorMapper.fallbackReason(for: error) ?? .providerExecutionFailed)
+                )
             }
         }
         #endif
-        return await fallback.analyze(msg, now: now, language: language)
+        return EmailAnalysisOutcome(
+            value: EmailContentAnalyzer().analyze(msg, now: now, language: language),
+            executionPath: .rules(.unavailable)
+        )
     }
 }
 
-// MARK: - Gemini Email Engine (opt-in only)
-
-private enum ProviderEmailAnalysisSettings {
-    static let enabledKey = "pieroot.todo.providerEmailAnalysisEnabled"
-
-    static var selectedProvider: PersonaAIProvider {
-        SettingsStore.selectedProvider()
-    }
-
-    static var isEnabled: Bool {
-        UserDefaults.standard.bool(forKey: enabledKey)
-    }
-
-    static var shouldUseGemini: Bool {
-        selectedProvider == .gemini && isEnabled && GeminiProviderService.storedAPIKey != nil
-    }
-}
-
-struct GeminiEmailAnalysisEngine: EmailAnalysisEngine {
-    private let providerService: GeminiProviderService
-    private let fallback = OnDeviceDetectorEngine()
-    private let analyzer = EmailContentAnalyzer()
-
-    init(providerService: GeminiProviderService = GeminiProviderService()) {
-        self.providerService = providerService
-    }
-
+// MARK: - Local LLM Email Engine
+struct LocalLLMEmailAnalysisEngine: EmailAnalysisEngine {
     func analyze(
         _ msg: GmailMessage,
         now: Date,
         language: AppLanguage
-    ) async -> EmailExtraction? {
+    ) async throws -> EmailAnalysisOutcome<EmailExtraction?> {
+        let llm = OnDeviceLLMService.shared
+        guard BetaFeaturePolicy().authorizes(.onDevice, for: .standardAnalysis) else {
+            return EmailAnalysisOutcome(
+                value: EmailContentAnalyzer().analyze(msg, now: now, language: language),
+                executionPath: .rules(.providerDisabled)
+            )
+        }
+        guard llm.isModelLoaded else {
+            return EmailAnalysisOutcome(
+                value: EmailContentAnalyzer().analyze(msg, now: now, language: language),
+                executionPath: .rules(.modelNotLoaded)
+            )
+        }
+        guard !msg.subject.isEmpty else {
+            return EmailAnalysisOutcome(value: nil, executionPath: .beta(.onDevice))
+        }
         let bodyPreview = String(msg.body.prefix(1500))
-        guard !msg.subject.isEmpty else { return nil }
-
         let prompt = """
         현재 시각: \(AppDateFormat.llmString(from: now))
         발신자: \(msg.from)
         제목: \(msg.subject)
         \(bodyPreview.isEmpty ? "" : "본문:\n\(bodyPreview)")
-        """
 
+        반드시 JSON 객체 하나만 출력하세요. 키: dueDateISO, isAllDay, sender, senderEmail, keywordScore, deadlineSentence, notes.
+        dueDateISO는 명시적 마감일이 있을 때만 ISO8601로 쓰고, 없으면 빈 문자열로 두세요.
+        """
         do {
-            let raw = try await providerService.generateJSON(
-                systemInstruction: Prompts.EmailFM.systemInstruction(language: language),
+            let raw = try await llm.generate(
+                systemPrompt: Prompts.EmailFM.systemInstruction(language: language),
                 userPrompt: prompt,
-                modelID: GeminiProviderService.storedModelID
+                maxTokens: 700,
+                use: .standardAnalysis
             )
-            return parseExtraction(raw, msg: msg, now: now, language: language)
+            return EmailAnalysisOutcome(
+                value: EmailExtractionParser.parse(raw, msg: msg, now: now, language: language, provenance: .localLLM),
+                executionPath: .beta(.onDevice)
+            )
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
-            print("[GeminiEmailAnalysisEngine] Gemini 실패 — NSDataDetector 폴백: \(error.localizedDescription)")
-            return await fallback.analyze(msg, now: now, language: language)
+            return EmailAnalysisOutcome(
+                value: EmailContentAnalyzer().analyze(msg, now: now, language: language),
+                executionPath: .rules(ProviderErrorMapper.fallbackReason(for: error) ?? .providerExecutionFailed)
+            )
         }
     }
+}
 
-    private func parseExtraction(
+// MARK: - Shared Email Extraction Parser
+enum EmailExtractionParser {
+    enum Provenance {
+        case localLLM
+    }
+
+    static func parse(
         _ raw: String,
         msg: GmailMessage,
         now: Date,
-        language: AppLanguage
+        language: AppLanguage,
+        provenance: Provenance
     ) -> EmailExtraction? {
         var trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let first = trimmed.range(of: "{"),
@@ -154,6 +176,7 @@ struct GeminiEmailAnalysisEngine: EmailAnalysisEngine {
         let isAllDay = ((json["isAllDay"] as? Bool) ?? false) || normalizedDeadline.isAllDay
         let finalDate = normalizedDeadline.date
 
+        let analyzer = EmailContentAnalyzer()
         let sender = (json["sender"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let senderEmail = (json["senderEmail"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let keywordScore = max(0, (json["keywordScore"] as? Int) ?? 0)
@@ -168,7 +191,7 @@ struct GeminiEmailAnalysisEngine: EmailAnalysisEngine {
         var notesLines = [
             AppLanguage.localized(
                 "mail.analysis.header",
-                defaultValue: language == .english ? "[Email Summary]" : "[Gemini 분석]",
+                defaultValue: language == .english ? "[Email Summary]" : provenance.header(language: language),
                 language: language,
                 comment: "Email analysis provenance"
             ),
@@ -230,20 +253,64 @@ struct GeminiEmailAnalysisEngine: EmailAnalysisEngine {
     }
 }
 
+private extension EmailExtractionParser.Provenance {
+    func header(language: AppLanguage) -> String {
+        switch self {
+        case .localLLM:
+            return language == .english ? "[On-Device AI Analysis]" : "[온디바이스 AI 분석]"
+        }
+    }
+}
+
+struct GeminiEmailAnalysisEngine: EmailAnalysisEngine {
+    private let service: GeminiProviderService
+
+    init(service: GeminiProviderService = GeminiProviderService()) {
+        self.service = service
+    }
+
+    func analyze(
+        _ msg: GmailMessage,
+        now: Date,
+        language: AppLanguage
+    ) async throws -> EmailAnalysisOutcome<EmailExtraction?> {
+        do {
+            let value = try await service.analyzeEmail(msg, now: now, language: language)
+            return EmailAnalysisOutcome(value: value, executionPath: .beta(.gemini))
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            return EmailAnalysisOutcome(
+                value: EmailContentAnalyzer().analyze(msg, now: now, language: language),
+                executionPath: .rules(ProviderErrorMapper.fallbackReason(for: error) ?? .providerExecutionFailed)
+            )
+        }
+    }
+}
+
 // MARK: - Email Analysis Engine Factory
 
 /// 포그라운드/백그라운드에 따라 적절한 엔진을 반환한다.
-/// - Gemini provider email analysis는 명시적 opt-in일 때만 활성화된다.
-/// - true (기본, 포그라운드): Gemini opt-in → GeminiEmailAnalysisEngine, 아니면 FoundationModelsEmailEngine
+/// - true (기본, 포그라운드): selectedAIProvider에 맞는 엔진
 /// - false (백그라운드 BGTask): OnDeviceDetectorEngine
 enum EmailAnalysisEngineFactory {
     static func makeEngine(allowFoundationModels: Bool = true) -> any EmailAnalysisEngine {
-        if allowFoundationModels && ProviderEmailAnalysisSettings.shouldUseGemini {
-            return GeminiEmailAnalysisEngine()
+        guard allowFoundationModels else { return OnDeviceDetectorEngine(fallbackReason: .providerDisabled) }
+
+        switch BetaFeaturePolicy().routingDecision(for: .standardAnalysis) {
+        case .rules(let reason):
+            return OnDeviceDetectorEngine(fallbackReason: reason)
+        case .providers(let providers):
+            switch providers.first {
+            case .foundationModels:
+                return FoundationModelsEmailEngine()
+            case .onDevice:
+                return LocalLLMEmailAnalysisEngine()
+            case .gemini:
+                return GeminiEmailAnalysisEngine()
+            case nil:
+                return OnDeviceDetectorEngine(fallbackReason: .noEligibleProvider)
+            }
         }
-        if allowFoundationModels {
-            return FoundationModelsEmailEngine()
-        }
-        return OnDeviceDetectorEngine()
     }
 }

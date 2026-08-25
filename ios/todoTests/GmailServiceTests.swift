@@ -402,7 +402,7 @@ struct GmailServiceTests {
 
     @Test("Refresh Token 실패 (400 invalid_grant) 시 토큰 삭제 및 에러 발생 확인")
     func testRefreshTokenInvalidGrant() async throws {
-        try await withIsolatedProviderState {
+        await withIsolatedProviderState {
         defer {
             resetSharedState()
             sut.session = .shared
@@ -431,7 +431,7 @@ struct GmailServiceTests {
 
     @Test("Gmail API 호출 실패 (500) 시 apiFailed 에러 발생 확인")
     func testGmailAPIFailure500() async throws {
-        try await withIsolatedProviderState {
+        await withIsolatedProviderState {
         resetSharedState()
         defer {
             resetSharedState()
@@ -461,7 +461,7 @@ struct GmailServiceTests {
 
     @Test("권한 부족 (403 Forbidden) 시 markAsRead 실패 확인")
     func testMarkAsReadForbidden() async throws {
-        try await withIsolatedProviderState {
+        await withIsolatedProviderState {
         resetSharedState()
         defer {
             resetSharedState()
@@ -492,7 +492,7 @@ struct GmailServiceTests {
 
     @Test("구 readonly 토큰은 modify 전에 제거된다")
     func testReadonlyScopeTokensAreClearedBeforeModify() async throws {
-        try await withIsolatedProviderState {
+        await withIsolatedProviderState {
         resetSharedState()
         defer {
             resetSharedState()
@@ -1337,4 +1337,51 @@ struct GmailServiceTests {
         }
     }
 
+    @Test("OAuth fetchInboxPage and fetchInboxUpdates return expected head and update cursors")
+    func testOAuthHeadAndUpdatesCursorBehavior() async throws {
+        try await withIsolatedProviderState {
+            resetSharedState()
+            defer {
+                resetSharedState()
+                sut.session = .shared
+            }
+            KeychainStore.set(service: "pieroot.todo.gmail", account: "access_token", value: "valid_token")
+            KeychainStore.set(service: "pieroot.todo.gmail", account: "scope_version", value: "gmail.modify.openid.v2")
+            let expiry = String(Date().addingTimeInterval(3600).timeIntervalSince1970)
+            KeychainStore.set(service: "pieroot.todo.gmail", account: "access_token_expires_at", value: expiry)
+
+            MockURLProtocol.requestHandler = { request in
+                let url = try #require(request.url)
+                if url.path.hasSuffix("/messages") {
+                    return (
+                        HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+                        #"{"messages":[{"id":"msg-1"}],"nextPageToken":"page-2"}"#.data(using: .utf8)
+                    )
+                }
+                return (
+                    HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+                    try gmailMessagePayload(
+                        id: "msg-1",
+                        receivedAt: Date(timeIntervalSince1970: 1_800_000_000),
+                        labelIDs: ["INBOX"]
+                    )
+                )
+            }
+
+            // Head page fetch (cursor: nil) -> newestCursor: "head", nextCursor: "page-2"
+            let headPage = try await sut.fetchInboxPage(after: nil)
+            #expect(headPage.newestCursor == "head")
+            #expect(headPage.nextCursor == "page-2")
+
+            // Older page fetch (cursor: "page-2") -> newestCursor: nil
+            let olderPage = try await sut.fetchInboxPage(after: "page-2")
+            #expect(olderPage.newestCursor == nil)
+
+            // Update fetch (newerThan: "head") -> newestCursor: "head", nextCursor: nil, hasMoreUpdates: false
+            let updatePage = try await sut.fetchInboxUpdates(newerThan: "head")
+            #expect(updatePage.newestCursor == "head")
+            #expect(updatePage.nextCursor == nil)
+            #expect(updatePage.hasMoreUpdates == false)
+        }
+    }
 }

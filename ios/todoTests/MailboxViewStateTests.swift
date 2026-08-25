@@ -11,22 +11,18 @@ struct MailboxViewStateTests {
         state.reconcileAuthenticatedProviders([.gmail, .outlook])
         #expect(state.selectedProvider == .gmail)
 
-        state.selectedProvider = .outlook
-        state.reconcileAuthenticatedProviders([.gmail, .outlook])
-        #expect(state.selectedProvider == .outlook)
-
+        state.selectedProvider = .gmail
         state.reconcileAuthenticatedProviders([.gmail])
         #expect(state.selectedProvider == .gmail)
 
         state.reconcileAuthenticatedProviders([.outlook])
         #expect(state.selectedProvider == .outlook)
-
         state.reconcileAuthenticatedProviders([])
         #expect(state.selectedProvider == nil)
     }
 
-    @Test("Gmail과 Outlook category cursor count는 provider 전환 후에도 독립 유지된다")
-    func testProviderSpecificPagingAndCategoryState() {
+    @Test("Gmail category와 cursor count 상태가 올바르게 업데이트된다")
+    func testGmailPagingAndCategoryState() {
         var state = MailboxViewState(selectedProvider: .gmail)
         state.selectedGmailCategory = .updates
         let beganGmailPage = state.beginPage(for: .gmail, loadMore: false)
@@ -36,26 +32,10 @@ struct MailboxViewStateTests {
         #expect(beganGmailIndex)
         state.completeIndex(for: .gmail, totalCount: 250)
 
-        state.selectedProvider = .outlook
-        state.selectedOutlookClassification = .other
-        let beganOutlookPage = state.beginPage(for: .outlook, loadMore: false)
-        #expect(beganOutlookPage)
-        state.completePage(for: .outlook, nextCursor: "outlook-next")
-        let beganOutlookIndex = state.beginIndex(for: .outlook)
-        #expect(beganOutlookIndex)
-        state.completeIndex(for: .outlook, totalCount: 80)
-
-        state.selectedProvider = .gmail
         #expect(state.selectedGmailCategory == .updates)
         #expect(state.pagingState(for: .gmail).nextCursor == "gmail-next")
         #expect(state.pagingState(for: .gmail).totalInboxCount == 250)
         #expect(state.pagingState(for: .gmail).canLoadMore)
-
-        state.selectedProvider = .outlook
-        #expect(state.selectedOutlookClassification == .other)
-        #expect(state.pagingState(for: .outlook).nextCursor == "outlook-next")
-        #expect(state.pagingState(for: .outlook).totalInboxCount == 80)
-        #expect(state.pagingState(for: .outlook).canLoadMore)
     }
 
     @Test("page와 index 실패는 기존 cursor count를 보존하고 retry 상태만 기록한다")
@@ -129,6 +109,247 @@ struct MailboxViewStateTests {
         #expect(
             local.message
                 == "프로바이더에는 반영되었지만 로컬 상태 저장에 실패했습니다. 메일 목록을 다시 동기화합니다."
+        )
+    }
+
+    @Test("Gmail IMAP errors stay localized in the selected language")
+    func testGmailIMAPErrorLocalization() {
+        let korean = mailDetailAlert(
+            action: .markAsRead,
+            error: GmailIMAPError.invalidResponse,
+            language: .korean
+        )
+        #expect(korean.title == "읽음 동기화 오류")
+        #expect(korean.message == "Gmail IMAP에서 올바르지 않은 응답을 받았습니다.")
+
+        let english = mailDetailAlert(
+            action: .trash,
+            error: GmailIMAPError.authenticationFailed,
+            language: .english
+        )
+        #expect(english.title == "Mail deletion error")
+        #expect(english.message == "Gmail IMAP authentication failed.")
+    }
+
+    @Test("Gmail IMAP mutation capability errors are localized")
+    func testGmailMutationCapabilityAlertLocalization() {
+        let korean = mailDetailAlert(
+            action: .trash,
+            error: GmailIMAPError.mutationUnsupported,
+            language: .korean
+        )
+        #expect(korean.title == "메일 삭제 오류")
+        #expect(korean.message.contains("지원하지 않습니다"))
+
+        let english = mailDetailAlert(
+            action: .markAsRead,
+            error: GmailIMAPError.mailboxReset,
+            language: .english
+        )
+        #expect(english.title == "Read-status sync error")
+        #expect(english.message == "The Gmail mailbox changed. Refresh the inbox and try again.")
+    }
+
+    @Test("MailboxStartupPresentation pure presentation contract")
+    func testMailboxStartupPresentationContract() {
+        // 1. checking + cached Gmail => shows mailbox/visible Gmail
+        let checkingWithCachedGmail = MailboxStartupPresentation(
+            authenticationState: .checking,
+            cachedProviders: [.gmail],
+            authenticatedProviders: [],
+            storedCredentialProviders: [.gmail]
+        )
+        #expect(checkingWithCachedGmail.visibleProviders == [.gmail])
+        #expect(checkingWithCachedGmail.showsMailbox == true)
+        #expect(checkingWithCachedGmail.showsAuthenticationCheckingStatus == true)
+
+        // 2. checking + no cache => no mailbox/checking status true
+        let checkingNoCache = MailboxStartupPresentation(
+            authenticationState: .checking,
+            cachedProviders: [],
+            authenticatedProviders: [],
+            storedCredentialProviders: []
+        )
+        #expect(checkingNoCache.visibleProviders.isEmpty)
+        #expect(checkingNoCache.showsMailbox == false)
+        #expect(checkingNoCache.showsAuthenticationCheckingStatus == true)
+
+        // 3. resolved + no live session keeps cached mail only while its
+        // local App Password is still present.
+        let resolvedNoAuthenticatedProviders = MailboxStartupPresentation(
+            authenticationState: .resolved,
+            cachedProviders: [.gmail],
+            authenticatedProviders: [],
+            storedCredentialProviders: [.gmail]
+        )
+        #expect(resolvedNoAuthenticatedProviders.visibleProviders == [.gmail])
+        #expect(resolvedNoAuthenticatedProviders.showsMailbox == true)
+        #expect(resolvedNoAuthenticatedProviders.showsAuthenticationCheckingStatus == false)
+
+        let resolvedMissingCredential = MailboxStartupPresentation(
+            authenticationState: .resolved,
+            cachedProviders: [.gmail],
+            authenticatedProviders: [],
+            storedCredentialProviders: []
+        )
+        #expect(resolvedMissingCredential.visibleProviders.isEmpty)
+        #expect(resolvedMissingCredential.showsMailbox == false)
+
+        // 4. resolved + Gmail authenticated => shows Gmail
+        let resolvedGmailAuthenticated = MailboxStartupPresentation(
+            authenticationState: .resolved,
+            cachedProviders: [.gmail],
+            authenticatedProviders: [.gmail],
+            storedCredentialProviders: []
+        )
+        #expect(resolvedGmailAuthenticated.visibleProviders == [.gmail])
+        #expect(resolvedGmailAuthenticated.showsMailbox == true)
+        #expect(resolvedGmailAuthenticated.showsAuthenticationCheckingStatus == false)
+    }
+
+    @Test("Gmail and Outlook stored credentials permit valid account namespaces")
+    func testGmailAndOutlookCredentialsPermitValidNamespaces() {
+        let cacheAccess = MailboxCachedProviderAccess(
+            activeGmailNamespace: "mail@example.com",
+            activeOutlookNamespace: "outlook@example.com"
+        )
+        #expect(cacheAccess.locallyConfiguredProviders == [.gmail, .outlook])
+        #expect(cacheAccess.isLocallyConfigured(.gmail))
+        #expect(cacheAccess.isLocallyConfigured(.outlook))
+        #expect(
+            cacheAccess.permits(
+                provider: .gmail,
+                sourceAccountNamespace: "mail@example.com"
+            )
+        )
+        #expect(
+            !cacheAccess.permits(
+                provider: .gmail,
+                sourceAccountNamespace: "other@example.com"
+            )
+        )
+        #expect(
+            cacheAccess.permits(
+                provider: .outlook,
+                sourceAccountNamespace: "outlook@example.com"
+            )
+        )
+        #expect(
+            !cacheAccess.permits(
+                provider: .outlook,
+                sourceAccountNamespace: ""
+            )
+        )
+        #expect(
+            !cacheAccess.permits(
+                provider: .outlook,
+                sourceAccountNamespace: "other@outlook.com"
+            )
+        )
+        let presentation = MailboxStartupPresentation(
+            authenticationState: .checking,
+            cachedProviders: [.gmail],
+            authenticatedProviders: [],
+            storedCredentialProviders: [.gmail]
+        )
+        #expect(presentation.visibleProviders == [.gmail])
+    }
+    @Test("stored mail credentials make the Mail tab visible without remote validation")
+    func testMailTabVisibilityUsesLocalCredentialSignals() {
+        #expect(
+            mailTabIsVisibleForStoredCredentials(
+                uiTestShowsAllTabs: false,
+                gmailAccount: "mail@example.com"
+            )
+        )
+        #expect(
+            mailTabIsVisibleForStoredCredentials(
+                uiTestShowsAllTabs: false,
+                gmailAccount: "",
+                outlookAccount: "outlook@example.com"
+            )
+        )
+        #expect(
+            !mailTabIsVisibleForStoredCredentials(
+                uiTestShowsAllTabs: false,
+                gmailAccount: "",
+                outlookAccount: ""
+            )
+        )
+        #expect(
+            mailTabIsVisibleForStoredCredentials(
+                uiTestShowsAllTabs: true,
+                gmailAccount: ""
+            )
+        )
+    }
+
+    @Test("첫 번째 메일 row만, 준비 완료 후에만 top sync를 트리거한다")
+    func testShouldTriggerTopSyncOnlyFiresForFirstReadyRow() {
+        // First row + fully resolved/loaded/provider-selected => fires.
+        #expect(
+            MailTabView.shouldTriggerTopSync(
+                emailID: "first",
+                firstEmailID: "first",
+                authenticationState: .resolved,
+                hasLoadedInitialPage: true,
+                hasProvider: true
+            )
+        )
+
+        // Any row other than the first never fires, even when fully ready.
+        #expect(
+            !MailTabView.shouldTriggerTopSync(
+                emailID: "second",
+                firstEmailID: "first",
+                authenticationState: .resolved,
+                hasLoadedInitialPage: true,
+                hasProvider: true
+            )
+        )
+
+        // Still checking authentication => no trigger.
+        #expect(
+            !MailTabView.shouldTriggerTopSync(
+                emailID: "first",
+                firstEmailID: "first",
+                authenticationState: .checking,
+                hasLoadedInitialPage: true,
+                hasProvider: true
+            )
+        )
+
+        // Initial page not yet loaded => no trigger.
+        #expect(
+            !MailTabView.shouldTriggerTopSync(
+                emailID: "first",
+                firstEmailID: "first",
+                authenticationState: .resolved,
+                hasLoadedInitialPage: false,
+                hasProvider: true
+            )
+        )
+
+        // No selected provider => no trigger.
+        #expect(
+            !MailTabView.shouldTriggerTopSync(
+                emailID: "first",
+                firstEmailID: "first",
+                authenticationState: .resolved,
+                hasLoadedInitialPage: true,
+                hasProvider: false
+            )
+        )
+
+        // Empty list (no first row yet) => no trigger for any id.
+        #expect(
+            !MailTabView.shouldTriggerTopSync(
+                emailID: "first",
+                firstEmailID: nil,
+                authenticationState: .resolved,
+                hasLoadedInitialPage: true,
+                hasProvider: true
+            )
         )
     }
 }

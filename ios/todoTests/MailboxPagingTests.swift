@@ -30,11 +30,13 @@ struct MailboxPagingTests {
         labels: [String] = [],
         classification: String = "",
         categories: [String] = [],
-        folderID: String = ""
+        folderID: String = "",
+        globalID: String = ""
     ) -> MailboxMessageMetadata {
         MailboxMessageMetadata(
             provider: provider,
             providerMessageID: id,
+            providerGlobalMessageID: globalID,
             threadID: "thread-\(id)",
             subject: "subject-\(id)",
             from: "sender-\(id)@example.com",
@@ -54,7 +56,7 @@ struct MailboxPagingTests {
         let container = try makeContainer()
         let context = ModelContext(container)
         let rich = EmailMessage(
-            id: "same",
+            id: "gmail-imap:global-same",
             subject: "subject-same",
             body: "analyzed body",
             htmlBody: "<p>analyzed HTML</p>",
@@ -66,6 +68,7 @@ struct MailboxPagingTests {
         )
         rich.analysisState = .analyzed
         rich.analysisSummary = "preserved summary"
+        rich.analysisKeyPoints = ["retained key point"]
         rich.analysisDetail = "preserved detail"
         rich.analyzedBodyFingerprint = EmailAnalysisContract.fingerprint(
             subject: "subject-same",
@@ -81,6 +84,7 @@ struct MailboxPagingTests {
             rawMessageID: "same",
             isInInbox: true
         )
+        let selection = MailDetailSelection(bodyOnly)
         let newestEmpty = EmailMessage(
             id: "same",
             subject: "newest-empty",
@@ -120,6 +124,7 @@ struct MailboxPagingTests {
         let survivor = try #require(rows.first)
         #expect(rows.count == 1)
         #expect(survivor === rich)
+        #expect(survivor.id == "gmail-imap:global-same")
         #expect(survivor.subject == "subject-same")
         #expect(survivor.body == "analyzed body")
         #expect(survivor.htmlBody == "<p>analyzed HTML</p>")
@@ -139,6 +144,9 @@ struct MailboxPagingTests {
         )
         #expect(survivor.isRead)
         #expect(survivor.gmailInboxCategories == Set([.updates]))
+        let resolvedDetailEmail = MailDetailSelection.resolve(rows, matching: selection.key)
+        #expect(resolvedDetailEmail === survivor)
+        #expect(resolvedDetailEmail?.analysisKeyPoints == ["retained key point"])
         #expect(saveCount == 1)
     }
 
@@ -341,6 +349,41 @@ struct MailboxPagingTests {
         #expect(email.analyzedBodyFingerprint.isEmpty)
         #expect(email.analysisVersion == 0)
     }
+
+    @Test("Gmail content rehydration never downgrades a local read state")
+    func testGmailContentPreservesLocalReadState() throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let email = EmailMessage(
+            id: "gmail-imap:global-read",
+            isRead: true,
+            provider: .gmail,
+            rawMessageID: "read-id",
+            labelIDs: ["INBOX"],
+            isInInbox: true
+        )
+        context.insert(email)
+        try context.save()
+
+        let store = MailboxLocalStore(
+            defaults: try makeDefaults(),
+            saveContext: { try $0.save() }
+        )
+        let content = MailboxMessageContent(
+            metadata: metadata(
+                provider: .gmail,
+                id: "read-id",
+                isRead: false,
+                labels: ["INBOX", "UNREAD"]
+            ),
+            body: "body",
+            htmlBody: ""
+        )
+        try store.updateContent(content, for: email, in: context)
+
+        #expect(email.isRead)
+        #expect(!email.labelIDs.contains("UNREAD"))
+    }
     @Test("upsert와 reconciliation save 실패는 기존 cache 상태로 rollback한다")
     func testSaveFailuresRollbackMailboxState() throws {
         let container = try makeContainer()
@@ -391,4 +434,60 @@ struct MailboxPagingTests {
         #expect(try context.fetch(FetchDescriptor<EmailMessage>()).count == 1)
     }
 
+    @Test("Gmail label-less metadata preserves previously stored categories")
+    func testCategoryPreservationWithEmptyLabels() throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let email = EmailMessage(
+            id: "cat-1",
+            subject: "Promo Email",
+            provider: MailProvider.gmail,
+            rawMessageID: "cat-1",
+            labelIDs: ["INBOX", "CATEGORY_PROMOTIONS"],
+            isInInbox: true
+        )
+        context.insert(email)
+        try context.save()
+
+        let store = MailboxLocalStore(defaults: try makeDefaults(), saveContext: { try $0.save() })
+        // Incoming metadata has empty gmailLabelIDs
+        try store.upsert(
+            MailboxPage(
+                messages: [
+                    metadata(
+                        provider: MailProvider.gmail,
+                        id: "cat-1",
+                        labels: []
+                    )
+                ],
+                nextCursor: nil
+            ),
+            into: context
+        )
+
+        #expect(email.labelIDs == ["INBOX", "CATEGORY_PROMOTIONS"])
+    }
+
+    @Test("Gmail metadata without a global ID never downgrades an existing stable local ID")
+    func testGmailMissingGlobalIDPreservesStableLocalID() throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let email = EmailMessage(
+            id: "gmail-imap:900",
+            provider: .gmail,
+            rawMessageID: "7",
+            isInInbox: true,
+            sourceAccountNamespace: "imap@example.com"
+        )
+        context.insert(email)
+        try context.save()
+
+        let store = MailboxLocalStore(defaults: try makeDefaults(), saveContext: { try $0.save() })
+        try store.upsert(
+            MailboxPage(messages: [metadata(provider: .gmail, id: "7")], nextCursor: nil),
+            into: context
+        )
+
+        #expect(email.id == "gmail-imap:900")
+    }
 }

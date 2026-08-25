@@ -2,38 +2,26 @@ import CryptoKit
 import Foundation
 import SwiftData
 
-#if canImport(FoundationModels)
-import FoundationModels
-
-@available(iOS 26.0, *)
-@Generable
-private struct FMEmailSummaryOutput {
-    @Guide(description: "Compress the email's main point into 1–3 concise bullets. Exclude greetings, signatures, quoted text, and CID markup.")
-    var summary: String
-
-    @Guide(description: "List 0–4 key facts, decisions, amounts, or deadlines. One fact per sentence.")
-    var keyPoints: [String]
-
-    @Guide(description: "List only 0–4 actions the recipient must actually take. Return an empty array when there are none. Do not infer.")
-    var actionItems: [String]
-}
-#endif
 
 enum EmailAnalysisContract {
-    static let summaryContractVersion = 3
+    static let summaryContractVersion = 6
 
     static func normalizedBody(_ body: String) -> String {
-        body
+        unescapedWhitespace(in: body)
             .components(separatedBy: .newlines)
             .prefix { line in !line.trimmingCharacters(in: .whitespaces).hasPrefix("--") }
             .filter { line in
                 let trimmed = line.trimmingCharacters(in: .whitespaces)
                 return !trimmed.hasPrefix(">") && !trimmed.localizedCaseInsensitiveContains("cid:")
             }
+            .map {
+                $0
+                    .replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression)
+                    .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            .filter { !$0.isEmpty }
             .joined(separator: "\n")
-            .replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression)
-            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     static func fingerprint(subject: String, body: String) -> String {
@@ -74,9 +62,136 @@ enum EmailAnalysisContract {
         email.analysisKeyPoints = []
         email.analysisActionItems = []
         email.analysisError = ""
+        email.analysisFailureReasonRaw = nil
         email.analyzedBodyFingerprint = ""
         email.analyzedAt = nil
         email.analysisVersion = 0
+    }
+
+    static func deterministicSummary(subject: String, body: String) -> EmailSummaryResult {
+        let sentences = informativeSentences(from: normalizedBody(body))
+        guard !sentences.isEmpty else {
+            return EmailSummaryResult(
+                summary: subject.trimmingCharacters(in: .whitespacesAndNewlines),
+                keyPoints: [],
+                actionItems: []
+            )
+        }
+
+        if let invitation = calendarInvitationSummary(subject: subject, sentences: sentences) {
+            return invitation
+        }
+
+        let summarySentences = Array(sentences.prefix(2))
+        return EmailSummaryResult(
+            summary: summarySentences.joined(separator: " "),
+            keyPoints: Array(sentences.dropFirst(summarySentences.count).prefix(3)),
+            actionItems: []
+        )
+    }
+
+    private static func unescapedWhitespace(in text: String) -> String {
+        text
+            .replacingOccurrences(of: #"\r\n"#, with: "\n")
+            .replacingOccurrences(of: #"\n"#, with: "\n")
+            .replacingOccurrences(of: #"\r"#, with: "\n")
+            .replacingOccurrences(of: #"\t"#, with: " ")
+    }
+
+    private static func calendarInvitationSummary(
+        subject: String,
+        sentences: [String]
+    ) -> EmailSummaryResult? {
+        let content = ([subject] + sentences).joined(separator: " ")
+        let lowercased = content.lowercased()
+        let isKorean = content.range(
+            of: #"[ㄱ-ㅎㅏ-ㅣ가-힣]"#,
+            options: .regularExpression
+        ) != nil
+        let hasCalendar = isKorean
+            ? content.contains("캘린더")
+            : lowercased.contains("calendar")
+        let isInvitation = isKorean
+            ? content.contains("공유") && content.contains("초대")
+            : lowercased.contains("share") && lowercased.contains("invite")
+        guard hasCalendar, isInvitation,
+              let calendarName = calendarName(in: content, isKorean: isKorean)
+        else {
+            return nil
+        }
+
+        let requiresAcceptance = isKorean
+            ? content.contains("수락")
+            : lowercased.contains("accept")
+        if isKorean {
+            return EmailSummaryResult(
+                summary: requiresAcceptance
+                    ? "\(calendarName) 캘린더 공유 초대입니다. 참여하려면 초대를 수락하세요."
+                    : "\(calendarName) 캘린더 공유 초대입니다.",
+                keyPoints: requiresAcceptance
+                    ? ["공유 초대를 수락하면 캘린더에 참여할 수 있습니다."]
+                    : [],
+                actionItems: []
+            )
+        }
+        return EmailSummaryResult(
+            summary: requiresAcceptance
+                ? "You were invited to share the \(calendarName) calendar. Accept the invitation to participate."
+                : "You were invited to share the \(calendarName) calendar.",
+            keyPoints: requiresAcceptance
+                ? ["Accepting the invitation lets you participate in the calendar."]
+                : [],
+            actionItems: []
+        )
+    }
+
+    private static func calendarName(in content: String, isKorean: Bool) -> String? {
+        let pattern = isKorean
+            ? #"["'“]([^"'”]{1,120})["'”]\s*캘린더"#
+            : #"["'“]([^"'”]{1,120})["'”]\s+calendar"#
+        guard let expression = try? NSRegularExpression(pattern: pattern),
+              let match = expression.firstMatch(
+                  in: content,
+                  range: NSRange(content.startIndex..., in: content)
+              ),
+              let range = Range(match.range(at: 1), in: content)
+        else {
+            return nil
+        }
+        return String(content[range]).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func informativeSentences(from body: String) -> [String] {
+        let withoutLinks = body
+            .replacingOccurrences(of: #"\[[^\]]{0,500}\]"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"https?://[^\s\])>]+"#, with: " ", options: .regularExpression)
+            .components(separatedBy: .newlines)
+            .map {
+                $0
+                    .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            .joined(separator: "\n")
+
+        let candidates = withoutLinks
+            .components(separatedBy: CharacterSet(charactersIn: ".!?。！？\n"))
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { candidate in
+                let words = candidate.split(whereSeparator: \.isWhitespace)
+                let containsCJK = candidate.range(
+                    of: #"[ㄱ-ㅎㅏ-ㅣ가-힣一-龯ぁ-ゟ゠-ヿ]"#,
+                    options: .regularExpression
+                ) != nil
+                return containsCJK
+                    ? candidate.count >= 10
+                    : candidate.count >= 24 && words.count >= 5
+            }
+
+        var seen = Set<String>()
+        return candidates.filter { candidate in
+            let key = candidate.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            return seen.insert(key).inserted
+        }
     }
 }
 
@@ -89,23 +204,52 @@ final class EmailMessageAnalysisService {
         String,
         String
     ) async throws -> EmailSummaryResult
+    typealias FoundationModelsSummaryProvider = @MainActor (
+        String,
+        String,
+        String,
+        AppLanguage
+    ) async throws -> EmailSummaryResult
+    typealias RoutingDecisionProvider = @Sendable () -> ProviderRoutingDecision
+    typealias FoundationModelsAvailabilityProvider = @MainActor () -> Bool
 
     private let summaryProvider: SummaryProvider?
+    private let foundationModelsSummaryProvider: FoundationModelsSummaryProvider
+    private let routingDecisionProvider: RoutingDecisionProvider
+    private let foundationModelsAvailabilityProvider: FoundationModelsAvailabilityProvider
 
     private init() {
         summaryProvider = nil
+        foundationModelsSummaryProvider = Self.summarizeWithFoundationModels
+        routingDecisionProvider = { BetaFeaturePolicy().routingDecision(for: .standardAnalysis) }
+        foundationModelsAvailabilityProvider = Self.foundationModelsAvailable
     }
 
     init(summaryProvider: @escaping SummaryProvider) {
         self.summaryProvider = summaryProvider
+        foundationModelsSummaryProvider = Self.summarizeWithFoundationModels
+        routingDecisionProvider = { BetaFeaturePolicy().routingDecision(for: .standardAnalysis) }
+        foundationModelsAvailabilityProvider = Self.foundationModelsAvailable
+    }
+
+    init(
+        foundationModelsSummaryProvider: @escaping FoundationModelsSummaryProvider,
+        routingDecisionProvider: @escaping RoutingDecisionProvider,
+        foundationModelsAvailabilityProvider: @escaping FoundationModelsAvailabilityProvider = { true }
+    ) {
+        summaryProvider = nil
+        self.foundationModelsSummaryProvider = foundationModelsSummaryProvider
+        self.routingDecisionProvider = routingDecisionProvider
+        self.foundationModelsAvailabilityProvider = foundationModelsAvailabilityProvider
     }
 
     func analyze(
         _ email: EmailMessage,
         context: ModelContext,
         language: AppLanguage = .current
-    ) async {
+    ) async throws {
         let key = EmailMessageKey(email)
+        let originalModelID = email.persistentModelID
         guard activeKeys.insert(key).inserted else { return }
         defer { activeKeys.remove(key) }
 
@@ -129,13 +273,16 @@ final class EmailMessageAnalysisService {
             )
             return
         }
+        let shouldRetryRuleFallback = shouldRetryRuleFallback(email)
         guard email.analysisState != .analyzed
             || email.analyzedBodyFingerprint != fingerprint
             || email.analysisVersion != EmailAnalysisContract.summaryContractVersion
+            || shouldRetryRuleFallback
         else { return }
 
         email.analysisState = .analyzing
         email.analysisError = ""
+        email.analysisFailureReasonRaw = nil
         guard save(context) else {
             persistFailure(
                 email,
@@ -153,30 +300,42 @@ final class EmailMessageAnalysisService {
         }
 
         do {
-            let result = try await summarize(
+            let outcome = try await summarize(
                 subject: email.subject,
                 sender: email.from,
                 body: source,
                 language: language
             )
+            try Task.checkCancellation()
+            guard let currentEmail = try resolvedEmail(matching: key, in: context) else {
+                return
+            }
+
+            let result = outcome.value
+            switch outcome.executionPath {
+            case .rules(let reason):
+                currentEmail.analysisFailureReasonRaw = reason.rawValue
+            case .beta:
+                currentEmail.analysisFailureReasonRaw = nil
+            }
             guard !discardAnalysisIfSourceChanged(
-                email,
+                currentEmail,
                 expectedFingerprint: fingerprint,
                 context: context
             ) else {
                 return
             }
-            email.analysisSummary = result.summary
-            email.analysisKeyPoints = result.keyPoints
-            email.analysisActionItems = result.actionItems
-            email.analysisDetail = ""
-            email.analysisState = .analyzed
-            email.analyzedBodyFingerprint = fingerprint
-            email.analysisVersion = EmailAnalysisContract.summaryContractVersion
-            email.analyzedAt = Date()
+            currentEmail.analysisSummary = result.summary
+            currentEmail.analysisKeyPoints = result.keyPoints
+            currentEmail.analysisActionItems = result.actionItems
+            currentEmail.analysisDetail = ""
+            currentEmail.analysisState = .analyzed
+            currentEmail.analyzedBodyFingerprint = fingerprint
+            currentEmail.analysisVersion = EmailAnalysisContract.summaryContractVersion
+            currentEmail.analyzedAt = Date()
             guard save(context) else {
                 persistFailure(
-                    email,
+                    currentEmail,
                     context: context,
                     message: AppLanguage.localized(
                         "mail.analysis.saveResultFailed",
@@ -189,61 +348,201 @@ final class EmailMessageAnalysisService {
                 )
                 return
             }
+        } catch is CancellationError {
+            if let currentEmail = try? resolvedEmail(matching: key, in: context),
+               currentEmail.persistentModelID == originalModelID {
+                currentEmail.analysisState = .unanalyzed
+                currentEmail.analysisFailureReasonRaw = nil
+                currentEmail.analysisError = ""
+                _ = save(context)
+            }
+            throw CancellationError()
         } catch {
+            guard !Task.isCancelled else {
+                throw CancellationError()
+            }
+            guard let currentEmail = try? resolvedEmail(matching: key, in: context) else {
+                return
+            }
             guard !discardAnalysisIfSourceChanged(
-                email,
+                currentEmail,
                 expectedFingerprint: fingerprint,
                 context: context
             ) else {
                 return
             }
-            persistFailure(email, context: context, message: error.localizedDescription)
+            currentEmail.analysisFailureReasonRaw = ProviderErrorMapper.fallbackReason(for: error)?.rawValue
+            persistFailure(currentEmail, context: context, message: error.localizedDescription)
         }
     }
-
     private func summarize(
         subject: String,
         sender: String,
         body: String,
         language: AppLanguage
-    ) async throws -> EmailSummaryResult {
+    ) async throws -> EmailAnalysisOutcome<EmailSummaryResult> {
         if let summaryProvider {
-            return try await summaryProvider(subject, sender, body)
+            return EmailAnalysisOutcome(
+                value: try await summaryProvider(subject, sender, body),
+                executionPath: .rules(.noProviderOptIn)
+            )
         }
-        #if canImport(FoundationModels)
-        guard FoundationModelsAvailability.isAvailable, #available(iOS 26.0, *) else {
-            throw SummaryError.unavailable
+        let fallback: (RuleFallbackReason) -> EmailAnalysisOutcome<EmailSummaryResult> = { reason in
+            EmailAnalysisOutcome(
+                value: EmailAnalysisContract.deterministicSummary(subject: subject, body: body),
+                executionPath: .rules(reason)
+            )
+        }
+        let decision = routingDecisionProvider()
+        guard case .providers(let providers) = decision, let provider = providers.first else {
+            if case .rules(let reason) = decision { return fallback(reason) }
+            return fallback(.noEligibleProvider)
         }
         let instructions = AppLanguage.localized(
             "mail.analysis.instruction",
             defaultValue: language == .english
-                ? "Summarize this email concisely. Do not repeat the source; output the key points, important facts, and actions the recipient must take. Write every natural-language field in English and do not translate the source content."
-                : "당신은 이메일을 간결하게 정리합니다. 원문을 반복하지 말고 요점, 중요한 사실, 수신자가 해야 하는 일만 출력합니다. 자연어 필드는 모두 한국어로 작성하되 원문 내용은 번역하지 않습니다.",
+                ? "Summarize this email concisely. Return JSON with summary, keyPoints, and actionItems."
+                : "이메일을 간결하게 요약하세요. summary, keyPoints, actionItems 키를 가진 JSON으로 답하세요.",
             language: language,
             comment: "Email analysis model instruction"
         )
         let prompt = "발신자: \(sender)\n제목: \(subject)\n본문:\n\(String(body.prefix(8_000)))"
-        LLMDebugLogger.request(
-            provider: "AFM",
-            operation: "summarizeEmailMessage",
-            metadata: ["subject: \(subject)", "bodyChars: \(min(body.count, 8_000))"],
-            systemPrompt: instructions,
-            userPrompt: prompt
-        )
-        let session = LanguageModelSession(instructions: instructions)
-        let response = try await session.respond(to: prompt, generating: FMEmailSummaryOutput.self)
-        let output = response.content
-        LLMDebugLogger.response(provider: "AFM", operation: "summarizeEmailMessage", text: "summary=\(output.summary)\nkeyPoints=\(output.keyPoints.joined(separator: " | "))\nactionItems=\(output.actionItems.joined(separator: " | "))")
-        return EmailSummaryResult(
-            summary: output.summary.trimmingCharacters(in: .whitespacesAndNewlines),
-            keyPoints: output.keyPoints.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty },
-            actionItems: output.actionItems.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        do {
+            switch provider {
+            case .gemini:
+                guard SettingsStore.shared.get("pieroot.todo.providerEmailAnalysisEnabled", defaultValue: false) else {
+                    return fallback(.consentMissing)
+                }
+                return EmailAnalysisOutcome(
+                    value: try await GeminiProviderService().summarizeEmail(
+                        subject: subject,
+                        body: body,
+                        language: language
+                    ),
+                    executionPath: .beta(.gemini)
+                )
+            case .foundationModels:
+                return EmailAnalysisOutcome(
+                    value: try await foundationModelsSummaryProvider(subject, sender, body, language),
+                    executionPath: .beta(.foundationModels)
+                )
+            case .onDevice:
+                guard OnDeviceLLMService.shared.isModelLoaded else {
+                    return fallback(.modelNotLoaded)
+                }
+                let raw = try await OnDeviceLLMService.shared.generate(
+                    systemPrompt: instructions,
+                    userPrompt: prompt,
+                    maxTokens: 900,
+                    use: .standardAnalysis
+                )
+                guard let result = Self.parseSummary(raw) else {
+                    return fallback(.invalidResponse)
+                }
+                return EmailAnalysisOutcome(value: result, executionPath: .beta(.onDevice))
+            }
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            return fallback(ProviderErrorMapper.fallbackReason(for: error) ?? .providerExecutionFailed)
+        }
+    }
+
+
+
+
+    private func shouldRetryRuleFallback(_ email: EmailMessage) -> Bool {
+        guard let rawReason = email.analysisFailureReasonRaw,
+              let reason = RuleFallbackReason(rawValue: rawReason)
+        else {
+            return false
+        }
+        switch reason {
+        case .noProviderOptIn, .noEligibleProvider, .providerDisabled, .unavailable:
+            break
+        case .modelNotLoaded, .credentialMissing, .consentMissing, .invalidResponse, .providerExecutionFailed:
+            return false
+        }
+        guard case .providers(let providers) = routingDecisionProvider(),
+              providers == [.foundationModels]
+        else {
+            return false
+        }
+        return foundationModelsAvailabilityProvider()
+    }
+
+    private static func foundationModelsAvailable() -> Bool {
+        #if canImport(FoundationModels)
+        if #available(iOS 26.0, *) {
+            return FoundationModelsAvailability.isAvailable
+        }
+        #endif
+        return false
+    }
+
+    private static func summarizeWithFoundationModels(
+        subject: String,
+        sender: String,
+        body: String,
+        language: AppLanguage
+    ) async throws -> EmailSummaryResult {
+        #if canImport(FoundationModels)
+        guard #available(iOS 26.0, *), FoundationModelsAvailability.isAvailable else {
+            throw IntelligenceRoutingError.backendUnavailable(
+                provider: .foundationModels,
+                reason: RuleFallbackReason.unavailable.rawValue
+            )
+        }
+        return try await FoundationModelsService().summarizeEmail(
+            subject: subject,
+            sender: sender,
+            body: body,
+            language: language
         )
         #else
-        throw SummaryError.unavailable
+        throw IntelligenceRoutingError.backendUnavailable(
+            provider: .foundationModels,
+            reason: RuleFallbackReason.unavailable.rawValue
+        )
         #endif
     }
 
+    private static func parseSummary(_ raw: String) -> EmailSummaryResult? {
+        var trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let first = trimmed.range(of: "{"), let last = trimmed.range(of: "}", options: .backwards) {
+            trimmed = String(trimmed[first.lowerBound..<last.upperBound])
+        }
+        guard let data = trimmed.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        let summary = (json["summary"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let keyPoints = (json["keyPoints"] as? [String] ?? [])
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        let actionItems = (json["actionItems"] as? [String] ?? [])
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !summary.isEmpty || !keyPoints.isEmpty || !actionItems.isEmpty else { return nil }
+        return EmailSummaryResult(summary: summary, keyPoints: keyPoints, actionItems: actionItems)
+    }
+
+    private func resolvedEmail(
+        matching key: EmailMessageKey,
+        in context: ModelContext
+    ) throws -> EmailMessage? {
+        let providerRawValue = key.providerRawValue
+        let sourceAccountNamespace = key.sourceAccountNamespace
+        let descriptor = FetchDescriptor<EmailMessage>(
+            predicate: #Predicate<EmailMessage> { email in
+                email.providerRawValue == providerRawValue
+                    && email.sourceAccountNamespace == sourceAccountNamespace
+            },
+            sortBy: [SortDescriptor(\EmailMessage.receivedAt, order: .reverse)]
+        )
+        return try context.fetch(descriptor)
+            .first { EmailMessageKey($0) == key }
+    }
 
     private func discardAnalysisIfSourceChanged(
         _ email: EmailMessage,

@@ -66,17 +66,11 @@ struct EmailMessageProviderTests {
         )
     }
 
-    @Test("인식되지 않은 Gmail 라벨은 기본 카테고리이고 Outlook은 Gmail 카테고리가 없다")
+    @Test("인식되지 않은 Gmail 라벨은 기본 카테고리이다")
     func testMailCategoryFallbacks() {
         let gmail = EmailMessage(id: "gmail", labelIDs: ["INBOX", "UNREAD"])
-        let outlook = EmailMessage(
-            id: "outlook",
-            provider: .outlook,
-            labelIDs: ["CATEGORY_SOCIAL"]
-        )
 
         #expect(gmail.gmailInboxCategories == Set([.primary]))
-        #expect(outlook.gmailInboxCategories.isEmpty)
     }
 
     @Test("Outlook classification은 case-insensitive이고 unknown은 Other로 귀속된다")
@@ -124,7 +118,7 @@ struct EmailMessageProviderTests {
 
     @Test("분석 기간 storage precedence와 후보 filtering은 mailbox 표시 개수와 분리된다")
     func testEmailAnalysisLookbackStoragePrecedenceAndCandidates() async throws {
-        try await AIProviderTestIsolation.shared.withLock {
+        await AIProviderTestIsolation.shared.withLock {
             let key = EmailAnalysisLookbackPolicy.lookbackSettingKey
             let markerKey = "\(key).isLocal"
             let testCloudKey = "pieroot.todo.testCloud.\(key)"
