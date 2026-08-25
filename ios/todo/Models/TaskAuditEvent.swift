@@ -17,6 +17,9 @@ final class TaskAuditEvent {
     // MARK: - Identity
 
     var id: UUID = UUID()
+    /// Original Todo identity retained for content-free cohort joins.
+    var todoID: UUID = UUID()
+
 
     // MARK: - Lifecycle 타임스탬프
 
@@ -37,6 +40,12 @@ final class TaskAuditEvent {
     var wasFixedSchedule: Bool = false
     /// 마감일 존재 여부
     var hadDueDate: Bool = false
+    /// Original deadline when known; legacy snapshots leave it nil.
+    var dueDate: Date?
+
+    /// Content-free normalized tag snapshot used for behavior aggregation.
+    var tags: [String] = []
+
 
     // MARK: - 파생 통계 (저장하지 않음, 분석 시 계산)
 
@@ -54,6 +63,7 @@ final class TaskAuditEvent {
     // MARK: - Init
 
     init(from todo: Todo) {
+        self.todoID          = todo.id
         self.createdAt        = todo.createdAt
         self.completedAt      = todo.completedAt
         self.deletedAt        = Date()
@@ -61,6 +71,8 @@ final class TaskAuditEvent {
         self.triageType       = todo.triageStatus
         self.wasFixedSchedule = todo.isFixedSchedule
         self.hadDueDate       = todo.dueDate != nil
+        self.dueDate         = todo.dueDate
+        self.tags            = todo.tags.map(UserVocabularyService.normalizedKey).filter { !$0.isEmpty }
     }
 }
 
@@ -98,6 +110,9 @@ final class TaskBehaviorEvent {
     var sourceType: String = ""
     var triageType: String = ""
     var wasFixedSchedule: Bool = false
+    /// Creation timestamp copied for latency analysis; legacy rows remain unknown.
+    var todoCreatedAt: Date?
+
 
     var beforeCompletion: Bool?
     var afterCompletion: Bool?
@@ -129,6 +144,7 @@ final class TaskBehaviorEvent {
         sourceType = todo.source
         triageType = todo.triageStatus
         wasFixedSchedule = todo.isFixedSchedule
+        todoCreatedAt = todo.createdAt
     }
 }
 

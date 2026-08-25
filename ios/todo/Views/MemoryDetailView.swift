@@ -39,7 +39,12 @@ struct MemoryDetailView: View {
                     if isAnalyzing {
                         HStack(spacing: 8) {
                             ProgressView().controlSize(.small)
-                            Text("결정론적 통계 분석 중…")
+                            Text(AppLanguage.localized(
+                                "memory.analysis.progress",
+                                defaultValue: "행동 패턴 분석 중…",
+                                language: .current,
+                                comment: "Behavior-pattern analysis progress."
+                            ))
                         }
                     } else {
                         Label(pendingMemoryResult == nil ? "지금 패턴 분석" : "다시 분석", systemImage: "chart.bar.xaxis")
@@ -47,7 +52,12 @@ struct MemoryDetailView: View {
                 }
                 .buttonStyle(.borderless)
             } footer: {
-                Text("최근 90일의 현재 TODO 상태, 사용자 삭제 스냅샷, typed 변경 이벤트를 분리합니다. 모든 지원 기기에서 동일한 구조화 지표와 신뢰도를 계산하며, 결과는 적용을 눌러야 저장됩니다.")
+                Text(AppLanguage.localized(
+                    "memory.analysis.footer",
+                    defaultValue: "최근 90일의 현재 TODO 상태, 사용자 삭제 스냅샷, typed 변경 이벤트를 분리합니다. 구조화 지표와 신뢰도는 모든 지원 기기에서 동일하게 계산하고, AFM은 선택되었을 때 그 지표의 서술만 개선합니다. 결과는 적용을 눌러야 저장됩니다.",
+                    language: .current,
+                    comment: "Behavior-pattern analysis scope and AFM narrative explanation."
+                ))
             }
 
             Section {
@@ -117,7 +127,9 @@ struct MemoryDetailView: View {
             }
             
             HStack(spacing: 8) {
-                Button("적용") { applyMemoryAnalysis() }
+                Button("적용") {
+                    Task { await applyMemoryAnalysis() }
+                }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
                 
@@ -201,9 +213,14 @@ struct MemoryDetailView: View {
         }
     }
     
-    private func applyMemoryAnalysis() {
+    private func applyMemoryAnalysis() async {
         guard let result = pendingMemoryResult else { return }
-        MemoryService.shared.applyAnalysisResult(result)
-        pendingMemoryResult = nil
+        do {
+            try await MemoryService.shared.applyAnalysisResult(result)
+            pendingMemoryResult = nil
+        } catch {
+            errorMessage = error.localizedDescription
+            showError = true
+        }
     }
 }

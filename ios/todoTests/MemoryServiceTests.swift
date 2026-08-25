@@ -4,6 +4,7 @@ import SwiftData
 @testable import todo
 
 @Suite("MemoryService deterministic behavior analysis")
+@MainActor
 struct MemoryServiceTests {
     private func makeDate(
         year: Int = 2026,
@@ -92,6 +93,58 @@ struct MemoryServiceTests {
         #expect(result.analyzedCompletedCount == 2)
         #expect(result.behaviorProfile.insight(for: .currentCompletionShare)?.denominator == 2)
         #expect(result.behaviorProfile.insight(for: .deletedCompletedShare)?.denominator == 2)
+    }
+
+    @Test("AFM behavior narration preserves deterministic metrics and profile")
+    func AFMNarrationPreservesDeterministicMetrics() async throws {
+        let now = makeDate(day: 10, hour: 12)
+        let completed = completedTodo(
+            title: "confidential",
+            createdAt: makeDate(day: 1, hour: 8),
+            completedAt: makeDate(day: 2, hour: 10)
+        )
+        let baseline = MemoryService.computeAnalysis(todos: [completed], now: now, language: .english)
+        let service = BehaviorNarrationService(
+            narrativeProvider: { _, _ in
+                BehaviorNarrative(
+                    summary: "  Completion records are concentrated in the observed window.  ",
+                    insights: ["  One deterministic observation. ", ""]
+                )
+            },
+            routingDecisionProvider: { .providers([.foundationModels]) },
+            availabilityProvider: { true }
+        )
+
+        let result = try await service.enrich(baseline, language: .english)
+
+        #expect(result.summary == "Completion records are concentrated in the observed window.")
+        #expect(result.insights == ["One deterministic observation."])
+        #expect(result.fastTags == baseline.fastTags)
+        #expect(result.overdueRate == baseline.overdueRate)
+        #expect(result.productiveHour == baseline.productiveHour)
+        #expect(result.analyzedCompletedCount == baseline.analyzedCompletedCount)
+        #expect(result.recordTitle == baseline.recordTitle)
+        #expect(result.accessScopeSummary == baseline.accessScopeSummary)
+        #expect(result.behaviorProfile == baseline.behaviorProfile)
+        #expect(result.processorDescription == "Apple Foundation Models · deterministic metrics")
+    }
+
+    @Test("explicit local selection retains the deterministic behavior result")
+    func explicitLocalSelectionDoesNotInvokeAFMNarration() async throws {
+        let now = makeDate(day: 10, hour: 12)
+        let baseline = MemoryService.computeAnalysis(todos: [], now: now, language: .english)
+        let service = BehaviorNarrationService(
+            narrativeProvider: { _, _ in throw CancellationError() },
+            routingDecisionProvider: { .providers([.onDevice]) },
+            availabilityProvider: { true }
+        )
+
+        let result = try await service.enrich(baseline, language: .english)
+
+        #expect(result.summary == baseline.summary)
+        #expect(result.insights == baseline.insights)
+        #expect(result.processorDescription == baseline.processorDescription)
+        #expect(result.behaviorProfile == baseline.behaviorProfile)
     }
 
     @Test("overdue rate denominator contains only completed Todos with due dates")
@@ -336,11 +389,11 @@ struct MemoryServiceTests {
         for metric in [
             BehaviorMetric.completionUndoRate,
             .dueDateChangeRate,
-            .manualPriorityChangeRate,
             .aiOverrideRate
         ] {
             #expect(result.behaviorProfile.insight(for: metric)?.confidence == .insufficient)
         }
+        #expect(result.behaviorProfile.insight(for: .manualPriorityChangeRate) == nil)
         #expect(!result.insights.contains { $0.contains("완료 취소") })
         #expect(!result.insights.contains { $0.contains("마감일을 변경") })
         #expect(!result.insights.contains { $0.contains("우선순위를 변경") })
@@ -496,5 +549,54 @@ struct MemoryServiceTests {
         #expect(fallback.sampleCount == 12)
         #expect(fallback.confidence == .low)
         #expect(fallback.insights.isEmpty)
+    }
+    @Test("legacy profile payloads default classifications and skip unknown elements")
+    func behaviorProfileLossyDecode() throws {
+        let date = makeDate(day: 10, hour: 12)
+        let known = BehaviorClassification(
+            dimension: .completionTime,
+            label: .morning,
+            confidence: .medium,
+            evidence: [
+                BehaviorEvidence(
+                    metricRawValue: BehaviorMetric.completionTimeBucketConcentration.rawValue,
+                    value: 0.5,
+                    rawCount: 5,
+                    effectiveCount: 5
+                )
+            ]
+        )
+        let profile = BehaviorProfile(
+            version: BehaviorProfile.currentVersion,
+            windowStart: date,
+            windowEnd: date,
+            sampleCount: 5,
+            effectiveSampleSize: 5,
+            confidence: .medium,
+            insights: [],
+            classifications: [known]
+        )
+        let encoded = try JSONEncoder().encode(profile)
+        var payload = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        var classifications = try #require(payload["classifications"] as? [[String: Any]])
+        classifications.append([
+            "dimension": "futureDimension",
+            "label": "futureLabel",
+            "confidence": BehaviorConfidence.high.rawValue,
+            "evidence": []
+        ])
+        payload["classifications"] = classifications
+        let decoded = try JSONDecoder().decode(
+            BehaviorProfile.self,
+            from: JSONSerialization.data(withJSONObject: payload)
+        )
+        #expect(decoded.classifications == [known])
+
+        payload.removeValue(forKey: "classifications")
+        let legacy = try JSONDecoder().decode(
+            BehaviorProfile.self,
+            from: JSONSerialization.data(withJSONObject: payload)
+        )
+        #expect(legacy.classifications.isEmpty)
     }
 }
