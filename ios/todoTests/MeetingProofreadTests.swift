@@ -495,6 +495,46 @@ struct MeetingProofreadTests {
             ) == "AI 검수를 건너뜀 · 요약 완료"
         )
     }
+    @Test("refinement cancellation propagates without analysis")
+    @MainActor
+    func refinementCancellationPropagates() async throws {
+        let meetingID = "123e4567-e89b-12d3-a456-426614174000"
+        let base = result([MeetingSegment(id: "raw", startMs: 0, endMs: 1_000, text: "원문")])
+        let configuration = ModelConfiguration(
+            schema: AppDataContainer.meetingSchema,
+            isStoredInMemoryOnly: true,
+            cloudKitDatabase: .none
+        )
+        let container = try ModelContainer(for: AppDataContainer.meetingSchema, configurations: configuration)
+        let context = ModelContext(container)
+        let record = MeetingRecord(meetingID: meetingID, languageTag: "ko-KR", timezoneIdentifier: "UTC")
+        try record.replaceTranscriptionBase(base, status: .ready)
+        context.insert(record)
+        try context.save()
+        var analysisCalled = false
+        let dependencies = MeetingPostProcessor.Dependencies(
+            snapshot: { .empty },
+            refine: { _, _, _, _, _ in throw CancellationError() },
+            analyze: { _, input, _, _ in
+                analysisCalled = true
+                return MeetingAnalysisEngine.Outcome(result: input, engineLabel: "test", usedOnDeviceLLM: false)
+            },
+            save: { try $0.save() },
+            learnCorrections: { _, _ in }
+        )
+
+        await #expect(throws: CancellationError.self) {
+            _ = try await MeetingPostProcessor.refineAndAnalyze(
+                record: record,
+                context: context,
+                allowRefine: true,
+                allowModelLoad: false,
+                dependencies: dependencies
+            )
+        }
+        #expect(!analysisCalled)
+        #expect(record.refinementFallbackReasonRaw == nil)
+    }
 }
 
 private enum ProofreadTestError: Error {

@@ -4,6 +4,7 @@ import Testing
 @testable import todo
 
 @Suite("Meeting playback streaming and waveform cache")
+@MainActor
 struct MeetingPlaybackStreamTests {
     /// Writes a synthesized recording under the real meeting directory so the
     /// logical cursor can resolve it, and returns its manifest.
@@ -175,5 +176,101 @@ struct MeetingPlaybackStreamTests {
         controller.stop()
         #expect(controller.playbackProgress == 0)
         #expect(controller.playbackMilliseconds == 0)
+    }
+
+    @Test("resolved start progress honors an armed seek and collapses stale end values")
+    func resolvedStartProgress() {
+        // A still-armed seek target wins over the last known progress.
+        #expect(MeetingAudioPlaybackController.resolvedStartProgress(pending: 0.42, current: 0.9) == 0.42)
+        // No armed seek falls back to the last known progress (paused resume).
+        #expect(MeetingAudioPlaybackController.resolvedStartProgress(pending: nil, current: 0.35) == 0.35)
+        // At/past the end (natural completion) restarts from zero rather than
+        // replaying a stale end-of-track value.
+        #expect(MeetingAudioPlaybackController.resolvedStartProgress(pending: nil, current: 1) == 0)
+        #expect(MeetingAudioPlaybackController.resolvedStartProgress(pending: 1.2, current: 0.1) == 0)
+        // Out-of-range and non-finite inputs (e.g. a zero-duration totalMs
+        // producing segmentStartMs/totalMs) never propagate into Int64(...).
+        #expect(MeetingAudioPlaybackController.resolvedStartProgress(pending: -0.5, current: 0) == 0)
+        #expect(MeetingAudioPlaybackController.resolvedStartProgress(pending: .nan, current: 0.5) == 0)
+        #expect(MeetingAudioPlaybackController.resolvedStartProgress(pending: nil, current: .infinity) == 0)
+    }
+
+    @Test("seeking as the first call (mirroring play()'s non-zero start) streams from the armed offset, not zero")
+    func schedulerSeekFirstStreamsFromOffset() async throws {
+        let totalSamples = 48_000
+        let fixture = try makeFixture(totalSamples: totalSamples)
+        defer { try? FileManager.default.removeItem(at: fixture.cleanup) }
+
+        let format = try #require(AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: Double(fixture.manifest.sampleRate),
+            channels: 1,
+            interleaved: false
+        ))
+
+        final class EventBox: @unchecked Sendable {
+            private let lock = NSLock()
+            private var finishedFlag = false
+            private var failure: Error?
+            func record(_ event: MeetingPlaybackStreamScheduler.Event) {
+                lock.lock()
+                defer { lock.unlock() }
+                switch event {
+                case .finished: finishedFlag = true
+                case .failed(let error, _): failure = error
+                }
+            }
+            var finished: Bool { lock.lock(); defer { lock.unlock() }; return finishedFlag }
+            var error: Error? { lock.lock(); defer { lock.unlock() }; return failure }
+        }
+
+        // Mirrors MeetingAudioPlaybackController.play()'s exact ordering for a
+        // non-zero start: construct the scheduler, seek as the FIRST call (no
+        // start()) while the engine/node are not yet running, then start the
+        // engine and play — proving seek() alone is a safe substitute for
+        // start()+seek() and that it actually streams from the armed offset.
+        func run(startingAt offset: Int64) async throws -> Int {
+            let engine = AVAudioEngine()
+            let node = AVAudioPlayerNode()
+            engine.attach(node)
+            engine.connect(node, to: engine.mainMixerNode, format: format)
+            try engine.enableManualRenderingMode(.offline, format: format, maximumFrameCount: 4_096)
+
+            let events = EventBox()
+            let cursor = try MeetingLogicalAudioCursor(manifest: fixture.manifest)
+            let scheduler = MeetingPlaybackStreamScheduler(cursor: cursor, node: node, format: format)
+            scheduler.onEvent = { events.record($0) }
+
+            if offset > 0 {
+                try scheduler.seek(toLogicalSample: offset, resumePlaying: false)
+            } else {
+                try scheduler.start()
+            }
+            try engine.start()
+            node.play()
+
+            let render = try #require(AVAudioPCMBuffer(pcmFormat: engine.manualRenderingFormat, frameCapacity: 4_096))
+            var iterations = 0
+            while !events.finished, events.error == nil, iterations < 400 {
+                let status = try engine.renderOffline(4_096, to: render)
+                #expect(status == .success)
+                iterations += 1
+                try await Task.sleep(for: .milliseconds(2))
+            }
+            node.stop()
+            engine.stop()
+            #expect(events.error == nil)
+            #expect(events.finished)
+            return iterations
+        }
+
+        let fullRunIterations = try await run(startingAt: 0)
+        let seekedRunIterations = try await run(startingAt: Int64(totalSamples / 2))
+
+        // Starting from the armed midpoint streams roughly half the timeline.
+        // If play() regressed back to start()-then-seek (or seek() silently
+        // fell back to zero), this run would take as long as the full run.
+        #expect(seekedRunIterations < fullRunIterations)
+        #expect(Double(seekedRunIterations) < Double(fullRunIterations) * 0.75)
     }
 }

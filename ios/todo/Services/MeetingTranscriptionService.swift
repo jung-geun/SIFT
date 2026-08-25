@@ -4,6 +4,14 @@ import Foundation
 import OSLog
 import Speech
 
+
+nonisolated private func recordTranscriptionDiagnostic(_ error: Error, operation: String) {
+    DiagnosticRecorder.shared.record(
+        error: error,
+        component: "meeting.transcription",
+        operation: operation
+    )
+}
 enum MeetingTranscriptionPurpose: Sendable {
     case live
     case retry
@@ -276,6 +284,7 @@ struct DefaultMeetingTranscriptionSessionFactory: MeetingTranscriptionSessionFac
         } catch let error as MeetingTranscriptionError {
             throw error
         } catch {
+            recordTranscriptionDiagnostic(error, operation: "sessionSetup")
             throw MeetingTranscriptionError.setupFailed
         }
     }
@@ -315,8 +324,9 @@ private extension AppleMeetingTranscriptionSession {
             await collectorTask?.value
         } catch is CancellationError {
             resultContinuation.finish()
-            throw MeetingTranscriptionError.runtimeFailed
+            throw CancellationError()
         } catch {
+            recordTranscriptionDiagnostic(error, operation: "analyze")
             resultContinuation.finish(throwing: MeetingTranscriptionError.runtimeFailed)
             throw MeetingTranscriptionError.runtimeFailed
         }
@@ -345,6 +355,7 @@ private final class SpeechMeetingTranscriptionSession: AppleMeetingTranscription
                 try await request.downloadAndInstall()
             }
         } catch {
+            recordTranscriptionDiagnostic(error, operation: "assetInstallation")
             throw MeetingTranscriptionError.assetInstallationFailed
         }
         guard let inputFormat = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]) else {
@@ -358,6 +369,7 @@ private final class SpeechMeetingTranscriptionSession: AppleMeetingTranscription
         do {
             try await UserVocabularyBiasing.prepare(analyzer: analyzer, inputFormat: inputFormat, snapshot: snapshot)
         } catch {
+            recordTranscriptionDiagnostic(error, operation: "vocabularyPreparation")
             throw MeetingTranscriptionError.setupFailed
         }
         collectorTask = Task { [transcriber, resultContinuation] in
@@ -378,6 +390,7 @@ private final class SpeechMeetingTranscriptionSession: AppleMeetingTranscription
                 }
                 resultContinuation.finish()
             } catch {
+                recordTranscriptionDiagnostic(error, operation: "resultCollection")
                 resultContinuation.finish(throwing: MeetingTranscriptionError.runtimeFailed)
             }
         }
@@ -410,6 +423,7 @@ private final class DictationMeetingTranscriptionSession: AppleMeetingTranscript
                 try await request.downloadAndInstall()
             }
         } catch {
+            recordTranscriptionDiagnostic(error, operation: "assetInstallation")
             throw MeetingTranscriptionError.assetInstallationFailed
         }
         guard let inputFormat = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]) else {
@@ -423,6 +437,7 @@ private final class DictationMeetingTranscriptionSession: AppleMeetingTranscript
         do {
             try await UserVocabularyBiasing.prepare(analyzer: analyzer, inputFormat: inputFormat, snapshot: snapshot)
         } catch {
+            recordTranscriptionDiagnostic(error, operation: "vocabularyPreparation")
             throw MeetingTranscriptionError.setupFailed
         }
         collectorTask = Task { [transcriber, resultContinuation] in
@@ -443,6 +458,7 @@ private final class DictationMeetingTranscriptionSession: AppleMeetingTranscript
                 }
                 resultContinuation.finish()
             } catch {
+                recordTranscriptionDiagnostic(error, operation: "resultCollection")
                 resultContinuation.finish(throwing: MeetingTranscriptionError.runtimeFailed)
             }
         }

@@ -72,6 +72,7 @@ private func isQueueOverflow(_ error: Error) -> Bool {
 
 
 @Suite("Canonical meeting audio")
+@MainActor
 struct MeetingCanonicalAudioPipelineTests {
     @Test("48 kHz irregular chunks drain to exact 16 kHz one-second PCM")
     func resamplesAndDrainsTail() async throws {

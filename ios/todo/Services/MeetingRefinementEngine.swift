@@ -13,6 +13,35 @@ import Foundation
 ///      invariant.
 ///   3. If neither is available, the transcript is returned unchanged and the UI
 ///      shows an honest "on-device AI unavailable" state.
+struct TranscriptRefinementOutcome {
+    let result: MeetingResult
+    let source: MeetingRefinementEngine.Source?
+    let changed: Bool
+    let correctionPairs: [MeetingRefinementEngine.CorrectionPair]
+    let providerRan: Bool
+    let skipReason: MeetingProcessingReporter.SkipReason?
+    let executionPath: AnalysisExecutionPath
+
+    static func skipped(
+        _ reason: MeetingProcessingReporter.SkipReason,
+        result: MeetingResult = MeetingResult(),
+        executionPath: AnalysisExecutionPath = .rules(.noEligibleProvider)
+    ) -> Self {
+        Self(result: result, source: nil, changed: false, correctionPairs: [], providerRan: false, skipReason: reason, executionPath: executionPath)
+    }
+
+    static func applied(
+        result: MeetingResult,
+        changed: Bool,
+        source: MeetingRefinementEngine.Source,
+        correctionPairs: [MeetingRefinementEngine.CorrectionPair],
+        providerRan: Bool,
+        executionPath: AnalysisExecutionPath = .rules(.noEligibleProvider)
+    ) -> Self {
+        Self(result: result, source: source, changed: changed, correctionPairs: correctionPairs, providerRan: providerRan, skipReason: nil, executionPath: executionPath)
+    }
+}
+
 @MainActor
 struct MeetingRefinementEngine {
     typealias CorrectionPair = (from: String, to: String)
@@ -49,16 +78,7 @@ struct MeetingRefinementEngine {
         }
     }
 
-    enum Outcome {
-        case skipped(MeetingProcessingReporter.SkipReason)
-        case applied(
-            result: MeetingResult,
-            changed: Bool,
-            source: Source,
-            correctionPairs: [CorrectionPair],
-            providerRan: Bool
-        )
-    }
+    typealias Outcome = TranscriptRefinementOutcome
 
     enum RefinementError: LocalizedError {
         case engineUnavailable
@@ -101,14 +121,43 @@ struct MeetingRefinementEngine {
         }
     }
 
+    private let afmProvider: (any MeetingRefinementProvider)?
+    private let onDeviceProvider: (any MeetingRefinementProvider)?
+
+    init(
+        afmProvider: (any MeetingRefinementProvider)? = nil,
+        onDeviceProvider: (any MeetingRefinementProvider)? = nil
+    ) {
+        self.afmProvider = afmProvider
+        self.onDeviceProvider = onDeviceProvider
+    }
+
     /// The engine that *would* run, for pre-run UI. `allowModelLoad` should be
-    /// true only for explicit foreground actions (the manual "improve" button),
-    /// where loading an already-downloaded model is acceptable.
     func plannedEngine(allowModelLoad: Bool) -> Engine? {
-        if #available(iOS 26.0, *), FoundationModelsAvailability.isAvailable { return .afm }
-        let llm = OnDeviceLLMService.shared
-        if llm.isModelLoaded { return .localLLM }
-        if allowModelLoad, llm.isCapable, llm.isModelCachedOnDisk { return .localLLM }
+        guard case .providers(let providers) = BetaFeaturePolicy().routingDecision(for: .transcriptRefinement) else {
+            return nil
+        }
+        for provider in providers {
+            switch provider {
+            case .foundationModels:
+                if afmProvider != nil {
+                    return .afm
+                }
+                if #available(iOS 26.0, *), FoundationModelsAvailability.isAvailable {
+                    return .afm
+                }
+            case .onDevice:
+                if onDeviceProvider != nil {
+                    return .localLLM
+                }
+                let llm = OnDeviceLLMService.shared
+                if llm.isModelLoaded || (allowModelLoad && llm.isCapable && llm.isModelCachedOnDisk) {
+                    return .localLLM
+                }
+            case .gemini:
+                continue
+            }
+        }
         return nil
     }
 
@@ -120,7 +169,7 @@ struct MeetingRefinementEngine {
         allowModelLoad: Bool
     ) async throws -> Outcome {
         guard !result.segments.isEmpty else {
-            return .skipped(.emptyTranscript)
+            return .skipped(.emptyTranscript, result: result, executionPath: .rules(.noEligibleProvider))
         }
 
         var mapped = result.segments
@@ -129,53 +178,117 @@ struct MeetingRefinementEngine {
             mapped[index].text = canonicalizer.canonicalize(mapped[index].text)
         }
         let mappingChanged = mapped.map(\.text) != result.segments.map(\.text)
+        let routingDecision = BetaFeaturePolicy().routingDecision(for: .transcriptRefinement)
         guard let engine = plannedEngine(allowModelLoad: allowModelLoad) else {
+            let reason: RuleFallbackReason
+            let onDeviceWasEnabled: Bool
+            switch routingDecision {
+            case .rules(let fallbackReason):
+                reason = fallbackReason
+                onDeviceWasEnabled = false
+            case .providers(let providers):
+                onDeviceWasEnabled = providers.contains(.onDevice)
+                reason = onDeviceWasEnabled ? .modelNotLoaded : .unavailable
+            }
             guard mappingChanged else {
-                let llm = OnDeviceLLMService.shared
-                if !allowModelLoad, llm.isCapable, llm.isModelCachedOnDisk {
-                    return .skipped(.modelNotLoaded)
-                }
-                return .skipped(.unavailable)
+                return .skipped(
+                    reason == .modelNotLoaded ? .modelNotLoaded : .unavailable,
+                    result: result,
+                    executionPath: .rules(reason)
+                )
             }
             return .applied(
                 result: try MeetingRevisionEditor.editSegments(meetingID: meetingID, in: result, segments: mapped),
                 changed: true,
                 source: .userVocabulary,
                 correctionPairs: [],
-                providerRan: false
+                providerRan: false,
+                executionPath: .rules(reason)
             )
         }
 
         let corrected: [MeetingSegment]
+        let source: Source
         switch engine {
         case .afm:
-            guard #available(iOS 26.0, *) else { throw RefinementError.engineUnavailable }
-            let batchResult = try await FoundationModelsService()
-                .correctTranscript(
+            do {
+                guard #available(iOS 26.0, *) else { throw RefinementError.engineUnavailable }
+                let batchResult: TranscriptCorrectionBatchResult
+                if let afmProvider {
+                    batchResult = try await afmProvider.correct(
+                        segments: mapped,
+                        glossaryHint: vocabulary.promptHint,
+                        language: language
+                    )
+                } else {
+                    batchResult = try await FoundationModelsService()
+                        .correctTranscript(
+                            segments: mapped,
+                            glossaryHint: vocabulary.promptHint,
+                            language: language
+                        )
+                }
+                guard batchResult.succeededBatchCount > 0 || batchResult.failedBatchCount == 0 else {
+                    throw RefinementError.invalidModelResponse
+                }
+                corrected = batchResult.segments
+                source = .appleIntelligence
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                guard BetaFeaturePolicy().authorizes(.onDevice, for: .transcriptRefinement) else {
+                    throw error
+                }
+                if let onDeviceProvider {
+                    let batchResult = try await onDeviceProvider.correct(
+                        segments: mapped,
+                        glossaryHint: vocabulary.promptHint,
+                        language: language
+                    )
+                    guard batchResult.succeededBatchCount > 0 || batchResult.failedBatchCount == 0 else {
+                        throw RefinementError.invalidModelResponse
+                    }
+                    corrected = batchResult.segments
+                } else {
+                    corrected = try await correctViaLocalLLM(
+                        segments: mapped,
+                        glossaryHint: vocabulary.promptHint,
+                        language: language,
+                        allowModelLoad: allowModelLoad
+                    )
+                }
+                source = .qwen
+            }
+        case .localLLM:
+            if let onDeviceProvider {
+                let batchResult = try await onDeviceProvider.correct(
                     segments: mapped,
                     glossaryHint: vocabulary.promptHint,
                     language: language
                 )
-            guard batchResult.succeededBatchCount > 0 || batchResult.failedBatchCount == 0 else {
-                throw RefinementError.invalidModelResponse
+                guard batchResult.succeededBatchCount > 0 || batchResult.failedBatchCount == 0 else {
+                    throw RefinementError.invalidModelResponse
+                }
+                corrected = batchResult.segments
+            } else {
+                corrected = try await correctViaLocalLLM(
+                    segments: mapped,
+                    glossaryHint: vocabulary.promptHint,
+                    language: language,
+                    allowModelLoad: allowModelLoad
+                )
             }
-            corrected = batchResult.segments
-        case .localLLM:
-            corrected = try await correctViaLocalLLM(
-                segments: mapped,
-                glossaryHint: vocabulary.promptHint,
-                language: language,
-                allowModelLoad: allowModelLoad
-            )
+            source = .qwen
         }
 
         guard corrected.map(\.text) != result.segments.map(\.text) else {
             return .applied(
                 result: result,
                 changed: false,
-                source: engine.source,
+                source: source,
                 correctionPairs: [],
-                providerRan: true
+                providerRan: true,
+                executionPath: source == .appleIntelligence ? .beta(.foundationModels) : .beta(.onDevice)
             )
         }
         let refined = try MeetingRevisionEditor.editSegments(
@@ -189,9 +302,10 @@ struct MeetingRefinementEngine {
         return .applied(
             result: refined,
             changed: true,
-            source: engine.source,
+            source: source,
             correctionPairs: pairs,
-            providerRan: true
+            providerRan: true,
+            executionPath: source == .appleIntelligence ? .beta(.foundationModels) : .beta(.onDevice)
         )
     }
 
@@ -203,12 +317,15 @@ struct MeetingRefinementEngine {
         language: AppLanguage,
         allowModelLoad: Bool
     ) async throws -> [MeetingSegment] {
+        guard BetaFeaturePolicy().authorizes(.onDevice, for: .transcriptRefinement) else {
+            throw RefinementError.localModelUnavailable
+        }
         let llm = OnDeviceLLMService.shared
         if !llm.isModelLoaded {
             guard allowModelLoad, llm.isCapable, llm.isModelCachedOnDisk else {
                 throw RefinementError.localModelUnavailable
             }
-            await llm.loadModelIfNeeded()
+            await llm.loadModelIfNeeded(use: .transcriptRefinement)
         }
         guard llm.isModelLoaded else { throw RefinementError.localModelUnavailable }
 
@@ -239,7 +356,8 @@ struct MeetingRefinementEngine {
             let raw = try await llm.generate(
                 systemPrompt: Prompts.MeetingCorrectionLocal.systemInstruction(language: language),
                 userPrompt: userPrompt,
-                maxTokens: 700
+                maxTokens: 700,
+                use: .transcriptRefinement
             )
             guard let parsed = Self.parseLocalCorrections(raw) else {
                 throw RefinementError.invalidModelResponse

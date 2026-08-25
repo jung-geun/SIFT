@@ -31,7 +31,7 @@ enum MeetingPostProcessor {
             _ result: MeetingResult,
             _ glossaryHint: String,
             _ language: AppLanguage
-        ) async -> MeetingAnalysisEngine.Outcome
+        ) async throws -> MeetingAnalysisEngine.Outcome
         let save: (_ context: ModelContext) throws -> Void
         let learnCorrections: (_ meetingID: String, _ pairs: [MeetingRefinementEngine.CorrectionPair]) async -> Void
 
@@ -48,7 +48,7 @@ enum MeetingPostProcessor {
                     )
                 },
                 analyze: { meetingID, result, glossaryHint, language in
-                    await MeetingAnalysisEngine().analyze(
+                    try await MeetingAnalysisEngine().analyze(
                         meetingID: meetingID,
                         result: result,
                         glossaryHint: glossaryHint,
@@ -135,10 +135,18 @@ enum MeetingPostProcessor {
                     language,
                     allowModelLoad
                 )
-                switch outcome {
-                case .skipped(let reason):
+                if case .rules(let reason) = outcome.executionPath {
+                    record.refinementFallbackReasonRaw = reason.rawValue
+                } else {
+                    record.refinementFallbackReasonRaw = nil
+                }
+                if let reason = outcome.skipReason {
                     proofreadOutcome = .skipped(reason: reason)
-                case .applied(let refinedResult, let changed, let source, let correctionPairs, _):
+                    try dependencies.save(context)
+                } else if let source = outcome.source {
+                    let refinedResult = outcome.result
+                    let changed = outcome.changed
+                    let correctionPairs = outcome.correctionPairs
                     let engineLabel = source.displayName(language: .current)
                     proofreadEngine = engineLabel
                     let count = MeetingProofread.corrections(raw: base, current: refinedResult).count
@@ -160,6 +168,8 @@ enum MeetingPostProcessor {
                         proofreadOutcome = changed
                             ? .changed(count: correctionCount, engine: engineLabel)
                             : .unchanged(engine: engineLabel)
+                    } catch is CancellationError {
+                        throw CancellationError()
                     } catch {
                         result = base
                         refined = false
@@ -170,7 +180,12 @@ enum MeetingPostProcessor {
                         )
                     }
                 }
+            } catch is CancellationError {
+                throw CancellationError()
             } catch {
+                let reason = ProviderErrorMapper.fallbackReason(for: error) ?? .providerExecutionFailed
+                record.refinementFallbackReasonRaw = reason.rawValue
+                try? dependencies.save(context)
                 result = base
                 refined = false
                 correctionCount = 0
@@ -183,7 +198,7 @@ enum MeetingPostProcessor {
 
         reporter?.set(.summarizing(engine: ""))
         let analysisHint = (await dependencies.snapshot()).promptHint
-        let analysis = await dependencies.analyze(record.meetingID, result, analysisHint, language)
+        let analysis = try await dependencies.analyze(record.meetingID, result, analysisHint, language)
         let analysisLabel = analysis.engineSource?.displayName(language: .current)
             ?? AppLanguage.localized(
                 "meeting.engine.unknown",

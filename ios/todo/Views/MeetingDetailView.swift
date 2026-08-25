@@ -2,6 +2,10 @@ import SwiftUI
 import Combine
 import SwiftData
 
+
+private enum PersistedMeetingDiagnosticError: Error {
+    case transcriptFinalizationFailed
+}
 struct MeetingDetailView: View {
     @Environment(\.modelContext) private var meetingContext
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -11,6 +15,7 @@ struct MeetingDetailView: View {
     @State private var confirmedDraftIDs = Set<String>()
     let meeting: MeetingRecord
     @StateObject private var player = MeetingAudioPlaybackController()
+    @State private var isStartingSegmentPlayback = false
     @State private var waveform: MeetingWaveform?
     @State private var waveformError: String?
     @State private var isExporting = false
@@ -324,6 +329,25 @@ struct MeetingDetailView: View {
             if let retryError {
                 Text(retryError).font(.caption).foregroundStyle(AppTheme.destructive)
             }
+            NavigationLink {
+                DiagnosticReportView(
+                    pendingError: DiagnosticReportService.shared.collectionEnabled
+                        ? nil
+                        : PersistedMeetingDiagnosticError.transcriptFinalizationFailed,
+                    component: "meeting.transcription",
+                    operation: "persistedFinalizationFailure"
+                )
+            } label: {
+                Label(
+                    AppLanguage.localized(
+                        "meeting.action.reportDiagnostic",
+                        defaultValue: AppLanguage.current == .english ? "Report Error" : "오류 보고",
+                        language: .current,
+                        comment: "Open diagnostic reporting after a meeting transcription error."
+                    ),
+                    systemImage: "exclamationmark.bubble"
+                )
+            }
         }
     }
 
@@ -478,6 +502,10 @@ struct MeetingDetailView: View {
         }
         .padding(.vertical, 6)
         .padding(.horizontal, 10)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            seek(to: segment)
+        }
         .overlay(alignment: .leading) {
             if isActive {
                 Rectangle()
@@ -491,8 +519,8 @@ struct MeetingDetailView: View {
         )
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: isActive)
         .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(isActive ? .isSelected : [])
-        .accessibilityHint(isActive ? "현재 재생 구간" : "")
+        .accessibilityAddTraits(isActive ? [.isSelected, .isButton] : .isButton)
+        .accessibilityHint(isActive ? "현재 재생 구간. 두 번 탭하면 이 구간부터 재생" : "두 번 탭하면 이 구간부터 재생")
         .accessibilityValue(
             correction.map { "교정 전: \($0.before). 교정 후: \($0.after)." } ?? segment.text
         )
@@ -524,6 +552,26 @@ struct MeetingDetailView: View {
         }
     }
 
+    private func seek(to segment: MeetingSegment) {
+        guard let manifest = meeting.audioManifest else { return }
+        let total = totalMs(manifest)
+        guard total > 0 else { return }
+        player.seek(toProgress: Double(segment.startMs) / Double(total), totalMilliseconds: total)
+        // seek() already repositions a live scheduler and keeps it playing, so
+        // only a stopped/paused player needs an explicit start/resume call —
+        // calling play(manifest:) while already playing would tear down and
+        // rebuild the engine for no benefit. isStartingSegmentPlayback closes
+        // the async gap before player.isPlaying flips true, so two rapid taps
+        // on different rows can't race two overlapping play() calls.
+        guard !player.isPlaying, !isStartingSegmentPlayback else { return }
+        isStartingSegmentPlayback = true
+        Task {
+            defer { isStartingSegmentPlayback = false }
+            do { try await player.play(manifest: manifest) }
+            catch { player.report(error) }
+        }
+    }
+
     private var isReprocessing: Bool {
         isAnalyzing || isRetryingTranscript
     }
@@ -541,6 +589,18 @@ struct MeetingDetailView: View {
     @ViewBuilder
     private var proofreadStatus: some View {
         let language = AppLanguage.current
+        if let rawReason = meeting.refinementFallbackReasonRaw,
+           let reason = RuleFallbackReason(rawValue: rawReason) {
+            let label = AppLanguage.localized(
+                "meeting.refinement.ruleBased",
+                defaultValue: language == .english ? "Rule-based · %@" : "규칙 기반 · %@",
+                language: language,
+                comment: "Meeting refinement rules fallback label."
+            )
+            Text(String(format: label, locale: language.locale, reason.localizedDescription(language: language)))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
         switch proofreadPresentation {
         case .hidden:
             if isOnDeviceAIAvailable == false, !processingReporter.isBusy {
@@ -833,12 +893,20 @@ struct MeetingDetailView: View {
             defer { isAnalyzing = false }
             let snapshot = await userVocabulary?.service.snapshot() ?? .empty
             let hint = snapshot.promptHint
-            let outcome = await MeetingAnalysisEngine().analyze(
-                meetingID: meetingID,
-                result: source,
-                glossaryHint: hint,
-                language: AppLanguage.resolve(languageTag: meeting.languageTag)
-            )
+            let outcome: MeetingAnalysisEngine.Outcome
+            do {
+                outcome = try await MeetingAnalysisEngine().analyze(
+                    meetingID: meetingID,
+                    result: source,
+                    glossaryHint: hint,
+                    language: AppLanguage.resolve(languageTag: meeting.languageTag)
+                )
+            } catch is CancellationError {
+                return
+            } catch {
+                analysisError = error.localizedDescription
+                return
+            }
             guard let latest = meeting.result,
                   let merged = latest.replacingSummary(
                     outcome.result.summary,

@@ -31,6 +31,7 @@ final class MeetingAudioPlaybackController: ObservableObject {
     private let logger = Logger(subsystem: "pieroot.todo", category: "MeetingPlayback")
     private var scheduler: MeetingPlaybackStreamScheduler?
     private var pendingStartProgress: Double?
+    private var isStartingPlayback = false
     /// The logical sample the current schedule started from. node.playerTime
     /// resets to 0 on every (re)schedule, so progress = base + node.sampleTime.
     private var baseLogicalSample: Int64 = 0
@@ -54,19 +55,37 @@ final class MeetingAudioPlaybackController: ObservableObject {
         return (sample / sampleRate) * 1_000 + ((sample % sampleRate) * 1_000 / sampleRate)
     }
 
+    /// Resolves the position play() should start from: the still-armed seek
+    /// target when set, else the last known playback progress. A value at or
+    /// past the end collapses to zero so replaying after natural completion
+    /// restarts from the beginning instead of resuming a stale end/seek value.
+    nonisolated static func resolvedStartProgress(pending: Double?, current: Double) -> Double {
+        let resolved = pending ?? current
+        guard resolved.isFinite else { return 0 }
+        return resolved >= 1 ? 0 : min(max(resolved, 0), 1)
+    }
+
     func play(manifest: MeetingAudioManifest) async throws {
+        guard !isStartingPlayback else { return }
         if isPaused {
             node.play()
             isPaused = false
             isPlaying = true
             return
         }
-        stop()
+        isStartingPlayback = true
+        defer { isStartingPlayback = false }
+        // Keep the armed seek until it is resolved after session activation below.
+        stop(resetProgress: false)
         do {
             try await MeetingAudioSessionController.shared.activateForPlayback()
         } catch {
             throw PlaybackError.operation("activateSession", error)
         }
+        let startProgress = Self.resolvedStartProgress(
+            pending: pendingStartProgress,
+            current: playbackProgress
+        )
         var playbackStarted = false
         defer {
             if !playbackStarted {
@@ -75,7 +94,6 @@ final class MeetingAudioPlaybackController: ObservableObject {
             }
         }
         guard !manifest.parts.isEmpty else { throw PlaybackError.noAudio }
-        let startProgress = min(max(pendingStartProgress ?? playbackProgress, 0), 1)
         logicalTotalSamples = manifest.totalSamples
         playbackSampleRate = manifest.sampleRate
         let startSample = Int64(startProgress * Double(logicalTotalSamples))
@@ -121,9 +139,10 @@ final class MeetingAudioPlaybackController: ObservableObject {
         }
         scheduler = streamScheduler
         do {
-            try streamScheduler.start()
             if startSample > 0 {
                 try streamScheduler.seek(toLogicalSample: startSample, resumePlaying: false)
+            } else {
+                try streamScheduler.start()
             }
         } catch {
             throw PlaybackError.operation("streamDecode", error)
@@ -171,6 +190,7 @@ final class MeetingAudioPlaybackController: ObservableObject {
     /// the visible position armed so the waveform doesn't snap back to the start.
     /// Once playback is prepared, it also repositions the scheduled audio.
     func seek(toProgress progress: Double, totalMilliseconds: Int64? = nil) {
+        guard progress.isFinite else { return }
         let clamped = min(max(progress, 0), 1)
         pendingStartProgress = clamped
 
@@ -191,6 +211,10 @@ final class MeetingAudioPlaybackController: ObservableObject {
                 forLogicalSample: target,
                 sampleRate: playbackSampleRate
             )
+            // Already applied to the live engine; nothing left to consume at the
+            // next play(), so don't let this linger and get replayed after this
+            // session stops/finishes.
+            pendingStartProgress = nil
         } catch {
             report(PlaybackError.operation("seek", error))
             stop()
@@ -229,11 +253,21 @@ final class MeetingAudioPlaybackController: ObservableObject {
                 logger.error(
                     "Playback failure operation=\(operation, privacy: .public) domain=\(diagnostic.domain, privacy: .public) code=\(diagnostic.code, privacy: .public) description=\(diagnostic.localizedDescription, privacy: .private)"
                 )
+                DiagnosticRecorder.shared.record(
+                    error: underlying,
+                    component: "meeting.playback",
+                    operation: operation
+                )
             }
         default:
             let diagnostic = error as NSError
             logger.error(
                 "Playback failure domain=\(diagnostic.domain, privacy: .public) code=\(diagnostic.code, privacy: .public) description=\(diagnostic.localizedDescription, privacy: .private)"
+            )
+            DiagnosticRecorder.shared.record(
+                error: error,
+                component: "meeting.playback",
+                operation: "playback"
             )
         }
         errorMessage = Self.userFacingErrorMessage(error, language: .current)

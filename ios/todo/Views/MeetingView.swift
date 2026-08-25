@@ -6,7 +6,6 @@ struct MeetingView: View {
     @Environment(\.userVocabulary) private var userVocabulary
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Query(sort: \MeetingRecord.updatedAt, order: .reverse) private var meetings: [MeetingRecord]
-    @ObservedObject private var settingsStore = SettingsStore.shared
     @StateObject private var coordinator = MeetingCaptureCoordinator()
     @State private var languageTag = AppLanguage.current == .english ? "en-US" : "ko-KR"
     @State private var consentAccepted = false
@@ -14,10 +13,9 @@ struct MeetingView: View {
     @State private var currentMeetingID: String?
     @State private var showingConsentWithdrawal = false
     @State private var helpTopic: MeetingHelpTopic?
-    @State private var voiceProcessingEnabled = SettingsStore.shared.effectiveMeetingVoiceProcessingEnabled
-    @State private var autoRefineEnabled = SettingsStore.shared.meetingAutoRefineEnabled
     @StateObject private var processingReporter = MeetingProcessingReporter()
     @ScaledMetric(relativeTo: .body) private var liveTranscriptViewportHeight = 220
+    @State private var showingDiagnosticReports = false
 
     var body: some View {
         NavigationStack {
@@ -36,26 +34,6 @@ struct MeetingView: View {
                         helpTopic: .recordingConsent
                     )
 
-                    if settingsStore.betaFeaturesEnabled {
-                        settingToggle(
-                            title: "음성 노이즈 감소",
-                            isOn: $voiceProcessingEnabled,
-                            helpTopic: .voiceProcessing,
-                            isDisabled: coordinator.status == .recording || coordinator.status == .paused
-                        )
-                        .onChange(of: voiceProcessingEnabled) { _, enabled in
-                            SettingsStore.shared.meetingVoiceProcessingEnabled = enabled
-                        }
-                    }
-
-                    settingToggle(
-                        title: "전사 자동 교정",
-                        isOn: $autoRefineEnabled,
-                        helpTopic: .autoRefine
-                    )
-                    .onChange(of: autoRefineEnabled) { _, enabled in
-                        SettingsStore.shared.meetingAutoRefineEnabled = enabled
-                    }
 
                     captureControls
                 }
@@ -162,9 +140,6 @@ struct MeetingView: View {
                 else { return }
                 showingConsentWithdrawal = true
             }
-            .onChange(of: settingsStore.betaFeaturesEnabled) { _, _ in
-                voiceProcessingEnabled = settingsStore.effectiveMeetingVoiceProcessingEnabled
-            }
             .alert(copy("meeting.alert.recordingNotice.title", fallback: "녹음 안내"), isPresented: $showingDisclosure) {
                 Button(copy("취소", fallback: "취소"), role: .cancel) {}
                 Button(copy("녹음 시작", fallback: "녹음 시작")) { startRecording() }
@@ -195,9 +170,22 @@ struct MeetingView: View {
                 ))
             }
             .alert(copy("meeting.alert.recordingError.title", fallback: "녹음 오류"), isPresented: Binding(get: { coordinator.failure != nil }, set: { if !$0 { coordinator.dismissFailure() } })) {
+                if coordinator.reportableError != nil {
+                    Button(copy("meeting.action.reportDiagnostic", fallback: "오류 보고")) {
+                        showingDiagnosticReports = true
+                    }
+                }
                 Button(copy("확인", fallback: "확인"), role: .cancel) {}
             } message: {
                 Text(coordinator.failure ?? copy("meeting.error.unknown", fallback: "알 수 없는 오류"))
+            }
+            .sheet(isPresented: $showingDiagnosticReports) {
+                NavigationStack {
+                    DiagnosticReportView(
+                        pendingError: DiagnosticReportService.shared.collectionEnabled ? nil : coordinator.reportableError,
+                        showsCloseButton: true
+                    )
+                }
             }
         }
         .task { persistPendingCaptureRecoveries() }
@@ -256,7 +244,13 @@ struct MeetingView: View {
             Button(copy("meeting.action.stopRecording", fallback: "녹음 종료")) { Task { await stopRecording() } }
                 .tint(AppTheme.destructive)
         case .paused:
-            Button(copy("meeting.action.continueRecording", fallback: "계속 녹음")) { try? coordinator.resume() }
+            Button(copy("meeting.action.continueRecording", fallback: "계속 녹음")) {
+                do {
+                    try coordinator.resume()
+                } catch {
+                    coordinator.reportFailure(error)
+                }
+            }
             Button(copy("meeting.action.stopRecording", fallback: "녹음 종료")) { Task { await stopRecording() } }
                 .tint(AppTheme.destructive)
         case .stopping, .finalizingTranscript, .extractingActions:

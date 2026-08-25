@@ -446,6 +446,8 @@ final class MeetingRecord {
     /// current transcript is a raw base or has been edited by the user. Legacy
     /// localized labels are read for display but are never written by new commits.
     var refinementEngineLabel: String = ""
+    /// Stable rule fallback reason for transcript refinement; legacy rows remain unknown.
+    var refinementFallbackReasonRaw: String? = nil
     var manifestData: Data = Data()
     var retentionUntil: Date?
     var confirmedTodoIDs: [String] = []
@@ -517,6 +519,7 @@ final class MeetingRecord {
         let transcriptRevision: Int
         let statusRaw: String
         let refinementEngineLabel: String
+        let refinementFallbackReasonRaw: String?
         let manifestData: Data
         let updatedAt: Date
     }
@@ -528,6 +531,7 @@ final class MeetingRecord {
             transcriptRevision: transcriptRevision,
             statusRaw: statusRaw,
             refinementEngineLabel: refinementEngineLabel,
+            refinementFallbackReasonRaw: refinementFallbackReasonRaw,
             manifestData: manifestData,
             updatedAt: updatedAt
         )
@@ -540,6 +544,7 @@ final class MeetingRecord {
         statusRaw = snapshot.statusRaw
         refinementEngineLabel = snapshot.refinementEngineLabel
         manifestData = snapshot.manifestData
+        refinementFallbackReasonRaw = snapshot.refinementFallbackReasonRaw
         updatedAt = snapshot.updatedAt
     }
 

@@ -43,6 +43,9 @@ enum MeetingTodoImporter {
             TaskBehaviorRecorder.recordCreation(of: todo, actor: .meetingImport, in: todoContext)
             try todoContext.save()
         }
+        Task { @MainActor in
+            await TodoEligibilityReconciler.shared.reconcile(todo)
+        }
 
         if !meeting.confirmedTodoIDs.contains(todo.id.uuidString) {
             meeting.confirmedTodoIDs.append(todo.id.uuidString)

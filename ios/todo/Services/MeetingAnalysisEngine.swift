@@ -1,20 +1,15 @@
 import Foundation
 
-/// Routes meeting transcript analysis to an on-device LLM, preferring Apple
-/// Foundation Models (AFM), falling back to the on-device MLX LLM (Qwen) when it
-/// is already loaded, and only then to the deterministic keyword heuristic.
-/// On-device only — the transcript never leaves the device.
-///
-/// Both LLM paths extract summary / decisions / unresolved questions / action
-/// candidates. The heuristic is a last resort that only yields rule-based action
-/// drafts, so keeping an LLM in front means tasks and questions come from real
-/// analysis rather than keyword matching whenever any on-device model is present.
+/// Routes meeting transcript analysis through the user's selected AI provider,
+/// then falls back through the same provider chain used by task prioritization.
+/// The deterministic keyword heuristic remains the last resort.
 @MainActor
 struct MeetingAnalysisEngine {
 
     enum AnalysisSource: String, Sendable {
         case appleIntelligence = "apple-intelligence"
         case qwen = "qwen"
+        case gemini = "gemini"
         case heuristic = "heuristic"
 
         func displayName(language: AppLanguage) -> String {
@@ -23,6 +18,8 @@ struct MeetingAnalysisEngine {
                 return MeetingRefinementEngine.Source.appleIntelligence.displayName(language: language)
             case .qwen:
                 return MeetingRefinementEngine.Source.qwen.displayName(language: language)
+            case .gemini:
+                return PersonaAIProvider.gemini.displayName(language: language)
             case .heuristic:
                 return AppLanguage.localized(
                     "meeting.engine.heuristic",
@@ -41,17 +38,20 @@ struct MeetingAnalysisEngine {
         let engineLabel: String
         let usedOnDeviceLLM: Bool
         let engineSource: AnalysisSource?
+        let executionPath: AnalysisExecutionPath
 
         init(
             result: MeetingResult,
             engineLabel: String,
             usedOnDeviceLLM: Bool,
-            engineSource: AnalysisSource? = nil
+            engineSource: AnalysisSource? = nil,
+            executionPath: AnalysisExecutionPath = .rules(.noProviderOptIn)
         ) {
             self.result = result
             self.engineLabel = engineLabel
             self.usedOnDeviceLLM = usedOnDeviceLLM
             self.engineSource = engineSource
+            self.executionPath = executionPath
         }
     }
 
@@ -62,70 +62,238 @@ struct MeetingAnalysisEngine {
         result: MeetingResult,
         glossaryHint: String = "",
         language: AppLanguage
-    ) async -> Outcome {
-        if #available(iOS 26.0, *), FoundationModelsAvailability.isAvailable {
-            do {
-                let extraction = try await FoundationModelsService()
-                    .analyzeMeeting(
-                        meetingID: meetingID,
-                        segments: result.segments,
-                        glossaryHint: glossaryHint,
-                        language: language
-                    )
-                return Outcome(
-                    result: merge(extraction, into: result, meetingID: meetingID),
-                    engineLabel: MeetingRefinementEngine.Source.appleIntelligence.displayName(language: language),
-                    usedOnDeviceLLM: true,
-                    engineSource: .appleIntelligence
-                )
-            } catch {
-                // AFM 미가용/실패 → 로컬 LLM → 휴리스틱 순으로 강등.
+    ) async throws -> Outcome {
+        let decision = BetaFeaturePolicy().routingDecision(for: .standardAnalysis)
+        guard case .providers(let providers) = decision, let provider = providers.first else {
+            let reason: RuleFallbackReason
+            if case .rules(let fallback) = decision {
+                reason = fallback
+            } else {
+                reason = .noEligibleProvider
             }
+            return heuristicOutcome(
+                meetingID: meetingID,
+                result: result,
+                language: language,
+                reason: reason
+            )
         }
-        if let extraction = await analyzeViaLocalLLM(
-            meetingID: meetingID,
-            segments: result.segments,
-            glossaryHint: glossaryHint,
-            language: language
-        ) {
+
+        do {
+            if let outcome = try await analyze(
+                provider: provider,
+                meetingID: meetingID,
+                result: result,
+                glossaryHint: glossaryHint,
+                language: language
+            ) {
+                return outcome
+            }
+            throw IntelligenceRoutingError.parseFailed(
+                provider: provider,
+                reason: "Meeting provider returned no analysis."
+            )
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            return heuristicOutcome(
+                meetingID: meetingID,
+                result: result,
+                language: language,
+                reason: ProviderErrorMapper.fallbackReason(for: error) ?? .providerExecutionFailed
+            )
+        }
+    }
+
+    private func heuristicOutcome(
+        meetingID: String,
+        result: MeetingResult,
+        language: AppLanguage,
+        reason: RuleFallbackReason
+    ) -> Outcome {
+        Outcome(
+            result: heuristic.analyze(meetingID: meetingID, result: result, language: language),
+            engineLabel: AnalysisSource.heuristic.displayName(language: language),
+            usedOnDeviceLLM: false,
+            engineSource: .heuristic,
+            executionPath: .rules(reason)
+        )
+    }
+
+    private func analyze(
+        provider: PersonaAIProvider,
+        meetingID: String,
+        result: MeetingResult,
+        glossaryHint: String,
+        language: AppLanguage
+    ) async throws -> Outcome? {
+        switch provider {
+        case .foundationModels:
+            return try await analyzeViaFoundationModels(
+                meetingID: meetingID,
+                result: result,
+                glossaryHint: glossaryHint,
+                language: language
+            )
+        case .onDevice:
+            guard let extraction = try await analyzeViaLocalLLM(
+                segments: result.segments,
+                glossaryHint: glossaryHint,
+                language: language
+            ) else { return nil }
             return Outcome(
                 result: merge(extraction, into: result, meetingID: meetingID),
                 engineLabel: MeetingRefinementEngine.Source.qwen.displayName(language: language),
                 usedOnDeviceLLM: true,
-                engineSource: .qwen
+                engineSource: .qwen,
+                executionPath: .beta(.onDevice)
+            )
+        case .gemini:
+            guard let extraction = try await analyzeViaGemini(
+                meetingID: meetingID,
+                segments: result.segments,
+                glossaryHint: glossaryHint,
+                language: language
+            ) else { return nil }
+            return Outcome(
+                result: merge(extraction, into: result, meetingID: meetingID),
+                engineLabel: AnalysisSource.gemini.displayName(language: language),
+                usedOnDeviceLLM: false,
+                engineSource: .gemini,
+                executionPath: .beta(.gemini)
             )
         }
+    }
+    private func analyzeViaFoundationModels(
+        meetingID: String,
+        result: MeetingResult,
+        glossaryHint: String,
+        language: AppLanguage
+    ) async throws -> Outcome {
+        guard #available(iOS 26.0, *), FoundationModelsAvailability.isAvailable else {
+            throw IntelligenceRoutingError.backendUnavailable(
+                provider: .foundationModels,
+                reason: RuleFallbackReason.unavailable.rawValue
+            )
+        }
+        let extraction = try await FoundationModelsService()
+            .analyzeMeeting(
+                meetingID: meetingID,
+                segments: result.segments,
+                glossaryHint: glossaryHint,
+                language: language
+            )
         return Outcome(
-            result: heuristic.analyze(meetingID: meetingID, result: result, language: language),
-            engineLabel: AnalysisSource.heuristic.displayName(language: language),
-            usedOnDeviceLLM: false,
-            engineSource: .heuristic
+            result: merge(extraction, into: result, meetingID: meetingID),
+            engineLabel: MeetingRefinementEngine.Source.appleIntelligence.displayName(language: language),
+            usedOnDeviceLLM: true,
+            engineSource: .appleIntelligence,
+            executionPath: .beta(.foundationModels)
         )
     }
 
-    // MARK: - On-device LLM analysis (AFM 미가용 폴백)
+    // MARK: - Gemini analysis
 
-    /// Extracts title/summary/decisions/questions/actions with the MLX LLM, but
-    /// only when its model is already loaded (no surprise download; the manual
-    /// refine path loads it first, so analysis can reuse it). Returns nil to fall
-    /// through to the heuristic.
-    private func analyzeViaLocalLLM(
+    private func analyzeViaGemini(
         meetingID: String,
         segments: [MeetingSegment],
         glossaryHint: String,
         language: AppLanguage
-    ) async -> ProviderMeetingExtraction? {
-        let llm = OnDeviceLLMService.shared
-        guard llm.isModelLoaded else { return nil }
+    ) async throws -> ProviderMeetingExtraction? {
+        let baseResult = MeetingResult(segments: segments)
 
-        // Analysis needs whole-meeting context; cap to the first ~3000 chars to
-        // fit the local model's smaller window (mirrors the AFM char cap).
+
+        let analyzed = try await GeminiProviderService().analyzeMeeting(
+            meetingID: meetingID,
+            result: baseResult,
+            glossaryHint: glossaryHint,
+            language: language
+        )
+        return ProviderMeetingExtraction(
+            title: analyzed.title,
+            summary: analyzed.summary,
+            decisions: analyzed.decisions,
+            unresolvedQuestions: analyzed.unresolvedQuestions,
+            actionDrafts: analyzed.actionDrafts.map {
+                ProviderActionDraftInput(
+                    title: $0.title,
+                    notes: $0.notes,
+                    assignee: $0.assignee,
+                    dueAtISO8601: $0.dueAtISO8601,
+                    sourceSegmentIDs: $0.sourceSegmentIDs,
+                    confidence: $0.confidence,
+                    requiresReview: $0.requiresReview
+                )
+            }
+        )
+    }
+
+    // MARK: - On-device LLM analysis
+
+    /// Extracts title/summary/decisions/questions/actions with the MLX LLM, but
+    /// only when its model is already loaded (no surprise download). Returns nil
+    /// to continue routing.
+    private func analyzeViaLocalLLM(
+        segments: [MeetingSegment],
+        glossaryHint: String,
+        language: AppLanguage
+    ) async throws -> ProviderMeetingExtraction? {
+        let llm = OnDeviceLLMService.shared
+        guard llm.isModelLoaded else {
+            throw OnDeviceLLMService.LLMError.modelNotLoaded
+        }
+        guard let context = buildTranscriptContext(
+            segments: segments,
+            glossaryHint: glossaryHint,
+            language: language,
+            transcriptCharCap: 3_000
+        ) else {
+            throw IntelligenceRoutingError.parseFailed(
+                provider: .onDevice,
+                reason: "Meeting transcript context is empty."
+            )
+        }
+
+        let userPrompt = """
+        \(context.glossaryBlock)[전사 구간]
+        \(context.numbered.joined(separator: "\n"))
+
+        \(Prompts.MeetingAnalysisLocal.requestSuffix(language: language))
+        """
+        let raw = try await llm.generate(
+            systemPrompt: Prompts.MeetingAnalysisLocal.systemInstruction(language: language),
+            userPrompt: userPrompt,
+            maxTokens: 900,
+            use: .standardAnalysis
+        )
+        guard let extraction = Self.extraction(from: raw, included: context.included) else {
+            throw IntelligenceRoutingError.parseFailed(
+                provider: .onDevice,
+                reason: "On-device meeting response was invalid."
+            )
+        }
+        return extraction
+
+    }
+
+    private struct TranscriptContext {
+        let numbered: [String]
+        let included: [MeetingSegment]
+        let glossaryBlock: String
+    }
+
+    private func buildTranscriptContext(
+        segments: [MeetingSegment],
+        glossaryHint: String,
+        language: AppLanguage,
+        transcriptCharCap: Int
+    ) -> TranscriptContext? {
         var numbered = [String]()
         var included = [MeetingSegment]()
         var used = 0
         for segment in segments {
             let line = "\(included.count + 1). \(segment.text)"
-            if used + line.count > 3_000, !included.isEmpty { break }
+            if used + line.count > transcriptCharCap, !included.isEmpty { break }
             numbered.append(line)
             included.append(segment)
             used += line.count
@@ -144,41 +312,8 @@ struct MeetingAnalysisEngine {
             )
             glossaryBlock = "[\(label)]\n\(glossaryHint.trimmingCharacters(in: .whitespacesAndNewlines))\n\n"
         }
-        let userPrompt = """
-        \(glossaryBlock)[전사 구간]
-        \(numbered.joined(separator: "\n"))
 
-        \(Prompts.MeetingAnalysisLocal.requestSuffix(language: language))
-        """
-        guard let raw = try? await llm.generate(
-            systemPrompt: Prompts.MeetingAnalysisLocal.systemInstruction(language: language),
-            userPrompt: userPrompt,
-            maxTokens: 900
-        ), let payload = Self.parseAnalysis(raw) else { return nil }
-
-        let drafts: [ProviderActionDraftInput] = (payload.actions ?? []).compactMap { action -> ProviderActionDraftInput? in
-            let index = action.n - 1
-            guard index >= 0, index < included.count else { return nil }
-            let title = action.title.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !title.isEmpty else { return nil }
-            let due = (action.due ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            return ProviderActionDraftInput(
-                title: title,
-                notes: (action.notes ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
-                assignee: nil,
-                dueAtISO8601: due.isEmpty ? nil : Self.canonicalDueDate(due),
-                sourceSegmentIDs: [included[index].id],
-                confidence: 0.6,
-                requiresReview: true
-            )
-        }
-        return ProviderMeetingExtraction(
-            title: (payload.title ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
-            summary: (payload.summary ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
-            decisions: (payload.decisions ?? []).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty },
-            unresolvedQuestions: (payload.questions ?? []).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty },
-            actionDrafts: drafts
-        )
+        return TranscriptContext(numbered: numbered, included: included, glossaryBlock: glossaryBlock)
     }
 
     private struct AnalysisAction: Decodable {
@@ -205,6 +340,34 @@ struct MeetingAnalysisEngine {
         }
         guard let data = trimmed.data(using: .utf8) else { return nil }
         return try? JSONDecoder().decode(AnalysisPayload.self, from: data)
+    }
+
+    private static func extraction(from raw: String, included: [MeetingSegment]) -> ProviderMeetingExtraction? {
+        guard let payload = parseAnalysis(raw) else { return nil }
+
+        let drafts: [ProviderActionDraftInput] = (payload.actions ?? []).compactMap { action -> ProviderActionDraftInput? in
+            let index = action.n - 1
+            guard index >= 0, index < included.count else { return nil }
+            let title = action.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !title.isEmpty else { return nil }
+            let due = (action.due ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            return ProviderActionDraftInput(
+                title: title,
+                notes: (action.notes ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
+                assignee: nil,
+                dueAtISO8601: due.isEmpty ? nil : canonicalDueDate(due),
+                sourceSegmentIDs: [included[index].id],
+                confidence: 0.6,
+                requiresReview: true
+            )
+        }
+        return ProviderMeetingExtraction(
+            title: (payload.title ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
+            summary: (payload.summary ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
+            decisions: (payload.decisions ?? []).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty },
+            unresolvedQuestions: (payload.questions ?? []).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty },
+            actionDrafts: drafts
+        )
     }
 
     /// Converts model dates to the canonical UTC contract. Model output without

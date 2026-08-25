@@ -5,6 +5,7 @@ import Testing
 @testable import todo
 
 @Suite("Meeting seek, import, and analysis fallback")
+@MainActor
 struct MeetingSeekAndImportTests {
     private let meetingID = "123e4567-e89b-12d3-a456-426614174000"
 
@@ -128,6 +129,28 @@ struct MeetingSeekAndImportTests {
         #expect(box.finished)
     }
 
+    @Test("transcript tap arms the visible playback position before playback starts")
+    @MainActor
+    func transcriptTapArmsPosition() {
+        let controller = MeetingAudioPlaybackController()
+        let totalMs: Int64 = 60_000
+        let segment = MeetingSegment(id: "s2", startMs: 15_000, endMs: 20_000, text: "두 번째 구간")
+
+        // No playback has started yet (fresh/unpositioned) — a caption tap must
+        // still arm the segment's start as the visible position, matching what
+        // `play(manifest:)` reads as its resume point.
+        controller.seek(toProgress: Double(segment.startMs) / Double(totalMs), totalMilliseconds: totalMs)
+        #expect(abs(controller.playbackProgress - 0.25) < 0.0001)
+        #expect(controller.playbackMilliseconds == segment.startMs)
+
+        // Tapping an earlier caption after the first tap replaces the armed
+        // position rather than accumulating from the previous one.
+        let earlier = MeetingSegment(id: "s1", startMs: 5_000, endMs: 10_000, text: "첫 구간")
+        controller.seek(toProgress: Double(earlier.startMs) / Double(totalMs), totalMilliseconds: totalMs)
+        #expect(abs(controller.playbackProgress - (5.0 / 60.0)) < 0.0001)
+        #expect(controller.playbackMilliseconds == earlier.startMs)
+    }
+
     @Test("segment lookup follows half-open latest-start precedence")
     func segmentLookupBoundaries() throws {
         let result = try MeetingResult(segments: [
@@ -224,7 +247,7 @@ struct MeetingSeekAndImportTests {
         // the deterministic keyword heuristic rather than throw.
         let segment = MeetingSegment(id: "seg-1", startMs: 0, endMs: 1_000, text: "김대리가 보고서를 제출해주세요")
         let result = MeetingResult(segments: [segment])
-        let outcome = await MeetingAnalysisEngine().analyze(
+        let outcome = try await MeetingAnalysisEngine().analyze(
             meetingID: meetingID,
             result: result,
             language: .korean

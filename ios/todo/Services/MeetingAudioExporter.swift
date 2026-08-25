@@ -15,6 +15,11 @@ enum MeetingAudioExporter {
         logger.error(
             "Export failure operation=\(stage, privacy: .public) domain=\(diagnostic.domain, privacy: .public) code=\(diagnostic.code, privacy: .public) description=\(diagnostic.localizedDescription, privacy: .private)"
         )
+        DiagnosticRecorder.shared.record(
+            error: error,
+            component: "meeting.export",
+            operation: stage
+        )
         return .operation(stage, error)
     }
     static func exportSourceArchive(manifest: MeetingAudioManifest) throws -> URL {

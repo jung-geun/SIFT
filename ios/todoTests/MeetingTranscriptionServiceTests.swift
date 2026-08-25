@@ -94,6 +94,7 @@ struct MeetingTranscriptionServiceTests {
 }
 
 @Suite("Meeting transcription input isolation")
+@MainActor
 struct MeetingTranscriptionInputPipelineTests {
     @Test("input overflow fails transcription without blocking capture")
     func overflowFailsOnce() async throws {
@@ -116,7 +117,7 @@ struct MeetingTranscriptionInputPipelineTests {
         let buffer = try #require(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 1_024))
         buffer.frameLength = 1_024
         pipeline.enqueue(buffer)
-        #expect(started.wait(timeout: .now() + 2) == .success)
+        #expect(waitForSemaphore(started))
         pipeline.enqueue(buffer)
         release.signal()
         do {
@@ -128,6 +129,10 @@ struct MeetingTranscriptionInputPipelineTests {
         #expect(failures.count == 1)
         stream.continuation.finish()
     }
+}
+
+private func waitForSemaphore(_ semaphore: DispatchSemaphore, timeout: TimeInterval = 2) -> Bool {
+    semaphore.wait(timeout: .now() + timeout) == .success
 }
 
 private final class TranscriptionFailureProbe: @unchecked Sendable {

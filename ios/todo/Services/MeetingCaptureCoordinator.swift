@@ -150,6 +150,7 @@ final class MeetingCaptureCoordinator: ObservableObject {
     private var terminalArtifact: MeetingCaptureArtifact?
     private var terminalError: Error?
     private var liveTranscriptionError: Error?
+    private(set) var reportableError: Error?
     private let logger = Logger(subsystem: "pieroot.todo", category: "MeetingCapture")
     private var liveTranscriptReducer = LiveTranscriptReducer()
     private var transcriptChunks: [TranscriptRangeKey: String] = [:]
@@ -164,6 +165,7 @@ final class MeetingCaptureCoordinator: ObservableObject {
 
     func start(meetingID: String, languageTag: String) async throws {
         guard status == .ready || status == .cancelled || status == .failed else { throw CaptureError.invalidState }
+        reportableError = nil
         guard await AVAudioApplication.requestRecordPermission() else { throw CaptureError.microphoneDenied }
         let transcriptionSession = try await transcriptionSessionFactory.make(
             languageTag: languageTag,
@@ -183,6 +185,7 @@ final class MeetingCaptureCoordinator: ObservableObject {
                 engine.prepare()
                 usingVoiceProcessing = Self.isValidFormat(node.outputFormat(forBus: 0))
             } catch {
+                logDiagnostic(error, operation: "voiceProcessing")
                 usingVoiceProcessing = false
             }
             if !usingVoiceProcessing {
@@ -428,7 +431,9 @@ final class MeetingCaptureCoordinator: ObservableObject {
                 language: .current,
                 comment: "Detail shown when transcript finalization times out while preserving recoverable meeting data."
             )
-            throw CaptureError.transcriptFinalizationTimeout
+            let error = CaptureError.transcriptFinalizationTimeout
+            logDiagnostic(error, operation: "transcriptFinalizationTimeout")
+            throw error
         }
         finalizedTranscript = provisionalText
         finalizationProgress = 0.9
@@ -491,6 +496,7 @@ final class MeetingCaptureCoordinator: ObservableObject {
                 try await canonicalPipeline?.finish()
             } catch {
                 canonicalError = error
+                logDiagnostic(error, operation: "canonicalFinalization")
             }
             canonicalPipeline = nil
             guard let writer = flacPartWriter,
@@ -528,13 +534,16 @@ final class MeetingCaptureCoordinator: ObservableObject {
                 activeMeetingID = nil
             } catch {
                 terminalError = error
+                logDiagnostic(error, operation: "audioFinalization")
                 await MeetingAudioSessionController.shared.deactivate()
             }
         }
     }
 
     private func recordLiveTranscriptionFailure(_ error: Error) -> Bool {
+        guard !(error is CancellationError) else { return false }
         guard liveTranscriptionError == nil else { return false }
+        logDiagnostic(error, operation: "liveTranscription")
         liveTranscriptionError = error
         liveTranscriptionWarning = AppLanguage.localized(
             "meeting.capture.transcription.warning",
@@ -636,6 +645,7 @@ final class MeetingCaptureCoordinator: ObservableObject {
     }
 
     func reportFailure(_ message: String) {
+        reportableError = nil
         failure = message
     }
 
@@ -648,6 +658,12 @@ final class MeetingCaptureCoordinator: ObservableObject {
         failure = nil
     }
     private func logDiagnostic(_ error: Error, operation: String) {
+        reportableError = error
+        DiagnosticRecorder.shared.record(
+            error: error,
+            component: "meeting.capture",
+            operation: operation
+        )
         let diagnostic = error as NSError
         logger.error(
             "Capture failure operation=\(operation, privacy: .public) domain=\(diagnostic.domain, privacy: .public) code=\(diagnostic.code, privacy: .public) description=\(diagnostic.localizedDescription, privacy: .private)"
