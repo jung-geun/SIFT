@@ -1,0 +1,57 @@
+# GitHub Actions CI — backend/meeting-api (Node) 테스트 + 타입 빌드
+#
+# iOS CI(ci.yml)는 backend/meeting-api 를 빌드하지 않으므로, dependabot npm PR 을
+# 포함한 meeting-api 변경은 이 workflow 가 검증합니다. 단계는 GCP Cloud Build
+# (backend/meeting-api/cloudbuild.yaml)의 npm ci → npm test → npm run build 와 같고,
+# Node 22 + npm 11.18.0 으로 Cloud Build·Dockerfile 과 버전을 맞춥니다.
+# Docker 이미지 빌드는 Cloud Build 가 담당하므로 여기서는 하지 않습니다.
+
+name: meeting-api
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - 'backend/meeting-api/**'
+      - '.github/workflows/meeting-api.yml'
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - 'backend/meeting-api/**'
+      - '.github/workflows/meeting-api.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+    working-directory: backend/meeting-api
+
+jobs:
+  test-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: backend/meeting-api/package-lock.json
+
+      - name: Use npm 11.18.0 (Cloud Build / Dockerfile 과 동일)
+        run: npm install -g npm@11.18.0
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build

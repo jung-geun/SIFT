@@ -1,11 +1,23 @@
-# GitHub Actions CI — Xcode 프로젝트 빌드 + Tier 1 파서 테스트
+# GitHub Actions CI — Xcode 프로젝트 빌드 + todoTests 단위 테스트
 #
 # ⚠️ 주의: 이 프로젝트는 SPM(Package.swift) 이 아닌 Xcode 프로젝트이므로
 #           `swift build` / `swift test` 대신 `xcodebuild` 를 사용합니다.
 #
-# ⚠️ Xcode 버전 경고: deployment target = iOS 26.5, Xcode 26.5 빌드 필요.
-#   GitHub 호스티드 러너(macos-15)에 Xcode 26.5 가 없으면 빌드가 실패할 수 있습니다.
-#   러너에 Xcode 26.5 가 추가되는 시점에 자동으로 통과됩니다.
+# 툴체인: deployment target = iOS 26.5 이므로 iOS 26.5 SDK/시뮬레이터가 있는
+#   Xcode 26.5 가 필요합니다. macos-15 러너의 최신 Xcode(26.3, iOS 26.2 SDK)로는
+#   빌드·테스트가 불가능해 macos-26 러너 + Xcode 26.5 로 고정합니다.
+#
+# 거짓 성공(false green) 방지:
+#   - `defaults.run.shell: bash` → GitHub 가 `bash -eo pipefail` 로 실행하므로
+#     `xcodebuild … | xcbeautify` 에서 xcodebuild 실패가 스텝 실패로 전달됩니다.
+#   - 예전의 `| xcpretty || xcodebuild …` 는 xcpretty 종료 코드(0)만 보아
+#     빌드 실패를 숨겼습니다. 포매터는 러너 이미지에 포함된 xcbeautify 를 씁니다.
+#   - xcodebuild 는 실행된 테스트가 0개여도 `TEST SUCCEEDED` 를 반환하므로
+#     결과 번들을 읽어 통과한 테스트가 1개 이상인지 확인합니다.
+#
+# 경로 필터: iOS 빌드가 읽는 경로(ios/, ci_scripts/, Package.resolved 해시)와
+#   이 workflow 가 바뀔 때만 실행합니다. backend/meeting-api 는 meeting-api.yml 이
+#   검증합니다. 필터를 우회해 다시 측정하려면 workflow_dispatch 로 실행합니다.
 #
 # Tier 2 FM 스모크 테스트(FMSmokeTests)는 시뮬레이터에 Apple Intelligence 가 없어
 # `guard FoundationModelsService.isAvailable else { return }` 에서 자동 skip 됩니다(정상).
@@ -15,20 +27,41 @@ name: CI
 on:
   push:
     branches: [ "main" ]
+    paths:
+      - 'ios/**'
+      - 'ci_scripts/**'
+      - '.package-resolved.sha256'
+      - '.github/workflows/ci.yml'
   pull_request:
     branches: [ "main" ]
+    paths:
+      - 'ios/**'
+      - 'ci_scripts/**'
+      - '.package-resolved.sha256'
+      - '.github/workflows/ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
   build-test:
-    runs-on: macos-15
+    runs-on: macos-26
+    timeout-minutes: 30
+    env:
+      DESTINATION: 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.5'
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Select Xcode (latest stable)
+      - name: Select Xcode 26.5
         uses: maxim-lobanov/setup-xcode@v1
         with:
-          xcode-version: latest-stable
+          xcode-version: '26.5'
 
       - name: Print Xcode version
         run: xcodebuild -version
@@ -41,25 +74,28 @@ jobs:
           xcodebuild build \
             -project ios/todo.xcodeproj \
             -scheme todo \
-            -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
+            -destination "$DESTINATION" \
             CODE_SIGNING_ALLOWED=NO \
-            | xcpretty || xcodebuild build \
-            -project ios/todo.xcodeproj \
-            -scheme todo \
-            -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
-            CODE_SIGNING_ALLOWED=NO
+            | xcbeautify
 
-      - name: Test (Tier 1 파서; FM 스모크 자동 skip)
+      # 테스트 호스트가 멈추면 macOS 분(10x 과금)이 잡 timeout 까지 소모되므로 스텝 상한을 둔다.
+      - name: Test (todoTests; FM 스모크 자동 skip)
+        timeout-minutes: 10
         run: |
           xcodebuild test \
             -project ios/todo.xcodeproj \
             -scheme todo \
-            -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
+            -destination "$DESTINATION" \
             -only-testing:todoTests \
+            -resultBundlePath "$RUNNER_TEMP/todoTests.xcresult" \
             CODE_SIGNING_ALLOWED=NO \
-            | xcpretty || xcodebuild test \
-            -project ios/todo.xcodeproj \
-            -scheme todo \
-            -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
-            -only-testing:todoTests \
-            CODE_SIGNING_ALLOWED=NO
+            | xcbeautify
+
+      - name: Require executed tests
+        run: |
+          summary="$(xcrun xcresulttool get test-results summary --path "$RUNNER_TEMP/todoTests.xcresult" --compact)"
+          jq '{result, totalTestCount, passedTests, failedTests, skippedTests}' <<< "$summary"
+          if ! jq -e '.result == "Passed" and .passedTests >= 1' <<< "$summary" > /dev/null; then
+            echo "::error::todoTests 결과가 Passed 가 아니거나 통과한 테스트가 0개입니다(선택자 불일치·결과 불명 포함)."
+            exit 1
+          fi
