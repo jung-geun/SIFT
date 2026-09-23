@@ -12,15 +12,38 @@
 #     `xcodebuild … | xcbeautify` 에서 xcodebuild 실패가 스텝 실패로 전달됩니다.
 #   - 예전의 `| xcpretty || xcodebuild …` 는 xcpretty 종료 코드(0)만 보아
 #     빌드 실패를 숨겼습니다. 포매터는 러너 이미지에 포함된 xcbeautify 를 씁니다.
-#   - xcodebuild 는 실행된 테스트가 0개여도 `TEST SUCCEEDED` 를 반환하므로
-#     결과 번들을 읽어 통과한 테스트가 1개 이상인지 확인합니다.
+#   - xcodebuild 는 실행된 테스트가 0개여도 성공(`TEST EXECUTE SUCCEEDED`)을
+#     반환하므로 결과 번들을 읽어 통과한 테스트가 1개 이상인지 확인합니다.
+#
+# 단계 분리: 컴파일(build-for-testing) → 시뮬레이터 부팅 → 테스트 실행
+#   (test-without-building)을 각각의 스텝으로 나눠, 시간 초과가 나면 어느 단계인지
+#   스텝 이름으로 드러나게 합니다. build-for-testing 은 앱과 scheme 의 모든 테스트
+#   번들을 컴파일하고(`-only-testing` 은 컴파일 대상을 줄이지 않으며 예전
+#   `xcodebuild test` 도 같음 — 로컬 Xcode 27 에서 확인), 두 호출은 같은
+#   `-derivedDataPath` 를 써서 test-without-building 이 같은 xctestrun 을 실행합니다.
+#   ⚠️ 부팅 5분·테스트 10분·잡 30분 상한은 macos-26 에서 아직 측정하지 않은
+#   값(추정)입니다. 첫 실제 실행에서 컴파일·부팅·실행 중 어느 단계가 시간을
+#   쓰는지 확인한 뒤 상한을 확정합니다.
+#
+# 매크로 검증: `-skipMacroValidation` 은 전역 defaults 상태에 기대지 않으려고
+#   컴파일하는 build-for-testing 에만 줍니다. 이 우회는 'Verify Package.resolved
+#   integrity' 스텝(커밋된 Package.resolved 해시 검증)이 통과해야만 적용되므로
+#   그 스텝을 Build 앞에 두는 순서를 유지합니다.
+#
+# 실패 진단: 테스트 결과 요약(개수·실패 목록)은 실패해도 출력하고, 실패·취소 시
+#   결과 번들(.xcresult)과 크래시 리포트(.ips)를 artifact 로 5일간 보관합니다.
 #
 # 경로 필터: iOS 빌드가 읽는 경로(ios/, ci_scripts/, Package.resolved 해시)와
 #   이 workflow 가 바뀔 때만 실행합니다. backend/meeting-api 는 meeting-api.yml 이
 #   검증합니다. 필터를 우회해 다시 측정하려면 workflow_dispatch 로 실행합니다.
+#   ⚠️ GitHub 의 paths 필터는 변경 파일 중 처음 300개만 봅니다. 300개를 넘는
+#   push/PR 에서 ios/** 변경이 그 뒤에만 있으면 이 workflow 가 실행되지 않으므로
+#   workflow_dispatch 로 수동 실행합니다. main 에 필수 status check 를 걸게 되면
+#   건너뛴 check 가 merge 를 막으므로, 항상 실행되는 gate job(변경 없음이면
+#   no-op 성공)으로 바꿔야 합니다.
 #
 # Tier 2 FM 스모크 테스트(FMSmokeTests)는 시뮬레이터에 Apple Intelligence 가 없어
-# `guard FoundationModelsService.isAvailable else { return }` 에서 자동 skip 됩니다(정상).
+# `guard FoundationModelsAvailability.isAvailable else { return }` 에서 자동 skip 됩니다(정상).
 
 name: CI
 
@@ -53,13 +76,14 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 30
     env:
-      DESTINATION: 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.5'
+      SIM_NAME: 'iPhone 17 Pro'
+      SIM_RUNTIME: 'iOS-26-5'
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Select Xcode 26.5
-        uses: maxim-lobanov/setup-xcode@v1
+        uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1.7.0
         with:
           xcode-version: '26.5'
 
@@ -69,33 +93,87 @@ jobs:
       - name: Verify Package.resolved integrity
         run: sh ci_scripts/ci_pre_xcodebuild.sh
 
-      - name: Build
+      # 이름만으로는 여러 런타임의 같은 기종이 섞일 수 있어 UDID 로 고정한다. 없으면 fail-closed.
+      - name: Resolve simulator
         run: |
-          xcodebuild build \
+          udid="$(xcrun simctl list devices available --json \
+            | jq -r --arg rt "$SIM_RUNTIME" --arg name "$SIM_NAME" \
+              '[.devices | to_entries[] | select(.key | endswith("." + $rt)) | .value[] | select(.name == $name and .isAvailable)] | first | .udid // empty')"
+          if [ -z "$udid" ]; then
+            echo "::error::$SIM_RUNTIME 런타임에 사용 가능한 '$SIM_NAME' 시뮬레이터가 없습니다."
+            xcrun simctl list devices available
+            exit 1
+          fi
+          echo "시뮬레이터: $SIM_NAME ($SIM_RUNTIME) $udid"
+          {
+            echo "SIM_UDID=$udid"
+            echo "DESTINATION=platform=iOS Simulator,id=$udid"
+          } >> "$GITHUB_ENV"
+
+      - name: Build for testing (app + test bundles)
+        run: |
+          xcodebuild build-for-testing \
             -project ios/todo.xcodeproj \
             -scheme todo \
             -destination "$DESTINATION" \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            -skipMacroValidation \
             CODE_SIGNING_ALLOWED=NO \
             | xcbeautify
 
+      - name: Boot simulator
+        timeout-minutes: 5
+        run: xcrun simctl bootstatus "$SIM_UDID" -b
+
       # 테스트 호스트가 멈추면 macOS 분(10x 과금)이 잡 timeout 까지 소모되므로 스텝 상한을 둔다.
+      # 컴파일·부팅은 앞 스텝에서 끝나므로 이 상한에는 더 이상 포함되지 않는다. 다만 패키지 그래프
+      # 로드, 앱 설치, 테스트 호스트 실행은 테스트 실행과 함께 여전히 이 상한 안에 있다.
       - name: Test (todoTests; FM 스모크 자동 skip)
+        id: test
         timeout-minutes: 10
         run: |
-          xcodebuild test \
+          xcodebuild test-without-building \
             -project ios/todo.xcodeproj \
             -scheme todo \
             -destination "$DESTINATION" \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
             -only-testing:todoTests \
             -resultBundlePath "$RUNNER_TEMP/todoTests.xcresult" \
             CODE_SIGNING_ALLOWED=NO \
             | xcbeautify
 
+      # 진단 전용: 실패해도 개수·실패 목록을 출력하며 이 스텝 자체는 실패하지 않는다(게이트는 다음 스텝).
+      - name: Summarize test results
+        if: ${{ !cancelled() && steps.test.outcome != 'skipped' }}
+        run: |
+          bundle="$RUNNER_TEMP/todoTests.xcresult"
+          if [ ! -d "$bundle" ]; then
+            echo "::warning::결과 번들이 없습니다($bundle). xcodebuild 가 번들을 만들기 전에 실패했을 수 있습니다."
+            exit 0
+          fi
+          if ! summary="$(xcrun xcresulttool get test-results summary --path "$bundle")"; then
+            echo "::warning::xcresulttool 이 결과 번들을 읽지 못했습니다(테스트가 중단됐을 수 있음)."
+            exit 0
+          fi
+          jq '{result, totalTestCount, passedTests, failedTests, skippedTests, expectedFailures, testFailures}' <<< "$summary" \
+            || echo "::warning::결과 요약 JSON 을 해석하지 못했습니다."
+
       - name: Require executed tests
         run: |
-          summary="$(xcrun xcresulttool get test-results summary --path "$RUNNER_TEMP/todoTests.xcresult" --compact)"
-          jq '{result, totalTestCount, passedTests, failedTests, skippedTests}' <<< "$summary"
+          summary="$(xcrun xcresulttool get test-results summary --path "$RUNNER_TEMP/todoTests.xcresult")"
           if ! jq -e '.result == "Passed" and .passedTests >= 1' <<< "$summary" > /dev/null; then
             echo "::error::todoTests 결과가 Passed 가 아니거나 통과한 테스트가 0개입니다(선택자 불일치·결과 불명 포함)."
             exit 1
           fi
+
+      # runner 가 끝나면 $RUNNER_TEMP 가 사라지므로 실패 원인을 볼 수 있게 남긴다(private 저장소 용량을 고려해 5일).
+      - name: Upload test diagnostics
+        if: ${{ failure() || cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: todoTests-diagnostics-attempt-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/todoTests.xcresult
+            ~/Library/Logs/DiagnosticReports/*.ips
+          if-no-files-found: warn
+          retention-days: 5

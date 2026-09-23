@@ -5,6 +5,14 @@
 # (backend/meeting-api/cloudbuild.yaml)의 npm ci → npm test → npm run build 와 같고,
 # Node 22 + npm 11.18.0 으로 Cloud Build·Dockerfile 과 버전을 맞춥니다.
 # Docker 이미지 빌드는 Cloud Build 가 담당하므로 여기서는 하지 않습니다.
+# `npm test` 는 단위 스위트(vitest.config.ts)만 실행하며 test/integration/** 은
+# 제외됩니다(통합 스위트는 `npm run test:integration`).
+#
+# 경로 필터: ⚠️ GitHub 의 paths 필터는 변경 파일 중 처음 300개만 봅니다. 300개를
+#   넘는 push/PR 에서 backend/meeting-api/** 변경이 그 뒤에만 있으면 이 workflow 가
+#   실행되지 않으므로 workflow_dispatch 로 수동 실행합니다. main 에 필수 status
+#   check 를 걸게 되면 건너뛴 check 가 merge 를 막으므로, 항상 실행되는 gate
+#   job(변경 없음이면 no-op 성공)으로 바꿔야 합니다.
 
 name: meeting-api
 
