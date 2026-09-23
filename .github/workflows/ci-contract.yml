@@ -3,7 +3,7 @@
 # scripts/check_ci_contract.py 가 ci.yml·meeting-api.yml·이 workflow 와
 # backend/meeting-api 의 vitest 설정·npm script 에서 CI 가 기대는 불변식을 검사합니다.
 #   - ci.yml: `defaults.run.shell: bash`(pipefail), build → test → gate 순서, fail-closed
-#     'Require executed tests' 게이트(스크립트 형태 전체 고정: 결과 번들 요약,
+#     'Require executed tests' 게이트(주석·빈 줄·들여쓰기 외 스크립트 전체 고정: 결과 번들 요약,
 #     `.result == "Passed" and .passedTests >= N`(N ≥ 1), 한 줄짜리 `exit 1`),
 #     테스트 선택자·결과 번들 경로, 병렬 테스트 고정(YES, worker 1),
 #     무결성 검사 → -skipMacroValidation 순서
@@ -18,8 +18,9 @@
 #   - meeting-api: 단위 설정은 test/integration/** 제외, 통합 설정은 그 경로만 포함,
 #     두 설정 모두 passWithNoTests 금지, npm ci → npm test → npm run build 스텝에 `if:` 금지
 # scripts/test_check_ci_contract.py 의 mutation 테스트는 불변식 하나만 깬 복사본에서
-# 해당 검사 ID 가 나오는지 확인하고, 한 검사 ID 를 여러 분기가 쓰면 그 분기의 메시지까지
-# 확인합니다. 검사 분기를 추가하면 그 분기만 깨는 mutation 테스트도 함께 추가합니다.
+# 해당 검사 ID 가 나오는지 확인합니다. 그 변형이 같은 ID 를 쓰는 다른 분기도 건드리면
+# 대상 분기의 메시지까지 확인해, 검사의 각 위반 분기를 그 분기만 껐을 때 실패하는
+# 테스트가 하나 이상 있게 합니다. 검사 분기를 추가하면 그런 테스트도 함께 추가합니다.
 # 표준 라이브러리만 쓰므로 설치 단계가 없습니다.
 # timeout 5분은 추정 상한입니다(로컬에서 검사+mutation 테스트는 1초 안팎).
 #

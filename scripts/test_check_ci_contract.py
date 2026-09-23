@@ -2,9 +2,10 @@
 
 Each test copies the real workflow and meeting-api files into a temporary
 directory, removes or breaks one invariant, and asserts that the specific check
-ID fires. Where several branches share a check ID, the test also matches the
-message of the branch it targets (`contains=`), so disabling that one branch
-fails the test even when another branch reports the same ID. Every edit asserts
+ID fires. When the edit also trips another branch that reports the same ID,
+the test matches the targeted branch's message too (`contains=`), so every
+checker branch is guarded by at least one test that fails when only that branch
+is disabled. Every edit asserts
 that its target text exists exactly the expected number of times, so a stale
 mutation fails loudly instead of passing as a no-op.
 

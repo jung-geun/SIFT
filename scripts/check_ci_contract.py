@@ -14,8 +14,9 @@ turning CI green again:
     (also one on a later line, as in `{ xcodebuild ...; } | cat`) must run
     with pipefail.
   * The fail-closed 'Require executed tests' gate exists, has no `if:` or
-    continue-on-error, runs after the test step and has exactly the pinned
-    shape: read the result bundle, `if ! jq -e '.result == "Passed" and
+    continue-on-error, runs after the test step and, apart from comment and
+    blank lines and indentation, has exactly the pinned shape: read the result
+    bundle, `if ! jq -e '.result == "Passed" and
     .passedTests >= N' ...; then` with N >= 1, optional `echo "..."` lines,
     `exit 1` as its own line, `fi`.
   * The test selector, result bundle path, parallel-testing shape and the
@@ -351,7 +352,8 @@ CI_JOB = "build-test"
 GATE_STEP = "Require executed tests"
 RESULT_BUNDLE = '"$RUNNER_TEMP/todoTests.xcresult"'
 DERIVED_DATA = '-derivedDataPath "$RUNNER_TEMP/DerivedData"'
-# The whole gate script, one line per entry after stripping indentation. Only
+# The whole gate script, one line per entry after dropping comment and blank
+# lines, joining `\` continuations and stripping indentation. Only
 # the minimum (N >= 1) and plain `echo "..."` messages (no `$`, backquote or
 # backslash) may vary; `exit 1` must be its own command line.
 GATE_SHAPE = re.compile(
