@@ -1,0 +1,63 @@
+# GitHub Actions — CI 형태 계약 검사 (CI 규칙 11)
+#
+# scripts/check_ci_contract.py 가 ci.yml·meeting-api.yml·이 workflow 와
+# backend/meeting-api 의 vitest 설정·npm script 에서 CI 가 기대는 불변식을 검사합니다.
+#   - ci.yml: `defaults.run.shell: bash`(pipefail), xcodebuild 스텝의 `||`·`set +e` 금지,
+#     fail-closed 'Require executed tests' 게이트, 테스트 선택자·결과 번들 경로,
+#     병렬 테스트 고정(YES, worker 1), 무결성 검사 → -skipMacroValidation 순서
+#   - 세 workflow: 정확한 경로 필터, `permissions: contents: read`, concurrency,
+#     checkout `persist-credentials: false`, continue-on-error 금지
+#   - 모든 workflow: xcodebuild 를 파이프하면 pipefail 필수, `||` fallback 금지
+#     (deploy.yml 'Archive' 는 알려진 부채로 명시되어 있고, 고쳐지면 목록에서 지워야 통과)
+#   - meeting-api: 단위 설정은 test/integration/** 제외, 통합 설정은 그 경로만 포함
+# scripts/test_check_ci_contract.py 는 각 불변식을 지운 변형(mutation)에서 해당
+# 검사 ID 가 실패하는지 확인합니다. 표준 라이브러리만 쓰므로 설치 단계가 없습니다.
+# timeout 5분은 추정 상한입니다(로컬에서 검사+mutation 테스트는 1초 안팎).
+
+name: CI contract
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - '.github/**'
+      - 'backend/meeting-api/vitest*.ts'
+      - 'backend/meeting-api/package.json'
+      - 'scripts/check_ci_contract.py'
+      - 'scripts/test_check_ci_contract.py'
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - '.github/**'
+      - 'backend/meeting-api/vitest*.ts'
+      - 'backend/meeting-api/package.json'
+      - 'scripts/check_ci_contract.py'
+      - 'scripts/test_check_ci_contract.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check CI contract
+        run: python3 scripts/check_ci_contract.py
+
+      - name: Mutation-test the contract checker
+        run: python3 -m unittest discover -s scripts -p 'test_check_ci_contract.py' -v

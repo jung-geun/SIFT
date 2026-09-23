@@ -13,6 +13,16 @@
 #   실행되지 않으므로 workflow_dispatch 로 수동 실행합니다. main 에 필수 status
 #   check 를 걸게 되면 건너뛴 check 가 merge 를 막으므로, 항상 실행되는 gate
 #   job(변경 없음이면 no-op 성공)으로 바꿔야 합니다.
+#
+# 캐시: `cache: npm`(~/.npm, package-lock.json 기준)의 복원 시간과 캐시 없는
+#   `npm ci` 시간은 아직 비교하지 않았습니다(규칙 4). 반영 후 실제 실행 20회
+#   이상의 스텝 시간을 모아 유지 여부와 timeout 15분 상한(추정)을 정합니다.
+#
+# 동시 실행·checkout·계약 검사: ci.yml 과 같은 concurrency(PR 만 이전 실행 취소,
+#   push·dispatch 는 실행별 group)와 `persist-credentials: false`(npm ci 의
+#   lifecycle script 가 도는 동안 GITHUB_TOKEN 을 .git/config 에 남기지 않음)를
+#   씁니다. 경로 필터·권한·단위/통합 스위트 분리는 scripts/check_ci_contract.py 가
+#   고정합니다.
 
 name: meeting-api
 
@@ -32,6 +42,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 defaults:
   run:
     shell: bash
@@ -44,6 +58,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up Node 22
         uses: actions/setup-node@v4
