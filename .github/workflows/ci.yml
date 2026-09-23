@@ -15,8 +15,10 @@
 #   - xcodebuild 는 실행된 테스트가 0개여도 성공(`TEST EXECUTE SUCCEEDED`)을
 #     반환하므로 결과 번들을 읽어 통과한 테스트가 1개 이상인지 확인합니다.
 #   - 위 형태(pipefail, `||` fallback 금지, 'Require executed tests' 게이트, 경로
-#     필터, 권한, concurrency, 병렬 테스트 고정 등)는 scripts/check_ci_contract.py
-#     (ci-contract.yml)가 계약 테스트로 고정합니다. 바꾸려면 검사도 함께 고칩니다.
+#     필터, 권한, concurrency, 병렬 테스트 고정, 잡 수준 `if:`·`needs:` 금지,
+#     GitHub-hosted `runs-on` 등)는 scripts/check_ci_contract.py(ci-contract.yml)가
+#     계약 테스트로 고정합니다. 바꾸려면 검사도 함께 고칩니다. 잡 조건(규칙 3·9)과
+#     러너 설정 수준 통제(규칙 10)는 ci-contract.yml 헤더에 적었습니다.
 #
 # 단계 분리: 컴파일(build-for-testing)과 테스트 실행(test-without-building)을 각각의
 #   스텝으로 나눠, 시간 초과가 나면 어느 단계인지 스텝 이름으로 드러나게 합니다.

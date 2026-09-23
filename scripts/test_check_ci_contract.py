@@ -2,8 +2,11 @@
 
 Each test copies the real workflow and meeting-api files into a temporary
 directory, removes or breaks one invariant, and asserts that the specific check
-ID fires. Every edit asserts that its target text exists exactly the expected
-number of times, so a stale mutation fails loudly instead of passing as a no-op.
+ID fires. Where several branches share a check ID, the test also matches the
+message of the branch it targets (`contains=`), so disabling that one branch
+fails the test even when another branch reports the same ID. Every edit asserts
+that its target text exists exactly the expected number of times, so a stale
+mutation fails loudly instead of passing as a no-op.
 
 Run: python3 -m unittest discover -s scripts -p 'test_check_ci_contract.py' -v
 """
@@ -66,10 +69,41 @@ class MutationTest(unittest.TestCase):
         self.assertEqual(text.count(old), count, f"mutation target not found {count}x in {rel}: {old!r}")
         path.write_text(text.replace(old, new), encoding="utf-8")
 
-    def assertFires(self, check: str, path: str | None = None) -> None:
+    def move(self, rel: str, start: str, end: str, before: str) -> None:
+        """Move the text from `start` up to (not including) `end` so it sits right before `before`."""
+        path = self.root / rel
+        text = path.read_text(encoding="utf-8")
+        for marker in (start, end, before):
+            self.assertEqual(text.count(marker), 1, f"move marker not found once in {rel}: {marker!r}")
+        i = text.index(start)
+        block = text[i : text.index(end, i)]
+        text = text.replace(block, "")
+        path.write_text(text.replace(before, block + before), encoding="utf-8")
+
+    def mutations(self, rel: str, cases: list[tuple[str, str]], check: str, contains: str | None = None) -> None:
+        """Apply each (old, new) edit to a fresh copy of `rel` and assert that `check` fires."""
+        path = self.root / rel
+        original = path.read_text(encoding="utf-8")
+        for old, new in cases:
+            with self.subTest(old=old, new=new):
+                self.mutate(rel, old, new)
+                self.assertFires(check, rel, contains)
+            path.write_text(original, encoding="utf-8")
+
+    def assertFires(self, check: str, path: str | None = None, contains: str | None = None) -> None:
         violations = contract.check(self.root)
-        hits = [v for v in violations if v.check == check and (path is None or v.path == path)]
-        self.assertTrue(hits, f"expected {check} for {path or 'any file'}; got {[str(v) for v in violations]}")
+        hits = [
+            v
+            for v in violations
+            if v.check == check and (path is None or v.path == path) and (contains is None or contains in v.message)
+        ]
+        self.assertTrue(
+            hits,
+            f"expected {check} for {path or 'any file'} containing {contains!r}; got {[str(v) for v in violations]}",
+        )
+
+    def assertClean(self) -> None:
+        self.assertEqual([str(v) for v in contract.check(self.root)], [])
 
     # -- baseline ---------------------------------------------------------
 
@@ -104,6 +138,33 @@ class MutationTest(unittest.TestCase):
         self.mutate(CI, "          xcodebuild test-without-building \\\n", "          set +e\n          xcodebuild test-without-building \\\n")
         self.assertFires("NO-FALLBACK", CI)
 
+    def test_combined_set_flags_disabling_errors_fail(self) -> None:
+        target = "          xcodebuild test-without-building \\\n"
+        cases = [
+            (target, f"          {command}\n{target}")
+            for command in ("set +eo pipefail", "set +ex", "set +xe", "set -x +e", "set +o errexit", "set +xo pipefail")
+        ]
+        self.mutations(CI, cases, "NO-FALLBACK", "disables errexit/pipefail")
+
+    def test_set_flags_keeping_errors_on_pass(self) -> None:
+        target = "          xcodebuild test-without-building \\\n"
+        path = self.root / CI
+        original = path.read_text(encoding="utf-8")
+        for command in ("set -eo pipefail", "set -euo pipefail", "set +x", "set +u", "set -o pipefail"):
+            with self.subTest(command=command):
+                self.mutate(CI, target, f"          {command}\n{target}")
+                self.assertClean()
+            path.write_text(original, encoding="utf-8")
+
+    def test_pipe_on_a_later_line_needs_pipefail(self) -> None:
+        workflow = PIPED_NEW_WORKFLOW.replace(
+            "          xcodebuild build -project ios/todo.xcodeproj -scheme todo | xcpretty || xcodebuild build -project ios/todo.xcodeproj -scheme todo\n",
+            "          {\n            xcodebuild build -project ios/todo.xcodeproj -scheme todo\n          } | xcpretty\n",
+        )
+        self.assertNotEqual(workflow, PIPED_NEW_WORKFLOW)
+        (self.root / ".github/workflows/group.yml").write_text(workflow, encoding="utf-8")
+        self.assertFires("PIPEFAIL", ".github/workflows/group.yml")
+
     def test_copying_the_old_pattern_into_a_new_workflow_fails(self) -> None:
         (self.root / ".github/workflows/copy.yml").write_text(PIPED_NEW_WORKFLOW, encoding="utf-8")
         self.assertFires("NO-FALLBACK", ".github/workflows/copy.yml")
@@ -125,7 +186,7 @@ class MutationTest(unittest.TestCase):
             "      - name: Require executed tests\n        run: |\n",
             "      - name: Require executed tests\n        if: ${{ success() }}\n        run: |\n",
         )
-        self.assertFires("CI-GATE", CI)
+        self.assertFires("CI-GATE", CI, "must not have an `if:`")
 
     def test_gate_continue_on_error_fails(self) -> None:
         self.mutate(
@@ -133,8 +194,28 @@ class MutationTest(unittest.TestCase):
             "      - name: Require executed tests\n        run: |\n",
             "      - name: Require executed tests\n        continue-on-error: true\n        run: |\n",
         )
-        self.assertFires("CI-GATE", CI)
+        self.assertFires("CI-GATE", CI, "must not set continue-on-error")
         self.assertFires("CONTINUE-ON-ERROR", CI)
+
+    def test_gate_before_test_step_fails(self) -> None:
+        self.move(CI, "      - name: Require executed tests\n", "      # runner 가 끝나면", "      # 테스트 호스트가 멈추면")
+        self.assertFires("CI-GATE", CI, "must run after the test step")
+
+    def test_gate_shape_mutations_fail(self) -> None:
+        bundle = '--path "$RUNNER_TEMP/todoTests.xcresult")"'
+        cases = [
+            # The finding's cases: `and` -> `or`, an always-true minimum, and an `exit 1` that never exits.
+            ('.result == "Passed" and .passedTests >= 1', '.result == "Passed" or .passedTests >= 1'),
+            (".passedTests >= 1'", ".passedTests >= 1 or true'"),
+            ('결과 불명 포함)."\n            exit 1\n', '결과 불명 포함)."\n            echo exit 1\n'),
+            ('결과 불명 포함)."\n            exit 1\n', '결과 불명 포함)."\n            exit 0\n'),
+            ("if ! jq -e '.result", "if ! jq '.result"),
+            ("if ! jq -e '.result", "if jq -e '.result"),
+            (bundle, '--path "$RUNNER_TEMP/other.xcresult")"'),
+            ("summary=\"$(xcrun xcresulttool get test-results summary " + bundle, "summary=\"$(cat " + bundle[len("--path ") :]),
+            ('<<< "$summary" > /dev/null; then', '<<< "$summary" > /dev/null || true; then'),
+        ]
+        self.mutations(CI, cases, "CI-GATE", "pinned shape")
 
     def test_gate_accepting_zero_tests_fails(self) -> None:
         self.mutate(CI, ".passedTests >= 1", ".passedTests >= 0")
@@ -167,6 +248,38 @@ class MutationTest(unittest.TestCase):
         self.mutate(CI, "            -parallel-testing-worker-count 1 \\\n", "")
         self.assertFires("CI-PARALLEL", CI)
 
+    def test_other_worker_count_fails(self) -> None:
+        self.mutate(CI, "-parallel-testing-worker-count 1 \\\n", "-parallel-testing-worker-count 2 \\\n")
+        self.assertFires("CI-PARALLEL", CI, "-parallel-testing-worker-count 1`")
+
+    def test_repeated_parallel_flags_fail(self) -> None:
+        target = "            -parallel-testing-worker-count 1 \\\n"
+        cases = [
+            (target, target + "            -parallel-testing-worker-count 4 \\\n"),
+            (target, target + "            -maximum-parallel-testing-workers 4 \\\n"),
+        ]
+        self.mutations(CI, cases, "CI-PARALLEL", "exactly once each")
+
+    def test_conditional_build_step_fails(self) -> None:
+        self.mutate(
+            CI,
+            "      - name: Build for testing (app + test bundles)\n        run: |\n",
+            "      - name: Build for testing (app + test bundles)\n        if: always()\n        run: |\n",
+        )
+        self.assertFires("CI-BUILD-CMD", CI, "must not have an `if:`")
+
+    def test_build_after_test_step_fails(self) -> None:
+        self.move(CI, "      - name: Build for testing (app + test bundles)\n", "      # 테스트 호스트가 멈추면", "      # 진단 전용")
+        self.assertFires("CI-BUILD-CMD", CI, "must run before the test step")
+
+    def test_conditional_test_step_fails(self) -> None:
+        self.mutate(CI, "        id: test\n", "        id: test\n        if: always()\n")
+        self.assertFires("CI-TEST-CMD", CI, "must not have an `if:`")
+
+    def test_test_step_rebuilding_fails(self) -> None:
+        self.mutate(CI, "          xcodebuild test-without-building \\\n", "          xcodebuild test \\\n")
+        self.assertFires("CI-TEST-CMD", CI, "test-without-building`")
+
     def test_serial_testing_fails(self) -> None:
         self.mutate(CI, "            -parallel-testing-enabled YES \\\n", "            -parallel-testing-enabled NO \\\n")
         self.assertFires("CI-PARALLEL", CI)
@@ -179,6 +292,15 @@ class MutationTest(unittest.TestCase):
     def test_removing_integrity_step_fails(self) -> None:
         self.mutate(CI, "      - name: Verify Package.resolved integrity\n        run: sh ci_scripts/ci_pre_xcodebuild.sh\n", "")
         self.assertFires("CI-MACRO", CI)
+
+    def test_integrity_step_after_build_fails(self) -> None:
+        self.move(CI, "      - name: Verify Package.resolved integrity\n", "      # 이름만으로는", "      # 테스트 호스트가 멈추면")
+        self.assertFires("CI-MACRO", CI, "before the integrity step")
+
+    def test_conditional_integrity_step_fails(self) -> None:
+        target = "        run: sh ci_scripts/ci_pre_xcodebuild.sh\n"
+        cases = [(target, "        if: always()\n" + target), (target, "        continue-on-error: true\n" + target)]
+        self.mutations(CI, cases, "CI-MACRO", "must be unconditional")
 
     # -- triggers, permissions, concurrency, checkout ------------------------
 
@@ -222,6 +344,87 @@ class MutationTest(unittest.TestCase):
         self.mutate(CI, "        with:\n          persist-credentials: false\n", "")
         self.assertFires("CHECKOUT-CREDENTIALS", CI)
 
+    def test_workflow_without_checkout_fails(self) -> None:
+        self.mutate(MEETING_API, "      - uses: actions/checkout@v4\n        with:\n          persist-credentials: false\n\n", "")
+        self.assertFires("CHECKOUT-CREDENTIALS", MEETING_API, "no actions/checkout step")
+
+    def test_workflow_without_jobs_fails(self) -> None:
+        self.mutate(MEETING_API, "jobs:\n", "x-jobs:\n")
+        self.assertFires("CI-JOB", MEETING_API, "no jobs")
+
+    def test_job_shell_override_fails(self) -> None:
+        self.mutate(CI, "    runs-on: macos-26\n", "    runs-on: macos-26\n    defaults:\n      run:\n        shell: sh\n")
+        self.assertFires("SHELL", CI, "job build-test overrides the default shell")
+
+    def test_job_continue_on_error_fails(self) -> None:
+        self.mutate(CI, "    runs-on: macos-26\n", "    runs-on: macos-26\n    continue-on-error: true\n")
+        self.assertFires("CONTINUE-ON-ERROR", CI, "job build-test sets continue-on-error")
+
+    # -- jobs always run (rules 3 and 9) ------------------------------------
+
+    def test_conditional_jobs_fail(self) -> None:
+        cases = {
+            CI: ["false", "github.actor != 'dependabot[bot]'"],
+            MEETING_API: ["false", "github.actor != 'dependabot[bot]'"],
+            CONTRACT: ["false"],
+        }
+        for rel, conditions in cases.items():
+            runs_on = "    runs-on: macos-26\n" if rel == CI else "    runs-on: ubuntu-latest\n"
+            self.mutations(
+                rel,
+                [(runs_on, f"    if: {condition}\n{runs_on}") for condition in conditions],
+                "JOB-UNCONDITIONAL",
+                "must not have an `if:`",
+            )
+
+    def test_job_needing_a_skipped_job_fails(self) -> None:
+        self.mutate(
+            CI,
+            "jobs:\n  build-test:\n    runs-on: macos-26\n",
+            "jobs:\n  version-check:\n    if: false\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n"
+            "  build-test:\n    needs: version-check\n    runs-on: macos-26\n",
+        )
+        self.assertFires("JOB-UNCONDITIONAL", CI, "job build-test must not use `needs:`")
+        self.assertFires("JOB-UNCONDITIONAL", CI, "job version-check must not have an `if:`")
+
+    # -- runners, expressions, secrets (rule 10, injection) ------------------
+
+    def test_self_hosted_runners_fail(self) -> None:
+        self.mutations(CI, [("    runs-on: macos-26\n", "    runs-on: [self-hosted, macOS]\n")], "RUNS-ON")
+        self.mutations(MEETING_API, [("    runs-on: ubuntu-latest\n", "    runs-on: self-hosted\n")], "RUNS-ON")
+
+    def test_contract_job_on_a_list_runner_fails(self) -> None:
+        self.mutate(CONTRACT, "    runs-on: ubuntu-latest\n", "    runs-on: [ubuntu-latest]\n")
+        self.assertFires("RUNS-ON", CONTRACT)
+        self.assertFires("CONTRACT-JOB", CONTRACT, "ubuntu-* runner")
+
+    def test_contract_job_on_macos_fails(self) -> None:
+        self.mutate(CONTRACT, "    runs-on: ubuntu-latest\n", "    runs-on: macos-26\n")
+        self.assertFires("CONTRACT-JOB", CONTRACT, "ubuntu-* runner")
+        self.assertFalse([v for v in contract.check(self.root) if v.check == "RUNS-ON"])
+
+    def test_expression_in_run_body_fails(self) -> None:
+        cases = [
+            ("        run: xcodebuild -version\n", '        run: echo "${{ github.head_ref }}"\n'),
+            (
+                "      - name: Resolve simulator\n        run: |\n",
+                "      - name: Resolve simulator\n        run: |\n          # ${{ github.head_ref }}\n",
+            ),
+        ]
+        self.mutations(CI, cases, "RUN-EXPRESSION")
+
+    def test_secret_references_fail(self) -> None:
+        self.mutations(
+            CI,
+            [("      SIM_RUNTIME: 'iOS-26-5'\n", "      SIM_RUNTIME: 'iOS-26-5'\n      TOKEN: ${{ secrets.GITHUB_TOKEN }}\n")],
+            "SECRETS",
+        )
+        self.mutations(
+            MEETING_API,
+            [("          persist-credentials: false\n", "          persist-credentials: false\n          token: ${{ github.token }}\n")],
+            "SECRETS",
+        )
+
     # -- meeting-api suites -------------------------------------------------
 
     def test_unit_config_running_integration_tests_fails(self) -> None:
@@ -237,34 +440,98 @@ class MutationTest(unittest.TestCase):
         self.assertFires("VITEST-INTEGRATION", INTEGRATION)
 
     def test_integration_config_merging_unit_config_fails(self) -> None:
-        self.mutate(
-            INTEGRATION,
-            "import { defineConfig } from 'vitest/config';\n",
-            "import { defineConfig, mergeConfig } from 'vitest/config';\nimport unit from './vitest.config';\n",
-        )
-        self.assertFires("VITEST-INTEGRATION", INTEGRATION)
+        target = "import { defineConfig } from 'vitest/config';\n"
+        cases = [
+            (target, "import { defineConfig, mergeConfig } from 'vitest/config';\n"),
+            (target, target + "import unit from './vitest.config';\n"),
+        ]
+        self.mutations(INTEGRATION, cases, "VITEST-INTEGRATION", "must stay standalone")
+
+    def test_unit_config_other_include_fails(self) -> None:
+        self.mutate(UNIT, "include: ['test/**/*.test.ts']", "include: ['test/unit/**/*.test.ts']")
+        self.assertFires("VITEST-UNIT", UNIT, "include must be exactly")
+
+    def test_unit_config_dropping_default_excludes_fails(self) -> None:
+        self.mutate(UNIT, "exclude: [...configDefaults.exclude, 'test/integration/**']", "exclude: ['test/integration/**']")
+        self.assertFires("VITEST-UNIT", UNIT, "configDefaults")
+
+    def test_pass_with_no_tests_fails(self) -> None:
+        for rel, check in ((UNIT, "VITEST-UNIT"), (INTEGRATION, "VITEST-INTEGRATION")):
+            self.mutations(
+                rel,
+                [("    environment: 'node',\n", "    environment: 'node',\n    passWithNoTests: true,\n")],
+                check,
+                "passWithNoTests",
+            )
+
+    def test_missing_vitest_config_fails(self) -> None:
+        (self.root / UNIT).unlink()
+        self.assertFires("VITEST-UNIT", UNIT, "cannot read")
 
     def test_unit_script_pointing_at_integration_config_fails(self) -> None:
         self.mutate(PACKAGE, '"test": "vitest run",', '"test": "vitest run --config vitest.integration.config.ts",')
         self.assertFires("NPM-SCRIPTS", PACKAGE)
 
+    def test_integration_script_changed_fails(self) -> None:
+        self.mutate(
+            PACKAGE,
+            '"test:integration": "vitest run --config vitest.integration.config.ts"',
+            '"test:integration": "vitest run"',
+        )
+        self.assertFires("NPM-SCRIPTS", PACKAGE, "'test:integration'")
+
+    def test_invalid_package_json_fails(self) -> None:
+        self.mutate(PACKAGE, '"test": "vitest run",', '"test": "vitest run",,')
+        self.assertFires("NPM-SCRIPTS", PACKAGE, "invalid JSON")
+
     def test_meeting_api_without_unit_tests_fails(self) -> None:
         self.mutate(MEETING_API, "      - name: Test\n        run: npm test\n\n", "")
         self.assertFires("MEETING-API-STEPS", MEETING_API)
 
+    def test_meeting_api_without_install_or_build_fails(self) -> None:
+        cases = [
+            ("      - name: Install dependencies\n        run: npm ci\n\n", ""),
+            ("\n      - name: Build\n        run: npm run build\n", "\n"),
+        ]
+        self.mutations(MEETING_API, cases, "MEETING-API-STEPS", "expected exactly one")
+
+    def test_meeting_api_step_order_fails(self) -> None:
+        self.mutate(
+            MEETING_API,
+            "      - name: Test\n        run: npm test\n\n      - name: Build\n        run: npm run build",
+            "      - name: Build\n        run: npm run build\n\n      - name: Test\n        run: npm test",
+        )
+        self.assertFires("MEETING-API-STEPS", MEETING_API, "in order")
+
+    def test_conditional_meeting_api_step_fails(self) -> None:
+        self.mutate(MEETING_API, "      - name: Test\n        run: npm test\n", "      - name: Test\n        if: false\n        run: npm test\n")
+        self.assertFires("MEETING-API-STEPS", MEETING_API, "must not have an `if:`")
+
+    def test_meeting_api_working_directory_fails(self) -> None:
+        self.mutate(MEETING_API, "    working-directory: backend/meeting-api\n", "")
+        self.assertFires("MEETING-API-STEPS", MEETING_API, "working-directory")
+
+    def test_contract_workflow_without_checker_fails(self) -> None:
+        self.mutate(CONTRACT, "        run: python3 scripts/check_ci_contract.py\n", "        run: echo skipped\n")
+        self.assertFires("CONTRACT-JOB", CONTRACT, "scripts/check_ci_contract.py`")
+
     def test_contract_workflow_without_mutation_tests_fails(self) -> None:
         self.mutate(CONTRACT, "python3 -m unittest discover", "echo skipped")
-        self.assertFires("CONTRACT-JOB", CONTRACT)
+        self.assertFires("CONTRACT-JOB", CONTRACT, "mutation tests")
 
     def test_conditional_contract_step_fails(self) -> None:
         self.mutate(CONTRACT, "      - name: Check CI contract\n", "      - name: Check CI contract\n        if: false\n")
-        self.assertFires("CONTRACT-JOB", CONTRACT)
+        self.assertFires("CONTRACT-JOB", CONTRACT, "must not have an `if:`")
 
     # -- parser strictness (fail closed) ------------------------------------
 
     def test_unsupported_yaml_in_a_workflow_fails(self) -> None:
         self.mutate(CI, "permissions:\n  contents: read\n", "permissions: &perms\n  contents: read\n")
         self.assertFires("PARSE", CI)
+
+    def test_unsupported_yaml_in_another_workflow_fails(self) -> None:
+        (self.root / ".github/workflows/other.yml").write_text("name: &x Other\n", encoding="utf-8")
+        self.assertFires("PARSE", ".github/workflows/other.yml")
 
     def test_missing_pinned_workflow_fails(self) -> None:
         (self.root / MEETING_API).unlink()
@@ -310,6 +577,9 @@ class ParserTest(unittest.TestCase):
             },
         )
 
+    def test_nested_sequences(self) -> None:
+        self.assertEqual(contract.parse_yaml("a:\n- - x\n  - y\n- z\n"), {"a": [["x", "y"], "z"]})
+
     def test_rejects_constructs_outside_the_subset(self) -> None:
         for text in (
             "a: &x 1\n",
@@ -324,6 +594,10 @@ class ParserTest(unittest.TestCase):
             "a: 'unterminated\n",
             "---\na: 1\n",
             "a: |2\n  x\n",
+            "a: b:\n",
+            "a: [x, , y]\n",
+            "a: [x #y]\n",
+            "a: [k: v]\n",
         ):
             with self.subTest(text=text), self.assertRaises(contract.YamlSubsetError):
                 contract.parse_yaml(text)

@@ -7,17 +7,28 @@ fix relies on, so reverting one of them fails a check instead of silently
 turning CI green again:
 
   * ci.yml runs every step with `bash` (GitHub runs it as `bash -eo pipefail`).
-  * No workflow step that runs xcodebuild uses `||`, `set +e` or
-    `set +o pipefail`, and every piped xcodebuild runs with pipefail.
-  * The fail-closed 'Require executed tests' gate exists, is unconditional and
-    still requires `.result == "Passed"` and at least one passed test.
+  * No workflow step that runs xcodebuild uses `||` or continue-on-error, or
+    turns errexit/pipefail off with `set` (a `+` option cluster that contains
+    `e`, such as `set +e`, `set +ex` or `set +eo pipefail`, or `set +o errexit`
+    / `set +o pipefail`). A step that runs xcodebuild and contains any pipe
+    (also one on a later line, as in `{ xcodebuild ...; } | cat`) must run
+    with pipefail.
+  * The fail-closed 'Require executed tests' gate exists, has no `if:` or
+    continue-on-error, runs after the test step and has exactly the pinned
+    shape: read the result bundle, `if ! jq -e '.result == "Passed" and
+    .passedTests >= N' ...; then` with N >= 1, optional `echo "..."` lines,
+    `exit 1` as its own line, `fi`.
   * The test selector, result bundle path, parallel-testing shape and the
     integrity-check -> -skipMacroValidation order in ci.yml.
-  * The exact trigger paths, `permissions: contents: read`, concurrency and
-    `persist-credentials: false` of ci.yml, meeting-api.yml and ci-contract.yml.
+  * ci.yml, meeting-api.yml and ci-contract.yml: the exact trigger paths,
+    `permissions: contents: read`, concurrency, `persist-credentials: false`,
+    no job-level `if:` or `needs:`, a GitHub-hosted `runs-on` label
+    (`macos-*` / `ubuntu-*`), no `${{ }}` expression inside a `run:` body and
+    no `secrets` / `github.token` expression anywhere.
   * backend/meeting-api: the unit vitest config excludes test/integration/**,
-    the integration config includes only test/integration/**, and the npm
-    scripts and meeting-api.yml steps still run them.
+    the integration config includes only test/integration/**, neither config
+    sets passWithNoTests, and the npm scripts and meeting-api.yml steps (with
+    no `if:`) still run them.
 
 It uses only the Python standard library (3.9+). The YAML reader accepts only
 the block-style subset these workflows use and raises on anything else
@@ -340,6 +351,31 @@ CI_JOB = "build-test"
 GATE_STEP = "Require executed tests"
 RESULT_BUNDLE = '"$RUNNER_TEMP/todoTests.xcresult"'
 DERIVED_DATA = '-derivedDataPath "$RUNNER_TEMP/DerivedData"'
+# The whole gate script, one line per entry after stripping indentation. Only
+# the minimum (N >= 1) and plain `echo "..."` messages (no `$`, backquote or
+# backslash) may vary; `exit 1` must be its own command line.
+GATE_SHAPE = re.compile(
+    "\n".join(
+        (
+            re.escape(f'summary="$(xcrun xcresulttool get test-results summary --path {RESULT_BUNDLE})"'),
+            re.escape("if ! jq -e '.result == \"Passed\" and .passedTests >= ")
+            + "[1-9][0-9]*"
+            + re.escape("' <<< \"$summary\" > /dev/null; then"),
+            r'(?:echo "[^"$`\\\n]*"\n)*exit 1',
+            "fi",
+        )
+    )
+)
+# Rule 10: pinned jobs run on GitHub-hosted runners only (no self-hosted label,
+# list or runner group). A pull_request run uses the PR's own YAML (and the PR
+# can edit this check too), so this check reports such a change but cannot stop
+# that PR's run; the settings-level control is the repository owner's (see the
+# ci-contract.yml header).
+HOSTED_RUNNER = re.compile(r"(?:macos|ubuntu)-[0-9a-z.\-]+")
+# Values reach `run:` bodies only through `env:`; an expression inside a body is
+# substituted into the script text before bash runs (script injection).
+_EXPRESSION = re.compile(r"\$\{\{")
+_SECRET_EXPRESSION = re.compile(r"\$\{\{(?:(?!\}\}).)*?\b(?:secrets|github\.token)\b")
 
 # Steps that break a workflow-wide rule today and are tracked for their owner
 # (the TestFlight release workflow). An entry that no longer matches fails as
@@ -362,6 +398,10 @@ CHECK_IDS = (
     "SHELL",
     "CONTINUE-ON-ERROR",
     "CHECKOUT-CREDENTIALS",
+    "JOB-UNCONDITIONAL",
+    "RUNS-ON",
+    "RUN-EXPRESSION",
+    "SECRETS",
     "CI-JOB",
     "CI-BUILD-CMD",
     "CI-TEST-CMD",
@@ -411,8 +451,13 @@ def shell_code(script: str) -> str:
 
 
 _XCODEBUILD = re.compile(r"\bxcodebuild\b")
-_PIPED_XCODEBUILD = re.compile(r"\bxcodebuild\b[^\n]*?(?<!\|)\|(?!\|)")
-_DISABLES_ERRORS = re.compile(r"\bset\s+\+(?:e\b|o\s+(?:pipefail|errexit)\b)")
+# Any pipe in the step, not only one on the xcodebuild line: a group such as
+# `{ xcodebuild ...\n} | cat` also hides xcodebuild's exit status.
+_PIPE = re.compile(r"(?<!\|)\|(?!\|)")
+# `set` with a `+` option cluster that contains `e` (+e, +ex, +xe, +eo pipefail)
+# or `+o errexit` / `+o pipefail` (also as `+xo pipefail`), anywhere in the
+# same `set` command.
+_DISABLES_ERRORS = re.compile(r"\bset\b[^\n;&|]*?(?<!\S)\+(?:[A-Za-z]*e|[A-Za-z]*o\s+(?:pipefail|errexit)\b)")
 _SETS_PIPEFAIL = re.compile(r"\bset\s+-\w*o\s+pipefail\b")
 
 
@@ -447,6 +492,15 @@ def _default_shell(node: Dict[str, Any]) -> Optional[str]:
 
 def _continue_on_error(node: Dict[str, Any]) -> bool:
     return "continue-on-error" in node and node.get("continue-on-error") != "false"
+
+
+def _scalars(node: Any, where: str) -> List[Tuple[str, str]]:
+    """Every string scalar under `node`, with a dotted location."""
+    if isinstance(node, dict):
+        return [item for key, value in node.items() for item in _scalars(value, f"{where}.{key}" if where else key)]
+    if isinstance(node, list):
+        return [item for index, value in enumerate(node) for item in _scalars(value, f"{where}[{index}]")]
+    return [(where, node)] if isinstance(node, str) else []
 
 
 def _load_workflows(root: Path, report: _Report) -> Dict[str, Dict[str, Any]]:
@@ -492,7 +546,7 @@ def _check_all_workflows(workflows: Dict[str, Dict[str, Any]], report: _Report) 
                             f"job {job_name} step {label!r} runs xcodebuild and {', '.join(problems)}; "
                             "a failing build must fail the step",
                         )
-                if _PIPED_XCODEBUILD.search(script):
+                if _PIPE.search(script):
                     shell = step.get("shell") or _default_shell(job) or _default_shell(workflow)
                     if shell != "bash" and not _SETS_PIPEFAIL.search(script):
                         if (rel, label, "PIPEFAIL") in KNOWN_DEBT:
@@ -501,7 +555,7 @@ def _check_all_workflows(workflows: Dict[str, Dict[str, Any]], report: _Report) 
                             report.add(
                                 "PIPEFAIL",
                                 rel,
-                                f"job {job_name} step {label!r} pipes xcodebuild with shell {shell!r}; "
+                                f"job {job_name} step {label!r} runs xcodebuild and a pipe with shell {shell!r}; "
                                 "use `shell: bash` (bash -eo pipefail) or `set -o pipefail`",
                             )
     for rel, label, check in sorted(KNOWN_DEBT - seen_debt):
@@ -525,6 +579,10 @@ def _check_pinned_workflow(rel: str, workflow: Dict[str, Any], report: _Report) 
     if _default_shell(workflow) != "bash":
         report.add("SHELL", rel, "workflow `defaults.run.shell` must be `bash` (bash -eo pipefail)")
 
+    for where, value in _scalars(workflow, ""):
+        if _SECRET_EXPRESSION.search(value):
+            report.add("SECRETS", rel, f"{where} references secrets or github.token; these workflows use none")
+
     jobs = _jobs(workflow)
     if not jobs:
         report.add("CI-JOB", rel, "workflow has no jobs")
@@ -536,12 +594,35 @@ def _check_pinned_workflow(rel: str, workflow: Dict[str, Any], report: _Report) 
             report.add("SHELL", rel, f"job {job_name} overrides the default shell")
         if _continue_on_error(job):
             report.add("CONTINUE-ON-ERROR", rel, f"job {job_name} sets continue-on-error")
+        # A job skipped by `if:`, or by a skipped `needs:` job, runs nothing and
+        # still reports success (also as a required check), and `needs:` puts
+        # the tests behind another job (rule 3). These workflows publish
+        # nothing, so no job has to wait: publishing and deploys, which rule 3
+        # gates on the whole test result, belong in their own workflow.
+        if "if" in job:
+            report.add("JOB-UNCONDITIONAL", rel, f"job {job_name} must not have an `if:`")
+        if "needs" in job:
+            report.add("JOB-UNCONDITIONAL", rel, f"job {job_name} must not use `needs:`")
+        runs_on = job.get("runs-on")
+        if not HOSTED_RUNNER.fullmatch(runs_on if isinstance(runs_on, str) else ""):
+            report.add(
+                "RUNS-ON",
+                rel,
+                f"job {job_name} must use a GitHub-hosted `runs-on` label (macos-* / ubuntu-*), got {runs_on!r}",
+            )
         for index, step in enumerate(_steps(job)):
             label = _step_label(step, index)
             if step.get("shell") not in (None, "bash"):
                 report.add("SHELL", rel, f"job {job_name} step {label!r} overrides the shell")
             if _continue_on_error(step):
                 report.add("CONTINUE-ON-ERROR", rel, f"job {job_name} step {label!r} sets continue-on-error")
+            run = step.get("run")
+            if isinstance(run, str) and _EXPRESSION.search(run):
+                report.add(
+                    "RUN-EXPRESSION",
+                    rel,
+                    f"job {job_name} step {label!r} has `${{{{` in its run body (also in comments); pass values via env",
+                )
             uses = step.get("uses")
             if isinstance(uses, str) and uses.startswith("actions/checkout@"):
                 checkouts += 1
@@ -639,31 +720,31 @@ def _check_ci(workflow: Dict[str, Any], report: _Report) -> None:
             report.add("CI-GATE", CI, "the gate must not set continue-on-error")
         if test_index is not None and gate_index < test_index:
             report.add("CI-GATE", CI, "the gate must run after the test step")
-        for needle in (
-            "xcrun xcresulttool get test-results summary",
-            RESULT_BUNDLE,
-            "jq -e",
-            '.result == "Passed"',
-            "exit 1",
-        ):
-            if needle not in script:
-                report.add("CI-GATE", CI, f"the gate must contain {needle!r}")
-        minimum = re.search(r"\.passedTests\s*>=\s*(\d+)", script)
-        if not minimum or int(minimum.group(1)) < 1:
-            report.add("CI-GATE", CI, "the gate must require `.passedTests >= N` with N >= 1")
+        lines = "\n".join(line.strip() for line in script.split("\n") if line.strip())
+        if not GATE_SHAPE.fullmatch(lines):
+            report.add(
+                "CI-GATE",
+                CI,
+                "the gate script must have exactly the pinned shape (xcresulttool summary of "
+                f"{RESULT_BUNDLE}, `if ! jq -e '.result == \"Passed\" and .passedTests >= N'` with N >= 1, "
+                "`exit 1` on its own line); got:\n" + lines,
+            )
 
 
 def _check_meeting_api(workflow: Dict[str, Any], report: _Report) -> None:
     working_directory = _mapping(_mapping(workflow.get("defaults")).get("run")).get("working-directory")
     if working_directory != "backend/meeting-api":
         report.add("MEETING-API-STEPS", MEETING_API, "`defaults.run.working-directory` must be backend/meeting-api")
-    runs = [step.get("run") for job in _jobs(workflow).values() for step in _steps(job)]
+    steps = [step for job in _jobs(workflow).values() for step in _steps(job)]
+    runs = [step.get("run") for step in steps]
     positions = []
     for command in ("npm ci", "npm test", "npm run build"):
         if runs.count(command) != 1:
             report.add("MEETING-API-STEPS", MEETING_API, f"expected exactly one `run: {command}` step")
         else:
             positions.append(runs.index(command))
+            if "if" in steps[positions[-1]]:
+                report.add("MEETING-API-STEPS", MEETING_API, f"the `run: {command}` step must not have an `if:`")
     if len(positions) == 3 and positions != sorted(positions):
         report.add("MEETING-API-STEPS", MEETING_API, "steps must run npm ci, npm test, npm run build in order")
 
@@ -687,7 +768,7 @@ def _check_contract_workflow(workflow: Dict[str, Any], report: _Report) -> None:
         report.add("CONTRACT-JOB", CONTRACT, "the checker and mutation-test steps must not have an `if:`")
     for job_name, job in jobs.items():
         runs_on = job.get("runs-on")
-        if not (isinstance(runs_on, str) and runs_on.startswith("ubuntu-")):
+        if not str(runs_on).startswith("ubuntu-"):
             report.add("CONTRACT-JOB", CONTRACT, f"job {job_name} must run on a cheap ubuntu-* runner")
 
 
@@ -752,6 +833,10 @@ def _check_meeting_api_sources(root: Path, report: _Report) -> None:
                 UNIT_VITEST,
                 f"exclude must keep ...configDefaults.exclude and 'test/integration/**', got {exclude}",
             )
+        # vitest fails a run that finds no test files; passWithNoTests would turn
+        # a broken include or deleted tests into a green 0-test run.
+        if re.search(r"\bpassWithNoTests\b", unit):
+            report.add("VITEST-UNIT", UNIT_VITEST, "must not set passWithNoTests")
 
     integration = read(INTEGRATION_VITEST, "VITEST-INTEGRATION")
     if integration is not None:
@@ -769,6 +854,8 @@ def _check_meeting_api_sources(root: Path, report: _Report) -> None:
                 INTEGRATION_VITEST,
                 "must stay standalone: mergeConfig() concatenates include/exclude with the unit config",
             )
+        if re.search(r"\bpassWithNoTests\b", integration):
+            report.add("VITEST-INTEGRATION", INTEGRATION_VITEST, "must not set passWithNoTests")
 
     package = read(PACKAGE_JSON, "NPM-SCRIPTS")
     if package is not None:

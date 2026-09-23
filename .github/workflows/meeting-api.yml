@@ -5,6 +5,8 @@
 # (backend/meeting-api/cloudbuild.yaml)의 npm ci → npm test → npm run build 와 같고,
 # Node 22 + npm 11.18.0 으로 Cloud Build·Dockerfile 과 버전을 맞춥니다.
 # Docker 이미지 빌드는 Cloud Build 가 담당하므로 여기서는 하지 않습니다.
+# `npm run build`(tsc)는 아무것도 발행하지 않는 검증 빌드라, 발행·배포를 테스트
+# 결과로 게이팅하라는 규칙 3의 대상이 아닙니다.
 # `npm test` 는 단위 스위트(vitest.config.ts)만 실행하며 test/integration/** 은
 # 제외됩니다(통합 스위트는 `npm run test:integration`).
 #
@@ -14,15 +16,16 @@
 #   check 를 걸게 되면 건너뛴 check 가 merge 를 막으므로, 항상 실행되는 gate
 #   job(변경 없음이면 no-op 성공)으로 바꿔야 합니다.
 #
-# 캐시: `cache: npm`(~/.npm, package-lock.json 기준)의 복원 시간과 캐시 없는
-#   `npm ci` 시간은 아직 비교하지 않았습니다(규칙 4). 반영 후 실제 실행 20회
-#   이상의 스텝 시간을 모아 유지 여부와 timeout 15분 상한(추정)을 정합니다.
+# 캐시: 규칙 4에 따라 캐시 복원 시간과 캐시 없는 `npm ci` 시간을 비교하기
+#   전까지 setup-node 의 `cache: npm` 을 쓰지 않습니다(ci.yml 의 SPM·DerivedData
+#   캐시와 같은 기준). 반영 후 실제 실행 20회 이상의 스텝 시간을 모아 캐시 도입
+#   여부와 timeout 15분 상한(추정)을 정합니다.
 #
 # 동시 실행·checkout·계약 검사: ci.yml 과 같은 concurrency(PR 만 이전 실행 취소,
 #   push·dispatch 는 실행별 group)와 `persist-credentials: false`(npm ci 의
 #   lifecycle script 가 도는 동안 GITHUB_TOKEN 을 .git/config 에 남기지 않음)를
-#   씁니다. 경로 필터·권한·단위/통합 스위트 분리는 scripts/check_ci_contract.py 가
-#   고정합니다.
+#   씁니다. 경로 필터·권한·잡 조건(`if:`·`needs:` 없음)·GitHub-hosted 러너·
+#   단위/통합 스위트 분리는 scripts/check_ci_contract.py 가 고정합니다.
 
 name: meeting-api
 
@@ -65,8 +68,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: npm
-          cache-dependency-path: backend/meeting-api/package-lock.json
 
       - name: Use npm 11.18.0 (Cloud Build / Dockerfile 과 동일)
         run: npm install -g npm@11.18.0
