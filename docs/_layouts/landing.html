@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="ko-KR">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f7f7fc">
+    {% seo %}
+    <link rel="icon" type="image/webp" href="{{ '/assets/images/app-icon.webp' | relative_url }}">
+    <link rel="apple-touch-icon" href="{{ '/assets/images/app-icon.webp' | relative_url }}">
+    <link rel="stylesheet" href="{{ '/assets/css/landing.css' | relative_url }}">
+    <link rel="preload" as="image" href="{{ '/assets/images/app-1112.webp' | relative_url }}" fetchpriority="high">
+    <script src="{{ '/assets/js/landing.js' | relative_url }}" defer></script>
+  </head>
+  <body class="landing-page">
+    <a class="skip-link" href="#content">본문 바로가기</a>
+    {{ content }}
+  </body>
+</html>

@@ -1,3 +1,8 @@
 title: "SIFT: To-Do List"
 description: "난잡한 일정을 채로 걸러 중요한 것을 추려주는 TODO 관리 시스템"
 theme: jekyll-theme-cayman
+url: "https://sift.pieroot.xyz"
+app_store_url: "https://apps.apple.com/kr/app/sift-to-do-list/id6782752844"
+
+github:
+  is_project_page: false

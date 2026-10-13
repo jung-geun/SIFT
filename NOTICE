@@ -1,0 +1,21 @@
+SIFT: To-Do List
+Copyright 2026 Jung-geun Bong
+
+Phosphor Icons
+--------------
+The icons in docs/assets/icons are licensed under the MIT License.
+Copyright (c) 2023 Phosphor Icons
+The complete copyright and permission notice is retained in:
+  docs/assets/icons/LICENSE
+
+App Store marketing assets
+--------------------------
+docs/assets/images/app-store-badge.svg is the unmodified Korean App Store
+download badge supplied by Apple. It remains Apple's marketing artwork,
+not an original SIFT asset. Use is governed by:
+  https://developer.apple.com/app-store/marketing/guidelines/
+Badge source:
+  https://tools.applemediaservices.com/api/badges/download-on-the-app-store/black/ko-kr?size=250x83
+The app-*.webp screen images reproduce SIFT's public App Store screenshots:
+  https://apps.apple.com/kr/app/sift-to-do-list/id6782752844
+Apple's trademarks and interface assets retain their respective rights.
