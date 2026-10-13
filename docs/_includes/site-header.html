@@ -1,0 +1,18 @@
+{% if page.layout == 'landing' %}
+  {% assign home_url = '' %}
+{% else %}
+  {% assign home_url = '/' | relative_url %}
+{% endif %}
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="brand" href="{{ '/' | relative_url }}" aria-label="SIFT 홈">
+      <img src="{{ '/assets/images/app-icon.webp' | relative_url }}" width="40" height="40" alt="">
+      <span>SIFT</span>
+    </a>
+    <nav class="site-nav" aria-label="주요 메뉴">
+      <a href="{{ home_url }}#screens">앱 화면</a>
+      <a href="{{ home_url }}#how-to">사용 방법</a>
+      <a href="{{ home_url }}#download">다운로드 <span aria-hidden="true">↗</span></a>
+    </nav>
+  </div>
+</header>

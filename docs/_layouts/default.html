@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="{{ page.lang | default: 'ko-KR' }}">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f7f7fc">
+    {% seo %}
+    <link rel="icon" type="image/webp" href="{{ '/assets/images/app-icon.webp' | relative_url }}">
+    <link rel="apple-touch-icon" href="{{ '/assets/images/app-icon.webp' | relative_url }}">
+    <link rel="stylesheet" href="{{ '/assets/css/landing.css' | relative_url }}">
+    <link rel="stylesheet" href="{{ '/assets/css/document.css' | relative_url }}">
+  </head>
+  <body class="document-page">
+    <a class="skip-link" href="#content">본문 바로가기</a>
+    {% include site-header.html %}
+    <main class="container document-shell">
+      <aside class="document-sidebar" aria-label="문서 탐색">
+        <a class="document-home" href="{{ '/' | relative_url }}"><span aria-hidden="true">←</span> 앱 소개로 돌아가기</a>
+        <nav class="document-nav" aria-label="도움말 및 정책">
+          <a href="{{ '/changes.html' | relative_url }}"{% if page.url == '/changes.html' %} aria-current="page"{% endif %}>변경사항</a>
+          <a href="{{ '/outlook-imap-setup.html' | relative_url }}"{% if page.url == '/outlook-imap-setup.html' %} aria-current="page"{% endif %}>Outlook 연결 안내</a>
+          <a href="{{ '/privacy-policy.html' | relative_url }}"{% if page.url == '/privacy-policy.html' %} aria-current="page"{% endif %}>개인정보 처리방침</a>
+          <a href="{{ '/terms-of-service.html' | relative_url }}"{% if page.url == '/terms-of-service.html' %} aria-current="page"{% endif %}>서비스 약관</a>
+        </nav>
+        {% assign sections = content | split: '<h2 id="' %}
+        {% if sections.size > 1 %}
+        <details class="document-toc">
+          <summary>이 문서의 목차</summary>
+          <nav aria-label="이 문서의 목차">
+            <ol>
+              {% for section in sections offset: 1 %}
+                {% assign section_id = section | split: '"' | first %}
+                {% assign section_title = section | split: '</h2>' | first | split: '>' | shift | join: '>' | strip_html %}
+                <li><a href="#{{ section_id | escape }}">{{ section_title }}</a></li>
+              {% endfor %}
+            </ol>
+          </nav>
+        </details>
+        {% endif %}
+      </aside>
+      <article id="content" class="document-content" tabindex="-1" aria-label="{{ page.title | escape }}">
+        {{ content | replace: '<table>', '<div class="document-table" role="region" aria-label="문서 표 (가로 스크롤 가능)" tabindex="0"><table>' | replace: '</table>', '</table></div>' | replace: '<pre', '<pre tabindex="0"' }}
+        <div class="document-end">
+          <a class="text-link" href="#content">문서 맨 위로 <span aria-hidden="true">↑</span></a>
+        </div>
+      </article>
+    </main>
+    {% include site-footer.html %}
+  </body>
+</html>

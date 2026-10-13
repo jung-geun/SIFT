@@ -1,0 +1,143 @@
+.document-shell {
+  display: grid;
+  grid-template-columns: 208px minmax(0, 1fr);
+  align-items: start;
+  gap: 72px;
+  padding-block: 52px 96px;
+}
+.document-sidebar {
+  position: sticky;
+  top: 108px;
+  max-height: calc(100svh - 140px);
+  overflow-y: auto;
+  padding: 5px;
+  margin: -5px;
+}
+.document-home {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  margin-bottom: 18px;
+  color: var(--muted);
+  font-size: 14px;
+}
+.document-home:hover { color: var(--accent-strong); }
+.document-nav { display: grid; gap: 4px; }
+.document-nav a {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 15px;
+  font-weight: 500;
+}
+.document-nav a:hover { background: var(--surface-soft); color: var(--text); }
+.document-nav a[aria-current="page"] { background: var(--surface-soft); color: var(--accent-strong); font-weight: 650; }
+.document-toc { margin-top: 28px; padding-top: 24px; border-top: 1px solid var(--border); }
+.document-toc summary { min-height: 44px; color: var(--text); font-size: 14px; font-weight: 650; cursor: pointer; }
+.document-toc ol { padding-left: 0; list-style: none; }
+.document-toc a { display: block; padding: 8px 0; color: var(--muted); font-size: 14px; line-height: 1.6; }
+.document-toc a:hover { color: var(--accent-strong); text-decoration: underline; text-underline-offset: 4px; }
+.document-content { min-width: 0; max-width: 52rem; font-size: 16px; line-height: 1.9; }
+.document-content[id], .document-content [id] { scroll-margin-top: 108px; }
+.document-content h1 { margin-bottom: 28px; font-size: clamp(36px, 4vw, 54px); font-weight: 750; line-height: 1.22; letter-spacing: -.045em; }
+.document-content h2 { margin-block: 48px 20px; font-size: 28px; font-weight: 700; line-height: 1.4; letter-spacing: -.035em; }
+.document-content h3 { margin-block: 32px 14px; font-size: 21px; font-weight: 650; line-height: 1.5; letter-spacing: -.02em; }
+.document-content h4 { margin-block: 24px 12px; font-size: 18px; line-height: 1.5; }
+.document-content p, .document-content ul, .document-content ol { margin-block: 18px; }
+.document-content > h1 + p { color: var(--muted); }
+.document-content ul, .document-content ol { padding-left: 1.5em; }
+.document-content li { margin-block: 10px; padding-left: 3px; }
+.document-content li > ul, .document-content li > ol { margin-block: 10px 20px; }
+.document-content li::marker { color: var(--muted); }
+.document-content a { color: var(--accent-strong); text-decoration: underline; text-underline-offset: 4px; text-decoration-thickness: 1px; }
+.document-content a:visited { color: var(--muted); }
+.document-content a:hover { color: var(--accent); text-decoration-thickness: 2px; }
+.document-content strong { font-weight: 650; }
+.document-content hr { height: 1px; margin-block: 32px; border: 0; background: var(--border); }
+.document-content hr + h2 { margin-top: 32px; }
+.document-content blockquote {
+  margin: 24px 0;
+  padding: 18px 24px;
+  border-radius: 12px;
+  background: var(--surface-soft);
+  color: var(--text);
+}
+.document-content blockquote > :first-child { margin-top: 0; }
+.document-content blockquote > :last-child { margin-bottom: 0; }
+.document-content code {
+  padding: .15em .35em;
+  border-radius: 4px;
+  background: var(--surface-soft);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: .875em;
+  overflow-wrap: anywhere;
+}
+.document-content pre {
+  max-width: 100%;
+  overflow-x: auto;
+  margin-block: 24px;
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  line-height: 1.7;
+  tab-size: 2;
+}
+.document-content pre code { padding: 0; border-radius: 0; background: transparent; overflow-wrap: normal; }
+.document-content .highlight { margin-block: 24px; }
+.document-content .highlight pre { margin: 0; }
+.document-content .document-table {
+  max-width: 100%;
+  overflow-x: auto;
+  margin-block: 24px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+}
+.document-content table { width: 100%; min-width: 32rem; border-collapse: collapse; font-size: 16px; line-height: 1.7; }
+.document-content th, .document-content td { padding: 16px 18px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+.document-content th { background: var(--surface-soft); font-weight: 650; }
+.document-content th:empty { padding: 0; }
+.document-content tbody tr:last-child td { border-bottom: 0; }
+.document-content td + td, .document-content th + th { border-left: 1px solid var(--border); }
+.document-content td { min-width: 8rem; }
+.document-content .document-end { margin-top: 56px; padding-top: 24px; border-top: 1px solid var(--border); }
+.document-end .text-link { text-decoration: none; }
+.document-page .site-footer { border-top: 1px solid var(--border); }
+.document-page .footer-links a[aria-current="page"] { color: var(--accent-strong); text-decoration: underline; text-underline-offset: 4px; }
+
+@media (max-width: 1024px) {
+  .document-shell { grid-template-columns: 188px minmax(0, 1fr); gap: 36px; }
+}
+@media (max-width: 768px) {
+  .document-shell { grid-template-columns: 1fr; gap: 32px; padding-block: 24px 64px; }
+  .document-sidebar { position: static; max-height: none; overflow: visible; padding-bottom: 24px; border-bottom: 1px solid var(--border); }
+  .document-home { margin-bottom: 12px; }
+  .document-nav { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 8px; }
+  .document-nav a { padding: 10px 12px; font-size: 14px; }
+  .document-toc { margin-top: 12px; padding-top: 8px; border-top: 0; }
+  .document-toc summary { display: list-item; min-height: 44px; padding-block: 10px; }
+  .document-toc nav { padding-block: 4px 12px; }
+  .document-toc a { padding-block: 10px; }
+  .document-content h1 { font-size: clamp(32px, 7vw, 42px); margin-bottom: 24px; }
+  .document-content h2 { font-size: 25px; margin-top: 40px; }
+  .document-content h3 { font-size: 20px; }
+  .document-content blockquote { padding: 16px 18px; }
+  .document-content th, .document-content td { padding: 14px 16px; }
+  .document-content pre { padding: 16px; }
+}
+@media print {
+  .document-page { background: white; color: #171725; }
+  .document-page .site-header, .document-sidebar, .document-page .site-footer, .document-end, .document-page .skip-link { display: none; }
+  .document-shell { display: block; width: 100%; padding: 0; }
+  .document-content { max-width: none; }
+  .document-content .document-table { overflow: visible; }
+  .document-content table { min-width: 0; font-size: 11px; }
+  .document-content th, .document-content td { min-width: 0; padding: 8px; }
+  .document-content pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .document-content h1, .document-content h2, .document-content h3 { break-after: avoid; }
+}

@@ -5,19 +5,7 @@ description: 직접 적은 할 일부터 메일 속 요청까지. 실제 앱 화
 image: /assets/images/app-icon.webp
 ---
 
-<header class="site-header">
-  <div class="container header-inner">
-    <a class="brand" href="{{ '/' | relative_url }}" aria-label="SIFT 홈">
-      <img src="{{ '/assets/images/app-icon.webp' | relative_url }}" width="40" height="40" alt="">
-      <span>SIFT</span>
-    </a>
-    <nav class="site-nav" aria-label="주요 메뉴">
-      <a href="#screens">앱 화면</a>
-      <a href="#how-to">사용 방법</a>
-      <a href="#download">다운로드 <span aria-hidden="true">↗</span></a>
-    </nav>
-  </div>
-</header>
+{% include site-header.html %}
 
 <main id="content">
   <section class="hero" aria-labelledby="hero-title">
@@ -184,18 +172,4 @@ image: /assets/images/app-icon.webp
   </section>
 </main>
 
-<footer class="site-footer">
-  <div class="container footer-inner">
-    <a class="brand footer-brand" href="{{ '/' | relative_url }}"><span>SIFT</span></a>
-    <nav class="footer-links" aria-label="프로젝트, 도움말 및 정책">
-      <a href="{{ '/changes.html' | relative_url }}">변경사항</a>
-      <a href="{{ '/outlook-imap-setup.html' | relative_url }}">Outlook (레거시 IMAP)</a>
-      <a href="{{ '/privacy-policy.html' | relative_url }}">개인정보 처리방침</a>
-      <a href="{{ '/terms-of-service.html' | relative_url }}">서비스 약관</a>
-      <a href="mailto:pieroot.02@gmail.com">문의</a>
-      <a href="https://github.com/jung-geun/SIFT" target="_blank" rel="noopener noreferrer" aria-label="SIFT GitHub 저장소 (새 탭)">GitHub ↗</a>
-    </nav>
-    <p class="footer-credit">© {{ site.time | date: '%Y' }} Jung-geun Bong</p>
-    <p class="footer-credit">Apple 및 Apple 로고, iPhone, iPad, iCloud, App Store는 Apple Inc.의 상표입니다.</p>
-  </div>
-</footer>
+{% include site-footer.html %}
