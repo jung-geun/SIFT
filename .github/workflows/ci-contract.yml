@@ -1,0 +1,93 @@
+# GitHub Actions — CI 형태 계약 검사 (CI 규칙 11)
+#
+# scripts/check_ci_contract.py 가 ci.yml·meeting-api.yml·이 workflow 와
+# backend/meeting-api 의 vitest 설정·npm script 에서 CI 가 기대는 불변식을 검사합니다.
+#   - ci.yml: `defaults.run.shell: bash`(pipefail), build → test → gate 순서, fail-closed
+#     'Require executed tests' 게이트(주석·빈 줄·들여쓰기 외 스크립트 전체 고정: 결과 번들 요약,
+#     `.result == "Passed" and .passedTests >= N`(N ≥ 1), 한 줄짜리 `exit 1`),
+#     테스트 선택자·결과 번들 경로, 병렬 테스트 고정(YES, worker 1),
+#     무결성 검사 → -skipMacroValidation 순서
+#   - 세 workflow: 정확한 경로 필터, `permissions: contents: read`, concurrency,
+#     checkout `persist-credentials: false`, continue-on-error 금지, 잡 수준 `if:`·`needs:`
+#     금지, GitHub-hosted `runs-on` 라벨(macos-*/ubuntu-*), `run:` 본문 안의 `${{ }}`
+#     금지(주석 포함, 값은 env 로 전달), `secrets`·`github.token` 식 금지
+#   - 모든 workflow: xcodebuild 를 실행하는 스텝은 `||` fallback, `set +e`(`set +ex`,
+#     `set +eo pipefail` 같은 묶음 포함)·`set +o errexit`·`set +o pipefail`,
+#     continue-on-error 금지. 그 스텝에 파이프가 있으면(다음 줄의 `} | cat` 포함) pipefail 필수
+#     (deploy.yml 'Archive' 는 알려진 부채로 명시되어 있고, 고쳐지면 목록에서 지워야 통과)
+#   - meeting-api: 단위 설정은 test/integration/** 제외, 통합 설정은 그 경로만 포함,
+#     두 설정 모두 passWithNoTests 금지, npm ci → npm test → npm run build 스텝에 `if:` 금지
+# scripts/test_check_ci_contract.py 의 mutation 테스트는 불변식 하나만 깬 복사본에서
+# 해당 검사 ID 가 나오는지 확인합니다. 그 변형이 같은 ID 를 쓰는 다른 분기도 건드리면
+# 대상 분기의 메시지까지 확인해, 검사의 각 위반 분기를 그 분기만 껐을 때 실패하는
+# 테스트가 하나 이상 있게 합니다. 검사 분기를 추가하면 그런 테스트도 함께 추가합니다.
+# 표준 라이브러리만 쓰므로 설치 단계가 없습니다.
+# timeout 5분은 추정 상한입니다(로컬에서 검사+mutation 테스트는 1초 안팎).
+#
+# 잡 조건(규칙 3·9): 세 workflow 는 아무것도 발행하지 않으므로 잡이 다른 잡을
+#   기다리거나(`needs:`) 조건으로 건너뛸(`if:`) 이유가 없습니다. 건너뛴 잡은 아무것도
+#   실행하지 않고도 성공으로 보고되므로(필수 check 여도 통과) 잡 수준 `if:`·`needs:` 를
+#   금지해 dependabot PR 을 포함한 모든 실행에서 테스트가 돌게 합니다. 규칙 3이 테스트
+#   workflow 전체 결과로 게이팅하라는 대상은 이미지·패키지 발행과 배포이며, 그런 잡은
+#   별도 workflow 에 둡니다. 아무것도 발행하지 않는 검증 빌드(ci.yml build-for-testing,
+#   meeting-api 의 `npm run build`)는 그 게이팅 대상이 아닙니다.
+#
+# 러너(규칙 10): 세 workflow 의 잡은 GitHub-hosted 러너에서만 돌고 계약 검사가 `runs-on`
+#   을 고정합니다. 이 YAML 검사는 통제 수단이지만 PR 이 검사와 함께 수정할 수 있고,
+#   pull_request 실행은 PR 의 YAML 을 쓰므로 runs-on 을 바꾼 PR 을 실패로 드러낼 뿐
+#   그 PR 의 실행 자체는 막지 못합니다. 그래서 설정 수준 통제도 필요합니다. 이 저장소는 사용자 계정 소유라 runner group
+#   (조직·엔터프라이즈 기능)이 없으므로 설정 수준 통제는 저장소 소유자 작업입니다.
+#   - Settings → Actions → Runners: 저장소 self-hosted runner 를 등록하지 않습니다.
+#   - Settings → Actions → General → "Fork pull request workflows": private 저장소에서
+#     "Run workflows from fork pull requests" 를 끈 상태로 둡니다.
+#   - public 으로 바꾸면 Settings → Actions → General → "Approval for running fork pull
+#     request workflows from contributors" 를 "Require approval for all external
+#     contributors" 로 둡니다.
+
+name: CI contract
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - '.github/**'
+      - 'backend/meeting-api/vitest*.ts'
+      - 'backend/meeting-api/package.json'
+      - 'scripts/check_ci_contract.py'
+      - 'scripts/test_check_ci_contract.py'
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - '.github/**'
+      - 'backend/meeting-api/vitest*.ts'
+      - 'backend/meeting-api/package.json'
+      - 'scripts/check_ci_contract.py'
+      - 'scripts/test_check_ci_contract.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check CI contract
+        run: python3 scripts/check_ci_contract.py
+
+      - name: Mutation-test the contract checker
+        run: python3 -m unittest discover -s scripts -p 'test_check_ci_contract.py' -v
