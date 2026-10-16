@@ -17,10 +17,9 @@
       <aside class="document-sidebar" aria-label="문서 탐색">
         <a class="document-home" href="{{ '/' | relative_url }}"><span aria-hidden="true">←</span> 앱 소개로 돌아가기</a>
         <nav class="document-nav" aria-label="도움말 및 정책">
-          <a href="{{ '/workflows.html' | relative_url }}"{% if page.url == '/workflows.html' %} aria-current="page"{% endif %}>작동 방식</a>
-          <a href="{{ '/media.html' | relative_url }}"{% if page.url == '/media.html' %} aria-current="page"{% endif %}>소개 이미지</a>
+          <a href="{{ '/workflows.html' | relative_url }}"{% if page.url == '/workflows.html' %} aria-current="page"{% endif %}>사용 안내</a>
+          <a href="{{ '/email-setup.html' | relative_url }}"{% if page.url == '/email-setup.html' %} aria-current="page"{% endif %}>이메일 연결</a>
           <a href="{{ '/changes.html' | relative_url }}"{% if page.url == '/changes.html' %} aria-current="page"{% endif %}>변경사항</a>
-          <a href="{{ '/outlook-imap-setup.html' | relative_url }}"{% if page.url == '/outlook-imap-setup.html' %} aria-current="page"{% endif %}>Outlook 연결 안내</a>
           <a href="{{ '/privacy-policy.html' | relative_url }}"{% if page.url == '/privacy-policy.html' %} aria-current="page"{% endif %}>개인정보 처리방침</a>
           <a href="{{ '/terms-of-service.html' | relative_url }}"{% if page.url == '/terms-of-service.html' %} aria-current="page"{% endif %}>서비스 약관</a>
         </nav>

@@ -1,0 +1,75 @@
+name: Publish public Pages
+
+on:
+  push:
+    branches: [main]
+  release:
+    types: [published, edited, deleted, unpublished, prereleased, released]
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      required_tag:
+        description: Fail rather than deploy if this stable release is not visible
+        required: false
+        default: ''
+        type: string
+
+permissions: {}
+
+# Shared across direct and reusable invocations. Never interrupt an active deploy.
+# A queued build always fetches the full current set, not just the triggering tag.
+concurrency:
+  group: public-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pages: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate curated release regression fixtures offline
+        run: python3 -m unittest discover -s scripts/tests -p 'test_release_notes.py' -v
+      - name: Read Pages settings (do not enable or change them)
+        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0
+        with:
+          enablement: false
+      - name: Generate data only from published actual releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUIRED_TAG: ${{ inputs.required_tag || '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/release_notes.py fetch \
+            --output docs/_data/published_releases.json \
+            --required-tag "$REQUIRED_TAG"
+      - name: Build server-rendered Jekyll site
+        uses: actions/jekyll-build-pages@44a6e6beabd48582f863aeeb6cb2151cc1716697 # v1.0.13
+        with:
+          source: ./docs
+          destination: ./_site
+      - name: Upload public site only
+        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
+        with:
+          path: ./_site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy Pages
+        id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5

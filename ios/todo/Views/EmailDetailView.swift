@@ -435,7 +435,7 @@ struct EmailDetailView: View {
             suppressedSendersList = EmailLearningStore.shared.suppressedSenders()
         }
         .sheet(isPresented: $showOutlookHelp) {
-            SupportSafariView(url: URL(string: "https://sift.pieroot.xyz/outlook-imap-setup.html")!)
+            SupportSafariView(url: URL(string: "https://sift.pieroot.xyz/email-setup.html#outlook")!)
         }
         .onDisappear {
             tutorial?.handleEmailDetailClosed()
