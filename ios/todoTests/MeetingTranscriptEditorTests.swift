@@ -99,14 +99,167 @@ struct MeetingTranscriptEditorTests {
         }
     }
 
-    @Test("speaker edit trims, sorts, and drops empty labels")
-    func speakerEdit() throws {
-        let original = makeResult()
-        let edited = try MeetingTranscriptEditor.setSpeakers(
-            result: original, meetingID: meetingID, segmentID: "seg-2",
-            speakerIDs: [" 화자 2 ", "", "화자 1"]
+    private let speakerManifest = MeetingAudioManifest(
+        relativeDirectory: "speaker-edit", sampleRate: 16_000, totalSamples: 32_000, parts: []
+    )
+
+    /// Raw base plus a proofread current transcript whose seg-2 has a new ID but the same lineage.
+    @MainActor
+    private func makeSpeakerRecord() throws -> MeetingRecord {
+        let raw = makeResult()
+        var current = raw
+        current.segments[1] = MeetingSegment(
+            id: "seg-2-proofread", lineageID: "seg-2", startMs: 1_000, endMs: 2_000,
+            text: "다음 주 화요일까지 견적서를 보내 주세요"
         )
-        #expect(edited.segments[1].speakerIDs == ["화자 1", "화자 2"])
+        let record = MeetingRecord(meetingID: meetingID)
+        try record.replaceTranscriptionBase(raw, status: .ready)
+        try record.update(result: current, status: .ready)
+        try record.update(audioManifest: speakerManifest)
+        record.refinementEngineLabel = MeetingRefinementEngine.Source.appleIntelligence.rawValue
+        return record
+    }
+
+    @Test("speaker assignment keeps transcript identity and labels current and raw lineage")
+    @MainActor
+    func speakerAssignmentKeepsTranscript() throws {
+        let record = try makeSpeakerRecord()
+        // Legacy free-text label "화자 1" becomes a named stable profile on first edit.
+        try MeetingSpeakerEditCommitter.rename(record: record, speakerID: "화자 1", displayName: "민수", save: {})
+        let before = try #require(record.result)
+        let generation = try #require(record.diarization?.generation)
+
+        try MeetingSpeakerEditCommitter.assign(
+            record: record, segmentID: "seg-2-proofread", speakerIDs: ["화자 1", "화자 1"], save: {}
+        )
+
+        let after = try #require(record.result)
+        #expect(after.segments[1].speakerIDs == ["화자 1"])
+        #expect(record.rawResult?.segments[1].speakerIDs == ["화자 1"])
+        #expect(record.rawResult?.segments[1].text == "다음 주 화요일까지 견적서를 보내주세요")
+        #expect(after.transcriptRevision == before.transcriptRevision)
+        #expect(after.segments.map(\.id) == before.segments.map(\.id))
+        #expect(after.segments.map(\.text) == before.segments.map(\.text))
+        #expect(after.summary == before.summary)
+        #expect(after.actionDrafts == before.actionDrafts)
+        #expect(record.refinementEngineLabel == MeetingRefinementEngine.Source.appleIntelligence.rawValue)
+        let payload = try #require(record.diarization)
+        #expect(payload.manualAssignments["seg-2"] == ["화자 1"])
+        #expect(payload.generation != generation)
+    }
+
+    @Test("rename changes only the profile display name")
+    @MainActor
+    func speakerRenameIsDisplayOnly() throws {
+        let record = try makeSpeakerRecord()
+        let source = try #require(record.result)
+        let seeded = try MeetingDiarizationPostProcessor.seed(
+            record: record, source: source,
+            manifestDigest: MeetingDiarizationFingerprint.manifest(speakerManifest),
+            sourceDigest: MeetingDiarizationFingerprint.source(source)
+        )
+        try record.update(diarization: seeded)
+        let beforePayload = try #require(record.diarization)
+        let resultData = record.resultData
+        let rawData = record.rawResultData
+        try MeetingSpeakerEditCommitter.rename(record: record, speakerID: "화자 1", displayName: "  민수 ", save: {})
+        let afterPayload = try #require(record.diarization)
+        #expect(afterPayload.generation == beforePayload.generation)
+        #expect(afterPayload.status == beforePayload.status)
+        #expect(afterPayload.manualAssignments == beforePayload.manualAssignments)
+        #expect(afterPayload.intervals == beforePayload.intervals)
+        #expect(afterPayload.profiles.map(\.id) == beforePayload.profiles.map(\.id))
+        #expect(afterPayload.profiles.map(\.ordinal) == beforePayload.profiles.map(\.ordinal))
+        #expect(afterPayload.sourceContentDigest == beforePayload.sourceContentDigest)
+        #expect(record.diarization?.profiles.first { $0.id == "화자 1" }?.displayName == "민수")
+        #expect(record.resultData == resultData)
+        #expect(record.rawResultData == rawData)
+        #expect(record.result?.segments[0].speakerIDs == ["화자 1"])
+
+        let snapshot = record.persistenceSnapshot()
+        #expect(throws: MeetingSpeakerEditError.emptyName) {
+            try MeetingSpeakerEditCommitter.rename(record: record, speakerID: "화자 1", displayName: " \n ", save: {})
+        }
+        #expect(throws: MeetingSpeakerEditError.unknownSpeaker) {
+            try MeetingSpeakerEditCommitter.rename(record: record, speakerID: "missing", displayName: "지수", save: {})
+        }
+        #expect(record.persistenceSnapshot() == snapshot)
+    }
+
+    @Test("unknown speaker or segment is an explicit error and changes nothing")
+    @MainActor
+    func speakerEditRejectsUnknownTargets() throws {
+        let record = try makeSpeakerRecord()
+        let snapshot = record.persistenceSnapshot()
+        #expect(throws: MeetingSpeakerEditError.unknownSpeaker) {
+            try MeetingSpeakerEditCommitter.assign(record: record, segmentID: "seg-1", speakerIDs: ["missing"], save: {})
+        }
+        #expect(throws: MeetingSpeakerEditError.unknownSegment) {
+            try MeetingSpeakerEditCommitter.assign(record: record, segmentID: "seg-9", speakerIDs: ["화자 1"], save: {})
+        }
+        #expect(throws: MeetingSpeakerEditError.unknownSegment) {
+            try MeetingSpeakerEditCommitter.createProfile(record: record, segmentID: "seg-9", displayName: "지수", save: {})
+        }
+        #expect(record.persistenceSnapshot() == snapshot)
+    }
+
+    @Test("createProfile assigns a new stable speaker but rejects empty names and a ninth speaker")
+    @MainActor
+    func createProfileLimits() throws {
+        func record(activeSpeakers: Int) throws -> MeetingRecord {
+            let record = try makeSpeakerRecord()
+            let profiles = (1...activeSpeakers).map { MeetingSpeakerProfile(id: "auto-\($0)", ordinal: $0, displayName: nil) }
+            let intervals = (1...activeSpeakers).map {
+                MeetingSpeakerInterval(speakerID: "auto-\($0)", startSample: Int64($0) * 1_000, endSample: Int64($0) * 1_000 + 800)
+            }
+            try record.update(diarization: MeetingDiarizationPayload(
+                status: .completed, generation: UUID(),
+                manifestDigest: MeetingDiarizationFingerprint.manifest(speakerManifest),
+                sourceTranscriptRevision: 3,
+                sourceContentDigest: MeetingDiarizationFingerprint.source(try #require(record.result)),
+                modelRevision: "pinned", preset: "c128-split-w8a8", coveredThroughSample: 32_000,
+                intervals: intervals, profiles: profiles, manualAssignments: [:], failureCode: nil
+            ))
+            return record
+        }
+
+        let full = try record(activeSpeakers: 8)
+        let fullSnapshot = full.persistenceSnapshot()
+        #expect(throws: MeetingSpeakerEditError.tooManySpeakers) {
+            try MeetingSpeakerEditCommitter.createProfile(record: full, segmentID: "seg-1", displayName: "지수", save: {})
+        }
+        #expect(full.persistenceSnapshot() == fullSnapshot)
+
+        let open = try record(activeSpeakers: 7)
+        #expect(throws: MeetingSpeakerEditError.emptyName) {
+            try MeetingSpeakerEditCommitter.createProfile(record: open, segmentID: "seg-1", displayName: "   ", save: {})
+        }
+        let id = try MeetingSpeakerEditCommitter.createProfile(record: open, segmentID: "seg-1", displayName: " 지수 ", save: {})
+        #expect(id == id.lowercased() && UUID(uuidString: id) != nil)
+        let payload = try #require(open.diarization)
+        let profile = try #require(payload.profiles.first { $0.id == id })
+        #expect(profile.ordinal == 8)
+        #expect(profile.displayName == "지수")
+        #expect(payload.manualAssignments["seg-1"] == [id])
+        #expect(open.result?.segments[0].speakerIDs == [id])
+        #expect(open.rawResult?.segments[0].speakerIDs == [id])
+        #expect(open.result?.transcriptRevision == 3)
+    }
+
+    @Test("speaker edit save failure rolls back labels and payload")
+    @MainActor
+    func speakerEditRollback() throws {
+        let record = try makeSpeakerRecord()
+        let snapshot = record.persistenceSnapshot()
+        #expect(throws: TranscriptCommitTestError.saveFailed) {
+            try MeetingSpeakerEditCommitter.createProfile(
+                record: record, segmentID: "seg-2-proofread", displayName: "지수",
+                save: { throw TranscriptCommitTestError.saveFailed }
+            )
+        }
+        #expect(record.persistenceSnapshot() == snapshot)
+        #expect(record.diarization == nil)
+        #expect(record.result?.segments[1].speakerIDs.isEmpty == true)
     }
 
     @Test("edit committer fences provenance, saves, and glossary side effects")

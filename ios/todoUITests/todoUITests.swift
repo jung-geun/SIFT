@@ -1,46 +1,21 @@
-//
-//  todoUITests.swift
-//  todoUITests
-//
-//  Created by pieroot on 6/15/26.
-//
-
 import XCTest
 
-final class todoUITests: XCTestCase {
+@MainActor
+final class AppSmokeUITests: SIFTUITestCase {
+    func testLaunchShowsPrimaryNavigation() throws {
+        launch()
 
-    override func setUpWithError() throws {
-        // Put setup code here. This method is called before the invocation of each test method in the class.
-
-        // In UI tests it is usually best to stop immediately when a failure occurs.
-        continueAfterFailure = false
-
-        // In UI tests it’s important to set the initial state - such as interface orientation - required for your tests before they run. The setUp method is a good place to do this.
+        step("핵심 탭과 할 일 추가 버튼 확인") {
+            require(app.tabBars.buttons["할 일"], message: "할 일 탭이 없습니다.")
+            require(app.tabBars.buttons["회의"], message: "회의 탭이 없습니다.")
+            require(app.buttons["todo.addButton"], message: "할 일 추가 버튼이 없습니다.")
+        }
     }
 
-    override func tearDownWithError() throws {
-        // Put teardown code here. This method is called after the invocation of each test method in the class.
-    }
-
-    @MainActor
-    func testExample() throws {
-        // UI tests must launch the application that they test.
-        let app = XCUIApplication()
-        app.launchArguments = ["-ui-test-suppress-crash-prompt"]
-        app.launch()
-
-        // Use XCTAssert and related functions to verify your tests produce the correct results.
-        // XCUIAutomation Documentation
-        // https://developer.apple.com/documentation/xcuiautomation
-    }
-
-    @MainActor
     func testLaunchPerformance() throws {
-        // This measures how long it takes to launch your application.
         measure(metrics: [XCTApplicationLaunchMetric()]) {
-            let app = XCUIApplication()
-            app.launchArguments = ["-ui-test-suppress-crash-prompt"]
             app.launch()
+            app.terminate()
         }
     }
 }

@@ -4,7 +4,7 @@ import Foundation
 
 /// Owns lossless FLAC part rotation after canonical 16-kHz mono PCM conversion.
 /// Part ownership is fixed; overlap is encoded only in later physical files.
-final class MeetingFLACPartWriter {
+nonisolated final class MeetingFLACPartWriter {
     private let directory: URL
     private var currentFile: AVAudioFile?
     private var currentURL: URL?

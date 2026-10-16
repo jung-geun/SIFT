@@ -218,36 +218,35 @@ struct ScheduleV9ParserTests {
 
         #expect(results?.count == 1)
         #expect(results?.first?.todoID == todos[0].id)
-        #expect(results?.first?.reason.isEmpty == false)
+    }
+
+    @Test("compact IDs match only submitted candidates and foreign UUIDs are rejected")
+    func responseIDsStayWithinSubmittedCandidates() throws {
+        let review = Todo(title: "Review candidate")
+        review.triageStatus = TodoTriage.review.rawValue
+        let completed = Todo(title: "Completed")
+        completed.isCompleted = true
+        let pinned = Todo(title: "Manual priority")
+        pinned.manualPriority = 4
+        let active = Todo(title: "Submitted candidate")
+        let todos = [review, completed, pinned, active]
+        let input = ScheduleLLMAdapter.buildScheduleInput(
+            todos: todos, persona: .empty, events: [], allowsPrivateCalendarTitles: true
+        )
+        let inputObject = try #require(JSONSerialization.jsonObject(with: Data(input.utf8)) as? [String: Any])
+        let tasks = try #require(inputObject["tasks"] as? [[String: Any]])
+        #expect(tasks.compactMap { $0["title"] as? String } == [active.title])
+        let ids = ["T1", review.id.uuidString, completed.id.uuidString, pinned.id.uuidString, UUID().uuidString]
+        let response = try JSONSerialization.data(withJSONObject: ["scheduled_tasks": ids.map { ["task_id": $0] }])
+        let results = try #require(sut.parseScheduleResponseV9(
+            text: String(decoding: response, as: UTF8.self), todos: todos, persona: .empty
+        ))
+        #expect(results.map(\.todoID) == [active.id])
     }
 }
 
-@Suite("Todo.apply metadata persistence")
-struct TodoApplyTests {
-    @Test("AI 요청 제공자와 폴백 사유를 저장한다")
-    func persistsRoutingMetadata() {
-        let todo = Todo(title: "세금 신고")
-        let result = PriorityResult(
-            todoID: todo.id,
-            score: 0.91,
-            reason: "오늘 마감",
-            detail: "Gemini fallback result",
-            needsNotification: true,
-            recommendedTime: nil,
-            personaFit: true,
-            engine: .heuristic,
-            axes: AxisScores(deadlineProximity: 9, urgency: 8, importance: 7, chaining: 2),
-            chainingDetail: "",
-            requestedProviderRawValue: PersonaAIProvider.gemini.rawValue,
-            fallbackReason: "Gemini API key is missing"
-        )
-
-        todo.apply(result)
-
-        #expect(todo.aiRequestedProvider == PersonaAIProvider.gemini.rawValue)
-        #expect(todo.aiFallbackReason == "Gemini API key is missing")
-        #expect(todo.aiEngine == PriorityEngine.heuristic.rawValue)
-    }
+@Suite("Todo priority scope")
+struct TodoPriorityScopeTests {
 
     @Test("AI 정리 scope는 review를 제외하고 todo만 반영한다")
     func aiSortScopeExcludesReviewTodosAndDoesNotApplyReviewResults() {

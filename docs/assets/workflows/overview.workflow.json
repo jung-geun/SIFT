@@ -1,0 +1,38 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {"title": "SIFT · 입력에서 다음 행동까지", "quality_profile": "showcase"},
+  "lanes": [
+    {"id":"tasks","label":"할 일"},
+    {"id":"mail","label":"연결한 메일"},
+    {"id":"meeting","label":"회의 기록"}
+  ],
+  "mainPath": ["capture","organize","triage","active","done","routine"],
+  "nodes": [
+    {"id":"capture","lane":"tasks","col":0,"type":"frontend","label":"직접 입력","sublabel":"제목 · 메모 · 기한"},
+    {"id":"organize","lane":"tasks","col":1,"type":"backend","label":"기기 내 정리","sublabel":"규칙 · 허용한 모델"},
+    {"id":"triage","lane":"tasks","col":2,"type":"security","label":"등록·대기 분류","sublabel":"대기 항목은 직접 검토"},
+    {"id":"active","lane":"tasks","col":3,"type":"database","label":"진행중 할 일","sublabel":"기한 · 권한 · 알림"},
+    {"id":"done","lane":"tasks","col":4,"type":"frontend","label":"완료 기록","sublabel":"실제 활동 측정 아님"},
+    {"id":"routine","lane":"tasks","col":5,"type":"backend","label":"루틴 제안","sublabel":"선택형 학습 · 검토 후 수락","width":160},
+    {"id":"mailSource","lane":"mail","col":0,"type":"external","label":"메일 수신","sublabel":"Gmail · Outlook 연결"},
+    {"id":"mailDraft","lane":"mail","col":1,"type":"backend","label":"로컬 후보 판단","sublabel":"확실성 · 날짜 근거"},
+    {"id":"meetingSource","lane":"meeting","col":0,"type":"frontend","label":"녹음·음성 가져오기","sublabel":"동의한 소스만","width":170},
+    {"id":"meetingDraft","lane":"meeting","col":1,"type":"backend","label":"전사·행동 초안","sublabel":"원문 연결 · 로컬 처리"}
+  ],
+  "edges": [
+    {"from":"capture","to":"organize"},
+    {"from":"organize","to":"triage"},
+    {"from":"triage","to":"active"},
+    {"from":"active","to":"done"},
+    {"from":"done","to":"routine"},
+    {"from":"mailSource","to":"mailDraft"},
+    {"from":"mailDraft","to":"triage","label":"조건별 분류","role":"branch"},
+    {"from":"meetingSource","to":"meetingDraft"},
+    {"from":"meetingDraft","to":"triage","label":"선택한 초안","role":"branch"}
+  ],
+  "cards": [
+    {"dot":"emerald","title":"사용자가 고르는 다음 행동","items":["회의 초안은 대기열로 가져오며, 메일은 근거·확실성에 따라 진행중 또는 대기로 분류합니다.","루틴은 완료 기록의 패턴입니다. 주기와 시간을 검토한 뒤 제안을 수락해야 할 일이 됩니다."]},
+    {"dot":"amber","title":"자동화와 외부 연결은 구분","items":["메일 수신 자체는 메일 서버 통신입니다. 자동 메일·회의 분석 경로는 로컬입니다.","선택형 OpenAI 분석·동기화의 별도 동의와 데이터 경계는 외부 연결 도표를 참고하세요."]}
+  ]
+}

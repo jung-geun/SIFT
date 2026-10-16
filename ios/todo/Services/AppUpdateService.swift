@@ -8,11 +8,11 @@ struct AppUpdateInfo: Equatable {
     let appStoreURL: URL
 
     var title: String {
-        "새 버전 사용 가능"
+        AppLanguage.localized("update.available", defaultValue: "New Version Available", language: AppLanguage.current)
     }
 
     var message: String {
-        "현재 \(currentVersion) · 최신 \(latestVersion)"
+        String(format: AppLanguage.localized("update.versions", defaultValue: "Current %@ · Latest %@", language: AppLanguage.current), locale: AppLanguage.current.locale, String(currentVersion), String(latestVersion))
     }
 }
 
@@ -53,6 +53,10 @@ final class AppUpdateService: ObservableObject {
     }
 
     func refresh() async {
+        #if SIFT_QA
+        // QA builds are not distributed through the production App Store listing.
+        updateInfo = nil
+        #else
         guard !isChecking else { return }
         guard let bundleIdentifier = Bundle.main.bundleIdentifier else { return }
         let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
@@ -91,6 +95,7 @@ final class AppUpdateService: ObservableObject {
         } catch {
             updateInfo = nil
         }
+        #endif
     }
 
     func dismissCurrentUpdate() {

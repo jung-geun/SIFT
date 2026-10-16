@@ -74,9 +74,6 @@ nonisolated enum BehaviorAnalysisEngine {
         var structuredInsights: [BehaviorInsight] = []
         var detectedCompletionHour: Int?
         var computedOverdueRate = 0.0
-        func copy(_ korean: String, _ english: String) -> String {
-            language == .english ? english : korean
-        }
 
         func rateTrend(successDates: [Date], totalDates: [Date]) -> (previous: Double, trend: BehaviorTrend)? {
             let recentStart = now.addingTimeInterval(-30 * 24 * 3600)
@@ -167,14 +164,8 @@ nonisolated enum BehaviorAnalysisEngine {
             }
             if let top = blockCounts.sorted(by: { $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value }).first {
                 let evidence = completionConfidence == .insufficient
-                    ? copy(
-                        "최근 90일 완료 기록 \(completedDates.count)건으로 시간대 경향을 판단하기에는 데이터가 부족함",
-                        "There is not enough data from \(completedDates.count) completions in the last 90 days to infer a time-of-day trend."
-                    )
-                    : copy(
-                        "최근 90일 완료 기록은 \(top.key)시~\(min(24, top.key + 3))시에 가장 많이 집중됨 (\(top.value)/\(completedDates.count)건)",
-                        "Completions in the last 90 days were most concentrated from \(top.key):00 to \(min(24, top.key + 3)):00 (\(top.value)/\(completedDates.count))."
-                    )
+                    ? String(format: AppLanguage.localized("behavior.analysis.insufficientTimeSamples", defaultValue: "There is not enough data from %@ completions in the last 90 days to infer a time-of-day trend.", language: language), locale: language.locale, completedDates.count.formatted(.number.locale(language.locale)))
+                    : String(format: AppLanguage.localized("behavior.analysis.completionTimeEvidence", defaultValue: "Completions in the last 90 days were most concentrated from %@:00 to %@:00 (%@/%@).", language: language), locale: language.locale, top.key.formatted(.number.locale(language.locale)), min(24, top.key + 3).formatted(.number.locale(language.locale)), top.value.formatted(.number.locale(language.locale)), completedDates.count.formatted(.number.locale(language.locale)))
                 structuredInsights.append(BehaviorInsight(
                     metric: .completionConcentrationHour,
                     value: Double(top.key),
@@ -192,10 +183,7 @@ nonisolated enum BehaviorAnalysisEngine {
                     lines.append(evidence)
                 } else {
                     detectedCompletionHour = top.key
-                    lines.append(copy(
-                        "완료 기록 집중 시간: \(top.key)시~\(min(24, top.key + 3))시 (\(top.value)/\(completedDates.count)건, \(completionConfidence.label))",
-                        "Completion concentration: \(top.key):00–\(min(24, top.key + 3)):00 (\(top.value)/\(completedDates.count), \(completionConfidence.label(language: language))."
-                    ))
+                    lines.append(String(format: AppLanguage.localized("behavior.analysis.completionTimeSummary", defaultValue: "Completion concentration: %@:00–%@:00 (%@/%@, %@).", language: language), locale: language.locale, top.key.formatted(.number.locale(language.locale)), min(24, top.key + 3).formatted(.number.locale(language.locale)), top.value.formatted(.number.locale(language.locale)), completedDates.count.formatted(.number.locale(language.locale)), String(completionConfidence.label(language: language))))
                     textualInsights.append(evidence)
                 }
             }
@@ -214,10 +202,7 @@ nonisolated enum BehaviorAnalysisEngine {
                     windowEnd: now,
                     previousValue: nil,
                     trend: .unavailable,
-                    evidence: copy(
-                        "완료 시간대 최빈 구간 비율 \(top.value)/\(completedDates.count)",
-                        "Top completion time bucket share: \(top.value)/\(completedDates.count)."
-                    )
+                    evidence: String(format: AppLanguage.localized("behavior.analysis.timeBucketShare", defaultValue: "Top completion time bucket share: %@/%@.", language: language), locale: language.locale, top.value.formatted(.number.locale(language.locale)), completedDates.count.formatted(.number.locale(language.locale)))
                 ))
             }
             let weekdayCounts = Dictionary(grouping: completedDates) {
@@ -236,10 +221,7 @@ nonisolated enum BehaviorAnalysisEngine {
                     windowEnd: now,
                     previousValue: nil,
                     trend: .unavailable,
-                    evidence: copy(
-                        "완료 최빈 요일 비율 \(top.value)/\(completedDates.count), 2위 \(second)건",
-                        "Top completion weekday share: \(top.value)/\(completedDates.count); runner-up \(second)."
-                    )
+                    evidence: String(format: AppLanguage.localized("behavior.analysis.weekdayShare", defaultValue: "Top completion weekday share: %@/%@; runner-up %@.", language: language), locale: language.locale, top.value.formatted(.number.locale(language.locale)), completedDates.count.formatted(.number.locale(language.locale)), second.formatted(.number.locale(language.locale)))
                 ))
             }
         }
@@ -259,28 +241,19 @@ nonisolated enum BehaviorAnalysisEngine {
                 windowEnd: now,
                 previousValue: nil,
                 trend: .unavailable,
-                evidence: copy(
-                    "사용자 완료 이벤트에서 생성 후 완료까지 유효한 경과 시간 \(latency.count)건",
-                    "\(latency.count) valid creation-to-completion latency observations from user completion events."
-                )
+                evidence: String(format: AppLanguage.localized("behavior.analysis.latencySamples", defaultValue: "%@ valid creation-to-completion latency observations from user completion events.", language: language), locale: language.locale, String(latency.count))
             ))
         }
 
         if !scopedTodos.isEmpty {
             let currentCompleted = scopedTodos.filter(\.isCompleted).count
-            let evidence = copy(
-                "현재 보유 TODO 완료 상태: \(currentCompleted)/\(scopedTodos.count)건",
-                "Current to-do completion state: \(currentCompleted)/\(scopedTodos.count)."
-            )
+            let evidence = String(format: AppLanguage.localized("behavior.analysis.currentCompletionShare", defaultValue: "Current to-do completion state: %@/%@.", language: language), locale: language.locale, currentCompleted.formatted(.number.locale(language.locale)), scopedTodos.count.formatted(.number.locale(language.locale)))
             lines.append(evidence)
             appendRateInsight(metric: .currentCompletionShare, successes: currentCompleted, total: scopedTodos.count, evidence: evidence, includeInText: false)
         }
         if !scopedAuditSnapshots.isEmpty {
             let completedBeforeDeletion = scopedAuditSnapshots.filter { $0.completedAt != nil }.count
-            let evidence = copy(
-                "최근 90일 사용자 삭제 스냅샷 중 완료 후 삭제: \(completedBeforeDeletion)/\(scopedAuditSnapshots.count)건",
-                "Among user-deletion snapshots from the last 90 days, completed before deletion: \(completedBeforeDeletion)/\(scopedAuditSnapshots.count)."
-            )
+            let evidence = String(format: AppLanguage.localized("behavior.analysis.deletedCompletedShare", defaultValue: "Among user-deletion snapshots from the last 90 days, completed before deletion: %@/%@.", language: language), locale: language.locale, completedBeforeDeletion.formatted(.number.locale(language.locale)), scopedAuditSnapshots.count.formatted(.number.locale(language.locale)))
             lines.append(evidence)
             let successDates = scopedAuditSnapshots.filter { $0.completedAt != nil }.map(\.observationDate)
             let totalDates = scopedAuditSnapshots.map(\.observationDate)
@@ -296,10 +269,7 @@ nonisolated enum BehaviorAnalysisEngine {
                 windowEnd: now,
                 previousValue: nil,
                 trend: .unavailable,
-                evidence: copy(
-                    "최근 90일 사용자 주도 삭제 스냅샷 \(scopedAuditSnapshots.count)건",
-                    "\(scopedAuditSnapshots.count) user-deletion snapshots in the last 90 days."
-                )
+                evidence: String(format: AppLanguage.localized("behavior.analysis.deletedSnapshotCount", defaultValue: "%@ user-deletion snapshots in the last 90 days.", language: language), locale: language.locale, scopedAuditSnapshots.count.formatted(.number.locale(language.locale)))
             ))
         }
 
@@ -307,10 +277,7 @@ nonisolated enum BehaviorAnalysisEngine {
             let elapsed = weightedMean(completionRecords.enumerated().map { index, record in
                 (value: max(0, record.completedAt.timeIntervalSince(record.createdAt) / 3600), weight: completionWeights[index])
             })
-            lines.append(copy(
-                "생성 후 완료까지 경과 시간 가중 평균: \(formatHours(elapsed, language: language))",
-                "Weighted elapsed time from creation to completion: \(formatHours(elapsed, language: language))."
-            ))
+            lines.append(String(format: AppLanguage.localized("behavior.analysis.weightedLatency", defaultValue: "Weighted elapsed time from creation to completion: %@.", language: language), locale: language.locale, String(formatHours(elapsed, language: language))))
         }
 
         var tagSamples: [String: [(value: Double, weight: Double)]] = [:]
@@ -331,15 +298,9 @@ nonisolated enum BehaviorAnalysisEngine {
         let fastTags = Array(eligibleTags.prefix(3)).map(\.tag)
         if let fastest = eligibleTags.min(by: { $0.weightedLatencyHours < $1.weightedLatencyHours }),
            let slowest = eligibleTags.max(by: { $0.weightedLatencyHours < $1.weightedLatencyHours }), fastest.tag != slowest.tag {
-            let evidence = copy(
-                "생성→완료 경과가 짧은 태그: '\(fastest.tag)' 평균 \(formatHours(fastest.weightedLatencyHours, language: language)) / 긴 태그: '\(slowest.tag)' 평균 \(formatHours(slowest.weightedLatencyHours, language: language))",
-                "Shortest creation-to-completion tag: '\(fastest.tag)' average \(formatHours(fastest.weightedLatencyHours, language: language)); longest: '\(slowest.tag)' average \(formatHours(slowest.weightedLatencyHours, language: language))."
-            )
+            let evidence = String(format: AppLanguage.localized("behavior.analysis.tagLatencyEvidence", defaultValue: "Shortest creation-to-completion tag: '%@' average %@; longest: '%@' average %@.", language: language), locale: language.locale, String(fastest.tag), String(formatHours(fastest.weightedLatencyHours, language: language)), String(slowest.tag), String(formatHours(slowest.weightedLatencyHours, language: language)))
             lines.append(evidence)
-            textualInsights.append(copy(
-                "최근 기록에서 '\(fastest.tag)' 태그의 생성 후 완료까지 경과 시간이 '\(slowest.tag)' 태그보다 짧았음",
-                "Recent records show shorter creation-to-completion time for '\(fastest.tag)' than '\(slowest.tag)'."
-            ))
+            textualInsights.append(String(format: AppLanguage.localized("behavior.analysis.tagLatencySummary", defaultValue: "Recent records show shorter creation-to-completion time for '%@' than '%@'.", language: language), locale: language.locale, String(fastest.tag), String(slowest.tag)))
         }
 
         let dueDateCompleted = liveCompleted.compactMap { snapshot -> (due: Date, completedAt: Date)? in
@@ -350,10 +311,7 @@ nonisolated enum BehaviorAnalysisEngine {
         let onTime = dueDateCompleted.filter { calendar.isDate($0.completedAt, equalTo: $0.due, toGranularity: .minute) }.count
         let late = dueDateCompleted.count - early - onTime
         if !dueDateCompleted.isEmpty {
-            let evidence = copy(
-                "마감이 있는 최근 완료 기록: 조기 \(early)건 / 정시 \(onTime)건 / 지연 \(late)건",
-                "Recent due-dated completions: early \(early) / on time \(onTime) / late \(late)."
-            )
+            let evidence = String(format: AppLanguage.localized("behavior.analysis.deadlineTiming", defaultValue: "Recent due-dated completions: early %@ / on time %@ / late %@.", language: language), locale: language.locale, early.formatted(.number.locale(language.locale)), onTime.formatted(.number.locale(language.locale)), late.formatted(.number.locale(language.locale)))
             lines.append(evidence)
             let lateDates = dueDateCompleted.filter { $0.completedAt > $0.due }.map(\.completedAt)
             let totalDates = dueDateCompleted.map(\.completedAt)
@@ -370,10 +328,7 @@ nonisolated enum BehaviorAnalysisEngine {
             return due.timeIntervalSince(snapshot.createdAt) / 3600
         }
         if !leadTimes.isEmpty {
-            lines.append(copy(
-                "생성→마감 리드타임 평균: \(formatHours(leadTimes.reduce(0, +) / Double(leadTimes.count), language: language))",
-                "Average creation-to-deadline lead time: \(formatHours(leadTimes.reduce(0, +) / Double(leadTimes.count), language: language))."
-            ))
+            lines.append(String(format: AppLanguage.localized("behavior.analysis.deadlineLeadTime", defaultValue: "Average creation-to-deadline lead time: %@.", language: language), locale: language.locale, String(formatHours(leadTimes.reduce(0, +) / Double(leadTimes.count), language: language))))
         }
 
         let activeTodos = scopedTodos.filter { !$0.isCompleted }
@@ -382,10 +337,7 @@ nonisolated enum BehaviorAnalysisEngine {
             return due <= weekOut
         }.count
         if nearTerm > 0 {
-            let evidence = copy(
-                "마감 경과 또는 향후 7일 내 마감 미완료 TODO \(nearTerm)건",
-                "\(nearTerm) incomplete to-dos are overdue or due within the next 7 days."
-            )
+            let evidence = String(format: AppLanguage.localized("behavior.analysis.nearTermBacklog", defaultValue: "%@ incomplete to-dos are overdue or due within the next 7 days.", language: language), locale: language.locale, nearTerm.formatted(.number.locale(language.locale)))
             lines.append(evidence)
             textualInsights.append(evidence)
             structuredInsights.append(BehaviorInsight(
@@ -408,10 +360,7 @@ nonisolated enum BehaviorAnalysisEngine {
                 metric: .activeWithoutDueDateShare,
                 successes: withoutDue,
                 total: activeTodos.count,
-                evidence: copy(
-                    "활성 TODO \(activeTodos.count)건 중 마감일 없는 TODO \(withoutDue)건",
-                    "\(withoutDue) of \(activeTodos.count) active to-dos have no due date."
-                ),
+                evidence: String(format: AppLanguage.localized("behavior.analysis.withoutDeadline", defaultValue: "%@ of %@ active to-dos have no due date.", language: language), locale: language.locale, withoutDue.formatted(.number.locale(language.locale)), activeTodos.count.formatted(.number.locale(language.locale))),
                 includeInText: false
             )
         }
@@ -435,32 +384,20 @@ nonisolated enum BehaviorAnalysisEngine {
             }
             let completionDateByTask = Dictionary(grouping: completionEvents, by: \.todoID).compactMapValues { $0.map(\.timestamp).min() }
             let undoDateByTask = Dictionary(grouping: undoEvents, by: \.todoID).compactMapValues { $0.map(\.timestamp).min() }
-            appendRateInsight(metric: .completionUndoRate, successes: undoDateByTask.count, total: completionDateByTask.count, successDates: Array(undoDateByTask.values), totalDates: Array(completionDateByTask.values), evidence: copy(
-                "사용자 완료 TODO \(completionDateByTask.count)건 중 완료 취소 \(undoDateByTask.count)건",
-                "\(undoDateByTask.count) completion undos among \(completionDateByTask.count) user-completed to-dos."
-            ))
+            appendRateInsight(metric: .completionUndoRate, successes: undoDateByTask.count, total: completionDateByTask.count, successDates: Array(undoDateByTask.values), totalDates: Array(completionDateByTask.values), evidence: String(format: AppLanguage.localized("behavior.analysis.completionUndoRate", defaultValue: "%@ completion undos among %@ user-completed to-dos.", language: language), locale: language.locale, undoDateByTask.count.formatted(.number.locale(language.locale)), completionDateByTask.count.formatted(.number.locale(language.locale))))
 
             let dueChanges = scopedEvents.filter { $0.kind == .dueDateChanged && $0.actorRawValue == TaskBehaviorActor.user.rawValue && $0.beforeDueDate != $0.afterDueDate }
             let dueChangeDates = latestDatesByTodo(dueChanges)
-            appendRateInsight(metric: .dueDateChangeRate, successes: dueChangeDates.count, total: observedTodoIDs.count, successDates: dueChangeDates, totalDates: latestDatesByTodo(scopedEvents), evidence: copy(
-                "관찰된 TODO \(observedTodoIDs.count)건 중 사용자가 마감일을 변경한 TODO \(dueChangeDates.count)건",
-                "\(dueChangeDates.count) of \(observedTodoIDs.count) observed to-dos had a user due-date change."
-            ))
+            appendRateInsight(metric: .dueDateChangeRate, successes: dueChangeDates.count, total: observedTodoIDs.count, successDates: dueChangeDates, totalDates: latestDatesByTodo(scopedEvents), evidence: String(format: AppLanguage.localized("behavior.analysis.dueDateChangeRate", defaultValue: "%@ of %@ observed to-dos had a user due-date change.", language: language), locale: language.locale, dueChangeDates.count.formatted(.number.locale(language.locale)), observedTodoIDs.count.formatted(.number.locale(language.locale))))
             let validDueChanges = dueChanges.filter { $0.beforeDueDate != nil && $0.afterDueDate != nil }
             let validDueDates = latestDatesByTodo(validDueChanges)
             let postponed = latestDatesByTodo(validDueChanges.filter { $0.afterDueDate! > $0.beforeDueDate! })
-            appendRateInsight(metric: .dueDatePostponeRate, successes: postponed.count, total: validDueDates.count, successDates: postponed, totalDates: validDueDates, evidence: copy(
-                "유효한 사용자 마감일 변경 TODO \(validDueDates.count)건 중 연기한 TODO \(postponed.count)건",
-                "\(postponed.count) of \(validDueDates.count) to-dos with valid user due-date changes were postponed."
-            ))
+            appendRateInsight(metric: .dueDatePostponeRate, successes: postponed.count, total: validDueDates.count, successDates: postponed, totalDates: validDueDates, evidence: String(format: AppLanguage.localized("behavior.analysis.dueDatePostponeRate", defaultValue: "%@ of %@ to-dos with valid user due-date changes were postponed.", language: language), locale: language.locale, postponed.count.formatted(.number.locale(language.locale)), validDueDates.count.formatted(.number.locale(language.locale))))
 
             let createdEvents = scopedEvents.filter { $0.kind == .created && $0.actorRawValue == TaskBehaviorActor.user.rawValue && $0.timestamp <= now }
             let createdDates = Dictionary(grouping: createdEvents, by: \.todoID).compactMapValues { $0.map(\.timestamp).min() }
             let dueAtCreation = Set(createdEvents.filter { $0.afterDueDate != nil }.map(\.todoID))
-            appendRateInsight(metric: .dueDateAtCreationRate, successes: dueAtCreation.count, total: createdDates.count, successDates: Array(dueAtCreation.compactMap { createdDates[$0] }), totalDates: Array(createdDates.values), evidence: copy(
-                "사용자 생성 이벤트가 있는 TODO \(createdDates.count)건 중 생성 시 마감일이 있던 TODO \(dueAtCreation.count)건",
-                "\(dueAtCreation.count) of \(createdDates.count) user-created to-dos with valid creation events had a due date at creation."
-            ))
+            appendRateInsight(metric: .dueDateAtCreationRate, successes: dueAtCreation.count, total: createdDates.count, successDates: Array(dueAtCreation.compactMap { createdDates[$0] }), totalDates: Array(createdDates.values), evidence: String(format: AppLanguage.localized("behavior.analysis.dueDateAtCreationRate", defaultValue: "%@ of %@ user-created to-dos with valid creation events had a due date at creation.", language: language), locale: language.locale, dueAtCreation.count.formatted(.number.locale(language.locale)), createdDates.count.formatted(.number.locale(language.locale))))
             let manualEvents = scopedEvents.filter {
                 $0.kind == .priorityChanged
                     && $0.actorRawValue == TaskBehaviorActor.user.rawValue
@@ -470,10 +407,7 @@ nonisolated enum BehaviorAnalysisEngine {
                 grouping: manualEvents.filter { createdDates[$0.todoID] != nil },
                 by: \.todoID
             ).compactMapValues { $0.map(\.timestamp).max() }
-            appendRateInsight(metric: .manualPriorityChangeRate, successes: manualDatesByCreatedTask.count, total: createdDates.count, successDates: Array(manualDatesByCreatedTask.values), totalDates: Array(createdDates.values), evidence: copy(
-                "사용자 생성 이벤트가 있는 TODO \(createdDates.count)건 중 수동 우선순위를 변경한 TODO \(manualDatesByCreatedTask.count)건",
-                "\(manualDatesByCreatedTask.count) of \(createdDates.count) user-created to-dos with valid creation events had a manual priority change."
-            ))
+            appendRateInsight(metric: .manualPriorityChangeRate, successes: manualDatesByCreatedTask.count, total: createdDates.count, successDates: Array(manualDatesByCreatedTask.values), totalDates: Array(createdDates.values), evidence: String(format: AppLanguage.localized("behavior.analysis.manualPriorityChangeRate", defaultValue: "%@ of %@ user-created to-dos with valid creation events had a manual priority change.", language: language), locale: language.locale, manualDatesByCreatedTask.count.formatted(.number.locale(language.locale)), createdDates.count.formatted(.number.locale(language.locale))))
             let priorityEvents = scopedEvents.filter { $0.kind == .priorityChanged }.sorted { $0.timestamp < $1.timestamp }
             let aiEvents = priorityEvents.filter { $0.actorRawValue == TaskBehaviorActor.artificialIntelligence.rawValue }
             let overrides = aiEvents.filter { ai in
@@ -481,10 +415,7 @@ nonisolated enum BehaviorAnalysisEngine {
                     later.todoID == ai.todoID && later.actorRawValue == TaskBehaviorActor.user.rawValue && later.timestamp > ai.timestamp && later.timestamp.timeIntervalSince(ai.timestamp) <= 24 * 3600
                 }
             }
-            appendRateInsight(metric: .aiOverrideRate, successes: overrides.count, total: aiEvents.count, successDates: overrides.map(\.timestamp), totalDates: aiEvents.map(\.timestamp), evidence: copy(
-                "AI 우선순위 변경 \(aiEvents.count)건 중 24시간 내 사용자 재변경 \(overrides.count)건",
-                "\(overrides.count) user overrides within 24 hours among \(aiEvents.count) AI priority changes."
-            ))
+            appendRateInsight(metric: .aiOverrideRate, successes: overrides.count, total: aiEvents.count, successDates: overrides.map(\.timestamp), totalDates: aiEvents.map(\.timestamp), evidence: String(format: AppLanguage.localized("behavior.analysis.aiOverrideRate", defaultValue: "%@ user overrides within 24 hours among %@ AI priority changes.", language: language), locale: language.locale, overrides.count.formatted(.number.locale(language.locale)), aiEvents.count.formatted(.number.locale(language.locale))))
         }
 
         var classifications: [BehaviorClassification] = []
@@ -554,10 +485,7 @@ nonisolated enum BehaviorAnalysisEngine {
             insights: structuredInsights,
             classifications: classifications
         )
-        let scope = copy(
-            "분석 범위: 현재 TODO \(scopedTodos.count)개, 최근 사용자 삭제 스냅샷 \(scopedAuditSnapshots.count)개, typed 변경 이벤트 \(scopedEvents.count)개, 최근 완료 기록 \(allCompletionRecords.count)개",
-            "Scope: \(scopedTodos.count) current to-dos, \(scopedAuditSnapshots.count) recent user-deletion snapshots, \(scopedEvents.count) typed change events, and \(allCompletionRecords.count) recent completions."
-        )
+        let scope = String(format: AppLanguage.localized("behavior.analysis.scope", defaultValue: "Scope: %@ current to-dos, %@ recent user-deletion snapshots, %@ typed change events, and %@ recent completions.", language: language), locale: language.locale, String(scopedTodos.count), String(scopedAuditSnapshots.count), String(scopedEvents.count), String(allCompletionRecords.count))
         return MemoryAnalysisResult(
             summary: lines.joined(separator: "\n"),
             insights: Array(textualInsights.prefix(8)),
@@ -565,9 +493,9 @@ nonisolated enum BehaviorAnalysisEngine {
             overdueRate: computedOverdueRate,
             productiveHour: detectedCompletionHour,
             analyzedCompletedCount: allCompletionRecords.count,
-            recordTitle: copy("행동 패턴 분석", "Behavior Pattern Analysis"),
+            recordTitle: AppLanguage.localized("행동 패턴 분석", defaultValue: "Behavior Pattern Analysis", language: language),
             accessScopeSummary: scope,
-            processorDescription: copy("통계 기반(결정론적)", "Statistical (deterministic)"),
+            processorDescription: AppLanguage.localized("behavior.analysis.processor", defaultValue: "Statistical (deterministic)", language: language),
             behaviorProfile: profile
         )
     }
@@ -602,8 +530,7 @@ nonisolated enum BehaviorAnalysisEngine {
     }
 
     private static func formatHours(_ hours: Double, language: AppLanguage) -> String {
-        let rounded = hours.rounded()
-        if language == .english { return "\(rounded)h" }
-        return "\(rounded)시간"
+        let value = hours.rounded().formatted(.number.locale(language.locale))
+        return String(format: AppLanguage.localized("behavior.analysis.hours", defaultValue: "%@h", language: language), locale: language.locale, value)
     }
 }

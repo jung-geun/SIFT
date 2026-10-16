@@ -9,6 +9,8 @@ import SwiftUI
 struct MeetingProcessingStatusView: View {
     let phase: MeetingProcessingReporter.Phase
     var showsTranscription: Bool = false
+    var offlineTranscription: Bool = false
+    var transcriptionProgress: MeetingTranscriptionProgress?
 
     private enum StageState { case done, active, pending, skipped }
 
@@ -39,6 +41,9 @@ struct MeetingProcessingStatusView: View {
                     )
                 }
                 statusLine
+                if case .transcribing = phase, let transcriptionProgress {
+                    MeetingTranscriptionProgressView(progress: transcriptionProgress)
+                }
             }
             .padding(.vertical, 4)
         }
@@ -139,7 +144,9 @@ struct MeetingProcessingStatusView: View {
         case .idle:
             EmptyView()
         case .transcribing:
-            label(AppLanguage.localized("meeting.processing.retranscribing", defaultValue: "저장된 음성을 다시 전사하는 중이에요", language: .current, comment: "Meeting processing status."), engine: "")
+            label(offlineTranscription
+                ? AppLanguage.localized("meeting.processing.offlineTranscribing", defaultValue: AppLanguage.current == .english ? "Transcribing saved audio with on-device Whisper" : "기기 내 Whisper로 저장된 음성을 다시 전사하는 중", language: .current, comment: "WhisperKit saved audio processing stage.")
+                : AppLanguage.localized("meeting.processing.retranscribing", defaultValue: "저장된 음성을 다시 전사하는 중이에요", language: .current, comment: "Meeting processing status."), engine: "")
         case .proofreading(let engine):
             label(AppLanguage.localized("meeting.processing.proofreading", defaultValue: "AI가 전사를 검수하는 중이에요", language: .current, comment: "Meeting processing status."), engine: engine)
         case .summarizing(let engine):
@@ -194,5 +201,70 @@ struct MeetingProcessingStatusView: View {
                     .foregroundStyle(Color.accentColor)
             }
         }
+    }
+}
+
+/// Estimates apply only to the active ASR stage. Loading and downstream work
+/// remain indeterminate rather than borrowing an invented percentage or speed.
+struct MeetingTranscriptionProgressView: View {
+    let progress: MeetingTranscriptionProgress
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { timeline in
+            VStack(alignment: .leading, spacing: 6) {
+                Text(stageTitle).font(.subheadline.weight(.medium))
+                    .accessibilityIdentifier("meeting.transcription.stage")
+                if let fraction = progress.fraction {
+                    ProgressView(value: fraction)
+                } else {
+                    ProgressView()
+                }
+                Text(String(format: text("meeting.progress.duration", "Audio %@", "음성 길이 %@"),
+                            MeetingTranscriptionProgress.timestamp(progress.totalMilliseconds)))
+                if progress.stage == .recognizing || progress.stage == .preparingAudio {
+                    Text(String(format: text("meeting.progress.position", "Confirmed audio position %@ / %@", "음성 확인 위치 %@ / %@"),
+                                MeetingTranscriptionProgress.timestamp(progress.completedMilliseconds),
+                                MeetingTranscriptionProgress.timestamp(progress.totalMilliseconds)))
+                        .accessibilityIdentifier("meeting.transcription.position")
+                }
+                Text(String(format: text("meeting.progress.elapsed", "Elapsed %@", "경과 %@"),
+                            duration(progress.elapsed(at: timeline.date))))
+                if let remaining = progress.estimatedRemaining(at: timeline.date) {
+                    Text(String(format: text("meeting.progress.estimate", "About %@ left for transcription · estimated finish %@", "전사 예상 잔여 약 %@ · %@ 완료 예상"),
+                                duration(remaining), timeline.date.addingTimeInterval(remaining).formatted(
+                                    .dateTime.hour().minute().locale(AppLanguage.current.locale))))
+                        .accessibilityIdentifier("meeting.transcription.estimate")
+                    Text(text("meeting.progress.estimateScope", "Based on this run's speed; excludes speaker detection, proofreading and summary.", "현재 처리 속도 기준이며 화자 분석·AI 검수·요약 시간은 제외합니다."))
+                } else if progress.stage == .recognizing {
+                    Text(text("meeting.progress.measuring", "Measuring transcription speed; a time estimate will appear after enough audio is confirmed.", "전사 속도를 측정하는 중입니다. 음성 구간이 충분히 확인되면 예상 시간을 표시합니다."))
+                }
+                if progress.stage == .recognizing {
+                    Text(String(format: text("meeting.progress.lastUpdate", "Last confirmed progress %@ ago", "최근 진행 확인 %@ 전"),
+                                duration(max(0, timeline.date.timeIntervalSince(progress.lastActivityAt)))))
+                }
+            }
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var stageTitle: String {
+        switch progress.stage {
+        case .waiting: text("meeting.progress.waiting", "Waiting for on-device audio processing", "기기 내 음성 처리 대기 중")
+        case .loadingModel: text("meeting.progress.model", "Verifying and loading the transcription model", "전사 모델 검증·불러오는 중")
+        case .preparingAudio: text("meeting.progress.audio", "Preparing saved audio", "저장된 음성 준비 중")
+        case .recognizing: text("meeting.progress.recognizing", "Recognizing speech and aligning timestamps", "음성 인식·시간 정렬 중")
+        case .validating: text("meeting.progress.validating", "Checking and saving the transcript", "전사 결과 검사·저장 중")
+        }
+    }
+
+    private func duration(_ seconds: TimeInterval) -> String {
+        MeetingTranscriptionProgress.timestamp(Int64(max(0, min(seconds, Double(Int64.max / 1_000))) * 1_000))
+    }
+
+    private func text(_ key: String, _ english: String, _ korean: String) -> String {
+        AppLanguage.localized(key, defaultValue: AppLanguage.current == .english ? english : korean,
+                              language: .current, comment: "Measured local transcription progress; estimate is not a completion guarantee.")
     }
 }

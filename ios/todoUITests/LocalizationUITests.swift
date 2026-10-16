@@ -1,154 +1,106 @@
 import XCTest
 
-final class LocalizationUITests: XCTestCase {
-    override func setUpWithError() throws {
-        continueAfterFailure = false
-        XCUIApplication().terminate()
-    }
-    @MainActor
-    private func scrollToHittable(_ element: XCUIElement, in app: XCUIApplication, maxSwipes: Int = 8) {
-        for _ in 0..<maxSwipes where !element.isHittable {
-            app.swipeUp()
+@MainActor
+final class LocalizationUITests: SIFTUITestCase {
+    func testMoreSettingsNavigationPreservesPrimaryAddAction() throws {
+        XCUIDevice.shared.orientation = .portrait
+        defer { XCUIDevice.shared.orientation = .portrait }
+        launch(.init(language: .english))
+
+        step("To-Dos keeps Add primary and Settings inside More") {
+            require(app.buttons["todo.addButton"], message: "Primary Add action is missing.")
+            require(app.buttons["todo.moreActionsMenu"], message: "More menu is missing.")
+            XCTAssertFalse(app.buttons["todo.settingsButton"].exists, "Settings should not be a separate toolbar button.")
+            openSettings()
+            require(app.buttons["settings.languagePicker"], message: "Settings language picker is missing.")
+            tap(app.navigationBars.buttons["Close"], message: "Settings cannot be closed.")
         }
-        XCTAssertTrue(element.waitForExistence(timeout: 2))
-        XCTAssertTrue(element.isHittable)
+
+        step("Add remains usable after returning from Settings") {
+            tap(app.buttons["todo.addButton"], message: "Primary Add action is no longer accessible.")
+            require(app.navigationBars["New To-Do"], message: "Add did not open the to-do form.")
+            tap(app.navigationBars.buttons["Cancel"], message: "The add form cannot be dismissed.")
+            require(app.buttons["todo.moreActionsMenu"], message: "More did not return after dismissing Add.")
+        }
     }
 
+    func testLanguageSwitchPreservesTaskAndResetUsesSystemLanguage() throws {
+        launch(.init(language: .english, setsLanguageOverride: false,
+                     additionalArguments: ["-pieroot.todo.board.isBoardMode", "NO"]))
+        openSettings()
+        tap(app.buttons["settings.languagePicker"], message: "Language picker missing")
+        tap(app.buttons["English"], message: "English choice missing")
+        tap(app.buttons["settings.closeButton"], message: "Settings cannot close")
 
-    private func launchEnglish() -> XCUIApplication {
-        let app = XCUIApplication()
-        app.launchArguments = [
-            "-ApplePersistenceIgnoreState", "YES",
-            "-AppleLanguages", "(ko)",
-            "-AppleLocale", "ko_KR",
-            "-pieroot.todo.appLanguageOverride", "en",
-            "-pieroot.todo.hasOnboarded", "YES",
-            "-pieroot.todo.hasCompletedTutorial", "YES",
-            "-pieroot.todo.launchBehavior", "lastUsed",
-            "-pieroot.todo.selectedTab", "0",
-            "-pieroot.todo.uiTestShowAllTabs",
-            "-ui-test-suppress-crash-prompt"
-        ]
-        app.launch()
-        return app
+        let source = "Original text / 원문 / 2026"
+        tap(app.buttons["todo.addButton"], message: "Add missing")
+        tap(app.textFields["todo.add.titleField"], message: "Title missing")
+        app.textFields["todo.add.titleField"].typeText(source)
+        tap(app.buttons["todo.add.saveButton"], message: "Save missing")
+
+        for nativeName in ["Español", "日本語", "简体中文", "Français", "Italiano", "Deutsch"] {
+            openSettings()
+            tap(app.buttons["settings.languagePicker"], message: "Language picker missing")
+            tap(app.buttons[nativeName], message: "Missing language: \(nativeName)")
+            XCTAssertFalse(app.navigationBars["Settings"].exists, "Switch did not change the active screen language")
+            tap(app.buttons["settings.closeButton"], message: "Localized Settings cannot close")
+            require(app.staticTexts[source], message: "Switching language changed or lost original task text")
+            tap(app.buttons["todo.addButton"], message: "Add missing after language change")
+            require(app.textFields["todo.add.titleField"], message: "Localized Add form missing")
+            XCTAssertFalse(app.navigationBars["New To-Do"].exists, "Form silently fell back to English")
+            let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+            attachment.name = "Language-\(nativeName)-Add"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+            tap(app.buttons["todo.add.cancelButton"], message: "Localized Cancel missing")
+        }
+
+        openSettings()
+        tap(app.buttons["settings.languagePicker"], message: "Language picker missing")
+        tap(app.buttons["English"], message: "English choice missing")
+        tap(app.buttons["settings.languagePicker"], message: "Language picker missing")
+        tap(app.buttons["System Language"], message: "System reset choice missing")
+        require(app.navigationBars["Settings"], message: "Reset did not restore the English system locale")
+        tap(app.buttons["settings.closeButton"], message: "Settings cannot close after reset")
+        require(app.staticTexts[source], message: "Reset changed the source task")
     }
 
-    private func launchSystemKorean() -> XCUIApplication {
-        let app = XCUIApplication()
-        app.launchArguments = [
-            "-ApplePersistenceIgnoreState", "YES",
-            "-AppleLanguages", "(ko)",
-            "-AppleLocale", "ko_KR",
-            "-pieroot.todo.hasOnboarded", "YES",
-            "-pieroot.todo.hasCompletedTutorial", "YES",
-            "-pieroot.todo.launchBehavior", "lastUsed",
-            "-pieroot.todo.selectedTab", "0",
-            "-pieroot.todo.uiTestShowAllTabs",
-            "-ui-test-suppress-crash-prompt"
-        ]
-        app.launch()
-        return app
+    func testEnglishNavigationAndAddFormUseEnglishCopy() throws {
+        launch(.init(language: .english))
+
+        step("영문 탭 이름 확인") {
+            for label in ["To-Dos", "Calendar", "Mail", "Meetings"] {
+                require(app.buttons.matching(NSPredicate(format: "label == %@", label)).firstMatch, message: "\(label) 탭이 없습니다.")
+            }
+        }
+
+        step("영문 새 할 일 양식 확인") {
+            tap(app.buttons["todo.addButton"], message: "Add New To-Do 기본 버튼이 없습니다.")
+            require(app.navigationBars["New To-Do"], message: "New To-Do 제목이 없습니다.")
+            require(app.textFields["Title (Required)"], message: "영문 제목 필드가 없습니다.")
+            XCTAssertTrue(
+                app.textFields["Notes (Optional)"].exists || app.textViews["Notes (Optional)"].exists
+            )
+            tap(app.buttons["Cancel"], message: "Cancel 버튼이 없습니다.")
+        }
     }
 
-    @MainActor
-    func testEnglishTabsAndAddForm() throws {
-        let app = launchEnglish()
-        XCTAssertTrue(app.tabBars.buttons["To-Dos"].waitForExistence(timeout: 10))
-        XCTAssertTrue(app.tabBars.buttons["Calendar"].waitForExistence(timeout: 10))
-        XCTAssertTrue(app.tabBars.buttons["Mail"].waitForExistence(timeout: 10))
-        XCTAssertTrue(app.tabBars.buttons["Meetings"].waitForExistence(timeout: 10))
+    func testEnglishPrivacyScreenExposesRequiredCopy() throws {
+        launch(.init(language: .english))
 
-        app.tabBars.buttons["Calendar"].tap()
-        app.tabBars.buttons["Mail"].tap()
+        step("App Info 열기") {
+            openSettings()
+            let info = app.buttons["settings.appInfoRow"]
+            requireHittable(info, message: "App Info 행이 없습니다.")
+            info.tap()
+        }
 
-
-        app.tabBars.buttons["To-Dos"].tap()
-
-        let add = app.buttons["todo.addButton"]
-        XCTAssertTrue(add.waitForExistence(timeout: 10))
-        XCTAssertEqual(add.label, "Add New To-Do")
-        add.tap()
-        XCTAssertTrue(app.navigationBars["New To-Do"].waitForExistence(timeout: 10))
-        XCTAssertTrue(app.textFields["Title (Required)"].waitForExistence(timeout: 10))
-        XCTAssertTrue(
-            app.textFields["Notes (Optional)"].waitForExistence(timeout: 3)
-                || app.textViews["Notes (Optional)"].waitForExistence(timeout: 3)
-        )
-        app.buttons["Cancel"].tap()
-    }
-
-    @MainActor
-    func testEnglishSettingsAndLegalCopy() throws {
-        let app = launchEnglish()
-        let settings = app.buttons["todo.settingsButton"]
-        XCTAssertTrue(settings.waitForExistence(timeout: 10))
-        settings.tap()
-
-        let appInfo = app.buttons["settings.appInfoRow"]
-        scrollToHittable(appInfo, in: app)
-        appInfo.tap()
-        XCTAssertTrue(app.navigationBars["App Info"].waitForExistence(timeout: 10))
-
-        let privacy = app.buttons["Privacy Policy"]
-        XCTAssertTrue(privacy.waitForExistence(timeout: 10))
-        privacy.tap()
-        XCTAssertTrue(app.navigationBars["Privacy Policy"].waitForExistence(timeout: 10))
-        XCTAssertTrue(app.staticTexts["View Korean Original Online"].waitForExistence(timeout: 10))
-        XCTAssertTrue(app.staticTexts["Information collected and purposes"].waitForExistence(timeout: 10))
-        XCTAssertTrue(app.staticTexts["Effective date: July 31, 2026"].waitForExistence(timeout: 10))
-        XCTAssertTrue(
-            app.staticTexts["1-6. User-consented diagnostic reporting (optional)"].waitForExistence(timeout: 10)
-        )
-        let excludedDiagnosticData = app.staticTexts
-            .matching(NSPredicate(
-                format: "label == %@",
-                "Excluded: recordings, transcripts, to-dos, email bodies, subjects, and addresses, personas, account identifiers, and authentication tokens."
-            ))
-            .firstMatch
-        XCTAssertTrue(excludedDiagnosticData.waitForExistence(timeout: 10))
-    }
-
-    @MainActor
-    func testEnglishDiagnosticReportingConsentScreen() throws {
-        let app = launchEnglish()
-        let settings = app.buttons["todo.settingsButton"]
-        XCTAssertTrue(settings.waitForExistence(timeout: 10))
-        settings.tap()
-
-        let appInfo = app.buttons["settings.appInfoRow"]
-        scrollToHittable(appInfo, in: app)
-        appInfo.tap()
-
-        let diagnostics = app.buttons["appInfo.diagnosticReports"]
-        XCTAssertTrue(diagnostics.waitForExistence(timeout: 10))
-        diagnostics.tap()
-        XCTAssertTrue(app.navigationBars["Error Reports"].waitForExistence(timeout: 10))
-        XCTAssertTrue(app.staticTexts["Diagnostics and privacy"].waitForExistence(timeout: 10))
-        XCTAssertTrue(app.switches["diagnostics.collectionToggle"].waitForExistence(timeout: 10))
-    }
-
-    @MainActor
-    func testLanguageOverrideCanResetToSystem() throws {
-        let app = launchSystemKorean()
-        let settings = app.buttons["todo.settingsButton"]
-        XCTAssertTrue(settings.waitForExistence(timeout: 10))
-        settings.tap()
-
-        let picker = app.descendants(matching: .any)["settings.languagePicker"]
-        scrollToHittable(picker, in: app)
-        picker.tap()
-        let english = app.buttons["English"]
-        XCTAssertTrue(english.waitForExistence(timeout: 10))
-        english.tap()
-        XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 10))
-
-        picker.tap()
-        let systemLanguage = app.buttons["System Language"]
-        XCTAssertTrue(systemLanguage.waitForExistence(timeout: 10))
-        systemLanguage.tap()
-        XCTAssertTrue(app.navigationBars["설정"].waitForExistence(timeout: 10))
-
-        app.buttons["닫기"].tap()
-        XCTAssertTrue(app.tabBars.buttons["할 일"].waitForExistence(timeout: 10))
+        step("Privacy Policy 핵심 문구 확인") {
+            tap(app.buttons["Privacy Policy"], message: "Privacy Policy 행이 없습니다.")
+            require(
+                app.staticTexts["Information collected and purposes"],
+                message: "개인정보 처리방침 핵심 문구가 없습니다."
+            )
+        }
     }
 }

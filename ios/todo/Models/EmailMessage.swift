@@ -53,6 +53,10 @@ final class EmailMessage {
     var analyzedAt: Date? = nil
     /// Bump when the structured summary prompt or model contract changes.
     var analysisVersion: Int = 0
+    /// Laya recommendation only; the user can always save any email manually.
+    /// Nil means no valid inference for the current email body, not a negative decision.
+    var analysisTodoCandidate: Bool? = nil
+    var analysisTodoCandidateFingerprint: String = ""
 
     var provider: MailProvider {
         get { MailProvider(rawValue: providerRawValue) ?? .gmail }
@@ -159,20 +163,31 @@ enum GmailInboxCategory: String, CaseIterable, Identifiable, Hashable, Sendable 
     }
 
     func explanation(language: AppLanguage) -> String {
+        let key: String
         let values: (String, String)
         switch self {
         case .primary:
+            key = "mail.category.primary.explanation"
             values = ("아는 사람이 보낸 메일 및 다른 카테고리에 속하지 않은 메일", "Mail from people you know and mail that does not fit another category")
         case .promotions:
+            key = "mail.category.promotions.explanation"
             values = ("특가, 혜택 등 홍보성 메일", "Promotional mail about deals and offers")
         case .social:
+            key = "mail.category.social.explanation"
             values = ("소셜 네트워크 및 미디어 공유 서비스에서 보낸 메일", "Mail from social networks and media-sharing services")
         case .updates:
+            key = "mail.category.updates.explanation"
             values = ("자동 확인 메일, 알림, 명세서, 리마인더", "Automated confirmations, notifications, statements, and reminders")
         case .forums:
+            key = "mail.category.forums.explanation"
             values = ("온라인 그룹, 토론 게시판, 메일링 리스트에서 온 메일", "Mail from online groups, discussion boards, and mailing lists")
         }
-        return language == .english ? values.1 : values.0
+        return AppLanguage.localized(
+            key,
+            defaultValue: language == .korean ? values.0 : values.1,
+            language: language,
+            comment: "Explanation of a Gmail inbox category; describes provider classification, not message content."
+        )
     }
 
     var title: String {
@@ -180,13 +195,22 @@ enum GmailInboxCategory: String, CaseIterable, Identifiable, Hashable, Sendable 
     }
 
     func title(language: AppLanguage) -> String {
+        let key: String
+        let korean: String
+        let english: String
         switch self {
-        case .primary: language == .english ? "Primary" : "기본"
-        case .promotions: language == .english ? "Promotions" : "프로모션"
-        case .social: language == .english ? "Social" : "소셜"
-        case .updates: language == .english ? "Updates" : "업데이트"
-        case .forums: language == .english ? "Forums" : "포럼"
+        case .primary: (key, korean, english) = ("mail.category.primary.title", "기본", "Primary")
+        case .promotions: (key, korean, english) = ("mail.category.promotions.title", "프로모션", "Promotions")
+        case .social: (key, korean, english) = ("mail.category.social.title", "소셜", "Social")
+        case .updates: (key, korean, english) = ("mail.category.updates.title", "업데이트", "Updates")
+        case .forums: (key, korean, english) = ("mail.category.forums.title", "포럼", "Forums")
         }
+        return AppLanguage.localized(
+            key,
+            defaultValue: language == .korean ? korean : english,
+            language: language,
+            comment: "Gmail inbox category title."
+        )
     }
 
     var systemImage: String {

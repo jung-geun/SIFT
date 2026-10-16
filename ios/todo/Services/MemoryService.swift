@@ -53,40 +53,43 @@ struct BehaviorNarrationService {
 
     func enrich(
         _ baseline: MemoryAnalysisResult,
-        language: AppLanguage
+        language: AppLanguage,
+        tier: OpenAIAnalysisTier = .basic
     ) async throws -> MemoryAnalysisResult {
-        guard routingDecisionProvider() == .providers([.foundationModels]),
-              availabilityProvider()
-        else {
+        if tier == .advanced || routingDecisionProvider() == .providers([.openAI]) {
+            if tier == .basic, !OpenAIPrivacy.allows(.routines) { return baseline }
+            let narrative = try await OpenAIAnalysisService().behavior(baseline, tier: tier, language: language)
+            return enriched(baseline, narrative: narrative, processor: "OpenAI · \(tier.modelID) · deterministic metrics")
+        }
+        guard routingDecisionProvider() == .providers([.foundationModels]), availabilityProvider() else {
             return baseline
         }
-
         do {
             let narrative = try await narrativeProvider(baseline, language)
-            let summary = narrative.summary.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !summary.isEmpty else { return baseline }
-            let insights = narrative.insights
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { !$0.isEmpty }
-            return MemoryAnalysisResult(
-                summary: summary,
-                insights: insights.isEmpty ? baseline.insights : Array(insights.prefix(4)),
-                fastTags: baseline.fastTags,
-                overdueRate: baseline.overdueRate,
-                productiveHour: baseline.productiveHour,
-                analyzedCompletedCount: baseline.analyzedCompletedCount,
-                recordTitle: baseline.recordTitle,
-                accessScopeSummary: baseline.accessScopeSummary,
-                processorDescription: language == .english
-                    ? "Apple Foundation Models · deterministic metrics"
-                    : "Apple Foundation Models · 결정론적 지표",
-                behaviorProfile: baseline.behaviorProfile
-            )
+            return enriched(baseline, narrative: narrative, processor: "Apple Foundation Models · deterministic metrics")
         } catch is CancellationError {
             throw CancellationError()
         } catch {
             return baseline
         }
+    }
+
+    private func enriched(_ baseline: MemoryAnalysisResult, narrative: BehaviorNarrative, processor: String) -> MemoryAnalysisResult {
+        let summary = narrative.summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !summary.isEmpty else { return baseline }
+        let insights = narrative.insights.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        return MemoryAnalysisResult(
+            summary: summary,
+            insights: insights.isEmpty ? baseline.insights : Array(insights.prefix(4)),
+            fastTags: baseline.fastTags,
+            overdueRate: baseline.overdueRate,
+            productiveHour: baseline.productiveHour,
+            analyzedCompletedCount: baseline.analyzedCompletedCount,
+            recordTitle: baseline.recordTitle,
+            accessScopeSummary: baseline.accessScopeSummary,
+            processorDescription: processor,
+            behaviorProfile: baseline.behaviorProfile
+        )
     }
 
     private static func liveNarrative(
@@ -294,7 +297,8 @@ final class MemoryService {
     func analyzeForegroundPreview(
         todos: [Todo],
         auditEvents: [TaskAuditEvent] = [],
-        behaviorEvents: [TaskBehaviorEvent] = []
+        behaviorEvents: [TaskBehaviorEvent] = [],
+        tier: OpenAIAnalysisTier = .basic
     ) async throws -> MemoryAnalysisResult {
         let baseline = Self.computeAnalysis(
             todos: todos,
@@ -303,7 +307,8 @@ final class MemoryService {
         )
         return try await BehaviorNarrationService().enrich(
             baseline,
-            language: .current
+            language: .current,
+            tier: tier
         )
     }
 

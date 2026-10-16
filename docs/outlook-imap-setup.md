@@ -96,7 +96,7 @@ Set-CASMailbox -Identity <user@domain.com> -ImapEnabled $true
 ### 기기 전용 Keychain 저장
 
 - **앱 비밀번호 보안**: 사용자가 입력한 앱 비밀번호는 iOS **Keychain에 기기 전용(Device-Only)**으로 암호화 저장되며, iCloud로 동기화되지 않습니다 (`OutlookIMAPCredentialStore`).
-- **메일 본문 보관**: 메일 본문 데이터는 기본적으로 기기 로컬 전용 저장소에만 보관되며 외부 서버로 전송되지 않습니다 (사용자가 Gemini 메일 본문 분석을 별도로 켠 경우에만 선택한 내용이 Gemini API로 전송될 수 있습니다).
+- **메일 본문 보관**: 메일 본문 데이터는 기기 로컬 전용 저장소에 보관하며 Gemini API로 전송하지 않습니다. 별도 설치한 Laya의 후보 판단과 사용 가능한 Apple Intelligence의 요약은 기기 내에서 실행됩니다.
 - **개인정보 보호**: 입력된 자격증명은 SIFT 서버를 거치지 않고 사용자 기기에서 Outlook 서버로 직접 통신합니다.
 
 ---

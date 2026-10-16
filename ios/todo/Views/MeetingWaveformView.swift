@@ -1,9 +1,9 @@
 import SwiftUI
 
-/// A Voice-Memos-style audio track: the waveform slides under a fixed center
-/// playhead. Dragging the track scrubs (a single seek fires on release, so the
-/// streaming scheduler isn't rescheduled on every touch move). Current and
-/// total time are shown below.
+/// A virtual audio track under a fixed playhead. Only the visible time bins are
+/// drawn into a viewport-sized Canvas, regardless of the recording's duration.
+/// Drag for fine seeking; the full-duration slider provides coarse navigation.
+/// Both commit a single playback fraction on release, not on every touch move.
 struct MeetingWaveformView: View {
     let waveform: MeetingWaveform
     /// Playback position 0...1, drives the track offset when not scrubbing.
@@ -12,8 +12,6 @@ struct MeetingWaveformView: View {
     /// Called with the target fraction (0...1) when the user releases a scrub.
     var onSeek: ((Double) -> Void)?
 
-    /// Points per second of audio; sets how wide (scrollable) the track is.
-    private let pointsPerSecond: CGFloat = 40
     private let trackHeight: CGFloat = 96
 
     @State private var dragProgress: Double?
@@ -22,17 +20,36 @@ struct MeetingWaveformView: View {
     private var effectiveProgress: Double { dragProgress ?? min(max(progress, 0), 1) }
 
     var body: some View {
+        VStack(spacing: 8) {
+            timeline
+            Slider(
+                value: Binding(get: { effectiveProgress }, set: { dragProgress = $0 }),
+                in: 0...1,
+                onEditingChanged: { editing in
+                    if !editing { commitSeek() }
+                }
+            )
+            .disabled(onSeek == nil || totalMs <= 0)
+            .accessibilityLabel("전체 녹음 탐색")
+            .accessibilityValue("\(timeLabel(Int64(effectiveProgress * Double(totalMs)))) / \(timeLabel(totalMs))")
+        }
+        .onDisappear { dragProgress = nil }
+    }
+
+    private var timeline: some View {
         VStack(spacing: 6) {
             GeometryReader { geometry in
                 let viewport = geometry.size.width
-                let totalSeconds = max(1, Double(totalMs) / 1000)
-                let contentWidth = max(viewport, CGFloat(totalSeconds) * pointsPerSecond)
-                let offsetX = viewport / 2 - CGFloat(effectiveProgress) * contentWidth
+                let layout = MeetingWaveformViewport(
+                    width: viewport,
+                    totalMs: totalMs,
+                    bucketCount: waveform.buckets.count,
+                    progress: effectiveProgress
+                )
 
                 ZStack(alignment: .leading) {
-                    trackCanvas(contentWidth: contentWidth)
-                        .frame(width: contentWidth, height: trackHeight)
-                        .offset(x: offsetX)
+                    trackCanvas(layout: layout)
+                        .frame(width: viewport, height: trackHeight)
 
                     // Fixed center playhead.
                     Rectangle()
@@ -42,18 +59,15 @@ struct MeetingWaveformView: View {
                 }
                 .frame(width: viewport, height: trackHeight, alignment: .leading)
                 .contentShape(Rectangle())
+                .clipped()
                 .gesture(
                     DragGesture(minimumDistance: 1)
                         .onChanged { value in
                             if dragProgress == nil { dragBase = min(max(progress, 0), 1) }
                             // Dragging the track right moves the needle earlier.
-                            let delta = Double(value.translation.width / contentWidth)
-                            dragProgress = min(max(dragBase - delta, 0), 1)
+                            dragProgress = layout.seekProgress(from: dragBase, translation: value.translation.width)
                         }
-                        .onEnded { _ in
-                            if let target = dragProgress { onSeek?(target) }
-                            dragProgress = nil
-                        }
+                        .onEnded { _ in commitSeek() }
                 )
             }
             .frame(height: trackHeight)
@@ -88,20 +102,26 @@ struct MeetingWaveformView: View {
         return min(max(progress + (increment ? step : -step), 0), 1)
     }
 
-    private func trackCanvas(contentWidth: CGFloat) -> some View {
+    private func commitSeek() {
+        if let target = dragProgress { onSeek?(target) }
+        dragProgress = nil
+    }
+
+    private func trackCanvas(layout: MeetingWaveformViewport) -> some View {
         Canvas { context, size in
-            let count = max(1, waveform.buckets.count)
-            let barSpan = size.width / CGFloat(count)
             let center = size.height / 2
-            let played = CGFloat(effectiveProgress) * size.width
-            for (index, peak) in waveform.buckets.enumerated() where peak > 0 {
+            // Index into the original array. No full-recording copy or scan on
+            // playback ticks, and no offscreen drawing surface to clip later.
+            for index in layout.visibleBuckets {
+                let peak = waveform.buckets[index]
+                guard peak > 0 else { continue }
                 let amplitude = max(2, CGFloat(peak) * center)
-                let x = (CGFloat(index) + 0.5) * barSpan
-                let color: Color = x <= played ? .accentColor : .secondary.opacity(0.35)
+                let x = layout.x(for: index)
+                let color: Color = x <= size.width / 2 ? .accentColor : .secondary.opacity(0.35)
                 var bar = Path()
                 bar.move(to: CGPoint(x: x, y: center - amplitude))
                 bar.addLine(to: CGPoint(x: x, y: center + amplitude))
-                context.stroke(bar, with: .color(color), lineWidth: max(1, barSpan * 0.6))
+                context.stroke(bar, with: .color(color), lineWidth: min(3, max(1, layout.bucketSpan * 0.6)))
             }
         }
     }
@@ -109,5 +129,41 @@ struct MeetingWaveformView: View {
     private func timeLabel(_ ms: Int64) -> String {
         let clamped = max(0, ms)
         return String(format: "%02lld:%02lld", clamped / 60_000, (clamped / 1_000) % 60)
+    }
+}
+
+/// Geometry only: contentWidth is a virtual time scale, never a view allocation.
+/// Keep rendering and fine seeking on this same scale, including short clips
+/// whose entire waveform is stretched to the viewport's width.
+struct MeetingWaveformViewport {
+    let width: CGFloat
+    let bucketCount: Int
+    let progress: Double
+    let contentWidth: CGFloat
+
+    init(width: CGFloat, totalMs: Int64, bucketCount: Int, progress: Double) {
+        self.width = max(0, width)
+        self.bucketCount = max(0, bucketCount)
+        self.progress = min(max(progress, 0), 1)
+        contentWidth = max(1, max(width, CGFloat(max(0, totalMs)) / 1_000 * 40))
+    }
+
+    var bucketSpan: CGFloat { contentWidth / CGFloat(max(1, bucketCount)) }
+    private var origin: CGFloat { width / 2 - CGFloat(progress) * contentWidth }
+
+    var visibleBuckets: Range<Int> {
+        guard bucketCount > 0, width > 0 else { return 0..<0 }
+        // One extra bin at each edge retains partially visible strokes.
+        let first = min(bucketCount, max(0, Int(floor(-origin / bucketSpan)) - 1))
+        let end = min(bucketCount, max(0, Int(ceil((width - origin) / bucketSpan)) + 1))
+        return first..<max(first, end)
+    }
+
+    func x(for bucket: Int) -> CGFloat {
+        origin + (CGFloat(bucket) + 0.5) * bucketSpan
+    }
+
+    func seekProgress(from base: Double, translation: CGFloat) -> Double {
+        min(max(base - Double(translation / contentWidth), 0), 1)
     }
 }

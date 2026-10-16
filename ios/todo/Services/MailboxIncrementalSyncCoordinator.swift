@@ -56,7 +56,6 @@ final class MailboxIncrementalSyncCoordinator {
         guard pollTask == nil else { return }
         pollTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            await self.syncAvailableProviders()
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(MailboxPagingPolicy.pollInterval))
                 guard !Task.isCancelled else { break }
@@ -109,6 +108,9 @@ final class MailboxIncrementalSyncCoordinator {
                 sourceAccountNamespace: namespace
             ) { mutation in
                 do {
+                    guard self.isCurrent(provider: provider, namespace: namespace, generation: generation) else {
+                        throw CancellationError()
+                    }
                     try await mailboxProvider.trashMessage(
                         messageID: mutation.providerMessageID,
                         expectedGlobalMessageID: mutation.expectedGlobalMessageID

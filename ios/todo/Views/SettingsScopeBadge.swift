@@ -7,7 +7,7 @@ extension View {
         let isLocal = SettingsStore.shared.isLocal(key: key)
         
         HStack(spacing: 4) {
-            if iCloudSyncEnabled {
+            if SettingsStore.supportsICloud && iCloudSyncEnabled {
                 if isLocal {
                     Text("로컬")
                         .font(.caption2)
@@ -26,5 +26,23 @@ extension View {
         }
         .foregroundStyle(.secondary)
         .padding(.top, 2)
+    }
+
+    @ViewBuilder
+    func disableNavigationBarMinimization() -> some View {
+        if #available(iOS 27.0, *) {
+            self.toolbarMinimizationBehavior(.never, for: .navigationBar)
+        } else {
+            self
+        }
+    }
+
+    @ViewBuilder
+    func disableTabBarMinimization() -> some View {
+        if #available(iOS 27.0, *) {
+            self.tabBarMinimizeBehavior(.never)
+        } else {
+            self
+        }
     }
 }

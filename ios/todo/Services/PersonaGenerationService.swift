@@ -5,7 +5,8 @@ import Foundation
 enum PersonaAIProvider: String, CaseIterable, Identifiable, Sendable {
     case foundationModels = "apple"
     case onDevice         = "onDevice"
-    case gemini           = "gemini"
+    case openAI           = "openai"
+    case laya             = "laya"
 
     var id: String { rawValue }
 
@@ -16,11 +17,13 @@ enum PersonaAIProvider: String, CaseIterable, Identifiable, Sendable {
     func displayName(language: AppLanguage) -> String {
         switch self {
         case .foundationModels:
-            return language == .english ? "Apple Foundation Models (AFM)" : "Apple Foundation Models (AFM)"
+            return AppLanguage.localized("beta.foundationModels.toggle", defaultValue: "Apple Foundation Models (AFM)", language: language)
         case .onDevice:
-            return language == .english ? "On Device AI" : "온디바이스 AI"
-        case .gemini:
-            return "Gemini API"
+            return AppLanguage.localized("intelligence.engine.onDevice", defaultValue: "On Device AI", language: language)
+        case .openAI:
+            return "OpenAI · ChatGPT"
+        case .laya:
+            return AppLanguage.localized("persona.engine.laya", defaultValue: "Laya (on-device)", language: language)
         }
     }
 
@@ -28,7 +31,8 @@ enum PersonaAIProvider: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .foundationModels: "apple.logo"
         case .onDevice:         "cpu"
-        case .gemini:           "cloud"
+        case .openAI:           "cloud"
+        case .laya:             "bolt.circle"
         }
     }
 }
@@ -39,6 +43,7 @@ struct PersonaRuleDraft: Equatable, Sendable {
     let descriptionText: String
     let evidence: [String]
     let confidence: BehaviorConfidence
+    var processorDescription: String = "Local rules"
 }
 
 /// AFM may improve only the narrative of a deterministic persona draft.
@@ -86,7 +91,8 @@ struct PersonaGenerationService {
         todos: [Todo],
         context: BehaviorAnalysisContext,
         now: Date,
-        language: AppLanguage = .current
+        language: AppLanguage = .current,
+        tier: OpenAIAnalysisTier = .basic
     ) async throws -> PersonaRuleDraft {
         let fallback = generateRuleBased(
             existingPersona: existingPersona,
@@ -95,6 +101,19 @@ struct PersonaGenerationService {
             now: now,
             language: language
         )
+        if tier == .advanced || routingDecisionProvider() == .providers([.openAI]) {
+            if tier == .basic, !OpenAIPrivacy.allows(.persona) { return fallback }
+            let narrative = try await OpenAIAnalysisService().persona(
+                existing: existingPersona, draft: fallback, tier: tier, language: language
+            )
+            return PersonaRuleDraft(
+                personaTypes: fallback.personaTypes,
+                descriptionText: narrative.descriptionText,
+                evidence: fallback.evidence,
+                confidence: fallback.confidence,
+                processorDescription: "OpenAI · \(tier.modelID)"
+            )
+        }
         guard routingDecisionProvider() == .providers([.foundationModels]),
               availabilityProvider()
         else {
@@ -110,14 +129,12 @@ struct PersonaGenerationService {
             )
             let description = narrative.descriptionText.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !description.isEmpty else { return fallback }
-            let evidence = narrative.evidence
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { !$0.isEmpty }
             return PersonaRuleDraft(
                 personaTypes: fallback.personaTypes,
                 descriptionText: description,
-                evidence: evidence.isEmpty ? fallback.evidence : Array(evidence.prefix(3)),
-                confidence: fallback.confidence
+                evidence: fallback.evidence,
+                confidence: fallback.confidence,
+                processorDescription: "Apple Foundation Models"
             )
         } catch is CancellationError {
             throw CancellationError()
@@ -143,7 +160,7 @@ struct PersonaGenerationService {
             .sorted { $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value }
             .prefix(3)
             .map(\.key)
-        let typeNames = context.personaTypes.map { $0.displayName }.joined(separator: language == .english ? ", " : ", ")
+        let typeNames = context.personaTypes.map { $0.displayName(language: language) }.joined(separator: ", ")
         let classificationNames = context.behaviorProfile.classifications
             .map { $0.label.rawValue }
             .sorted()
@@ -153,26 +170,18 @@ struct PersonaGenerationService {
             .sorted()
         var evidence: [String] = []
         if !topTags.isEmpty {
-            evidence.append(language == .english
-                ? "Frequent tags: \(topTags.joined(separator: ", "))"
-                : "자주 사용한 태그: \(topTags.joined(separator: ", "))")
+            evidence.append(String(format: AppLanguage.localized("persona.evidence.frequentTags", defaultValue: "Frequent tags: %@", language: language), locale: language.locale, String(topTags.joined(separator: ", "))))
         }
         if !classificationNames.isEmpty {
-            evidence.append(language == .english
-                ? "Behavior classifications: \(classificationNames.joined(separator: ", "))"
-                : "행동 분류: \(classificationNames.joined(separator: ", "))")
+            evidence.append(String(format: AppLanguage.localized("persona.evidence.classifications", defaultValue: "Behavior classifications: %@", language: language), locale: language.locale, String(classificationNames.joined(separator: ", "))))
         }
         if !metricNames.isEmpty {
-            evidence.append(language == .english
-                ? "Reliable metrics: \(metricNames.prefix(3).joined(separator: ", "))"
-                : "신뢰 가능한 지표: \(metricNames.prefix(3).joined(separator: ", "))")
+            evidence.append(String(format: AppLanguage.localized("persona.evidence.metrics", defaultValue: "Reliable metrics: %@", language: language), locale: language.locale, String(metricNames.prefix(3).joined(separator: ", "))))
         }
         let existingNote = existingPersona.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? ""
-            : language == .english ? " Existing description remains unchanged until you apply this draft." : " 적용하기 전까지 기존 설명은 변경되지 않는다."
-        let description = language == .english
-            ? "Rule-based persona for \(typeNames.isEmpty ? "the selected life context" : typeNames).\(existingNote)"
-            : "\(typeNames.isEmpty ? "선택된 생활 맥락" : typeNames)을 위한 규칙 기반 페르소나이다.\(existingNote)"
+            : AppLanguage.localized("persona.draft.existingPreserved", defaultValue: " Existing description remains unchanged until you apply this draft.", language: language)
+        let description = String(format: AppLanguage.localized("persona.draft.description", defaultValue: "Rule-based persona for %@.%@", language: language), locale: language.locale, String(typeNames.isEmpty ? AppLanguage.localized("persona.selectedContext", defaultValue: "the selected life context", language: language) : typeNames), String(existingNote))
         return PersonaRuleDraft(
             personaTypes: context.personaTypes,
             descriptionText: description,
@@ -215,9 +224,7 @@ struct PersonaGenerationService {
         let trimmedExisting = existingPersona.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmedExisting.isEmpty {
             personaSentences.append(
-                language == .english
-                    ? "The user's saved description is '\(String(trimmedExisting.prefix(80)))'; automatic analysis does not overwrite it."
-                    : "사용자가 저장한 기존 설명은 '\(String(trimmedExisting.prefix(80)))'이며 자동 분석은 이를 덮어쓰지 않는다."
+                String(format: AppLanguage.localized("persona.description.saved", defaultValue: "The user's saved description is '%@'; automatic analysis does not overwrite it.", language: language), locale: language.locale, String(String(trimmedExisting.prefix(80))))
             )
         }
 
@@ -227,51 +234,37 @@ struct PersonaGenerationService {
             .map(String.init)
         if !evidenceLines.isEmpty {
             personaSentences.append(
-                language == .english
-                    ? "Recent records show \(evidenceLines.joined(separator: " / "))."
-                    : "최근 기록에서는 \(evidenceLines.joined(separator: " / "))이 관찰됐다."
+                String(format: AppLanguage.localized("persona.description.recentRecords", defaultValue: "Recent records show %@.", language: language), locale: language.locale, String(evidenceLines.joined(separator: " / ")))
             )
         }
         if !topTags.isEmpty {
             personaSentences.append(
-                language == .english
-                    ? "Frequently used tags in current to-dos: \(topTags.map { "'\($0)'" }.joined(separator: ", "))."
-                    : "현재 TODO에서 자주 사용된 태그는 \(topTags.map { "'\($0)'" }.joined(separator: ", "))이다."
+                String(format: AppLanguage.localized("persona.description.frequentTags", defaultValue: "Frequently used tags in current to-dos: %@.", language: language), locale: language.locale, String(topTags.map { "'\($0)'" }.joined(separator: ", ")))
             )
         }
         if activeCount > 0 {
             personaSentences.append(
-                language == .english
-                    ? "There are \(activeCount) active to-dos."
-                    : "현재 등록된 미완료 TODO는 \(activeCount)건이다."
+                String(format: AppLanguage.localized("persona.description.activeTodos", defaultValue: "There are %@ active to-dos.", language: language), locale: language.locale, String(activeCount))
             )
         }
         personaSentences.append(
-            language == .english
-                ? "\(analysis.behaviorProfile.sampleCount) observations support this analysis with \(analysis.behaviorProfile.confidence.label(language: language)) confidence; interpret it only as recent behavior."
-                : "분석 근거 \(analysis.behaviorProfile.sampleCount)건의 신뢰도는 \(analysis.behaviorProfile.confidence.label)이며, 결과는 최근 행동 관찰로만 해석한다."
+            String(format: AppLanguage.localized("persona.description.confidence", defaultValue: "%@ observations support this analysis with %@ confidence; interpret it only as recent behavior.", language: language), locale: language.locale, String(analysis.behaviorProfile.sampleCount), String(analysis.behaviorProfile.confidence.label(language: language)))
         )
 
         var insights = Array(analysis.insights.prefix(2))
         if !topTags.isEmpty, insights.count < 3 {
             insights.append(
-                language == .english
-                    ? "Frequently used tags in current to-dos: \(topTags.joined(separator: ", "))"
-                    : "현재 TODO에서 자주 사용된 태그: \(topTags.joined(separator: ", "))"
+                String(format: AppLanguage.localized("persona.insight.frequentTags", defaultValue: "Frequently used tags in current to-dos: %@", language: language), locale: language.locale, String(topTags.joined(separator: ", ")))
             )
         }
         if activeCount > 0, insights.count < 3 {
             insights.append(
-                language == .english
-                    ? "\(activeCount) active to-dos"
-                    : "현재 등록된 미완료 TODO \(activeCount)건"
+                String(format: AppLanguage.localized("persona.insight.activeTodos", defaultValue: "%@ active to-dos", language: language), locale: language.locale, String(activeCount))
             )
         }
         if insights.isEmpty {
             insights.append(
-                language == .english
-                    ? "There is not enough behavior data to infer a trend yet."
-                    : "행동 경향을 단정하기에는 아직 관찰 데이터가 부족함"
+                AppLanguage.localized("persona.insight.insufficientData", defaultValue: "There is not enough behavior data to infer a trend yet.", language: language)
             )
         }
 

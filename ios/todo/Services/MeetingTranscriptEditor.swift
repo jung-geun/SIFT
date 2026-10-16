@@ -15,16 +15,6 @@ enum MeetingTranscriptEditor {
         return try MeetingRevisionEditor.editSegments(meetingID: meetingID, in: result, segments: segments)
     }
 
-    static func setSpeakers(result: MeetingResult, meetingID: String, segmentID: String, speakerIDs: [String]) throws -> MeetingResult {
-        var segments = result.segments
-        guard let index = segments.firstIndex(where: { $0.id == segmentID }) else { throw EditError.unknownSegment }
-        segments[index].speakerIDs = speakerIDs
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-            .sorted()
-        return try MeetingRevisionEditor.editSegments(meetingID: meetingID, in: result, segments: segments)
-    }
-
     static func split(result: MeetingResult, meetingID: String, segmentID: String, atMs: Int64, firstText: String, secondText: String) throws -> MeetingResult {
         let first = firstText.trimmingCharacters(in: .whitespacesAndNewlines)
         let second = secondText.trimmingCharacters(in: .whitespacesAndNewlines)

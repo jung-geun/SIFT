@@ -15,7 +15,11 @@ struct MeetingTranscriptRetryService {
 
     /// Re-runs on-device transcription from the saved FLAC timeline. Raw audio
     /// and the provisional transcript remain untouched until this completes.
-    func retranscribe(manifest: MeetingAudioManifest, languageTag: String) async throws -> [LiveTranscriptEntry] {
+    func retranscribe(
+        manifest: MeetingAudioManifest, languageTag: String,
+        progress: @escaping @Sendable (MeetingTranscriptionProgress.Update) -> Void = { _ in }
+    ) async throws -> [LiveTranscriptEntry] {
+        progress(.init(.preparingAudio))
         let session = try await transcriptionSessionFactory.make(languageTag: languageTag, purpose: .retry)
         guard let canonicalFormat = AVAudioFormat(
             commonFormat: .pcmFormatInt16,
@@ -30,6 +34,7 @@ struct MeetingTranscriptRetryService {
             outputFormat: session.inputFormat
         )
         let (stream, continuation) = AsyncStream.makeStream(of: AnalyzerInput.self)
+        progress(.init(.recognizing, completedMilliseconds: 0))
         let feeding = Task(priority: .userInitiated) {
             defer { continuation.finish() }
             let cursor = try MeetingLogicalAudioCursor(manifest: manifest)
@@ -47,6 +52,11 @@ struct MeetingTranscriptRetryService {
             var reducer = LiveTranscriptReducer()
             for try await result in session.results {
                 reducer.replace(Self.entry(for: result))
+                let end = CMTimeGetSeconds(CMTimeRangeGetEnd(result.range))
+                if result.isFinal, end.isFinite, end >= 0 {
+                    let bounded = min(end, Double(manifest.totalSamples) / Double(manifest.sampleRate))
+                    progress(.init(.recognizing, completedMilliseconds: Int64(bounded * 1_000)))
+                }
             }
             return reducer.entries
         }
@@ -56,7 +66,9 @@ struct MeetingTranscriptRetryService {
         do {
             try await feeding.value
             try await analyzing.value
-            return try await collecting.value
+            let entries = try await collecting.value
+            progress(.init(.validating))
+            return entries
         } catch {
             feeding.cancel()
             collecting.cancel()
@@ -73,13 +85,15 @@ struct MeetingTranscriptRetryService {
         let endSeconds = duration.timescale == 0
             ? startSeconds
             : startSeconds + Double(duration.value) / Double(duration.timescale)
+        let startMs = Int64((startSeconds * 1_000).rounded(.down))
+        let endMs = max(startMs + 1, Int64((endSeconds * 1_000).rounded(.down)))
         return LiveTranscriptEntry(
             id: "\(start.value):\(start.timescale):\(duration.value):\(duration.timescale)",
-            startMs: Int64((startSeconds * 1_000).rounded(.down)),
-            endMs: Int64((endSeconds * 1_000).rounded(.down)),
+            startMs: startMs,
+            endMs: endMs,
             text: String(result.text.characters),
-            speakerIDs: [],
             confidence: result.confidence,
+            timedRuns: MeetingTimedTextRun.extract(from: result.text, startMs: startMs, endMs: endMs),
             isFinal: result.isFinal
         )
     }

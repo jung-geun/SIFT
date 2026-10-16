@@ -38,7 +38,47 @@ enum TodoMutations {
         }
     }
 
-    static func delete(_ todo: Todo, in context: ModelContext) {
+    /// Success means the deletion and its audit records are on disk, not awaiting autosave.
+    /// A failed save restores the row and must be presented by the caller as an error.
+    static func delete(_ todo: Todo, in context: ModelContext) throws {
+        // Establish a baseline so rollback cannot discard unrelated pending edits.
+        if context.hasChanges {
+            try context.save()
+        }
+
+        // SwiftData can invalidate a deleted model after save. Retain only the inputs
+        // required by the existing cleanup APIs, without inserting this detached copy.
+        let cleanupTodo = Todo(
+            id: todo.id,
+            startDate: todo.startDate,
+            dueDate: todo.dueDate,
+            source: todo.todoSource,
+            sourceRef: todo.sourceRef
+        )
+        cleanupTodo.isCompleted = todo.isCompleted
+        cleanupTodo.triageStatus = todo.triageStatus
+        cleanupTodo.isFixedSchedule = todo.isFixedSchedule
+        cleanupTodo.calendarEventID = todo.calendarEventID
+        cleanupTodo.calendarEventExternalID = todo.calendarEventExternalID
+        cleanupTodo.sourceSenderEmail = todo.sourceSenderEmail
+
+        // User deletion and both audit records form one durable transaction.
+        TaskBehaviorRecorder.recordDeletion(of: todo, actor: .user, in: context)
+        context.insert(TaskAuditEvent(from: todo))
+        context.delete(todo)
+        do {
+            try context.save()
+        } catch {
+            context.rollback()
+            throw error
+        }
+
+        // Do not cancel reminders, remove calendar events, or teach email dismissal
+        // for a deletion that failed to persist.
+        performDeletionSideEffects(for: cleanupTodo)
+    }
+
+    private static func performDeletionSideEffects(for todo: Todo) {
         NotificationService.shared.cancel(todo: todo)
         // 대기열(review) 항목은 캘린더 이벤트 보존 — 큐에서 제거해도 이벤트는 유지
         // 태스크(todo)로 승격된 항목만 함께 삭제
@@ -63,9 +103,5 @@ enum TodoMutations {
                 messageID: todo.sourceRef
             )
         }
-        // 삭제 이력 audit 기록 (사용자 주도 삭제 전용 — 자동 만료 sweep 제외)
-        TaskBehaviorRecorder.recordDeletion(of: todo, actor: .user, in: context)
-        context.insert(TaskAuditEvent(from: todo))
-        context.delete(todo)
     }
 }

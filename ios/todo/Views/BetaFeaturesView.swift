@@ -2,9 +2,11 @@ import SwiftUI
 
 struct BetaFeaturesView: View {
     @ObservedObject private var settingsStore = SettingsStore.shared
+    @ObservedObject private var layaService: LayaDecisionService = .shared
     @ObservedObject private var llmService: OnDeviceLLMService = .shared
+    @ObservedObject private var speakerModel = MeetingDiarizationModelController.shared
+    @ObservedObject private var whisperModel = MeetingWhisperModelController.shared
     @AppStorage("pieroot.todo.onDeviceModelID") private var onDeviceModelID = OnDeviceLLMService.defaultModelID
-    @State private var geminiAPIKeyInput = ""
 
     private var access: BetaProviderAccess { SettingsStore.betaProviderAccess() }
 
@@ -50,20 +52,39 @@ struct BetaFeaturesView: View {
                 }
 
                 providerToggle(
-                    .gemini,
-                    title: copy("beta.gemini.toggle", korean: "Gemini 연결", english: "Gemini connection"),
-                    identifier: "beta.gemini.toggle"
+                    .openAI,
+                    title: copy("beta.openAI.toggle", korean: "OpenAI · ChatGPT 연결", english: "OpenAI · ChatGPT connection"),
+                    identifier: "beta.openAI.toggle"
                 )
-                if access.geminiEnabled {
-                    geminiSettings
+                if access.openAIEnabled {
+                    NavigationLink(destination: OpenAISettingsView()) {
+                        Label(copy("beta.openAI.settings", korean: "계정·전송 동의", english: "Account and sharing permissions"), systemImage: "person.crop.circle.badge.checkmark")
+                    }
+                    .accessibilityIdentifier("beta.openAI.settings")
+                }
+
+                providerToggle(
+                    .laya,
+                    title: copy("beta.laya.toggle", korean: "Laya 결정 모델 (메일 후보·우선순위)", english: "Laya decisions (email candidates and priority)"),
+                    identifier: "beta.laya.toggle"
+                )
+                if access.layaEnabled {
+                    LayaModelManagementSection(service: layaService)
+                    Text(copy(
+                        "beta.laya.note",
+                        korean: "Laya는 메일을 할 일 후보로 추천하고 TODO 우선순위·처리 시각을 판단합니다. 약 483 MB 다국어 모델을 직접 설치해야 하며 원문은 기기 밖으로 보내지 않습니다. 우선순위 품질 기준은 미달, 메일 판단 정확도는 미검증입니다. 원본 확인 후 직접 저장하세요. 미설치 시 기존 날짜 규칙을 사용합니다.",
+                        english: "Laya suggests email to-do candidates and decides task priority and processing time. Install its ~483 MB multilingual model manually; email text stays on device. Priority quality missed its gate, and email-classification accuracy is unverified. Review the source and save explicitly. Without the model, the existing date rules apply."
+                    ))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 }
             } header: {
                 Text(copy("beta.providers.section", korean: "베타 provider", english: "Beta providers"))
             } footer: {
                 Text(copy(
-                    "beta.providers.footer",
-                    korean: "각 provider는 TODO 우선순위, 이메일 분석, 회의 분석에 사용될 수 있습니다. Gemini 메일 본문 전송은 이메일 설정의 별도 동의가 필요합니다.",
-                    english: "Each provider may be used for TODO prioritization, email analysis, and meeting analysis. Sending email bodies to Gemini still requires separate consent in Email settings."
+                    "beta.providers.footer.local",
+                    korean: "자동 메일 후보·요약은 기기 내에서 처리합니다. OpenAI 외부 분석은 제공자 활성화·계정 권한·데이터별 전송 동의가 모두 있어야 하며, 고급 모델은 직접 재요청할 때만 사용합니다.",
+                    english: "Automatic email candidates and summaries stay on device. OpenAI requests require provider opt-in, account permission, and consent for each data scope. The advanced model is used only on an explicit re-request."
                 ))
             }
 
@@ -93,6 +114,28 @@ struct BetaFeaturesView: View {
                 )
                 .accessibilityIdentifier("beta.voiceProcessing.toggle")
 
+                Toggle(
+                    copy("beta.diarization.toggle", korean: "회의 화자 구분 (Nemotron)", english: "Meeting speaker diarization (Nemotron)"),
+                    isOn: Binding(
+                        get: { settingsStore.meetingDiarizationEnabled },
+                        set: { settingsStore.meetingDiarizationEnabled = $0 }
+                    )
+                )
+                .accessibilityIdentifier("beta.meetingDiarization.toggle")
+
+                speakerModelManagement
+
+                Toggle(
+                    copy("beta.whisper.auto", korean: "녹음 후 오프라인 고급 전사", english: "Offline transcription after recording"),
+                    isOn: Binding(
+                        get: { settingsStore.meetingAdvancedTranscriptionEnabled },
+                        set: { settingsStore.meetingAdvancedTranscriptionEnabled = $0 }
+                    )
+                )
+                .accessibilityIdentifier("beta.whisper.auto")
+
+                whisperModelManagement
+
                 if access.foundationModelsEnabled || access.onDeviceEnabled {
                     Toggle(
                         copy("beta.autoRefine.toggle", korean: "전사 자동 교정", english: "Automatically refine transcripts"),
@@ -111,7 +154,8 @@ struct BetaFeaturesView: View {
         .task {
             settingsStore.migrateLegacyBetaSelectedProviderIfNeeded()
             settingsStore.normalizeBetaSelectedProvider()
-            geminiAPIKeyInput = GeminiProviderService.storedAPIKey ?? ""
+            await speakerModel.refresh()
+            await whisperModel.refresh()
         }
     }
 
@@ -134,42 +178,126 @@ struct BetaFeaturesView: View {
         )
     }
 
+
     @ViewBuilder
-    private var geminiSettings: some View {
-        SecureField(copy("beta.gemini.apiKey", korean: "Gemini API 키", english: "Gemini API Key"), text: $geminiAPIKeyInput)
-            .textInputAutocapitalization(.never)
-            .autocorrectionDisabled()
-
-        Picker(copy("beta.model.label", korean: "모델", english: "Model"), selection: Binding(
-            get: { SettingsStore.shared.get("pieroot.todo.geminiModelID", defaultValue: GeminiProviderService.defaultModelID) },
-            set: { SettingsStore.shared.set("pieroot.todo.geminiModelID", value: $0) }
-        )) {
-            Text("gemini-2.0-flash").tag("gemini-2.0-flash")
-            Text("gemini-2.5-flash").tag("gemini-2.5-flash")
-        }
-
-        HStack {
-            Button(copy("beta.gemini.saveKey", korean: "키 저장", english: "Save key")) {
-                GeminiProviderService.saveAPIKey(geminiAPIKeyInput)
-                geminiAPIKeyInput = GeminiProviderService.storedAPIKey ?? ""
-            }
-            .disabled(geminiAPIKeyInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-
-            if GeminiProviderService.storedAPIKey != nil {
-                Button(copy("beta.gemini.deleteKey", korean: "키 삭제", english: "Delete key"), role: .destructive) {
-                    GeminiProviderService.deleteAPIKey()
-                    geminiAPIKeyInput = ""
-                }
-            }
-        }
-
+    private var speakerModelManagement: some View {
         Text(copy(
-            "beta.gemini.warning",
-            korean: "Gemini를 사용하면 TODO 제목·메모·마감·페르소나·캘린더 컨텍스트가 외부 서비스로 전송될 수 있습니다. 이메일 원문 본문은 별도 동의 없이는 전송하지 않습니다.",
-            english: "Using Gemini may send TODO titles, notes, due dates, persona, and calendar context to an external service. Email bodies are never sent without separate consent."
+            "beta.diarization.warning",
+            korean: "화자 구분은 실험적 기능이며 한국어·8인 회의 품질이나 이번 모델 추가의 품질 개선은 아직 검증되지 않았습니다. Nemotron은 계속 녹음 중 임시 화자 구분과 종료 후 각 트랙의 저장된 음성에 대한 최종 분석을 모두 담당합니다. pyannote/WeSpeaker Community-1 음성 임베딩은 보조 수단으로, 혼자 말한 구간을 이용해 같은 트랙의 이전·최종 화자 ID만 비교하며 Nemotron을 대체하지 않습니다. 충분한 단독 발화가 없으면 음성 비교를 생략합니다. 임베딩은 해당 트랙을 분석하는 동안 기기 메모리에만 유지되며 저장·동기화하거나 다른 트랙·회의의 화자를 연결하는 데 사용하지 않습니다. 트랙당 최대 8명입니다. 켜기만 해서는 다운로드되지 않으며 아래 버튼으로 전체 팩(약 218 MB)을 설치해야 합니다. 기존 Nemotron 단독 설치도 직접 업그레이드해야 하며 검증된 Nemotron 파일은 다시 내려받지 않습니다. 설치할 때만 Hugging Face에서 공개 모델을 내려받습니다. 음성·전사·화자 정보는 기기 밖으로 보내지 않습니다. 이 설정은 동기화되지 않으며 녹음 중 변경은 다음 녹음부터 적용됩니다.",
+            english: "Speaker diarization is experimental; quality for Korean and 8-person meetings and any quality improvement from this addition are not yet verified. Nemotron remains responsible for both live provisional speaker diarization and final analysis of each track's saved audio when you stop. pyannote/WeSpeaker Community-1 voice embeddings are auxiliary: solo speech is used only to compare prior and final speaker IDs within the same track, not to replace Nemotron. Voice comparison is skipped when there is not enough solo speech. Embeddings stay only in device memory during analysis of that track; they are not saved, synced or used to link speakers across tracks or meetings. Up to 8 speakers per track. Turning this on downloads nothing: explicitly install the complete pack (about 218 MB) below. Existing Nemotron-only installs also require an explicit upgrade; verified Nemotron files are reused without downloading them again. Only installation downloads public models from Hugging Face. Audio, transcripts and speaker data never leave this device. This setting does not sync; changes during recording apply to the next recording."
         ))
         .font(.caption)
-        .foregroundStyle(.secondary)
+        .foregroundStyle(.orange)
+        .accessibilityIdentifier("beta.diarization.warning")
+
+        Group {
+            if speakerModel.isInstalling {
+                ProgressView(
+                    copy("beta.diarization.installing", korean: "화자 모델 팩 재사용·다운로드·검증 및 로드 중…", english: "Reusing, downloading, verifying and loading the speaker model pack…"),
+                    value: speakerModel.progress
+                )
+            } else if speakerModel.isInstalled {
+                Label(copy("beta.diarization.installed", korean: "전체 화자 모델 팩 설치됨 (약 218 MB)", english: "Complete speaker model pack installed (about 218 MB)"), systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+            } else {
+                Text(copy("beta.diarization.notInstalled", korean: "전체 화자 모델 팩이 필요합니다. 기존 Nemotron 단독 설치도 업그레이드해야 합니다.", english: "The complete speaker model pack is required. Existing Nemotron-only installs also need an upgrade."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .accessibilityIdentifier("meeting.diarization.state")
+
+        if speakerModel.isInstalling {
+            Button(copy("beta.diarization.cancel", korean: "설치 취소", english: "Cancel installation"), role: .cancel) {
+                speakerModel.cancelInstall()
+            }
+        } else {
+            if speakerModel.hasRemovableModels {
+                Button(copy("beta.diarization.delete", korean: "화자 모델 삭제", english: "Delete speaker model"), role: .destructive) {
+                    Task { await speakerModel.delete() }
+                }
+                .disabled(speakerModel.isDeleting)
+                .accessibilityIdentifier("beta.diarization.delete")
+            }
+            if !speakerModel.isInstalled {
+                // Installation is user-initiated only, never triggered by the toggle or view lifecycle.
+                Button(copy("beta.diarization.download", korean: "화자 모델 팩 설치 또는 업그레이드 (약 218 MB)", english: "Install or upgrade speaker model pack (about 218 MB)")) {
+                    speakerModel.install()
+                }
+                .disabled(speakerModel.isDeleting)
+                .accessibilityIdentifier("meeting.diarization.download")
+            }
+        }
+
+        Link(copy(
+            "beta.diarization.attribution",
+            korean: "같은 트랙의 화자 ID 비교용 보조 임베딩 · 수정된 Core ML 변환: pyannote · WeSpeaker · BUT Speech@FIT · Fluid Inference (CC BY 4.0; 제작자·변경 사항은 NOTICE 참조)",
+            english: "Auxiliary same-track speaker-ID embeddings · modified Core ML conversions: pyannote · WeSpeaker · BUT Speech@FIT · Fluid Inference (CC BY 4.0; creators and changes in NOTICE)"
+        ), destination: URL(string: "https://huggingface.co/FluidInference/speaker-diarization-coreml/blob/df2625ac79a7ac6b65ad868fee6d80f320da4232/NOTICE.md")!)
+        .font(.caption)
+        .accessibilityIdentifier("beta.diarization.attribution")
+
+        if let errorMessage = speakerModel.errorMessage {
+            Text(errorMessage)
+                .font(.caption)
+                .foregroundStyle(.red)
+                .accessibilityIdentifier("beta.diarization.error")
+        }
+    }
+
+    @ViewBuilder
+    private var whisperModelManagement: some View {
+        Text(copy(
+            "beta.whisper.warning",
+            korean: "Whisper large-v3-turbo Core ML 모델(약 631 MB)을 직접 설치해야 합니다. 설치할 때만 공개 모델 파일을 내려받고, 녹음·전사 내용은 기기에서만 처리합니다. 종료 후 Apple 실시간 전사를 보존한 채 저장 음성을 다시 전사합니다. 모델이 없거나 실패하면 기존 음성과 Apple 전사는 유지됩니다. 한국어·혼합 언어의 품질 향상은 아직 검증되지 않았습니다.",
+            english: "Install the Whisper large-v3-turbo Core ML model (about 631 MB) manually. Only public model files are downloaded; your audio and transcript stay on the device. After recording, saved audio is transcribed while the original Apple live transcript is retained. If the model is missing or fails, existing audio and Apple text remain. Accuracy gains for Korean and mixed languages are not yet verified."
+        ))
+        .font(.caption)
+        .foregroundStyle(.orange)
+        .accessibilityIdentifier("beta.whisper.warning")
+
+        Group {
+            if whisperModel.isInstalling {
+                ProgressView(
+                    copy("beta.whisper.installing", korean: "음성 모델 다운로드 및 검증 중…", english: "Downloading and verifying the transcription model…"),
+                    value: whisperModel.progress
+                )
+            } else if whisperModel.isInstalled {
+                Label(copy("beta.whisper.installed", korean: "음성 모델 설치됨 (약 631 MB)", english: "Transcription model installed (about 631 MB)"), systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+            } else {
+                Text(copy("beta.whisper.notInstalled", korean: "고급 전사 모델이 설치되지 않았습니다. Apple 실시간 전사는 계속 사용할 수 있습니다.", english: "The transcription model is not installed. Apple live transcription remains available."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .accessibilityIdentifier("beta.whisper.state")
+
+        if whisperModel.isInstalling {
+            Button(copy("beta.whisper.cancel", korean: "다운로드 취소", english: "Cancel download"), role: .cancel) {
+                whisperModel.cancelInstall()
+            }
+            .accessibilityIdentifier("beta.whisper.cancel")
+        } else if whisperModel.isInstalled {
+            Button(copy("beta.whisper.delete", korean: "음성 모델 삭제", english: "Delete transcription model"), role: .destructive) {
+                Task { await whisperModel.delete() }
+            }
+            .disabled(whisperModel.isDeleting)
+            .accessibilityIdentifier("beta.whisper.delete")
+        } else {
+            Button(copy("beta.whisper.download", korean: "음성 모델 다운로드 (약 631 MB)", english: "Download transcription model (about 631 MB)")) {
+                whisperModel.install()
+            }
+            .disabled(whisperModel.isDeleting)
+            .accessibilityIdentifier("beta.whisper.download")
+        }
+
+        if let error = whisperModel.errorMessage {
+            Text(error)
+                .font(.caption)
+                .foregroundStyle(.red)
+                .accessibilityIdentifier("beta.whisper.error")
+        }
     }
 
     private func copy(_ key: String, korean: String, english: String) -> String {
@@ -178,6 +306,54 @@ struct BetaFeaturesView: View {
             defaultValue: AppLanguage.current == .english ? english : korean,
             language: .current,
             comment: "Beta feature settings copy."
+        )
+    }
+}
+
+
+struct LayaModelManagementSection: View {
+    @ObservedObject var service: LayaDecisionService
+
+    var body: some View {
+        if !service.isCapable {
+            Label(copy("beta.laya.unsupported", korean: "이 기기는 Laya 모델을 실행할 수 없습니다.", english: "This device cannot run the Laya model."), systemImage: "exclamationmark.triangle.fill")
+                .font(.caption)
+                .foregroundStyle(.orange)
+        } else if service.isModelInstalled {
+            HStack {
+                Label(copy("beta.model.downloaded", korean: "다운로드됨", english: "Downloaded"), systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                Spacer()
+                Text(ByteCountFormatter.string(fromByteCount: service.installedSizeBytes, countStyle: .file))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button(copy("beta.model.delete", korean: "삭제", english: "Delete"), role: .destructive) {
+                    Task { await service.deleteDownloadedModel() }
+                }
+                .disabled(service.isLoading || service.isDeleting)
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 4) {
+                Button(copy("beta.model.download", korean: "모델 다운로드", english: "Download model")) {
+                    Task { await service.loadModelIfNeeded(use: .layaModelManagement) }
+                }
+                .disabled(service.isLoading)
+                if service.isLoading {
+                    ProgressView(value: service.downloadProgress)
+                }
+                if let loadError = service.loadError {
+                    Text(loadError).font(.caption).foregroundStyle(.red)
+                }
+            }
+        }
+    }
+
+    private func copy(_ key: String, korean: String, english: String) -> String {
+        AppLanguage.localized(
+            key,
+            defaultValue: AppLanguage.current == .english ? english : korean,
+            language: .current,
+            comment: "Laya beta model management copy."
         )
     }
 }

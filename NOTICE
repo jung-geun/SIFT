@@ -1,6 +1,31 @@
 SIFT: To-Do List
 Copyright 2026 Jung-geun Bong
 
+The original SIFT source code, documentation, and project assets are licensed
+under the Apache License, Version 2.0 (SPDX: Apache-2.0). See LICENSE.
+
+Third-party software, model weights, tokenizers, and assets retain their own
+copyrights and licenses. They are not relicensed by SIFT's Apache-2.0 grant.
+This NOTICE supplies attribution and license-scope information; it does not
+modify the Apache License or replace any upstream license or notice.
+
+Third-party software
+--------------------
+Swift package sources and exact versions/revisions are recorded in:
+  ios/todo.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
+These include FluidAudio, WhisperKit, MLX Swift, MLX Swift LM, Apple Swift
+packages, Hugging Face Swift packages, EventSource, and yyjson. Their own
+LICENSE/NOTICE files remain applicable. An SDK license does not establish the
+license of model weights downloaded through that SDK.
+The iOS app includes full pinned SDK license and notice texts, including
+vendored and embedded-library attributions, in ios/todo/ThirdPartyNotices.txt.
+Open them in the app via Settings > App Info > Open-Source Licenses.
+
+Backend, Android, and Python dependencies likewise retain their own licenses.
+Their manifests and lockfiles identify the dependencies; a license field on
+SIFT's own package does not change any dependency's license. The Apache notices
+in android/gradlew and android/gradlew.bat remain intact.
+
 Phosphor Icons
 --------------
 The icons in docs/assets/icons are licensed under the MIT License.
@@ -12,10 +37,73 @@ App Store marketing assets
 --------------------------
 docs/assets/images/app-store-badge.svg is the unmodified Korean App Store
 download badge supplied by Apple. It remains Apple's marketing artwork,
-not an original SIFT asset. Use is governed by:
+not an original SIFT asset licensed under Apache-2.0. Use is governed by:
   https://developer.apple.com/app-store/marketing/guidelines/
 Badge source:
   https://tools.applemediaservices.com/api/badges/download-on-the-app-store/black/ko-kr?size=250x83
 The app-*.webp screen images reproduce SIFT's public App Store screenshots:
   https://apps.apple.com/kr/app/sift-to-do-list/id6782752844
 Apple's trademarks and interface assets retain their respective rights.
+
+Downloaded model artifacts
+--------------------------
+Downloaded models and tokenizers are third-party material, not original SIFT
+code. Consult the license and notices for the actual artifact and upstream
+weights before using, modifying, or redistributing them, including commercially.
+The current source references:
+
+- MLX Community MiniCPM5 and Qwen conversions:
+  https://huggingface.co/mlx-community/MiniCPM5-1B-4bit
+  https://huggingface.co/mlx-community/Qwen3.5-2B-MLX-4bit
+  https://huggingface.co/mlx-community/Qwen3.5-4B-MLX-4bit
+  These identifiers are not a license grant or an immutable revision pin.
+
+- Laya Core ML conversion and original multilingual checkpoint:
+  https://huggingface.co/FluidInference/laya-coreml/tree/7b8d7a2b7e28e746c6ecaad44bbcd5cf251a4fcc
+  https://huggingface.co/convaiinnovations/laya/tree/1c5edc17a7acd8701df6fc341c0d179f1c62c982
+  The conversion and original weights have separate provenance and license scope.
+
+- Nemotron Core ML diarization conversion:
+  https://huggingface.co/FluidInference/nemotron-3-diarization-coreml/tree/25a90f97f254428d4b30374b76af9c74fdee8327
+  The Community-1 attribution below does not establish Nemotron's license.
+
+- WhisperKit Core ML conversion of OpenAI Whisper large-v3-turbo:
+  https://huggingface.co/argmaxinc/whisperkit-coreml/tree/0f63a7800b00dd0226abd051b906c246e1907482
+  Model-weight and tokenizer terms remain separate from the WhisperKit SDK.
+
+Community-1-derived speaker helper models
+----------------------------------------
+SIFT references FBank.mlmodelc and Embedding.mlmodelc from the pinned
+Fluid Inference Community-1 artifact set. These are modified Core ML
+conversions, not original SIFT models or fine-tuned models. The upstream
+notice scopes CC BY 4.0 to its exact supported Community-1 artifacts; it does
+not cover unrelated Nemotron models or the repository's legacy assets.
+
+Attribution: pyannote, WeSpeaker, BUT Speech@FIT (Brno University of Technology),
+and Fluid Inference. Fluid Inference converted the PyTorch components to
+Core ML, configured fixed/enumerated input shapes, separated the FBank
+frontend from the embedding backend, and compiled Apple-platform packages.
+The upstream notice additionally identifies BUT Speech@FIT's PLDA material;
+this attribution is not a claim that SIFT uses every upstream pipeline asset.
+
+License: Creative Commons Attribution 4.0 International (CC BY 4.0)
+  https://creativecommons.org/licenses/by/4.0/
+Source pipeline:
+  https://huggingface.co/pyannote/speaker-diarization-community-1
+Exact conversion notice, provenance, and citations:
+  https://huggingface.co/FluidInference/speaker-diarization-coreml/blob/df2625ac79a7ac6b65ad868fee6d80f320da4232/NOTICE.md
+  https://huggingface.co/FluidInference/speaker-diarization-coreml/blob/df2625ac79a7ac6b65ad868fee6d80f320da4232/README.md
+
+Upstream citations retained for attribution:
+- Alexis Plaquet and Herve Bredin. Powerset multi-class cross entropy loss
+  for neural speaker diarization. INTERSPEECH, 2023.
+- Hongji Wang, Chengdong Liang, Shuai Wang, Zhengyang Chen, Binbin Zhang,
+  Xu Xiang, Yanlei Deng, and Yanmin Qian. Wespeaker: A research and production
+  oriented speaker embedding learning toolkit. ICASSP, pages 1-5, 2023.
+- Federico Landini, Jan Profant, Mireia Diez, and Lukas Burget. Bayesian HMM
+  clustering of x-vector sequences (VBx) in speaker diarization: theory,
+  implementation and analysis on standard tasks. Computer Speech & Language,
+  2022.
+
+The Apache License does not grant trademark rights or transfer signing keys,
+provider credentials, developer accounts, or permission to use hosted services.

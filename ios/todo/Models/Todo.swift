@@ -61,13 +61,22 @@ enum TodoPriority: Int, Codable, CaseIterable, Sendable {
     }
 
     func displayName(language: AppLanguage) -> String {
+        let key: String
+        let korean: String
+        let english: String
         switch self {
-        case .low:      return language == .english ? "Low" : "낮음"
-        case .medium:   return language == .english ? "Medium" : "보통"
-        case .high:     return language == .english ? "High" : "높음"
-        case .urgent:   return language == .english ? "Urgent" : "긴급"
-        case .critical: return language == .english ? "Critical" : "최우선"
+        case .low: (key, korean, english) = ("todo.priority.low", "낮음", "Low")
+        case .medium: (key, korean, english) = ("todo.priority.medium", "보통", "Medium")
+        case .high: (key, korean, english) = ("todo.priority.high", "높음", "High")
+        case .urgent: (key, korean, english) = ("todo.priority.urgent", "긴급", "Urgent")
+        case .critical: (key, korean, english) = ("todo.priority.critical", "최우선", "Critical")
         }
+        return AppLanguage.localized(
+            key,
+            defaultValue: language == .korean ? korean : english,
+            language: language,
+            comment: "Manual to-do priority label."
+        )
     }
 
     var systemColor: String {
@@ -228,6 +237,31 @@ final class Todo {
         TodoTriage(rawValue: triageStatus) ?? .todo
     }
 
+    var isEligibleForAutomaticPriority: Bool {
+        !isCompleted && triage == .todo && manualPriority == nil
+    }
+
+    /// Only a recorded AI result without fallback earns the list's success marker.
+    /// Scores, reason text, and persona fit can also come from rules.
+    var hasSuccessfulAIAnalysis: Bool {
+        guard aiFallbackReason.isEmpty, let engine = PriorityEngine(rawValue: aiEngine) else {
+            return false
+        }
+        switch engine {
+        case .foundationModels, .onDeviceMLX, .openAI, .laya:
+            return true
+        case .heuristic:
+            return false
+        }
+    }
+
+    /// Retain the privacy boundary even when a restored row's source enum is stale.
+    var hasLocalOnlySourceContent: Bool {
+        todoSource == .email || todoSource == .meeting
+            || !sourceMessageID.isEmpty || !sourceThreadID.isEmpty
+            || !sourceSenderEmail.isEmpty || !sourceAccountNamespace.isEmpty
+    }
+
 
     var manualPriorityEnum: TodoPriority? {
         guard let m = manualPriority else { return nil }
@@ -290,7 +324,7 @@ final class Todo {
 
 enum TodoPriorityScope {
     static func candidates(from todos: [Todo]) -> [Todo] {
-        todos.filter { !$0.isCompleted && $0.triage == .todo && $0.manualPriority == nil }
+        todos.filter(\.isEligibleForAutomaticPriority)
     }
     @discardableResult
     static func apply(_ result: PriorityResult, in candidates: [Todo]) -> Todo? {

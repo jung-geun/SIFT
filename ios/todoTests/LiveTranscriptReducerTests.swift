@@ -6,9 +6,9 @@ struct LiveTranscriptReducerTests {
     @Test("orders adjacent ranges and replaces progressive overlap")
     func replacesOverlapWithoutDroppingAdjacentSpeech() {
         var reducer = LiveTranscriptReducer()
-        reducer.replace(LiveTranscriptEntry(id: "early", startMs: 0, endMs: 1_000, text: "첫 문장", speakerIDs: []))
-        reducer.replace(LiveTranscriptEntry(id: "late", startMs: 2_000, endMs: 3_000, text: "마지막 문장", speakerIDs: []))
-        reducer.replace(LiveTranscriptEntry(id: "expanded", startMs: 800, endMs: 2_000, text: "확장된 임시 문장", speakerIDs: []))
+        reducer.replace(LiveTranscriptEntry(id: "early", startMs: 0, endMs: 1_000, text: "첫 문장"))
+        reducer.replace(LiveTranscriptEntry(id: "late", startMs: 2_000, endMs: 3_000, text: "마지막 문장"))
+        reducer.replace(LiveTranscriptEntry(id: "expanded", startMs: 800, endMs: 2_000, text: "확장된 임시 문장"))
 
         #expect(reducer.entries.map(\.id) == ["expanded", "late"])
         #expect(reducer.entries.map(\.text) == ["확장된 임시 문장", "마지막 문장"])
@@ -17,13 +17,12 @@ struct LiveTranscriptReducerTests {
     @Test("persists multiple timestamped entries rather than one whole meeting")
     func keepsIndependentTimeRanges() {
         var reducer = LiveTranscriptReducer()
-        reducer.replace(LiveTranscriptEntry(id: "a", startMs: 1_000, endMs: 1_500, text: "A", speakerIDs: []))
-        reducer.replace(LiveTranscriptEntry(id: "b", startMs: 1_500, endMs: 2_000, text: "B", speakerIDs: ["speaker-1"]))
+        reducer.replace(LiveTranscriptEntry(id: "a", startMs: 1_000, endMs: 1_500, text: "A"))
+        reducer.replace(LiveTranscriptEntry(id: "b", startMs: 1_500, endMs: 2_000, text: "B"))
 
         #expect(reducer.entries.count == 2)
         #expect(reducer.entries[0].startMs == 1_000)
         #expect(reducer.entries[1].endMs == 2_000)
-        #expect(reducer.entries[1].speakerIDs == ["speaker-1"])
     }
 
     @Test("final segments cannot be overwritten by a late volatile overlap")
@@ -35,7 +34,6 @@ struct LiveTranscriptReducerTests {
                 startMs: 0,
                 endMs: 1_000,
                 text: "확정 문장",
-                speakerIDs: [],
                 isFinal: true
             )
         )
@@ -44,8 +42,7 @@ struct LiveTranscriptReducerTests {
                 id: "volatile",
                 startMs: 100,
                 endMs: 900,
-                text: "늦은 임시 문장",
-                speakerIDs: []
+                text: "늦은 임시 문장"
             )
         )
 
@@ -61,8 +58,7 @@ struct LiveTranscriptReducerTests {
                 id: "visible",
                 startMs: 0,
                 endMs: 1_000,
-                text: "보이는 문장",
-                speakerIDs: []
+                text: "보이는 문장"
             )
         )
         reducer.replace(
@@ -70,13 +66,10 @@ struct LiveTranscriptReducerTests {
                 id: "blank",
                 startMs: 1_000,
                 endMs: 12_000,
-                text: " \n ",
-                speakerIDs: []
+                text: " \n "
             )
         )
 
         #expect(reducer.entries.map(\.id) == ["visible"])
     }
-
-
 }

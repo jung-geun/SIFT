@@ -10,7 +10,8 @@ import FoundationModels
 enum PriorityEngine: String, Sendable {
     case foundationModels = "Apple AI"   // ANE 실행
     case onDeviceMLX      = "온디바이스 AI" // GPU/MLX 실행
-    case gemini           = "Gemini AI"  // Gemini API 실행
+    case openAI           = "OpenAI"   // user-authorized ChatGPT plan Responses API
+    case laya             = "Laya"       // multilingual on-device Core ML, priority only
     case heuristic        = "휴리스틱"   // LLM 실패 폴백 — 규칙 기반
 
     var displayName: String {
@@ -22,11 +23,13 @@ enum PriorityEngine: String, Sendable {
         case .foundationModels:
             return "Apple AI"
         case .onDeviceMLX:
-            return language == .english ? "On Device AI" : "온디바이스 AI"
-        case .gemini:
-            return "Gemini AI"
+            return AppLanguage.localized("intelligence.engine.onDevice", defaultValue: "On Device AI", language: language)
+        case .openAI:
+            return "OpenAI"
+        case .laya:
+            return "Laya"
         case .heuristic:
-            return language == .english ? "Heuristic" : "휴리스틱"
+            return AppLanguage.localized("intelligence.engine.heuristic", defaultValue: "Heuristic", language: language)
         }
     }
 
@@ -128,21 +131,13 @@ enum IntelligenceRoutingError: LocalizedError, Sendable {
         }
         switch self {
         case .backendUnavailable:
-            return language == .english
-                ? "\(providerName) is unavailable on this device."
-                : "\(providerName)을 이 기기에서 사용할 수 없습니다."
+            return String(format: AppLanguage.localized("error.intelligence.backendUnavailable", defaultValue: "%@ is unavailable on this device.", language: language), locale: language.locale, String(providerName))
         case .backendNotConfigured:
-            return language == .english
-                ? "\(providerName) is not configured."
-                : "\(providerName)이(가) 설정되지 않았습니다."
+            return String(format: AppLanguage.localized("error.intelligence.backendNotConfigured", defaultValue: "%@ is not configured.", language: language), locale: language.locale, String(providerName))
         case .generationFailed:
-            return language == .english
-                ? "\(providerName) could not generate a result."
-                : "\(providerName) 결과를 생성하지 못했습니다."
+            return String(format: AppLanguage.localized("error.intelligence.generationFailed", defaultValue: "%@ could not generate a result.", language: language), locale: language.locale, String(providerName))
         case .parseFailed:
-            return language == .english
-                ? "\(providerName) returned an invalid result."
-                : "\(providerName)이(가) 올바르지 않은 결과를 반환했습니다."
+            return String(format: AppLanguage.localized("error.intelligence.parseFailed", defaultValue: "%@ returned an invalid result.", language: language), locale: language.locale, String(providerName))
         }
     }
 }
@@ -276,11 +271,9 @@ struct HeuristicEngine: IntelligenceService {
     /// Legacy localization compatibility for callers that display the no-deadline explanation.
     func heuristicReason(todo: Todo, persona: PersonaContext, language: AppLanguage) -> String {
         guard todo.dueDate == nil else {
-            return language == .english ? "Rule-based priority" : "규칙 기반 우선순위"
+            return AppLanguage.localized("priority.reason.rules.withDeadline", defaultValue: "Rule-based priority", language: language)
         }
-        return language == .english
-            ? "No deadline — low default priority"
-            : "마감 없음 — 낮은 기본 우선순위"
+        return AppLanguage.localized("priority.reason.rules.noDeadline", defaultValue: "No deadline — low default priority", language: language)
     }
 
     private static func higherPriorityFirst(
@@ -324,7 +317,7 @@ final class FoundationModelsEngine: IntelligenceService {
     ) async throws -> [PriorityResult] {
         #if canImport(FoundationModels)
         if #available(iOS 26.0, *), FoundationModelsAvailability.isAvailable {
-            let sorted = todos.filter { !$0.isCompleted }.sorted {
+            let sorted = todos.filter(\.isEligibleForAutomaticPriority).sorted {
                 switch ($0.dueDate, $1.dueDate) {
                 case (let a?, let b?): return a < b
                 case (.some, .none): return true
@@ -333,9 +326,7 @@ final class FoundationModelsEngine: IntelligenceService {
             }
             let active = Array(sorted.prefix(20))
             guard !active.isEmpty else { return [] }
-            let batchTitle = AppLanguage.current == .english
-                ? "\(active.count)-item batch"
-                : "일괄 요청 (\(active.count)개)"
+            let batchTitle = AppLanguage.localizedCount("priority.batchTitle", count: active.count, defaultValue: "%lld-item batch", language: .current)
             progress?(.requesting(
                 index: 1,
                 total: 1,
@@ -411,9 +402,7 @@ final class FoundationModelsEngine: IntelligenceService {
                 try await Task.sleep(nanoseconds: timeoutSeconds * 1_000_000_000)
                 throw IntelligenceRoutingError.generationFailed(
                     provider: .foundationModels,
-                    reason: AppLanguage.current == .english
-                        ? "Apple AI took too long to respond."
-                        : "Apple AI 응답 시간이 길어졌습니다."
+                    reason: AppLanguage.localized("error.intelligence.timeout", defaultValue: "Apple AI took too long to respond.", language: AppLanguage.current)
                 )
             }
 
@@ -441,7 +430,9 @@ final class OnDeviceLLMIntelligenceEngine: IntelligenceService {
         persona: PersonaContext,
         events: [CalendarService.CalendarEventSummary]
     ) -> String {
-        ScheduleLLMAdapter.buildScheduleInput(todos: todos, persona: persona, events: events)
+        ScheduleLLMAdapter.buildScheduleInput(
+            todos: todos, persona: persona, events: events, allowsPrivateCalendarTitles: true
+        )
     }
 
     func parseScheduleResponseV9(
@@ -483,7 +474,7 @@ final class OnDeviceLLMIntelligenceEngine: IntelligenceService {
             throw IntelligenceRoutingError.backendUnavailable(provider: .onDevice, reason: reason)
         }
 
-        let sortedActive = todos.filter { !$0.isCompleted }.sorted {
+        let sortedActive = todos.filter(\.isEligibleForAutomaticPriority).sorted {
             switch ($0.dueDate, $1.dueDate) {
             case (let a?, let b?): return a < b
             case (.some, .none):   return true
@@ -493,9 +484,7 @@ final class OnDeviceLLMIntelligenceEngine: IntelligenceService {
         let active = Array(sortedActive.prefix(15))
         guard !active.isEmpty else { return [] }
 
-        let batchTitle = AppLanguage.current == .english
-            ? "\(active.count)-item batch"
-            : "일괄 요청 (\(active.count)개)"
+        let batchTitle = AppLanguage.localizedCount("priority.batchTitle", count: active.count, defaultValue: "%lld-item batch", language: .current)
         let isMiniCPM = service.modelID == OnDeviceLLMService.miniCPMModelID
         let maxTokens = isMiniCPM ? max(360, min(760, active.count * 95)) : max(512, min(1_200, active.count * 140))
         let scheduleInput = Self.buildScheduleInput(todos: active, persona: persona, events: events)
@@ -736,11 +725,13 @@ final class RoutedIntelligenceEngine: IntelligenceService {
     private let policy: BetaFeaturePolicy
     private let foundationModels = FoundationModelsEngine()
     private let onDevice = OnDeviceLLMIntelligenceEngine()
-    private let gemini = GeminiIntelligenceEngine()
+    private let openAI = OpenAIIntelligenceEngine()
+    private let laya: any IntelligenceService
     private let heuristic = HeuristicEngine()
 
-    init(policy: BetaFeaturePolicy = BetaFeaturePolicy()) {
+    init(policy: BetaFeaturePolicy = BetaFeaturePolicy(), laya: (any IntelligenceService)? = nil) {
         self.policy = policy
+        self.laya = laya ?? LayaPriorityEngine(policy: policy)
     }
 
     func prioritize(
@@ -790,16 +781,30 @@ final class RoutedIntelligenceEngine: IntelligenceService {
                 return try await heuristicResults(for: .noEligibleProvider)
             }
             do {
+                let annotatedProgress: IntelligenceProgressHandler?
+                if let progress {
+                    annotatedProgress = { event in
+                        guard case .result(var result, let index, let total, let title) = event else {
+                            progress(event)
+                            return
+                        }
+                        result.requestedProviderRawValue = provider.rawValue
+                        if result.engine != .heuristic { result.executionPath = .beta(provider) }
+                        progress(.result(result, index: index, total: total, title: title))
+                    }
+                } else {
+                    annotatedProgress = nil
+                }
                 let results = try await engine(for: provider).prioritize(
                     todos: todos,
                     events: events,
                     persona: persona,
-                    progress: progress
+                    progress: annotatedProgress
                 )
                 let annotated = results.map { result in
                     var result = result
                     result.requestedProviderRawValue = provider.rawValue
-                    result.executionPath = .beta(provider)
+                    if result.engine != .heuristic { result.executionPath = .beta(provider) }
                     return result
                 }
                 progress?(.completed(finalProvider: provider.displayName, total: annotated.count))
@@ -820,8 +825,10 @@ final class RoutedIntelligenceEngine: IntelligenceService {
             return foundationModels
         case .onDevice:
             return onDevice
-        case .gemini:
-            return gemini
+        case .openAI:
+            return openAI
+        case .laya:
+            return laya
         }
     }
 }

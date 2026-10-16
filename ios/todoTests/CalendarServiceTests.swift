@@ -204,6 +204,29 @@ struct CalendarServiceTests {
         #expect(missingIDs == Set([missing.id]))
     }
 
+    @Test("deleted imported occurrence preserves items whose external ID is still observed on other devices")
+    @MainActor
+    func missingImportedOccurrencePreservesCrossDeviceExternalIDs() {
+        let now = Date(timeIntervalSinceReferenceDate: 800_000_000)
+        let crossDeviceTodo = Todo(
+            title: "Created on macOS",
+            dueDate: now.addingTimeInterval(3_600),
+            source: .calendar,
+            sourceRef: "macos-device-local-id#2026-09-18"
+        )
+        crossDeviceTodo.calendarEventExternalID = "shared-caldav-guid-123"
+
+        // On iOS, the local occurrence ref is "ios-device-local-id#2026-09-18", but the CalDAV external ID matches
+        let missingIDs = CalendarService.missingImportedTodoIDs(
+            from: [crossDeviceTodo],
+            observedOccurrenceRefs: ["ios-device-local-id#2026-09-18"],
+            observedExternalIDs: ["shared-caldav-guid-123"],
+            now: now
+        )
+
+        #expect(missingIDs.isEmpty)
+    }
+
     @Test("todoWindow maps timed events to a start/deadline pair and collapses all-day or zero-length events")
     func todoWindowMapsEventTimeInformation() {
         let start = Date(timeIntervalSinceReferenceDate: 900_000_000)

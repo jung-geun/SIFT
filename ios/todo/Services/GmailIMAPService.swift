@@ -28,59 +28,33 @@ nonisolated enum GmailIMAPError: LocalizedError, Equatable, Sendable {
     func errorDescription(language: AppLanguage) -> String {
         switch self {
         case .missingCredential:
-            return language == .english
-                ? "Gmail IMAP credentials are missing."
-                : "Gmail IMAP 인증 정보가 없습니다."
+            return AppLanguage.localized("error.mail.gmailIMAP.missingCredential", defaultValue: "Gmail IMAP credentials are missing.", language: language)
         case .invalidResponse:
-            return language == .english
-                ? "Gmail IMAP returned an invalid response."
-                : "Gmail IMAP에서 올바르지 않은 응답을 받았습니다."
+            return AppLanguage.localized("error.mail.gmailIMAP.invalidResponse", defaultValue: "Gmail IMAP returned an invalid response.", language: language)
         case .authenticationFailed:
-            return language == .english
-                ? "Gmail IMAP authentication failed."
-                : "Gmail IMAP 인증에 실패했습니다."
+            return AppLanguage.localized("error.mail.gmailIMAP.authenticationFailed", defaultValue: "Gmail IMAP authentication failed.", language: language)
         case .credentialRejected:
-            return language == .english
-                ? "Gmail rejected the saved App Password. Replace it in Email Settings."
-                : "Gmail이 저장된 App Password를 거부했습니다. 이메일 설정에서 교체해주세요."
+            return AppLanguage.localized("error.mail.gmailIMAP.credentialRejected", defaultValue: "Gmail rejected the saved App Password. Replace it in Email Settings.", language: language)
         case .mailboxReset:
-            return language == .english
-                ? "The Gmail mailbox changed. Refresh the inbox and try again."
-                : "Gmail 메일함이 변경되었습니다. 받은편지함을 새로고침한 뒤 다시 시도해주세요."
+            return AppLanguage.localized("error.mail.gmailIMAP.mailboxReset", defaultValue: "The Gmail mailbox changed. Refresh the inbox and try again.", language: language)
         case .mutationUnsupported:
-            return language == .english
-                ? "This Gmail IMAP server does not support the requested mail action."
-                : "이 Gmail IMAP 서버는 요청한 메일 작업을 지원하지 않습니다."
+            return AppLanguage.localized("error.mail.gmailIMAP.mutationUnsupported", defaultValue: "This Gmail IMAP server does not support the requested mail action.", language: language)
         case .messageIdentityUnavailable:
-            return language == .english
-                ? "This cached Gmail message needs a mailbox refresh before it can be changed."
-                : "이 Gmail 메일은 변경하기 전에 받은편지함을 새로고침해야 합니다."
+            return AppLanguage.localized("error.mail.gmailIMAP.messageIdentityUnavailable", defaultValue: "This cached Gmail message needs a mailbox refresh before it can be changed.", language: language)
         case .unsupportedExtension:
-            return language == .english
-                ? "Gmail IMAP does not advertise X-GM-EXT-1."
-                : "Gmail IMAP에서 필요한 Gmail 확장을 지원하지 않습니다."
+            return AppLanguage.localized("error.mail.gmailIMAP.unsupportedExtension", defaultValue: "Gmail IMAP does not advertise X-GM-EXT-1.", language: language)
         case .analysisFailed:
-            return language == .english
-                ? "Gmail message analysis did not complete."
-                : "Gmail 메일 분석을 완료하지 못했습니다."
+            return AppLanguage.localized("error.mail.gmailIMAP.analysisFailed", defaultValue: "Gmail message analysis did not complete.", language: language)
         case .analysisLeased:
-            return language == .english
-                ? "Gmail message analysis is already in progress."
-                : "Gmail 메일 분석이 이미 진행 중입니다."
+            return AppLanguage.localized("error.mail.gmailIMAP.analysisLeased", defaultValue: "Gmail message analysis is already in progress.", language: language)
         case .noSelectableTextPart:
-            return language == .english
-                ? "No readable text content found in this message."
-                : "이 메일에서 읽을 수 있는 텍스트 본문을 찾을 수 없습니다."
+            return AppLanguage.localized("error.mail.gmailIMAP.noSelectableTextPart", defaultValue: "No readable text content found in this message.", language: language)
         case .transport(let message):
             let detail = message.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !detail.isEmpty else {
-                return language == .english
-                    ? "The Gmail IMAP connection failed. Try again."
-                    : "Gmail IMAP 연결에 실패했습니다. 다시 시도해주세요."
+                return AppLanguage.localized("error.mail.gmailIMAP.transport", defaultValue: "The Gmail IMAP connection failed. Try again.", language: language)
             }
-            return language == .english
-                ? "The Gmail IMAP connection failed. Try again. (\(detail))"
-                : "Gmail IMAP 연결에 실패했습니다. 다시 시도해주세요. (\(detail))"
+            return String(format: AppLanguage.localized("error.mail.gmailIMAP.transportDetail", defaultValue: "The Gmail IMAP connection failed. Try again. (%@)", language: language), locale: language.locale, String(detail))
         }
     }
 
@@ -109,17 +83,145 @@ nonisolated struct IMAPMessageRecord: Sendable, Equatable {
     let body: String
 }
 
-private final class IMAPConnectionCompletion: @unchecked Sendable {
-    nonisolated private let lock = NSLock()
-    nonisolated(unsafe) private var completed = false
+/// Callback state is shared only through the lock; the transport itself is actor-isolated.
+nonisolated private final class IMAPTransportCompletion<Value: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Value, Error>?
 
-    nonisolated func claim() -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        guard !completed else { return false }
-        completed = true
+    init(_ continuation: CheckedContinuation<Value, Error>) {
+        self.continuation = continuation
+    }
+
+    @discardableResult
+    func resolve(_ result: Result<Value, Error>) -> Bool {
+        let pending = lock.withLock {
+            let pending = continuation
+            continuation = nil
+            return pending
+        }
+        guard let pending else { return false }
+        pending.resume(with: result)
         return true
     }
+}
+
+/// One absolute deadline covers queueing, TLS, greeting, send and the entire response.
+nonisolated private final class IMAPTransportOperation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var failure: Error?
+    private var resumeFailure: (@Sendable (Error) -> Void)?
+    private var cancelConnection: (@Sendable () -> Void)?
+    private var timer: DispatchWorkItem?
+
+    init(timeout: TimeInterval) {
+        let timer = DispatchWorkItem { [weak self] in
+            self?.abort(GmailIMAPError.transport("IMAP operation timed out"))
+        }
+        self.timer = timer
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout, execute: timer)
+    }
+
+    func attach(_ connection: any IMAPWireConnection) {
+        let alreadyFailed = lock.withLock {
+            cancelConnection = { connection.cancel() }
+            return failure != nil
+        }
+        if alreadyFailed { connection.cancel() }
+    }
+
+    func abort(_ error: Error) {
+        let handlers = lock.withLock { () -> ((@Sendable (Error) -> Void)?, (@Sendable () -> Void)?) in
+            guard failure == nil else { return (nil, nil) }
+            failure = error
+            return (resumeFailure, cancelConnection)
+        }
+        handlers.1?()
+        handlers.0?(error)
+    }
+
+    func finish() {
+        lock.withLock {
+            timer?.cancel()
+            timer = nil
+            resumeFailure = nil
+            cancelConnection = nil
+        }
+    }
+
+    func wait<Value: Sendable>(
+        _ start: (@escaping @Sendable (Result<Value, Error>) -> Bool) -> Void
+    ) async throws -> Value {
+        try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            return try await withCheckedThrowingContinuation { continuation in
+                let completion = IMAPTransportCompletion(continuation)
+                let error = lock.withLock {
+                    resumeFailure = { completion.resolve(.failure($0)) }
+                    return failure
+                }
+                if let error {
+                    completion.resolve(.failure(error))
+                } else {
+                    start { completion.resolve($0) }
+                }
+            }
+        } onCancel: {
+            self.abort(CancellationError())
+        }
+    }
+}
+
+/// Internal wire seam exercises the production deadline and framing paths without live credentials.
+nonisolated struct IMAPWireChunk: Sendable {
+    let data: Data
+    let isComplete: Bool
+}
+
+nonisolated protocol IMAPWireConnection: Sendable {
+    func start(_ completion: @escaping @Sendable (Result<Void, Error>) -> Void)
+    func send(_ data: Data, completion: @escaping @Sendable (Result<Void, Error>) -> Void)
+    func receive(_ completion: @escaping @Sendable (Result<IMAPWireChunk, Error>) -> Void)
+    func cancel()
+}
+
+nonisolated private final class NetworkIMAPWireConnection: Sendable, IMAPWireConnection {
+    private let connection: NWConnection
+
+    init(host: String, port: UInt16) throws {
+        guard let port = NWEndpoint.Port(rawValue: port) else { throw GmailIMAPError.invalidResponse }
+        connection = NWConnection(host: NWEndpoint.Host(host), port: port,
+                                  using: NWParameters(tls: NWProtocolTLS.Options()))
+    }
+
+    func start(_ completion: @escaping @Sendable (Result<Void, Error>) -> Void) {
+        connection.stateUpdateHandler = { state in
+            switch state {
+            case .ready: completion(.success(()))
+            case .failed: completion(.failure(GmailIMAPError.transport("IMAP TLS connection failed")))
+            case .cancelled: completion(.failure(GmailIMAPError.transport("IMAP connection closed")))
+            default: break
+            }
+        }
+        connection.start(queue: .global(qos: .utility))
+    }
+
+    func send(_ data: Data, completion: @escaping @Sendable (Result<Void, Error>) -> Void) {
+        connection.send(content: data, completion: .contentProcessed { error in
+            completion(error == nil ? .success(()) : .failure(GmailIMAPError.transport("IMAP send failed")))
+        })
+    }
+
+    func receive(_ completion: @escaping @Sendable (Result<IMAPWireChunk, Error>) -> Void) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 32_768) { data, _, complete, error in
+            if error != nil {
+                completion(.failure(GmailIMAPError.transport("IMAP receive failed")))
+            } else {
+                completion(.success(IMAPWireChunk(data: data ?? Data(), isComplete: complete)))
+            }
+        }
+    }
+
+    func cancel() { connection.cancel() }
 }
 
 /// Refines `IMAPCommandTransport` to expose a pre-authentication greeting probe.
@@ -133,139 +235,204 @@ protocol IMAPPreAuthCapabilityProbing: IMAPCommandTransport {
     func login(username: String, password: String) async throws
 }
 
-/// Minimal TLS IMAP transport. It exposes tagged command execution for the
-/// selected mailbox; the service owns safe UID-based mutations.
-nonisolated final class NetworkIMAPCommandTransport: IMAPPreAuthCapabilityProbing, @unchecked Sendable {
-    private let host: String
-    private let port: UInt16
-    private var connection: NWConnection?
-    private var tag = 0
+/// TLS IMAP transport. FIFO turns prevent actor reentrancy from overlapping wire reads.
+actor NetworkIMAPCommandTransport: IMAPPreAuthCapabilityProbing {
+    private let makeConnection: @Sendable () throws -> any IMAPWireConnection
+    private let timeout: TimeInterval
+    private var connection: (any IMAPWireConnection)?
+    private var tag: UInt64 = 0
+    private var decoder = IMAPResponseDecoder()
+    private var pendingLines: [String] = []
+    private var reachedEOF = false
+    private var activeOperation: IMAPTransportOperation?
+    private var busy = false
+    private var waiters: [(IMAPTransportOperation, @Sendable (Result<Void, Error>) -> Bool)] = []
 
     init(host: String = "imap.gmail.com", port: UInt16 = 993) {
-        self.host = host
-        self.port = port
+        makeConnection = { try NetworkIMAPWireConnection(host: host, port: port) }
+        timeout = 30
+    }
+
+    init(timeout: TimeInterval, makeConnection: @escaping @Sendable () throws -> any IMAPWireConnection) {
+        precondition(timeout.isFinite && timeout > 0)
+        self.timeout = timeout
+        self.makeConnection = makeConnection
     }
 
     func connect(username: String, password: String) async throws {
-        _ = try await connectPreAuth()
-        try await login(username: username, password: password)
+        let command = try Self.loginCommand(username: username, password: password)
+        try await withTurn { transport, operation in
+            _ = try await transport.open(operation)
+            try await transport.authenticate(command, operation: operation)
+        }
     }
 
     func connectPreAuth() async throws -> [String] {
-        let connection = NWConnection(
-            host: NWEndpoint.Host(host),
-            port: NWEndpoint.Port(rawValue: port)!,
-            using: NWParameters(tls: NWProtocolTLS.Options())
-        )
-        self.connection = connection
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            let completion = IMAPConnectionCompletion()
-            connection.stateUpdateHandler = { state in
-                switch state {
-                case .ready:
-                    guard completion.claim() else { return }
-                    connection.stateUpdateHandler = nil
-                    continuation.resume()
-                case .failed(let error):
-                    guard completion.claim() else { return }
-                    connection.stateUpdateHandler = nil
-                    continuation.resume(throwing: GmailIMAPError.transport(error.localizedDescription))
-                case .cancelled:
-                    guard completion.claim() else { return }
-                    connection.stateUpdateHandler = nil
-                    continuation.resume(throwing: GmailIMAPError.transport("IMAP connection cancelled"))
-                default:
-                    break
-                }
-            }
-            connection.start(queue: .global(qos: .utility))
-        }
-        return try await readResponse(until: nil)
+        try await withTurn { transport, operation in try await transport.open(operation) }
     }
 
     func login(username: String, password: String) async throws {
-        let user = Self.quote(username)
-        let secret = Self.quote(password)
-        let response = try await send("LOGIN \(user) \(secret)", allowingTaggedFailure: true)
-        if GmailIMAPError.isPermanentCredentialRejection(in: response) {
-            throw GmailIMAPError.credentialRejected
-        }
-        guard response.contains(where: { $0.contains(" OK") }) else {
-            throw GmailIMAPError.invalidResponse
+        let command = try Self.loginCommand(username: username, password: password)
+        try await withTurn { transport, operation in
+            try await transport.authenticate(command, operation: operation)
         }
     }
 
     func execute(_ command: String) async throws -> [String] {
-        try await send(command)
+        try Self.validateCommand(command)
+        return try await withTurn { transport, operation in
+            let response = try await transport.send(command, operation: operation)
+            guard Self.status(in: response.last ?? "") == "OK" else { throw GmailIMAPError.invalidResponse }
+            return response
+        }
     }
 
+    /// Closing interrupts active and queued work, rather than waiting for a silent peer.
     func close() async {
+        activeOperation?.abort(GmailIMAPError.transport("IMAP connection closed"))
+        for (operation, _) in waiters { operation.abort(GmailIMAPError.transport("IMAP connection closed")) }
+        waiters.removeAll()
+        disposeConnection()
+    }
+
+    private func withTurn<Value: Sendable>(
+        _ body: (isolated NetworkIMAPCommandTransport, IMAPTransportOperation) async throws -> Value
+    ) async throws -> Value {
+        let operation = IMAPTransportOperation(timeout: timeout)
+        defer { operation.finish() }
+        let _: Void = try await operation.wait { completion in
+            if busy {
+                waiters.append((operation, completion))
+            } else {
+                busy = true
+                _ = completion(.success(()))
+            }
+        }
+        activeOperation = operation
+        if let connection { operation.attach(connection) }
+        defer {
+            activeOperation = nil
+            busy = false
+            while !waiters.isEmpty {
+                let (_, completion) = waiters.removeFirst()
+                if completion(.success(())) {
+                    busy = true
+                    break
+                }
+            }
+        }
+        do {
+            try Task.checkCancellation()
+            let result = try await body(self, operation)
+            if reachedEOF { disposeConnection() }
+            return result
+        } catch {
+            // A partially transmitted/consumed command must never be reused by another turn.
+            disposeConnection()
+            throw error
+        }
+    }
+
+    private func disposeConnection() {
         connection?.cancel()
         connection = nil
+        decoder = IMAPResponseDecoder()
+        pendingLines.removeAll()
+        reachedEOF = false
     }
 
-    private func send(_ command: String, allowingTaggedFailure: Bool = false) async throws -> [String] {
-        guard let connection else { throw GmailIMAPError.transport("IMAP is not connected") }
-        tag += 1
-        let commandTag = String(format: "A%04d", tag)
-        let payload = Data("\(commandTag) \(command)\r\n".utf8)
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            connection.send(content: payload, completion: .contentProcessed { error in
-                if let error {
-                    continuation.resume(throwing: GmailIMAPError.transport(error.localizedDescription))
-                } else {
-                    continuation.resume()
-                }
-            })
+    private func open(_ operation: IMAPTransportOperation) async throws -> [String] {
+        disposeConnection()
+        let wire = try makeConnection()
+        connection = wire
+        operation.attach(wire)
+        tag = 0
+        let _: Void = try await operation.wait { completion in
+            wire.start { _ = completion($0) }
         }
-        let lines = try await readResponse(until: commandTag)
-        guard lines.contains(where: { $0.hasPrefix("\(commandTag) OK") }) else {
-            if allowingTaggedFailure,
-               lines.contains(where: { $0.hasPrefix("\(commandTag) NO") || $0.hasPrefix("\(commandTag) BAD") }) {
-                return lines
+        return try await readResponse(until: nil, operation: operation)
+    }
+
+    private func authenticate(_ command: String, operation: IMAPTransportOperation) async throws {
+        let response = try await send(command, operation: operation)
+        guard let terminal = response.last else { throw GmailIMAPError.invalidResponse }
+        if Self.status(in: terminal) != "OK" {
+            if GmailIMAPError.isPermanentCredentialRejection(in: [terminal]) {
+                throw GmailIMAPError.credentialRejected
             }
             throw GmailIMAPError.invalidResponse
         }
-        return lines
     }
 
-    private func readResponse(until commandTag: String?) async throws -> [String] {
-        guard let connection else { throw GmailIMAPError.transport("IMAP is not connected") }
-        var decoder = IMAPResponseDecoder()
+    private func send(_ command: String, operation: IMAPTransportOperation) async throws -> [String] {
+        guard let wire = connection else { throw GmailIMAPError.transport("IMAP is not connected") }
+        guard tag < UInt64.max else { throw GmailIMAPError.invalidResponse }
+        tag += 1
+        let commandTag = "A" + String(repeating: "0", count: max(0, 4 - String(tag).count)) + String(tag)
+        let data = Data("\(commandTag) \(command)\r\n".utf8)
+        let _: Void = try await operation.wait { completion in
+            wire.send(data) { _ = completion($0) }
+        }
+        return try await readResponse(until: commandTag, operation: operation)
+    }
+
+    private func readResponse(until commandTag: String?, operation: IMAPTransportOperation) async throws -> [String] {
+        guard let wire = connection else { throw GmailIMAPError.transport("IMAP is not connected") }
         var lines: [String] = []
+        var byteCount = pendingLines.reduce(0) { $0 + $1.utf8.count }
         while true {
-            let chunk = try await receive(from: connection)
-            for line in try decoder.append(chunk) {
+            while !pendingLines.isEmpty {
+                let line = pendingLines.removeFirst()
+                let tokens = line.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
+                guard tokens.count >= 2 else { throw GmailIMAPError.invalidResponse }
+                let status = tokens[1].uppercased()
                 lines.append(line)
                 if let commandTag {
-                    if line.hasPrefix(commandTag + " ") { return lines }
-                } else if line.hasPrefix("* OK") || line.hasPrefix("* PREAUTH") {
+                    if tokens[0] == commandTag {
+                        guard ["OK", "NO", "BAD"].contains(status) else { throw GmailIMAPError.invalidResponse }
+                        return lines
+                    }
+                    guard tokens[0] == "*", status != "BYE" else { throw GmailIMAPError.invalidResponse }
+                } else {
+                    guard tokens[0] == "*", ["OK", "PREAUTH"].contains(status) else {
+                        throw GmailIMAPError.invalidResponse
+                    }
                     return lines
                 }
             }
-        }
-    }
-
-    private func receive(from connection: NWConnection) async throws -> Data {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data, Error>) in
-            connection.receive(minimumIncompleteLength: 1, maximumLength: 32_768) { data, _, isComplete, error in
-                if let error {
-                    continuation.resume(throwing: GmailIMAPError.transport(error.localizedDescription))
-                } else if isComplete && (data == nil || data!.isEmpty) {
-                    continuation.resume(throwing: GmailIMAPError.transport("IMAP connection closed"))
-                } else {
-                    continuation.resume(returning: data ?? Data())
-                }
+            guard !reachedEOF else { throw GmailIMAPError.transport("IMAP connection closed") }
+            let chunk: IMAPWireChunk = try await operation.wait { completion in
+                wire.receive { _ = completion($0) }
             }
+            reachedEOF = chunk.isComplete
+            guard chunk.data.count <= 8_388_608 - byteCount else { throw GmailIMAPError.invalidResponse }
+            byteCount += chunk.data.count
+            pendingLines = try decoder.append(chunk.data)
         }
     }
 
-    private static func quote(_ value: String) -> String {
-        let sanitized = value
-            .replacingOccurrences(of: "\r", with: "")
-            .replacingOccurrences(of: "\n", with: "")
-        return "\"" + sanitized
-            .replacingOccurrences(of: "\\", with: "\\\\")
+    private static func status(in line: String) -> String? {
+        let tokens = line.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
+        return tokens.count >= 2 ? tokens[1].uppercased() : nil
+    }
+
+    private static func validateCommand(_ command: String) throws {
+        guard !command.isEmpty, command.utf8.count <= 65_536,
+              command.utf8.allSatisfy({ $0 >= 32 && $0 != 127 }),
+              command.first != " " else { throw GmailIMAPError.invalidResponse }
+    }
+
+    private static func loginCommand(username: String, password: String) throws -> String {
+        let command = "LOGIN \(try quote(username)) \(try quote(password))"
+        try validateCommand(command)
+        return command
+    }
+
+    private static func quote(_ value: String) throws -> String {
+        guard !value.isEmpty, value.utf8.allSatisfy({ $0 >= 32 && $0 < 127 }) else {
+            throw GmailIMAPError.invalidResponse
+        }
+        return "\"" + value.replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"") + "\""
     }
 }
@@ -275,6 +442,7 @@ actor GmailIMAPService: MailboxPagingProvider {
     let provider: MailProvider = .gmail
 
     private let transport: IMAPCommandTransport
+    private static let metadataFetchAttributes = "(UID FLAGS X-GM-MSGID X-GM-THRID INTERNALDATE RFC822.SIZE BODY.PEEK[HEADER.FIELDS (SUBJECT FROM MESSAGE-ID DATE)])"
     private var account: String?
     private var uidValidity: String?
     /// Ascending INBOX UIDs from the last `UID SEARCH ALL`, valid only for `indexValidity`.
@@ -303,8 +471,7 @@ actor GmailIMAPService: MailboxPagingProvider {
     // MARK: - Command serialization
     //
     // Ownership transfers on `resume`, so `isCommandBusy` stays true across handoffs.
-    // `withCheckedContinuation` is not cancellable: a cancelled waiter still takes its
-    // turn and runs its body, which is acceptable (a wasted sequence).
+    // Cancelled waiters release their turn without issuing any commands.
 
     private func acquireCommandTurn() async {
         guard isCommandBusy else {
@@ -331,13 +498,37 @@ actor GmailIMAPService: MailboxPagingProvider {
     func authenticate(email: String, backgroundEnabled: Bool) async throws {
         await acquireCommandTurn()
         defer { releaseCommandTurn() }
+        try Task.checkCancellation()
         try await performAuthenticate(email: email, backgroundEnabled: backgroundEnabled)
+    }
+
+    /// Connection settings require proof of message access, not only a successful LOGIN.
+    func validateConnection(email: String, backgroundEnabled: Bool) async throws {
+        await acquireCommandTurn()
+        defer { releaseCommandTurn() }
+        try Task.checkCancellation()
+        do {
+            try await performAuthenticate(
+                email: email,
+                backgroundEnabled: backgroundEnabled,
+                verifyingMessageRetrieval: true
+            )
+        } catch {
+            await performDisconnect()
+            throw error
+        }
     }
 
     func authenticateAndSave(email: String, appPassword: String, backgroundEnabled: Bool) async throws {
         await acquireCommandTurn()
         defer { releaseCommandTurn() }
-        try await performAuthenticateAndSave(email: email, appPassword: appPassword, backgroundEnabled: backgroundEnabled)
+        try Task.checkCancellation()
+        do {
+            try await performAuthenticateAndSave(email: email, appPassword: appPassword, backgroundEnabled: backgroundEnabled)
+        } catch {
+            await performDisconnect()
+            throw error
+        }
     }
 
     func disconnect() async {
@@ -349,24 +540,28 @@ actor GmailIMAPService: MailboxPagingProvider {
     func fetchInboxPage(after cursor: String?) async throws -> MailboxPage {
         await acquireCommandTurn()
         defer { releaseCommandTurn() }
+        try Task.checkCancellation()
         return try await performFetchInboxPage(after: cursor)
     }
 
     func fetchInboxUpdates(newerThan cursor: String) async throws -> MailboxPage {
         await acquireCommandTurn()
         defer { releaseCommandTurn() }
+        try Task.checkCancellation()
         return try await performFetchInboxUpdates(newerThan: cursor)
     }
 
     func fetchInboxMessageIDs() async throws -> Set<String> {
         await acquireCommandTurn()
         defer { releaseCommandTurn() }
+        try Task.checkCancellation()
         return try await performFetchInboxMessageIDs()
     }
 
     func fetchMessageContent(messageID: String) async throws -> MailboxMessageContent {
         await acquireCommandTurn()
         defer { releaseCommandTurn() }
+        try Task.checkCancellation()
         return try await performFetchMessageContent(messageID: messageID)
     }
 
@@ -376,6 +571,7 @@ actor GmailIMAPService: MailboxPagingProvider {
     ) async throws {
         await acquireCommandTurn()
         defer { releaseCommandTurn() }
+        try Task.checkCancellation()
         try await performMarkAsRead(
             messageID: messageID,
             expectedGlobalMessageID: expectedGlobalMessageID
@@ -388,6 +584,7 @@ actor GmailIMAPService: MailboxPagingProvider {
     ) async throws {
         await acquireCommandTurn()
         defer { releaseCommandTurn() }
+        try Task.checkCancellation()
         try await performTrashMessage(
             messageID: messageID,
             expectedGlobalMessageID: expectedGlobalMessageID
@@ -396,7 +593,11 @@ actor GmailIMAPService: MailboxPagingProvider {
 
     // MARK: - Authentication
 
-    private func performAuthenticate(email: String, backgroundEnabled _: Bool) async throws {
+    private func performAuthenticate(
+        email: String,
+        backgroundEnabled _: Bool,
+        verifyingMessageRetrieval: Bool = false
+    ) async throws {
         generationToken += 1
         await transport.close()
         account = nil
@@ -412,7 +613,7 @@ actor GmailIMAPService: MailboxPagingProvider {
         }
         try await transport.connect(username: email, password: password)
         try await requireGmailExtensions()
-        _ = try await selectInbox()
+        _ = try await selectInbox(verifyingMessageRetrieval: verifyingMessageRetrieval)
         account = IMAPCredentialStore.canonicalAccount(email)
     }
 
@@ -432,7 +633,7 @@ actor GmailIMAPService: MailboxPagingProvider {
         guard !normalizedPassword.isEmpty else { throw IMAPCredentialError.emptyPassword }
         try await transport.connect(username: email, password: normalizedPassword)
         try await requireGmailExtensions()
-        _ = try await selectInbox()
+        _ = try await selectInbox(verifyingMessageRetrieval: true)
         try IMAPCredentialStore.save(
             appPassword: normalizedPassword,
             for: email,
@@ -481,11 +682,27 @@ actor GmailIMAPService: MailboxPagingProvider {
         return validity
     }
 
-    private func selectInbox() async throws -> String {
+    private func selectInbox(verifyingMessageRetrieval: Bool = false) async throws -> String {
         let selected = try await transport.execute("SELECT INBOX")
-        guard let validity = selected.first(where: { $0.contains("UIDVALIDITY") })
-            .flatMap({ Self.captureToken("UIDVALIDITY", in: $0) }) else {
+        guard let validity = IMAPWireSyntax.uidValidity(selected) else {
             throw GmailIMAPError.invalidResponse
+        }
+        if verifyingMessageRetrieval {
+            guard let count = IMAPWireSyntax.messageCount(selected) else {
+                throw GmailIMAPError.invalidResponse
+            }
+            if count > 0 {
+                // Sequence '*' reads only the newest message, without listing the entire mailbox.
+                // PEEK leaves its read flag unchanged. An empty mailbox needs no FETCH.
+                let lines = try await transport.execute("FETCH * \(Self.metadataFetchAttributes)")
+                guard let header = lines.first(where: {
+                    IMAPWireSyntax.isFetch(IMAPWireSyntax.protocolText($0))
+                        && IMAPWireSyntax.literal($0) != nil
+                }), Self.parseRecord([header]) != nil else {
+                    throw GmailIMAPError.invalidResponse
+                }
+            }
+            try Task.checkCancellation()
         }
         uidValidity = validity
         return validity
@@ -568,8 +785,7 @@ actor GmailIMAPService: MailboxPagingProvider {
             throw GmailIMAPError.invalidResponse
         }
         guard let expectedGlobalMessageID,
-              !expectedGlobalMessageID.isEmpty,
-              UInt64(expectedGlobalMessageID) != nil
+              IMAPWireSyntax.positiveDecimal(expectedGlobalMessageID, as: UInt64.self) != nil
         else {
             throw GmailIMAPError.messageIdentityUnavailable
         }
@@ -679,7 +895,7 @@ actor GmailIMAPService: MailboxPagingProvider {
     }
 
     private nonisolated static func uid(from messageID: String) throws -> UInt32 {
-        guard let uid = UInt32(messageID), uid > 0 else {
+        guard let uid = IMAPWireSyntax.positiveDecimal(messageID, as: UInt32.self) else {
             throw GmailIMAPError.invalidResponse
         }
         return uid
@@ -810,7 +1026,8 @@ actor GmailIMAPService: MailboxPagingProvider {
 
     private func performFetchMessageContent(messageID: String) async throws -> MailboxMessageContent {
         guard account != nil else { throw GmailIMAPError.missingCredential }
-        let structureLines = try await transport.execute("UID FETCH \(messageID) (BODYSTRUCTURE)")
+        let uid = try Self.uid(from: messageID)
+        let structureLines = try await transport.execute("UID FETCH \(uid) (BODYSTRUCTURE)")
 
         var sectionToFetch: String?
         if let bstructString = Self.extractBodyStructureString(from: structureLines),
@@ -831,18 +1048,19 @@ actor GmailIMAPService: MailboxPagingProvider {
         }
 
         let section = sectionToFetch ?? "1"
-        let fetchCmd = "UID FETCH \(messageID) (UID FLAGS INTERNALDATE X-GM-MSGID X-GM-THRID BODY.PEEK[HEADER] BODY.PEEK[\(section).MIME] BODY.PEEK[\(section)]<0.500000>)"
-        let lines = try await transport.execute(fetchCmd)
+        let fetchCmd = "UID FETCH \(uid) (UID FLAGS INTERNALDATE X-GM-MSGID X-GM-THRID BODY.PEEK[HEADER] BODY.PEEK[\(section).MIME] BODY.PEEK[\(section)]<0.500000>)"
+        let responseLines = try await transport.execute(fetchCmd)
+        let lines = responseLines.filter { Self.captureToken("UID", in: $0).flatMap(UInt32.init) == uid }
 
         let preferredBodyAttribute = "BODY[\(section)]"
         let bodyAttribute: String
         let bodyLine: String
         if let preferredLine = lines.first(where: {
-            $0.range(of: preferredBodyAttribute, options: .caseInsensitive) != nil
+            Self.captureLiteral(in: $0, afterAttribute: preferredBodyAttribute) != nil
         }) {
             bodyAttribute = preferredBodyAttribute
             bodyLine = preferredLine
-        } else if let textLine = lines.first(where: { $0.uppercased().contains("BODY[TEXT]") }) {
+        } else if let textLine = lines.first(where: { Self.captureLiteral(in: $0, afterAttribute: "BODY[TEXT]") != nil }) {
             // Some IMAP servers expose a safe single-part text section as BODY[TEXT].
             bodyAttribute = "BODY[TEXT]"
             bodyLine = textLine
@@ -855,7 +1073,7 @@ actor GmailIMAPService: MailboxPagingProvider {
 
         let mimeAttribute = "BODY[\(section).MIME]"
         let mimeHeaderLine = lines.first(where: {
-            $0.range(of: mimeAttribute, options: .caseInsensitive) != nil
+            Self.captureLiteral(in: $0, afterAttribute: mimeAttribute) != nil
         })
         let mimeHeader = mimeHeaderLine.flatMap {
             Self.captureLiteral(in: $0, afterAttribute: mimeAttribute)
@@ -866,8 +1084,7 @@ actor GmailIMAPService: MailboxPagingProvider {
                 throw GmailIMAPError.noSelectableTextPart
             }
         }
-        let topHeaderLine = lines.first(where: { $0.uppercased().contains("BODY[HEADER]") })
-        let topHeader = topHeaderLine.flatMap { Self.captureLiteral(in: $0) }
+        let topHeader = lines.compactMap { Self.captureLiteral(in: $0, afterAttribute: "BODY[HEADER]") }.first
 
         let declaredLiteralLength = Self.captureLiteralLength(in: bodyLine, afterAttribute: bodyAttribute) ?? sectionBody.utf8.count
         let isTruncated = declaredLiteralLength >= 500_000 || sectionBody.utf8.count >= 500_000
@@ -908,7 +1125,7 @@ actor GmailIMAPService: MailboxPagingProvider {
         }
 
         let records = Self.parseRecords(lines)
-        guard let fallbackRecord = records.first else {
+        guard let fallbackRecord = records.first(where: { $0.uid == uid }) else {
             throw GmailIMAPError.invalidResponse
         }
         let topHeaderFields = topHeader.map { Self.parseHeadersAndBody($0).headers } ?? [:]
@@ -950,10 +1167,11 @@ actor GmailIMAPService: MailboxPagingProvider {
 
     private nonisolated static func parseSExpr(_ text: String) -> SExpr? {
         var index = text.startIndex
-        return parseExpr(text, index: &index)
+        return parseExpr(text, index: &index, depth: 0)
     }
 
-    private nonisolated static func parseExpr(_ text: String, index: inout String.Index) -> SExpr? {
+    private nonisolated static func parseExpr(_ text: String, index: inout String.Index, depth: Int) -> SExpr? {
+        guard depth < 64 else { return nil }
         skipWhitespace(text, index: &index)
         guard index < text.endIndex else { return nil }
 
@@ -966,7 +1184,7 @@ actor GmailIMAPService: MailboxPagingProvider {
                     text.formIndex(after: &index)
                     return .list(elements)
                 }
-                guard let element = parseExpr(text, index: &index) else { return nil }
+                guard let element = parseExpr(text, index: &index, depth: depth + 1) else { return nil }
                 elements.append(element)
             }
             return nil
@@ -1152,9 +1370,7 @@ actor GmailIMAPService: MailboxPagingProvider {
     }
 
     private nonisolated static func captureLiteralLength(in line: String) -> Int? {
-        guard let marker = line.range(of: #"\{\d+\}"#, options: .regularExpression) else { return nil }
-        let numStr = line[line.index(after: marker.lowerBound)..<line.index(before: marker.upperBound)]
-        return Int(numStr)
+        IMAPWireSyntax.literal(line)?.length
     }
     // MARK: - Metadata + category resolution
 
@@ -1162,7 +1378,7 @@ actor GmailIMAPService: MailboxPagingProvider {
         guard let lowest = uids.first, let highest = uids.last else { return [] }
         let range = uids.map(String.init).joined(separator: ",")
         let lines = try await transport.execute(
-            "UID FETCH \(range) (UID FLAGS X-GM-MSGID X-GM-THRID INTERNALDATE RFC822.SIZE BODY.PEEK[HEADER.FIELDS (SUBJECT FROM MESSAGE-ID DATE)])"
+            "UID FETCH \(range) \(Self.metadataFetchAttributes)"
         )
         try await resolveCategoryLabels(lowest: lowest, highest: highest, window: Set(uids))
         return Self.parseRecords(lines).map { metadata($0) }
@@ -1246,20 +1462,21 @@ actor GmailIMAPService: MailboxPagingProvider {
     }
 
     private nonisolated static func parseUIDs(_ lines: [String]) -> [UInt32] {
-        guard let line = lines.first(where: { $0.hasPrefix("* SEARCH") }) else { return [] }
-        return line.split(separator: " ").dropFirst(2).compactMap { UInt32($0) }
+        IMAPWireSyntax.searchUIDs(lines)
     }
 
     private nonisolated static func parseRecords(_ lines: [String]) -> [IMAPMessageRecord] {
         lines.compactMap { line -> IMAPMessageRecord? in
-            guard line.hasPrefix("* "), line.contains("FETCH") else { return nil }
-            let uid = captureToken("UID", in: line).flatMap(UInt32.init) ?? 0
-            let gmailID = captureToken("X-GM-MSGID", in: line) ?? "uid-\(uid)"
-            let thread = captureToken("X-GM-THRID", in: line) ?? ""
+            let syntax = IMAPWireSyntax.protocolText(line)
+            guard IMAPWireSyntax.isFetch(syntax),
+                  let uid = captureToken("UID", in: syntax).flatMap({ IMAPWireSyntax.positiveDecimal($0, as: UInt32.self) }),
+                  let gmailID = captureToken("X-GM-MSGID", in: syntax),
+                  IMAPWireSyntax.positiveDecimal(gmailID, as: UInt64.self) != nil else { return nil }
+            let thread = captureToken("X-GM-THRID", in: syntax) ?? ""
             let literal = captureLiteral(in: line) ?? ""
             let parsed = parseHeadersAndBody(literal)
             let body = line.contains("BODY[TEXT]") ? literal : parsed.body
-            let isRead = line.contains("\\Seen")
+            let isRead = IMAPWireSyntax.hasSeenFlag(syntax)
             return IMAPMessageRecord(
                 uid: uid,
                 gmailMessageID: gmailID,
@@ -1323,21 +1540,15 @@ actor GmailIMAPService: MailboxPagingProvider {
     }
 
     private nonisolated static func captureLiteral(in line: String) -> String? {
-        guard let marker = line.range(of: #"\{\d+\}"#, options: .regularExpression) else { return nil }
-        let lengthText = line[line.index(after: marker.lowerBound)..<line.index(before: marker.upperBound)]
-        guard let length = Int(lengthText) else { return nil }
-        let bytes = line[marker.upperBound...].utf8.prefix(length)
-        return String(decoding: bytes, as: UTF8.self)
+        IMAPWireSyntax.literal(line)?.text
     }
 
     private nonisolated static func captureLiteral(in line: String, afterAttribute attribute: String) -> String? {
-        guard let range = line.range(of: attribute, options: .caseInsensitive) else { return nil }
-        return captureLiteral(in: String(line[range.lowerBound...]))
+        IMAPWireSyntax.literal(line, attribute: attribute)?.text
     }
 
     private nonisolated static func captureLiteralLength(in line: String, afterAttribute attribute: String) -> Int? {
-        guard let range = line.range(of: attribute, options: .caseInsensitive) else { return nil }
-        return captureLiteralLength(in: String(line[range.lowerBound...]))
+        IMAPWireSyntax.literal(line, attribute: attribute)?.length
     }
 
     private nonisolated static func parseRecord(_ lines: [String]) -> IMAPMessageRecord? {
@@ -1345,8 +1556,131 @@ actor GmailIMAPService: MailboxPagingProvider {
     }
 
     private nonisolated static func captureToken(_ token: String, in line: String) -> String? {
-        guard let range = line.range(of: token, options: .caseInsensitive) else { return nil }
-        let tail = line[range.upperBound...].trimmingCharacters(in: .whitespaces)
-        return tail.split(whereSeparator: { $0 == " " || $0 == ")" || $0 == "]" }).first.map(String.init)
+        IMAPWireSyntax.token(token, in: line)
+    }
+}
+
+/// Protocol metadata must never be read from quoted strings or message literals.
+/// Shared by both providers so UID identity checks use the same wire boundary.
+nonisolated enum IMAPWireSyntax {
+    static func positiveDecimal<T: FixedWidthInteger & UnsignedInteger>(_ value: String, as: T.Type) -> T? {
+        guard !value.isEmpty, value.utf8.allSatisfy({ (48...57).contains($0) }),
+              let number = T(value), number > 0 else { return nil }
+        return number
+    }
+
+    static func protocolText(_ line: String) -> String {
+        scan(line).syntax
+    }
+
+    static func literal(_ line: String, attribute: String? = nil) -> (text: String, length: Int)? {
+        let result = scan(line, attribute: attribute, captureLiteral: true)
+        guard let text = result.literal else { return nil }
+        return (text, result.length)
+    }
+
+    private static func scan(_ line: String, attribute: String? = nil, captureLiteral: Bool = false)
+        -> (syntax: String, literal: String?, length: Int) {
+        let bytes = line.utf8
+        var index = bytes.startIndex
+        var syntax = ""
+        var literal: String?
+        var literalLength = 0
+        var quoted = false
+        var escaped = false
+        while index < bytes.endIndex {
+            let byte = bytes[index]
+            let next = bytes.index(after: index)
+            if !quoted && byte == 123 {
+                var markerEnd = next
+                while markerEnd < bytes.endIndex, (48...57).contains(bytes[markerEnd]) {
+                    bytes.formIndex(after: &markerEnd)
+                }
+                guard markerEnd > next, markerEnd < bytes.endIndex, bytes[markerEnd] == 125,
+                      let length = Int(String(decoding: bytes[next..<markerEnd], as: UTF8.self)),
+                      length <= 500_000 else { break }
+                let start = bytes.index(after: markerEnd)
+                let end = bytes.index(start, offsetBy: length, limitedBy: bytes.endIndex) ?? bytes.endIndex
+                let matchesAttribute = attribute.map {
+                    syntax.range(of: NSRegularExpression.escapedPattern(for: $0) + #"(?:<[0-9]+>)?\s*$"#,
+                                 options: [.regularExpression, .caseInsensitive]) != nil
+                } ?? true
+                if captureLiteral && literal == nil && matchesAttribute {
+                    literal = String(decoding: bytes[start..<end], as: UTF8.self)
+                    literalLength = length
+                }
+                syntax.append(" ")
+                index = end
+                continue
+            }
+            if escaped {
+                escaped = false
+                syntax.append(" ")
+            } else if quoted && byte == 92 {
+                escaped = true
+                syntax.append(" ")
+            } else if byte == 34 {
+                quoted.toggle()
+                syntax.append(" ")
+            } else {
+                syntax.unicodeScalars.append(UnicodeScalar(quoted || byte > 127 ? 32 : byte))
+            }
+            index = next
+        }
+        return (syntax, literal, literalLength)
+    }
+
+    static func token(_ name: String, in line: String) -> String? {
+        let text = protocolText(line)
+        let pattern = "(?i)(?:^|[ (])" + NSRegularExpression.escapedPattern(for: name)
+            + #" +([0-9]+)(?=[ )\]]|$)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+              let range = Range(match.range(at: 1), in: text) else { return nil }
+        return String(text[range])
+    }
+
+    static func isFetch(_ text: String) -> Bool {
+        text.range(of: #"^\* [1-9][0-9]* FETCH \("#, options: [.regularExpression, .caseInsensitive]) != nil
+    }
+
+    static func hasSeenFlag(_ text: String) -> Bool {
+        guard let range = text.range(of: #"(?i)(?:^|[ (])FLAGS +\([^)]*\)"#, options: .regularExpression) else { return false }
+        return text[range].split(whereSeparator: { $0 == " " || $0 == "(" || $0 == ")" })
+            .contains { $0.caseInsensitiveCompare("\\Seen") == .orderedSame }
+    }
+
+    static func uidValidity(_ lines: [String]) -> String? {
+        for line in lines {
+            guard line.range(of: #"^\* OK \[UIDVALIDITY [0-9]+\](?: |$)"#, options: [.regularExpression, .caseInsensitive]) != nil,
+                  let value = token("UIDVALIDITY", in: line.replacingOccurrences(of: "[", with: " ")),
+                  let validity = positiveDecimal(value, as: UInt32.self) else { continue }
+            return String(validity)
+        }
+        return nil
+    }
+
+    /// SELECT must explicitly report EXISTS; a missing count is not an empty mailbox.
+    static func messageCount(_ lines: [String]) -> UInt32? {
+        for line in lines.reversed() {
+            let tokens = line.split(separator: " ")
+            guard tokens.count == 3, tokens[0] == "*", tokens[2].uppercased() == "EXISTS" else { continue }
+            guard !tokens[1].isEmpty, tokens[1].utf8.allSatisfy({ (48...57).contains($0) }) else { return nil }
+            return UInt32(tokens[1])
+        }
+        return nil
+    }
+
+    static func searchUIDs(_ lines: [String]) -> [UInt32] {
+        var result = Set<UInt32>()
+        for line in lines {
+            let tokens = line.split(separator: " ")
+            guard tokens.count >= 2, tokens[0] == "*", tokens[1].uppercased() == "SEARCH" else { continue }
+            for token in tokens.dropFirst(2) {
+                guard let uid = positiveDecimal(String(token), as: UInt32.self) else { continue }
+                result.insert(uid)
+            }
+        }
+        return result.sorted()
     }
 }

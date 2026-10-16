@@ -18,19 +18,25 @@ enum PersonaType: String, CaseIterable, Codable, Sendable {
     }
 
     func displayName(language: AppLanguage) -> String {
+        let key: String
         let korean: String
         let english: String
         switch self {
-        case .student:      korean = "학생"; english = "Student"
-        case .officeWorker: korean = "직장인"; english = "Office Worker"
-        case .freelancer:   korean = "프리랜서"; english = "Freelancer"
-        case .jobSeeker:    korean = "취업준비생"; english = "Job Seeker"
-        case .selfEmployed: korean = "자영업"; english = "Self-Employed"
-        case .homemaker:    korean = "주부"; english = "Homemaker"
-        case .other:        korean = "기타"; english = "Other"
-        case .unspecified:  korean = "미설정"; english = "Not Set"
+        case .student: (key, korean, english) = ("persona.type.student", "학생", "Student")
+        case .officeWorker: (key, korean, english) = ("persona.type.officeWorker", "직장인", "Office Worker")
+        case .freelancer: (key, korean, english) = ("persona.type.freelancer", "프리랜서", "Freelancer")
+        case .jobSeeker: (key, korean, english) = ("persona.type.jobSeeker", "취업준비생", "Job Seeker")
+        case .selfEmployed: (key, korean, english) = ("persona.type.selfEmployed", "자영업", "Self-Employed")
+        case .homemaker: (key, korean, english) = ("persona.type.homemaker", "주부", "Homemaker")
+        case .other: (key, korean, english) = ("persona.type.other", "기타", "Other")
+        case .unspecified: (key, korean, english) = ("persona.type.unspecified", "미설정", "Not Set")
         }
-        return language == .english ? english : korean
+        return AppLanguage.localized(
+            key,
+            defaultValue: language == .korean ? korean : english,
+            language: language,
+            comment: "Persona lifestyle type shown during onboarding and in the saved profile."
+        )
     }
 
     var systemImage: String {
@@ -54,33 +60,230 @@ enum PersonaType: String, CaseIterable, Codable, Sendable {
     func presetDescriptions(language: AppLanguage) -> [String] {
         switch self {
         case .student:
-            return language == .english
-                ? ["University student", "Graduate student", "High school student", "Studying for a certification", "Graduating soon"]
-                : ["대학교 재학 중", "대학원 과정", "고등학생", "자격증 공부 중", "졸업 예정"]
+            return [
+                AppLanguage.localized(
+                    "persona.preset.student.university",
+                    defaultValue: language == .korean ? "대학교 재학 중" : "University student",
+                    language: language,
+                    comment: "Suggested self-description chip for the student persona; selecting it does not translate existing user text."
+                ),
+                AppLanguage.localized(
+                    "persona.preset.student.graduate",
+                    defaultValue: language == .korean ? "대학원 과정" : "Graduate student",
+                    language: language,
+                    comment: "Suggested self-description chip for the student persona; selecting it does not translate existing user text."
+                ),
+                AppLanguage.localized(
+                    "persona.preset.student.highSchool",
+                    defaultValue: language == .korean ? "고등학생" : "High school student",
+                    language: language,
+                    comment: "Suggested self-description chip for the student persona; selecting it does not translate existing user text."
+                ),
+                AppLanguage.localized(
+                    "persona.preset.student.certification",
+                    defaultValue: language == .korean ? "자격증 공부 중" : "Studying for a certification",
+                    language: language,
+                    comment: "Suggested self-description chip for the student persona; selecting it does not translate existing user text."
+                ),
+                AppLanguage.localized(
+                    "persona.preset.student.graduating",
+                    defaultValue: language == .korean ? "졸업 예정" : "Graduating soon",
+                    language: language,
+                    comment: "Suggested self-description chip for the student persona; selecting it does not translate existing user text."
+                )
+            ]
         case .officeWorker:
-            return language == .english
-                ? ["IT / Development", "Planning / Marketing", "Sales / Customer Support", "Finance / Accounting", "Design", "HR / Education"]
-                : ["IT/개발", "기획/마케팅", "영업/고객지원", "재무/회계", "디자인", "HR/교육"]
+            return [
+                AppLanguage.localized(
+                    "persona.preset.officeWorker.development",
+                    defaultValue: language == .korean ? "IT/개발" : "IT / Development",
+                    language: language,
+                    comment: "Suggested self-description chip for the officeWorker persona; selecting it does not translate existing user text."
+                ),
+                AppLanguage.localized(
+                    "persona.preset.officeWorker.marketing",
+                    defaultValue: language == .korean ? "기획/마케팅" : "Planning / Marketing",
+                    language: language,
+                    comment: "Suggested self-description chip for the officeWorker persona; selecting it does not translate existing user text."
+                ),
+                AppLanguage.localized(
+                    "persona.preset.officeWorker.sales",
+                    defaultValue: language == .korean ? "영업/고객지원" : "Sales / Customer Support",
+                    language: language,
+                    comment: "Suggested self-description chip for the officeWorker persona; selecting it does not translate existing user text."
+                ),
+                AppLanguage.localized(
+                    "persona.preset.officeWorker.finance",
+                    defaultValue: language == .korean ? "재무/회계" : "Finance / Accounting",
+                    language: language,
+                    comment: "Suggested self-description chip for the officeWorker persona; selecting it does not translate existing user text."
+                ),
+                AppLanguage.localized(
+                    "persona.preset.officeWorker.design",
+                    defaultValue: language == .korean ? "디자인" : "Design",
+                    language: language,
+                    comment: "Suggested self-description chip for the officeWorker persona; selecting it does not translate existing user text."
+                ),
+                AppLanguage.localized(
+                    "persona.preset.officeWorker.hr",
+                    defaultValue: language == .korean ? "HR/교육" : "HR / Education",
+                    language: language,
+                    comment: "Suggested self-description chip for the officeWorker persona; selecting it does not translate existing user text."
+                )
+            ]
         case .freelancer:
-            return language == .english
-                ? ["Development / Programming", "Design / Video", "Translation / Writing", "Consulting", "Teaching / Tutoring"]
-                : ["개발·프로그래밍", "디자인·영상", "번역·글쓰기", "컨설팅", "강의·튜터링"]
+            return [
+                AppLanguage.localized(
+                    "persona.preset.freelancer.development",
+                    defaultValue: language == .korean ? "개발·프로그래밍" : "Development / Programming",
+                    language: language,
+                    comment: "Suggested self-description chip for the freelancer persona; selecting it does not translate existing user text."
+                ),
+                AppLanguage.localized(
+                    "persona.preset.freelancer.design",
+                    defaultValue: language == .korean ? "디자인·영상" : "Design / Video",
+                    language: language,
+                    comment: "Suggested self-description chip for the freelancer persona; selecting it does not translate existing user text."
+                ),
+                AppLanguage.localized(
+                    "persona.preset.freelancer.writing",
+                    defaultValue: language == .korean ? "번역·글쓰기" : "Translation / Writing",
+                    language: language,
+                    comment: "Suggested self-description chip for the freelancer persona; selecting it does not translate existing user text."
+                ),
+                AppLanguage.localized(
+                    "persona.preset.freelancer.consulting",
+                    defaultValue: language == .korean ? "컨설팅" : "Consulting",
+                    language: language,
+                    comment: "Suggested self-description chip for the freelancer persona; selecting it does not translate existing user text."
+                ),
+                AppLanguage.localized(
+                    "persona.preset.freelancer.teaching",
+                    defaultValue: language == .korean ? "강의·튜터링" : "Teaching / Tutoring",
+                    language: language,
+                    comment: "Suggested self-description chip for the freelancer persona; selecting it does not translate existing user text."
+                )
+            ]
         case .jobSeeker:
-            return language == .english
-                ? ["Preparing for a large company", "Preparing for public service", "Applying to startups", "Targeting work abroad", "Preparing a portfolio"]
-                : ["대기업 준비", "공기업·공무원", "스타트업 지원 중", "해외 취업 목표", "포트폴리오 준비 중"]
+            return [
+                AppLanguage.localized(
+                    "persona.preset.jobSeeker.largeCompany",
+                    defaultValue: language == .korean ? "대기업 준비" : "Preparing for a large company",
+                    language: language,
+                    comment: "Suggested self-description chip for the jobSeeker persona; selecting it does not translate existing user text."
+                ),
+                AppLanguage.localized(
+                    "persona.preset.jobSeeker.publicService",
+                    defaultValue: language == .korean ? "공기업·공무원" : "Preparing for public service",
+                    language: language,
+                    comment: "Suggested self-description chip for the jobSeeker persona; selecting it does not translate existing user text."
+                ),
+                AppLanguage.localized(
+                    "persona.preset.jobSeeker.startup",
+                    defaultValue: language == .korean ? "스타트업 지원 중" : "Applying to startups",
+                    language: language,
+                    comment: "Suggested self-description chip for the jobSeeker persona; selecting it does not translate existing user text."
+                ),
+                AppLanguage.localized(
+                    "persona.preset.jobSeeker.abroad",
+                    defaultValue: language == .korean ? "해외 취업 목표" : "Targeting work abroad",
+                    language: language,
+                    comment: "Suggested self-description chip for the jobSeeker persona; selecting it does not translate existing user text."
+                ),
+                AppLanguage.localized(
+                    "persona.preset.jobSeeker.portfolio",
+                    defaultValue: language == .korean ? "포트폴리오 준비 중" : "Preparing a portfolio",
+                    language: language,
+                    comment: "Suggested self-description chip for the jobSeeker persona; selecting it does not translate existing user text."
+                )
+            ]
         case .selfEmployed:
-            return language == .english
-                ? ["Online shop", "Restaurant / Cafe", "Services", "B2B business", "Solo business"]
-                : ["온라인 쇼핑몰", "음식점·카페", "서비스업", "B2B 사업", "1인 기업"]
+            return [
+                AppLanguage.localized(
+                    "persona.preset.selfEmployed.onlineShop",
+                    defaultValue: language == .korean ? "온라인 쇼핑몰" : "Online shop",
+                    language: language,
+                    comment: "Suggested self-description chip for the selfEmployed persona; selecting it does not translate existing user text."
+                ),
+                AppLanguage.localized(
+                    "persona.preset.selfEmployed.restaurant",
+                    defaultValue: language == .korean ? "음식점·카페" : "Restaurant / Cafe",
+                    language: language,
+                    comment: "Suggested self-description chip for the selfEmployed persona; selecting it does not translate existing user text."
+                ),
+                AppLanguage.localized(
+                    "persona.preset.selfEmployed.services",
+                    defaultValue: language == .korean ? "서비스업" : "Services",
+                    language: language,
+                    comment: "Suggested self-description chip for the selfEmployed persona; selecting it does not translate existing user text."
+                ),
+                AppLanguage.localized(
+                    "persona.preset.selfEmployed.b2b",
+                    defaultValue: language == .korean ? "B2B 사업" : "B2B business",
+                    language: language,
+                    comment: "Suggested self-description chip for the selfEmployed persona; selecting it does not translate existing user text."
+                ),
+                AppLanguage.localized(
+                    "persona.preset.selfEmployed.solo",
+                    defaultValue: language == .korean ? "1인 기업" : "Solo business",
+                    language: language,
+                    comment: "Suggested self-description chip for the selfEmployed persona; selecting it does not translate existing user text."
+                )
+            ]
         case .homemaker:
-            return language == .english
-                ? ["Childcare", "Parenting", "Household work", "Running a side business"]
-                : ["육아 중", "학부모", "가사 전담", "부업 병행 중"]
+            return [
+                AppLanguage.localized(
+                    "persona.preset.homemaker.childcare",
+                    defaultValue: language == .korean ? "육아 중" : "Childcare",
+                    language: language,
+                    comment: "Suggested self-description chip for the homemaker persona; selecting it does not translate existing user text."
+                ),
+                AppLanguage.localized(
+                    "persona.preset.homemaker.parenting",
+                    defaultValue: language == .korean ? "학부모" : "Parenting",
+                    language: language,
+                    comment: "Suggested self-description chip for the homemaker persona; selecting it does not translate existing user text."
+                ),
+                AppLanguage.localized(
+                    "persona.preset.homemaker.household",
+                    defaultValue: language == .korean ? "가사 전담" : "Household work",
+                    language: language,
+                    comment: "Suggested self-description chip for the homemaker persona; selecting it does not translate existing user text."
+                ),
+                AppLanguage.localized(
+                    "persona.preset.homemaker.sideBusiness",
+                    defaultValue: language == .korean ? "부업 병행 중" : "Running a side business",
+                    language: language,
+                    comment: "Suggested self-description chip for the homemaker persona; selecting it does not translate existing user text."
+                )
+            ]
         case .other:
-            return language == .english
-                ? ["Retired / Resting", "Preparing a business", "Several activities", "Specialized occupation"]
-                : ["은퇴·휴식 중", "창업 준비 중", "다양한 활동 병행", "특수 직종"]
+            return [
+                AppLanguage.localized(
+                    "persona.preset.other.retired",
+                    defaultValue: language == .korean ? "은퇴·휴식 중" : "Retired / Resting",
+                    language: language,
+                    comment: "Suggested self-description chip for the other persona; selecting it does not translate existing user text."
+                ),
+                AppLanguage.localized(
+                    "persona.preset.other.business",
+                    defaultValue: language == .korean ? "창업 준비 중" : "Preparing a business",
+                    language: language,
+                    comment: "Suggested self-description chip for the other persona; selecting it does not translate existing user text."
+                ),
+                AppLanguage.localized(
+                    "persona.preset.other.multipleActivities",
+                    defaultValue: language == .korean ? "다양한 활동 병행" : "Several activities",
+                    language: language,
+                    comment: "Suggested self-description chip for the other persona; selecting it does not translate existing user text."
+                ),
+                AppLanguage.localized(
+                    "persona.preset.other.specialized",
+                    defaultValue: language == .korean ? "특수 직종" : "Specialized occupation",
+                    language: language,
+                    comment: "Suggested self-description chip for the other persona; selecting it does not translate existing user text."
+                )
+            ]
         case .unspecified:
             return []
         }

@@ -1,0 +1,12 @@
+flowchart LR
+    manual[직접 입력] --> triage[등록·검토 대기 분류]
+    mail[연결한 메일] --> local[기기 내 후보·날짜 판단]
+    local -->|근거·확실성에 따라| triage
+    meeting[동의한 회의 음성] --> draft[로컬 전사·행동 초안]
+    draft -->|사용자가 선택| review[검토 대기열]
+    triage --> active[진행중 할 일]
+    triage --> review
+    review -->|확인 후 등록| active
+    active --> completed[완료 기록]
+    completed -->|학습을 켠 경우| routine[검토 가능한 루틴 제안]
+    routine -->|확정·개별 수락| active

@@ -323,9 +323,11 @@ struct CalendarTabView: View {
     // MARK: Weekday Header
 
     private var weekdayHeader: some View {
-        HStack(spacing: 0) {
-            ForEach(["일","월","화","수","목","금","토"], id: \.self) { d in
-                Text(d)
+        var calendar = cal
+        calendar.locale = AppLanguage.current.locale
+        return HStack(spacing: 0) {
+            ForEach(calendar.shortStandaloneWeekdaySymbols, id: \.self) { day in
+                Text(day)
                     .font(.caption).fontWeight(.medium).foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity)
             }
@@ -398,10 +400,9 @@ private struct MonthBlock: View {
     }
 
     private var monthTitle: String {
-        let language = AppLanguage.current
         let fmt = DateFormatter()
-        fmt.locale = language.locale
-        fmt.dateFormat = language == .english ? "LLLL yyyy" : "yyyy년 M월"
+        fmt.locale = AppLanguage.current.locale
+        fmt.setLocalizedDateFormatFromTemplate("yMMMM")
         return fmt.string(from: month)
     }
 
@@ -674,7 +675,7 @@ private struct WeekRowView: View {
                     .foregroundStyle(.white)
                     .padding(.leading, 1)
             }
-            Text(item.event.title.isEmpty ? "(제목 없음)" : item.event.title)
+            Text(item.event.title.isEmpty ? AppLanguage.localized("calendar.event.noTitle", defaultValue: "(No Title)", language: .current, comment: "Placeholder for a calendar event without a title.") : item.event.title)
                 .font(.system(size: 10, weight: .medium))
                 .foregroundStyle(.white)
                 .lineLimit(1)
@@ -699,7 +700,7 @@ private struct WeekRowView: View {
     private func chipView(chip: ChipContent) -> some View {
         HStack(spacing: 2) {
             Circle().fill(chip.color).frame(width: 5, height: 5)
-            Text(chip.title.isEmpty ? "(없음)" : chip.title)
+            Text(chip.title.isEmpty ? AppLanguage.localized("calendar.item.emptyTitle", defaultValue: "(None)", language: .current, comment: "Compact placeholder for a calendar item without a title.") : chip.title)
                 .font(.system(size: 10)).lineLimit(1).foregroundStyle(Color(.label))
         }
         .frame(height: laneH)
@@ -904,7 +905,7 @@ struct DayDetailSheet: View {
                     Image(systemName: "chevron.left")
                         .font(.system(size: 8, weight: .bold)).foregroundStyle(.white)
                 }
-                Text(event.title.isEmpty ? "(제목 없음)" : event.title)
+                Text(event.title.isEmpty ? AppLanguage.localized("calendar.event.noTitle", defaultValue: "(No Title)", language: .current, comment: "Placeholder for a calendar event without a title.") : event.title)
                     .font(.caption).fontWeight(.medium).lineLimit(1)
                     .foregroundStyle(.white)
                 if event.isRecurring {
@@ -1006,7 +1007,7 @@ struct DayDetailSheet: View {
                 RoundedRectangle(cornerRadius: 2).fill(color).frame(width: 3)
                 VStack(alignment: .leading, spacing: 1) {
                     HStack(spacing: 3) {
-                        Text(event.title.isEmpty ? "(제목 없음)" : event.title)
+                        Text(event.title.isEmpty ? AppLanguage.localized("calendar.event.noTitle", defaultValue: "(No Title)", language: .current, comment: "Placeholder for a calendar event without a title.") : event.title)
                             .font(.caption.weight(.semibold)).foregroundStyle(Color(.label))
                             .lineLimit(bh > 44 ? 2 : 1)
                         Image(systemName: event.isRecurring
@@ -1036,7 +1037,7 @@ struct DayDetailSheet: View {
             Button { editingTodo = todo } label: {
                 HStack(spacing: 4) {
                     Image(systemName: "circle").font(.caption).foregroundStyle(AppTheme.accent)
-                    Text(todo.title.isEmpty ? "(제목 없음)" : todo.title)
+                    Text(todo.title.isEmpty ? AppLanguage.localized("todo.noTitle", defaultValue: "(No Title)", language: .current, comment: "Placeholder for a to-do without a title.") : todo.title)
                         .font(.caption.weight(.medium)).foregroundStyle(Color(.label)).lineLimit(1)
                     Spacer(minLength: 0)
                     if todo.todoSource == .calendar {
@@ -1169,7 +1170,9 @@ struct EventEditSheet: View {
                 if case .edit(let detail) = mode {
                     Section("일정 정보") {
                         Label(
-                            detail.isRecurring ? "반복 일정" : "일반 일정",
+                            detail.isRecurring
+                                ? AppLanguage.localized("calendar.event.recurring", defaultValue: "Recurring event", language: .current, comment: "Calendar event recurrence type.")
+                                : AppLanguage.localized("calendar.event.nonRecurring", defaultValue: "Non-recurring event", language: .current, comment: "Calendar event recurrence type."),
                             systemImage: detail.isRecurring
                                 ? "arrow.triangle.2.circlepath"
                                 : "calendar"
@@ -1197,7 +1200,9 @@ struct EventEditSheet: View {
                     }
                 }
             }
-            .navigationTitle(mode.isCreate ? "새 이벤트" : "이벤트 편집")
+            .navigationTitle(mode.isCreate
+                ? AppLanguage.localized("calendar.event.createTitle", defaultValue: "New Event", language: .current, comment: "New calendar event navigation title.")
+                : AppLanguage.localized("calendar.event.editTitle", defaultValue: "Edit Event", language: .current, comment: "Calendar event editor navigation title."))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -1226,15 +1231,17 @@ struct EventEditSheet: View {
         }
         .confirmationDialog(
             recurrenceMutation == .delete
-                ? "반복 일정 삭제 범위를 선택하세요"
-                : "반복 일정 변경 범위를 선택하세요",
+                ? AppLanguage.localized("calendar.recurrence.deleteScopeTitle", defaultValue: "Choose which recurring events to delete", language: .current, comment: "Recurring event deletion scope confirmation title.")
+                : AppLanguage.localized("calendar.recurrence.changeScopeTitle", defaultValue: "Choose which recurring events to change", language: .current, comment: "Recurring event edit scope confirmation title."),
             isPresented: $showRecurrenceScope,
             titleVisibility: .visible
         ) {
             Button("이 일정만") { performRecurrenceMutation(scope: .thisEvent) }
             Button("이후 모든 일정") { performRecurrenceMutation(scope: .futureEvents) }
             Button(
-                recurrenceMutation == .delete ? "전체 반복 일정 삭제" : "전체 반복 일정 변경",
+                recurrenceMutation == .delete
+                    ? AppLanguage.localized("calendar.recurrence.deleteAll", defaultValue: "Delete entire series", language: .current, comment: "Delete all occurrences of a recurring calendar event.")
+                    : AppLanguage.localized("calendar.recurrence.changeAll", defaultValue: "Change entire series", language: .current, comment: "Change all occurrences of a recurring calendar event."),
                 role: recurrenceMutation == .delete ? .destructive : nil
             ) {
                 performRecurrenceMutation(scope: .allEvents)
@@ -1267,11 +1274,11 @@ struct EventEditSheet: View {
     private func eventOriginLabel(for detail: CalendarService.CalendarEventDetail) -> String {
         switch detail.marker?.origin {
         case .siftRecommendation:
-            return "SIFT 추천 일정"
+            return AppLanguage.localized("calendar.event.origin.recommendation", defaultValue: "SIFT-recommended event", language: .current, comment: "Calendar event origin label for a SIFT recommendation.")
         case .siftManual, .siftEmail, .siftMeeting:
-            return "SIFT에서 생성한 일정"
+            return AppLanguage.localized("calendar.event.origin.sift", defaultValue: "Event created in SIFT", language: .current, comment: "Calendar event origin label for an event created in SIFT.")
         case .externalCalendar, nil:
-            return "외부 캘린더 일정"
+            return AppLanguage.localized("calendar.event.origin.external", defaultValue: "External calendar event", language: .current, comment: "Calendar event origin label for an external calendar event.")
         }
     }
 

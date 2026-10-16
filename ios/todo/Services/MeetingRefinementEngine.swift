@@ -154,7 +154,9 @@ struct MeetingRefinementEngine {
                 if llm.isModelLoaded || (allowModelLoad && llm.isCapable && llm.isModelCachedOnDisk) {
                     return .localLLM
                 }
-            case .gemini:
+            case .openAI:
+                continue
+            case .laya:
                 continue
             }
         }

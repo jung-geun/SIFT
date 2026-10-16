@@ -1,10 +1,13 @@
 import Foundation
 import SwiftData
 import Testing
+import CryptoKit
+import Security
 @testable import todo
 
 class MockURLProtocol: URLProtocol {
     static var requestHandler: ((URLRequest) throws -> (HTTPURLResponse, Data?))?
+    static var deferredHandler: ((MockURLProtocol, URLRequest) -> Void)?
 
     override class func canInit(with request: URLRequest) -> Bool {
         return true
@@ -15,6 +18,10 @@ class MockURLProtocol: URLProtocol {
     }
 
     override func startLoading() {
+        if let deferredHandler = Self.deferredHandler {
+            deferredHandler(self, request)
+            return
+        }
         guard let handler = MockURLProtocol.requestHandler else {
             fatalError("Handler is not set.")
         }
@@ -35,6 +42,13 @@ class MockURLProtocol: URLProtocol {
         } catch {
             client?.urlProtocol(self, didFailWithError: error)
         }
+    }
+
+    func complete(status: Int, data: Data?) {
+        let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        if let data { client?.urlProtocol(self, didLoad: data) }
+        client?.urlProtocolDidFinishLoading(self)
     }
 
     private static func bodyData(from request: URLRequest) -> Data? {
@@ -282,17 +296,26 @@ private func gmailMessagePayload(
     ])
 }
 
+@MainActor
+private final class MockGmailOAuthSession: GmailOAuthSession {
+    var didCancel = false
+    var onStart: () -> Bool = { true }
+    func start() -> Bool { onStart() }
+    func cancel() { didCancel = true }
+}
+
 @Suite("GmailService 에러 케이스 및 로그 검증", .serialized)
 @MainActor
 struct GmailServiceTests {
 
-    private let sut = EmailService.shared
+    private let sut = EmailService()
 
     private func withIsolatedProviderState<T>(
         _ operation: () async throws -> T
     ) async rethrows -> T {
         try await AIProviderTestIsolation.shared.withLock {
             let originalSession = sut.session
+            let originalAuthenticationFactory = sut.makeAuthenticationSession
             let defaults = UserDefaults.standard
             let settingKeys = [
                 EmailAnalysisLookbackPolicy.lookbackSettingKey,
@@ -311,13 +334,20 @@ struct GmailServiceTests {
                 "access_token",
                 "refresh_token",
                 "id_token",
-                "scope_version"
+                "scope_version",
+                "access_token_expires_at",
+                "oauth_tokens"
             ]
             let savedSecrets = keychainAccounts.map {
                 ($0, KeychainStore.get(service: "pieroot.todo.gmail", account: $0))
             }
             defer {
                 MockURLProtocol.requestHandler = nil
+                MockURLProtocol.deferredHandler = nil
+                #if DEBUG
+                KeychainStore.setWriteFailureForTesting(service: "pieroot.todo.gmail", status: nil)
+                #endif
+                sut.makeAuthenticationSession = originalAuthenticationFactory
                 sut.session = originalSession
                 for (key, value) in savedDefaults {
                     if let value {
@@ -352,7 +382,8 @@ struct GmailServiceTests {
         config.protocolClasses = [MockURLProtocol.self]
         sut.session = URLSession(configuration: config)
         MockURLProtocol.requestHandler = nil
-        for account in ["access_token", "refresh_token", "id_token", "scope_version"] {
+        MockURLProtocol.deferredHandler = nil
+        for account in ["access_token", "refresh_token", "id_token", "scope_version", "access_token_expires_at", "oauth_tokens"] {
             KeychainStore.deleteAny(
                 service: "pieroot.todo.gmail",
                 account: account
@@ -378,6 +409,29 @@ struct GmailServiceTests {
         KeychainStore.set(service: "pieroot.todo.gmail", account: "refresh_token", value: "valid-refresh")
         if let scopeVersion {
             KeychainStore.set(service: "pieroot.todo.gmail", account: "scope_version", value: scopeVersion)
+        }
+    }
+
+    private func storedTokenFields() throws -> [String: Any] {
+        let value = try #require(KeychainStore.get(service: "pieroot.todo.gmail", account: "oauth_tokens"))
+        return try #require(JSONSerialization.jsonObject(with: Data(value.utf8)) as? [String: Any])
+    }
+
+    private func installSuccessfulOAuth(capture: ((URL) -> Void)? = nil) {
+        sut.makeAuthenticationSession = { url, scheme, completion in
+            capture?(url)
+            let webSession = MockGmailOAuthSession()
+            webSession.onStart = {
+                let state = URLComponents(url: url, resolvingAgainstBaseURL: false)!.queryItems!
+                    .first { $0.name == "state" }!.value!
+                var callback = URLComponents(string: scheme + ":/oauth2callback")!
+                callback.queryItems = [URLQueryItem(name: "state", value: state), URLQueryItem(name: "code", value: "test+code&=value")]
+                // A second callback must neither double-resume nor exchange twice.
+                completion(callback.url, nil)
+                completion(callback.url, nil)
+                return true
+            }
+            return webSession
         }
     }
 
@@ -1182,7 +1236,8 @@ struct GmailServiceTests {
                 )
             }
 
-            #expect(try await sut.fetchInboxMessageIDs() == Set(["a", "b", "c"]))
+            let ids = try await sut.fetchInboxMessageIDs()
+            #expect(ids == Set(["a", "b", "c"]))
             let successfulURLs = probe.snapshot().listURLs
             #expect(successfulURLs.count == 2)
             for url in successfulURLs {
@@ -1384,4 +1439,457 @@ struct GmailServiceTests {
             #expect(updatePage.hasMoreUpdates == false)
         }
     }
+    @Test("OAuth callback validates the complete redirect and unique state/code")
+    func testOAuthCallbackRejectsInvalidRedirectAndAmbiguousParameters() throws {
+        let redirect = "com.googleusercontent.apps.746219534143-ij6p50gff6as4hn2bbhdc9a1u6os3jmp:/oauth2callback"
+        #expect(try sut.authorizationCode(from: URL(string: redirect + "?state=expected&code=ok"), expectedState: "expected") == "ok")
+        for invalid in [
+            "other:/oauth2callback?state=expected&code=ok",
+            redirect.replacingOccurrences(of: "/oauth2callback", with: "/other") + "?state=expected&code=ok",
+            redirect + "?state=wrong&code=ok",
+            redirect + "?state=expected&state=expected&code=ok",
+            redirect + "?state=expected&code=one&code=two",
+            redirect + "?state=expected&code=",
+            redirect + "?state=expected&code=ok&error=access_denied",
+            redirect + "?state=expected&code=ok#fragment"
+        ] {
+            #expect(throws: EmailError.authorizationFailed) {
+                try sut.authorizationCode(from: URL(string: invalid), expectedState: "expected")
+            }
+        }
+    }
+
+    #if !SIFT_QA
+    @Test("OAuth start(false) resumes with failure instead of hanging")
+    func testOAuthSessionStartFailure() async throws {
+        await withIsolatedProviderState {
+            resetSharedState()
+            defer { resetSharedState() }
+            sut.makeAuthenticationSession = { _, _, _ in
+                let webSession = MockGmailOAuthSession()
+                webSession.onStart = { false }
+                return webSession
+            }
+            await #expect(throws: EmailError.authorizationFailed) { try await sut.authenticate() }
+            #expect(!sut.isAuthenticated)
+        }
+    }
+
+    @Test("OAuth task cancellation and signOut cancel the retained session")
+    func testOAuthCancellationAndSignOutIgnoreLateCallback() async throws {
+        await withIsolatedProviderState {
+            resetSharedState()
+            defer { resetSharedState() }
+            for signOut in [false, true] {
+                let started = AsyncStream<Void>.makeStream()
+                var iterator = started.stream.makeAsyncIterator()
+                let webSession = MockGmailOAuthSession()
+                var completion: ((URL?, Error?) -> Void)?
+                sut.makeAuthenticationSession = { _, _, callback in
+                    completion = callback
+                    webSession.onStart = { started.continuation.yield(()); return true }
+                    return webSession
+                }
+                let task = Task { try await sut.authenticate() }
+                _ = await iterator.next()
+                if signOut { sut.signOut() } else { task.cancel() }
+                await #expect(throws: CancellationError.self) { try await task.value }
+                #expect(webSession.didCancel)
+                completion?(nil, EmailError.authorizationFailed)
+                await Task.yield()
+                #expect(KeychainStore.get(service: "pieroot.todo.gmail", account: "oauth_tokens") == nil)
+                started.continuation.finish()
+            }
+        }
+    }
+
+    @Test("OAuth uses S256 PKCE, retains modify scope, encodes form values, and exchanges once")
+    func testOAuthPKCEFormEncodingAndDuplicateCallback() async throws {
+        try await withIsolatedProviderState {
+            resetSharedState()
+            defer { resetSharedState() }
+            var authorizationURL: URL?
+            installSuccessfulOAuth { authorizationURL = $0 }
+            var tokenRequests = 0
+            MockURLProtocol.requestHandler = { request in
+                tokenRequests += 1
+                let body = try #require(request.httpBody)
+                let form = try #require(String(data: body, encoding: .utf8))
+                #expect(form.contains("code=test%2Bcode%26%3Dvalue"))
+                let fields = try #require(URLComponents(string: "https://example.test/?" + form)?.queryItems)
+                let verifier = try #require(fields.first { $0.name == "code_verifier" }?.value)
+                let challenge = Data(SHA256.hash(data: Data(verifier.utf8))).base64EncodedString()
+                    .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+                let query = try #require(authorizationURL.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false)?.queryItems })
+                #expect(query.first { $0.name == "code_challenge" }?.value == challenge)
+                #expect(query.first { $0.name == "code_challenge_method" }?.value == "S256")
+                #expect(query.first { $0.name == "scope" }?.value?.contains("gmail.modify") == true)
+                #expect((43...128).contains(verifier.count))
+                #expect(query.first { $0.name == "state" }?.value?.count == 43)
+                #expect(!form.contains("client_secret"))
+                return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+                        Data(#"{"access_token":"new-access","refresh_token":"new-refresh","id_token":"new-id","expires_in":3600}"#.utf8))
+            }
+            try await sut.authenticate()
+            #expect(tokenRequests == 1)
+            #expect(sut.isAuthenticated)
+            let fields = try storedTokenFields()
+            #expect(fields["scopeVersion"] as? String == "gmail.modify.openid.v2")
+        }
+    }
+
+    @Test("New OAuth account never inherits omitted old refresh or ID tokens")
+    func testOAuthNewAccountClearsOmittedTokens() async throws {
+        try await withIsolatedProviderState {
+            resetSharedState()
+            defer { resetSharedState() }
+            seedGmailTokens()
+            KeychainStore.set(service: "pieroot.todo.gmail", account: "id_token", value: "previous-account-id")
+            #expect(sut.isAuthenticated)
+            installSuccessfulOAuth()
+            MockURLProtocol.requestHandler = { request in
+                (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+                 Data(#"{"access_token":"new-account-access","expires_in":3600}"#.utf8))
+            }
+            try await sut.authenticate()
+            let fields = try storedTokenFields()
+            #expect(fields["refreshToken"] == nil)
+            #expect(fields["idToken"] == nil)
+            #expect(KeychainStore.get(service: "pieroot.todo.gmail", account: "id_token") == nil)
+        }
+    }
+
+    @Test("OAuth rejects non-200 even if the body looks like a token response")
+    func testOAuthExchangeRejectsNonSuccessStatus() async throws {
+        await withIsolatedProviderState {
+            resetSharedState()
+            defer { resetSharedState() }
+            installSuccessfulOAuth()
+            MockURLProtocol.requestHandler = { request in
+                (HTTPURLResponse(url: request.url!, statusCode: 500, httpVersion: nil, headerFields: nil)!,
+                 Data(#"{"access_token":"must-not-persist"}"#.utf8))
+            }
+            await #expect(throws: EmailError.authorizationFailed) { try await sut.authenticate() }
+            #expect(KeychainStore.get(service: "pieroot.todo.gmail", account: "oauth_tokens") == nil)
+        }
+    }
+    #endif
+
+    @Test("Transient and non-revocation refresh errors preserve the whole credential bundle")
+    func testRefreshTransientFailurePreservesTokens() async throws {
+        try await withIsolatedProviderState {
+            resetSharedState()
+            defer { resetSharedState() }
+            seedGmailTokens()
+            #expect(sut.isAuthenticated) // Migrates legacy fields as one snapshot.
+            let before = try #require(KeychainStore.get(service: "pieroot.todo.gmail", account: "oauth_tokens"))
+            for status in [400, 429, 500, 503] {
+                MockURLProtocol.requestHandler = { request in
+                    (HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!,
+                     Data(#"{"error":"temporarily_unavailable"}"#.utf8))
+                }
+                await #expect(throws: EmailError.apiFailed) { try await sut.fetchRecentMessages() }
+                #expect(KeychainStore.get(service: "pieroot.todo.gmail", account: "oauth_tokens") == before)
+            }
+        }
+    }
+
+    @Test("Refresh escapes form delimiters and adopts rotated refresh tokens")
+    func testRefreshFormEncodingAndRotation() async throws {
+        try await withIsolatedProviderState {
+            resetSharedState()
+            defer { resetSharedState() }
+            seedGmailTokens()
+            KeychainStore.set(service: "pieroot.todo.gmail", account: "refresh_token", value: "value+with&delimiters=ok")
+            KeychainStore.set(service: "pieroot.todo.gmail", account: "id_token", value: "existing-id")
+            MockURLProtocol.requestHandler = { request in
+                if request.url?.host == "oauth2.googleapis.com" {
+                    let form = String(decoding: try #require(request.httpBody), as: UTF8.self)
+                    #expect(form.contains("refresh_token=value%2Bwith%26delimiters%3Dok"))
+                    return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+                            Data(#"{"access_token":"rotated-access","refresh_token":"rotated-refresh","expires_in":3600}"#.utf8))
+                }
+                return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(#"{"messages":[]}"#.utf8))
+            }
+            _ = try await sut.fetchRecentMessages()
+            let fields = try storedTokenFields()
+            #expect(fields["refreshToken"] as? String == "rotated-refresh")
+            #expect(fields["idToken"] as? String == "existing-id")
+        }
+    }
+
+    @Test("Concurrent callers share one refresh and canceled waiters do not cancel other callers")
+    func testRefreshSingleFlightWithCanceledWaiter() async throws {
+        try await withIsolatedProviderState {
+            resetSharedState()
+            defer { resetSharedState() }
+            seedGmailTokens()
+            let started = AsyncStream<MockURLProtocol>.makeStream()
+            var iterator = started.stream.makeAsyncIterator()
+            var refreshRequests = 0
+            MockURLProtocol.deferredHandler = { protocolInstance, request in
+                if request.url?.host == "oauth2.googleapis.com" {
+                    refreshRequests += 1
+                    started.continuation.yield(protocolInstance)
+                } else {
+                    protocolInstance.complete(status: 200, data: Data(#"{"messages":[]}"#.utf8))
+                }
+            }
+            let canceled = Task { try await sut.fetchRecentMessages() }
+            let response = try #require(await iterator.next())
+            let surviving = Task { try await sut.fetchRecentMessages() }
+            await Task.yield()
+            canceled.cancel()
+            response.complete(status: 200, data: Data(#"{"access_token":"shared-access","expires_in":3600}"#.utf8))
+            await #expect(throws: CancellationError.self) { try await canceled.value }
+            _ = try await surviving.value
+            #expect(refreshRequests == 1)
+            started.continuation.finish()
+        }
+    }
+
+    @Test("signOut during token refresh cannot restore credentials")
+    func testSignOutCancelsActiveRefreshAndPreventsTokenResurrection() async throws {
+        try await withIsolatedProviderState {
+            resetSharedState()
+            defer { resetSharedState() }
+            seedGmailTokens()
+            let started = AsyncStream<Void>.makeStream()
+            var iterator = started.stream.makeAsyncIterator()
+            MockURLProtocol.deferredHandler = { _, _ in started.continuation.yield(()) }
+            let pending = Task { try await sut.fetchRecentMessages() }
+            _ = await iterator.next()
+            sut.signOut()
+            // URLSession is canceled too; its concrete cancellation error is platform-defined.
+            switch await pending.result {
+            case .success: Issue.record("A signed-out refresh unexpectedly succeeded")
+            case .failure: break
+            }
+            #expect(!sut.isAuthenticated)
+            #expect(KeychainStore.get(service: "pieroot.todo.gmail", account: "oauth_tokens") == nil)
+            await #expect(throws: EmailError.notAuthenticated) { try await sut.fetchRecentMessages() }
+            started.continuation.finish()
+        }
+    }
+
+    #if DEBUG
+    @Test("Failed Keychain replacement retains string and device-only binary credentials")
+    func testKeychainFailedReplacementPreservesPriorValues() async throws {
+        try await withIsolatedProviderState {
+            let service = "test.keychain.atomic." + UUID().uuidString
+            defer {
+                KeychainStore.setWriteFailureForTesting(service: service, status: nil)
+                KeychainStore.deleteAny(service: service)
+            }
+            try KeychainStore.setChecked(service: service, account: "string", value: "prior")
+            try KeychainStore.setDeviceOnly(service: service, account: "binary", data: Data([1]), access: .foregroundUserPresence)
+            KeychainStore.setWriteFailureForTesting(service: service, status: errSecInteractionNotAllowed)
+            #expect(throws: KeychainStoreError.security(errSecInteractionNotAllowed)) {
+                try KeychainStore.setChecked(service: service, account: "string", value: "replacement")
+            }
+            #expect(throws: KeychainStoreError.security(errSecInteractionNotAllowed)) {
+                try KeychainStore.setDeviceOnly(service: service, account: "binary", data: Data([2]), access: .backgroundAfterFirstUnlock)
+            }
+            #expect(throws: KeychainStoreError.security(errSecInteractionNotAllowed)) {
+                try KeychainStore.setDeviceOnly(service: service, account: "binary", data: Data([3]))
+            }
+            #expect(try KeychainStore.getChecked(service: service, account: "string") == "prior")
+            #expect(try KeychainStore.getDeviceOnly(service: service, account: "binary") == Data([1]))
+        }
+    }
+
+    @Test("Refresh persistence failure is propagated and retains the prior complete bundle")
+    func testRefreshPersistenceFailureDoesNotPartiallyCommit() async throws {
+        try await withIsolatedProviderState {
+            resetSharedState()
+            defer { KeychainStore.setWriteFailureForTesting(service: "pieroot.todo.gmail", status: nil); resetSharedState() }
+            seedGmailTokens()
+            #expect(sut.isAuthenticated)
+            let before = try #require(KeychainStore.get(service: "pieroot.todo.gmail", account: "oauth_tokens"))
+            KeychainStore.setWriteFailureForTesting(service: "pieroot.todo.gmail", status: errSecInteractionNotAllowed)
+            MockURLProtocol.requestHandler = { request in
+                (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+                 Data(#"{"access_token":"must-not-partially-commit","expires_in":3600}"#.utf8))
+            }
+            await #expect(throws: KeychainStoreError.security(errSecInteractionNotAllowed)) { try await sut.fetchRecentMessages() }
+            #expect(KeychainStore.get(service: "pieroot.todo.gmail", account: "oauth_tokens") == before)
+        }
+    }
+    #endif
+    @Test("Full message fetch errors are not silently treated as deleted messages")
+    func testFullMessageOnly404IsATombstone() async throws {
+        try await withIsolatedProviderState {
+            resetSharedState()
+            defer { resetSharedState() }
+            seedGmailTokens()
+            KeychainStore.set(service: "pieroot.todo.gmail", account: "access_token_expires_at", value: String(Date().addingTimeInterval(3600).timeIntervalSince1970))
+            for status in [401, 403, 429, 500] {
+                MockURLProtocol.requestHandler = { request in
+                    (HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!, Data())
+                }
+                await #expect(throws: EmailError.apiFailed) { try await sut.fetchFullMessage(id: "message-id") }
+            }
+            MockURLProtocol.requestHandler = { request in
+                (HTTPURLResponse(url: request.url!, statusCode: 404, httpVersion: nil, headerFields: nil)!, Data())
+            }
+            let message = try await sut.fetchFullMessage(id: "message-id")
+            #expect(message == nil)
+        }
+    }
+
+    @Test("Extraction scans later pages when the first page has already been handled")
+    func testExtractionPagesPastHandledMessages() async throws {
+        try await withIsolatedProviderState {
+            resetSharedState()
+            defer { resetSharedState() }
+            seedGmailTokens()
+            KeychainStore.set(service: "pieroot.todo.gmail", account: "access_token_expires_at", value: String(Date().addingTimeInterval(3600).timeIntervalSince1970))
+            let probe = GmailMailboxRequestProbe()
+            MockURLProtocol.requestHandler = { request in
+                let url = try #require(request.url)
+                let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                if url.path.hasSuffix("/messages") {
+                    probe.recordList(url)
+                    let cursor = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "pageToken" }?.value
+                    if cursor == nil {
+                        return (response, Data(#"{"messages":[{"id":"handled"}],"nextPageToken":"next"}"#.utf8))
+                    }
+                    return (response, Data(#"{"messages":[{"id":"unhandled"}]}"#.utf8))
+                }
+                probe.recordMetadata(messageID: url.lastPathComponent)
+                return (response, try gmailMessagePayload(id: "unhandled", receivedAt: Date(), labelIDs: ["INBOX"], plainBody: "Informational message only."))
+            }
+            _ = try await sut.fetchAndExtractAll(allowFoundationModels: false, excludingAlreadyHandledMessageIDs: ["handled"])
+            let captured = probe.snapshot()
+            #expect(captured.listURLs.count == 2)
+            #expect(captured.metadataMessageIDs == ["unhandled"])
+        }
+    }
+
+    @Test("Empty cursors stop paging and repeated cursors fail instead of looping forever")
+    func testMessageListStopsEmptyCursorAndRejectsRepeatedCursor() async throws {
+        try await withIsolatedProviderState {
+            resetSharedState()
+            defer { resetSharedState() }
+            seedGmailTokens()
+            KeychainStore.set(service: "pieroot.todo.gmail", account: "access_token_expires_at", value: String(Date().addingTimeInterval(3600).timeIntervalSince1970))
+            MockURLProtocol.requestHandler = { request in
+                (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(#"{"messages":[],"nextPageToken":""}"#.utf8))
+            }
+            let ids = try await sut.fetchInboxMessageIDs()
+            #expect(ids.isEmpty)
+            MockURLProtocol.requestHandler = { request in
+                (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(#"{"messages":[],"nextPageToken":"repeat"}"#.utf8))
+            }
+            await #expect(throws: EmailError.apiFailed) { try await sut.fetchInboxMessageIDs() }
+        }
+    }
+
+    @Test("Full and metadata headers agree and MIME attachments do not become the message body")
+    func testCaseInsensitiveHeadersAndAttachmentExclusion() async throws {
+        try await withIsolatedProviderState {
+            resetSharedState()
+            defer { resetSharedState() }
+            seedGmailTokens()
+            KeychainStore.set(service: "pieroot.todo.gmail", account: "access_token_expires_at", value: String(Date().addingTimeInterval(3600).timeIntervalSince1970))
+            let payload: [String: Any] = [
+                "id": "native-id", "threadId": "thread-id", "labelIds": ["INBOX"], "internalDate": "1800000000000",
+                "payload": ["mimeType": "multipart/mixed", "headers": [
+                    ["name": "subject", "value": "Lowercase subject"],
+                    ["name": "FROM", "value": "sender@example.com"],
+                    ["name": "message-id", "value": "<original@example.com>"]
+                ], "parts": [
+                    ["mimeType": "text/plain", "filename": "attachment.txt", "body": ["data": gmailBase64URL("Not the message body")]],
+                    ["mimeType": "text/html", "headers": [["name": "Content-Disposition", "value": "attachment"]], "body": ["data": gmailBase64URL("<b>Not the HTML body</b>")]],
+                    ["mimeType": "multipart/alternative", "parts": [
+                        ["mimeType": "text/plain", "body": ["data": gmailBase64URL("Actual body")]],
+                        ["mimeType": "text/html", "body": ["data": gmailBase64URL("<p>Actual body</p>")]]
+                    ]]
+                ]]
+            ]
+            let data = try JSONSerialization.data(withJSONObject: payload)
+            MockURLProtocol.requestHandler = { request in
+                let body = request.url!.path.hasSuffix("/messages") ? Data(#"{"messages":[{"id":"native-id"}]}"#.utf8) : data
+                return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, body)
+            }
+            let full = try #require(await sut.fetchFullMessage(id: "native-id"))
+            let page = try await sut.fetchInboxPage(after: nil)
+            #expect(full.subject == page.messages.first?.subject)
+            #expect(full.from == page.messages.first?.from)
+            #expect(full.messageID == "<original@example.com>")
+            #expect(full.body == "Actual body")
+            #expect(full.htmlBody == "<p>Actual body</p>")
+        }
+    }
+
+    @Test("REST mutation uses the original native message, rejects wrong global identity and path injection")
+    func testRESTMutationIdentityAndPathValidation() async throws {
+        try await withIsolatedProviderState {
+            resetSharedState()
+            defer { resetSharedState() }
+            seedGmailTokens()
+            KeychainStore.set(service: "pieroot.todo.gmail", account: "access_token_expires_at", value: String(Date().addingTimeInterval(3600).timeIntervalSince1970))
+            var paths: [String] = []
+            MockURLProtocol.requestHandler = { request in
+                paths.append(request.url!.path)
+                return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data("{}".utf8))
+            }
+            try await sut.markAsRead(messageID: "ff", expectedGlobalMessageID: "255")
+            try await sut.trashMessage(messageID: "ff", expectedGlobalMessageID: "255")
+            await #expect(throws: MailboxMutationError.self) { try await sut.trashMessage(messageID: "ff", expectedGlobalMessageID: "256") }
+            await #expect(throws: EmailError.apiFailed) { try await sut.markAsRead(messageID: "../threads/wrong") }
+            #expect(paths == ["/gmail/v1/users/me/messages/ff/modify", "/gmail/v1/users/me/messages/ff/trash"])
+        }
+    }
+    #if !SIFT_QA
+    @Test("signOut after OAuth callback fences a late successful token exchange")
+    func testSignOutDuringOAuthExchangePreventsTokenPersistence() async throws {
+        try await withIsolatedProviderState {
+            resetSharedState()
+            defer { resetSharedState() }
+            installSuccessfulOAuth()
+            let started = AsyncStream<MockURLProtocol>.makeStream()
+            var iterator = started.stream.makeAsyncIterator()
+            MockURLProtocol.deferredHandler = { protocolInstance, _ in started.continuation.yield(protocolInstance) }
+            let pending = Task { try await sut.authenticate() }
+            let response = try #require(await iterator.next())
+            sut.signOut()
+            response.complete(status: 200, data: Data(#"{"access_token":"late-access","refresh_token":"late-refresh","expires_in":3600}"#.utf8))
+            await #expect(throws: CancellationError.self) { try await pending.value }
+            #expect(!sut.isAuthenticated)
+            #expect(KeychainStore.get(service: "pieroot.todo.gmail", account: "oauth_tokens") == nil)
+            started.continuation.finish()
+        }
+    }
+    #endif
+    @Test("An empty stored access token is not authenticated")
+    func testEmptyStoredAccessTokenIsNotAuthenticated() async {
+        await withIsolatedProviderState {
+            resetSharedState()
+            defer { resetSharedState() }
+            seedGmailTokens()
+            KeychainStore.set(service: "pieroot.todo.gmail", account: "access_token", value: "")
+            #expect(!sut.isAuthenticated)
+        }
+    }
+
+    #if DEBUG
+    @Test("Failed legacy migration leaves original credentials intact and can be retried")
+    func testLegacyTokenMigrationFailurePreservesCredentials() async throws {
+        await withIsolatedProviderState {
+            resetSharedState()
+            defer { KeychainStore.setWriteFailureForTesting(service: "pieroot.todo.gmail", status: nil); resetSharedState() }
+            seedGmailTokens()
+            KeychainStore.setWriteFailureForTesting(service: "pieroot.todo.gmail", status: errSecInteractionNotAllowed)
+            await #expect(throws: KeychainStoreError.security(errSecInteractionNotAllowed)) { try await sut.fetchRecentMessages() }
+            #expect(KeychainStore.get(service: "pieroot.todo.gmail", account: "access_token") == "valid-access")
+            #expect(KeychainStore.get(service: "pieroot.todo.gmail", account: "refresh_token") == "valid-refresh")
+            #expect(KeychainStore.get(service: "pieroot.todo.gmail", account: "oauth_tokens") == nil)
+            KeychainStore.setWriteFailureForTesting(service: "pieroot.todo.gmail", status: nil)
+            #expect(sut.isAuthenticated)
+            #expect(KeychainStore.get(service: "pieroot.todo.gmail", account: "oauth_tokens") != nil)
+            #expect(KeychainStore.get(service: "pieroot.todo.gmail", account: "access_token") == nil)
+        }
+    }
+    #endif
 }

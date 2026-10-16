@@ -60,67 +60,32 @@ nonisolated struct PendingMailboxMutation: Codable, Hashable {
     }
 }
 
-nonisolated struct MailboxPendingMutationStore {
-    private let defaults: UserDefaults
-    private let key = "pieroot.todo.mailbox.pendingMutations.v1"
+/// Shared persistence for acknowledged local-save retries and deferred remote actions.
+nonisolated struct MailboxMutationStore {
+    enum Queue {
+        case acknowledged
+        case deferred
 
-    init(defaults: UserDefaults) {
+        var key: String {
+            switch self {
+            case .acknowledged: "pieroot.todo.mailbox.pendingMutations.v1"
+            case .deferred: "pieroot.todo.mailbox.pendingRemoteMutations.v1"
+            }
+        }
+    }
+
+    private let defaults: UserDefaults
+    private let key: String
+
+    init(defaults: UserDefaults, queue: Queue) {
         self.defaults = defaults
+        key = queue.key
     }
 
     var mutations: Set<PendingMailboxMutation> {
         guard let data = defaults.data(forKey: key),
-              let decoded = try? JSONDecoder().decode(
-                Set<PendingMailboxMutation>.self,
-                from: data
-              ) else {
-            return []
-        }
-        return decoded
-    }
-
-    func insert(_ mutation: PendingMailboxMutation) {
-        var updated = mutations
-        updated.insert(mutation)
-        persist(updated)
-    }
-
-    func remove(_ mutations: Set<PendingMailboxMutation>) {
-        guard !mutations.isEmpty else { return }
-        var updated = self.mutations
-        updated.subtract(mutations)
-        persist(updated)
-    }
-
-    private func persist(_ mutations: Set<PendingMailboxMutation>) {
-        guard !mutations.isEmpty else {
-            defaults.removeObject(forKey: key)
-            return
-        }
-        if let data = try? JSONEncoder().encode(mutations) {
-            defaults.set(data, forKey: key)
-        }
-    }
-}
-
-/// Durable outbox for local-first mailbox mutations. Entries remain until their
-/// corresponding IMAP operation succeeds, so app termination never loses a user delete.
-nonisolated struct MailboxPendingRemoteMutationStore {
-    private let defaults: UserDefaults
-    private let key = "pieroot.todo.mailbox.pendingRemoteMutations.v1"
-
-    init(defaults: UserDefaults) {
-        self.defaults = defaults
-    }
-
-    var mutations: Set<PendingMailboxMutation> {
-        guard let data = defaults.data(forKey: key),
-              let decoded = try? JSONDecoder().decode(
-                Set<PendingMailboxMutation>.self,
-                from: data
-              ) else {
-            return []
-        }
+              let decoded = try? JSONDecoder().decode(Set<PendingMailboxMutation>.self, from: data)
+        else { return [] }
         return decoded
     }
 
@@ -133,7 +98,6 @@ nonisolated struct MailboxPendingRemoteMutationStore {
         guard !mutations.isEmpty else { return }
         persist(self.mutations.subtracting(mutations))
     }
-
 
     private func persist(_ mutations: Set<PendingMailboxMutation>) {
         guard !mutations.isEmpty else {
@@ -157,8 +121,8 @@ final class MailboxLocalStore {
         saveContext: { try $0.save() }
     )
 
-    private let pendingStore: MailboxPendingMutationStore
-    private let pendingRemoteStore: MailboxPendingRemoteMutationStore
+    private let pendingStore: MailboxMutationStore
+    private let pendingRemoteStore: MailboxMutationStore
     /// Process-local leases prevent an Undo action from restoring a row once an
     /// IMAP trash command has begun. They intentionally are not persisted: after a
     /// termination the durable outbox remains eligible for a safe retry.
@@ -169,8 +133,8 @@ final class MailboxLocalStore {
         defaults: UserDefaults,
         saveContext: @escaping (ModelContext) throws -> Void
     ) {
-        pendingStore = MailboxPendingMutationStore(defaults: defaults)
-        pendingRemoteStore = MailboxPendingRemoteMutationStore(defaults: defaults)
+        pendingStore = MailboxMutationStore(defaults: defaults, queue: .acknowledged)
+        pendingRemoteStore = MailboxMutationStore(defaults: defaults, queue: .deferred)
         self.saveContext = saveContext
     }
 
@@ -183,6 +147,7 @@ final class MailboxLocalStore {
         let analysisStateRaw: String; let analysisSummary: String; let analysisDetail: String
         let analysisKeyPoints: [String]; let analysisActionItems: [String]; let analysisError: String
         let analysisFailureReasonRaw: String?; let analyzedBodyFingerprint: String; let analyzedAt: Date?; let analysisVersion: Int
+        let analysisTodoCandidate: Bool?; let analysisTodoCandidateFingerprint: String
 
         init(_ email: EmailMessage) {
             id = email.id; rawMessageID = email.rawMessageID; providerGlobalMessageID = email.providerGlobalMessageID
@@ -195,6 +160,7 @@ final class MailboxLocalStore {
             analysisKeyPoints = email.analysisKeyPoints; analysisActionItems = email.analysisActionItems; analysisError = email.analysisError
             analysisFailureReasonRaw = email.analysisFailureReasonRaw
             analyzedBodyFingerprint = email.analyzedBodyFingerprint; analyzedAt = email.analyzedAt; analysisVersion = email.analysisVersion
+            analysisTodoCandidate = email.analysisTodoCandidate; analysisTodoCandidateFingerprint = email.analysisTodoCandidateFingerprint
         }
 
         func restore(_ email: EmailMessage) {
@@ -208,6 +174,7 @@ final class MailboxLocalStore {
             email.analysisKeyPoints = analysisKeyPoints; email.analysisActionItems = analysisActionItems; email.analysisError = analysisError
             email.analysisFailureReasonRaw = analysisFailureReasonRaw
             email.analyzedBodyFingerprint = analyzedBodyFingerprint; email.analyzedAt = analyzedAt; email.analysisVersion = analysisVersion
+            email.analysisTodoCandidate = analysisTodoCandidate; email.analysisTodoCandidateFingerprint = analysisTodoCandidateFingerprint
         }
     }
 
@@ -452,6 +419,7 @@ final class MailboxLocalStore {
         in context: ModelContext,
         remote: () async throws -> Void
     ) async throws {
+        try Task.checkCancellation()
         let key = EmailMessageKey(email)
         let mutation = pendingMutation(for: email, action: .markAsRead)
         let previousIsRead = email.isRead
@@ -463,9 +431,6 @@ final class MailboxLocalStore {
 
         do {
             try await remote()
-            try Task.checkCancellation()
-        } catch is CancellationError {
-            throw CancellationError()
         } catch {
             guard let currentEmail = try? resolvedEmail(matching: key, in: context) else {
                 throw error
@@ -486,7 +451,7 @@ final class MailboxLocalStore {
             try saveContext(context)
             pendingStore.remove([mutation])
         } catch {
-            pendingStore.insert(mutation)
+            pendingStore.insert([mutation])
             throw MailboxMutationError.remoteCommittedLocalSaveFailed(
                 provider: currentEmail.provider,
                 action: .markAsRead
@@ -499,11 +464,11 @@ final class MailboxLocalStore {
         in context: ModelContext,
         remote: () async throws -> Void
     ) async throws {
+        try Task.checkCancellation()
         let key = EmailMessageKey(email)
         let provider = email.provider
         let mutation = pendingMutation(for: email, action: .trash)
         try await remote()
-        try Task.checkCancellation()
 
         guard let currentEmail = try resolvedEmail(matching: key, in: context) else {
             return
@@ -516,7 +481,7 @@ final class MailboxLocalStore {
         } catch {
             context.rollback()
             currentEmail.isInInbox = false
-            pendingStore.insert(mutation)
+            pendingStore.insert([mutation])
             throw MailboxMutationError.remoteCommittedLocalSaveFailed(
                 provider: provider,
                 action: .trash
@@ -610,13 +575,17 @@ final class MailboxLocalStore {
             .filter { $0.deferredUntil.map { $0 <= now } ?? true }
             .subtracting(claimedStagedTrashMutations)
         claimedStagedTrashMutations.formUnion(eligible)
+        defer { claimedStagedTrashMutations.subtract(eligible) }
 
         var completed = 0
         for mutation in eligible {
+            guard !Task.isCancelled else { break }
             do {
                 try await remote(mutation)
                 pendingRemoteStore.remove([mutation])
                 completed += 1
+            } catch is CancellationError {
+                break
             } catch {
                 DiagnosticRecorder.shared.record(
                     error: error,
@@ -786,6 +755,18 @@ final class MailboxLocalStore {
         } else {
             invalidateAnalysisIfStale(for: survivor)
         }
+        if rows.contains(where: { $0.analysisTodoCandidate != nil }) {
+            let fingerprint = EmailAnalysisContract.fingerprint(subject: survivor.subject, body: survivor.body)
+            if let source = rows.first(where: {
+                $0.analysisTodoCandidate != nil && $0.analysisTodoCandidateFingerprint == fingerprint
+            }) {
+                survivor.analysisTodoCandidate = source.analysisTodoCandidate
+                survivor.analysisTodoCandidateFingerprint = fingerprint
+            } else {
+                survivor.analysisTodoCandidate = nil
+                survivor.analysisTodoCandidateFingerprint = ""
+            }
+        }
     }
 
     private func localID(for metadata: MailboxMessageMetadata) -> String {
@@ -871,6 +852,13 @@ final class MailboxLocalStore {
     }
 
     private func invalidateAnalysisIfStale(for email: EmailMessage) {
+        if !email.analysisTodoCandidateFingerprint.isEmpty,
+           email.analysisTodoCandidateFingerprint != EmailAnalysisContract.fingerprint(
+               subject: email.subject, body: email.body
+           ) {
+            email.analysisTodoCandidate = nil
+            email.analysisTodoCandidateFingerprint = ""
+        }
         guard email.analysisState == .analyzed,
               !EmailAnalysisContract.isCurrentAnalysis(email) else {
             return

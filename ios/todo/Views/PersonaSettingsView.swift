@@ -4,33 +4,12 @@ struct PersonaSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.appTutorialState) private var tutorial
     @EnvironmentObject private var appUpdate: AppUpdateService
-    @AppStorage("pieroot.todo.iCloudSyncEnabled") private var iCloudSyncEnabled = false
-    @ObservedObject private var settingsStore = SettingsStore.shared
     @State private var languageOverrideRaw = AppLanguage.userOverride?.rawValue ?? ""
     @State private var selectedAppLanguage = AppLanguage.current
+    @State private var showsAdvancedSettings = false
     var body: some View {
         Form {
             Section {
-                NavigationLink(destination: PersonaDetailView()) {
-                    Label("나의 페르소나", systemImage: "person.circle")
-                        .appTutorialGlow(tutorial?.currentStep == .persona)
-                }
-                NavigationLink(destination: MemoryDetailView()) {
-                    Label("행동 패턴 분석", systemImage: "brain.head.profile")
-                }
-
-                NavigationLink(destination: VocabularyDetailView()) {
-                    Label("사용자 단어장", systemImage: "text.book.closed")
-                }
-                .accessibilityIdentifier("settings.vocabularyRow")
-                NavigationLink(destination: IntelligenceDetailView()) {
-                    Label("TODO 우선순위 규칙", systemImage: "slider.horizontal.3")
-                        .appTutorialGlow(tutorial?.currentStep == .priorityRules)
-                }
-                NavigationLink(destination: BetaFeaturesView()) {
-                    Label("베타 기능", systemImage: "testtube.2")
-                }
-                .accessibilityIdentifier("settings.betaFeaturesRow")
                 NavigationLink(destination: EmailDetailView()) {
                     Label("이메일 연동", systemImage: "envelope")
                         .appTutorialGlow(tutorial?.currentStep == .emailOptional)
@@ -38,17 +17,22 @@ struct PersonaSettingsView: View {
                 NavigationLink(destination: CalendarDetailView()) {
                     Label("캘린더 설정", systemImage: "calendar")
                 }
-
-                NavigationLink(destination: LaunchScreenDetailView()) {
-                    Label("시작 화면", systemImage: "rectangle.on.rectangle")
+                NavigationLink(destination: ICloudSyncDetailView()) {
+                    Label("iCloud 동기화", systemImage: "icloud")
                 }
-
+                NavigationLink(destination: RoutineDetailView()) {
+                    Label(copy("routines.title", fallback: "루틴 학습·추천"), systemImage: "repeat")
+                }
+                .accessibilityIdentifier("settings.routinesRow")
+                NavigationLink(destination: OpenAISettingsView()) {
+                    Label(copy("openai.title", fallback: "OpenAI · ChatGPT"), systemImage: "person.crop.circle.badge.checkmark")
+                }
+                .accessibilityIdentifier("settings.openAIRow")
+            }
+            Section {
                 NavigationLink(destination: SystemStatusDetailView()) {
                     Label("시스템 권한 및 상태", systemImage: "shield")
                         .appTutorialGlow(tutorial?.currentStep == .permissions)
-                }
-                NavigationLink(destination: ICloudSyncDetailView()) {
-                    Label("iCloud 동기화", systemImage: "icloud")
                 }
                 NavigationLink(destination: AppInfoDetailView()) {
                     HStack {
@@ -62,8 +46,6 @@ struct PersonaSettingsView: View {
                     }
                 }
                 .accessibilityIdentifier("settings.appInfoRow")
-            }
-            Section {
                 Picker(
                     copy("settings.language.label", fallback: "앱 언어"),
                     selection: $languageOverrideRaw
@@ -80,13 +62,32 @@ struct PersonaSettingsView: View {
                     AppLanguage.setUserOverride(language)
                 }
                 .accessibilityIdentifier("settings.languagePicker")
-            } header: {
-                Text(copy("settings.language.section", fallback: "언어"))
-            } footer: {
-                Text(copy(
-                    "settings.language.footer",
-                    fallback: "기본값은 시스템 언어입니다. 앱에서 선택한 언어는 이 기기에만 적용됩니다."
-                ))
+            }
+            Section {
+                DisclosureGroup(isExpanded: $showsAdvancedSettings) {
+                    NavigationLink(destination: PersonaDetailView()) {
+                        Label("나의 페르소나", systemImage: "person.circle")
+                            .appTutorialGlow(tutorial?.currentStep == .persona)
+                    }
+                    NavigationLink(destination: MemoryDetailView()) {
+                        Label("행동 패턴 분석", systemImage: "brain.head.profile")
+                    }
+                    NavigationLink(destination: VocabularyDetailView()) {
+                        Label("사용자 단어장", systemImage: "text.book.closed")
+                    }
+                    .accessibilityIdentifier("settings.vocabularyRow")
+                    NavigationLink(destination: IntelligenceDetailView()) {
+                        Label("TODO 우선순위 규칙", systemImage: "slider.horizontal.3")
+                            .appTutorialGlow(tutorial?.currentStep == .priorityRules)
+                    }
+                    NavigationLink(destination: BetaFeaturesView()) {
+                        Label("베타 기능", systemImage: "testtube.2")
+                    }
+                    .accessibilityIdentifier("settings.betaFeaturesRow")
+                } label: {
+                    Label(copy("settings.advanced", fallback: "고급 설정"), systemImage: "slider.horizontal.3")
+                        .accessibilityIdentifier("settings.advanced")
+                }
             }
 
         }
@@ -103,15 +104,11 @@ struct PersonaSettingsView: View {
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
                 Button(copy("action.close", fallback: "닫기")) { dismiss() }
+                    .accessibilityIdentifier("settings.closeButton")
             }
         }
-        .task {
-            let defaults = UserDefaults.standard
-            if !defaults.bool(forKey: "pieroot.todo.didMigrateToUnifiedAI") {
-                defaults.set(true, forKey: "pieroot.todo.didMigrateToUnifiedAI")
-
-            }
-        }
+        .onAppear { revealTutorialSettings() }
+        .onChange(of: tutorial?.currentStep) { _, _ in revealTutorialSettings() }
     }
 
     private func copy(_ key: String, fallback: String) -> String {
@@ -123,14 +120,9 @@ struct PersonaSettingsView: View {
         )
     }
 
-    private func settingsBinding<T>(key: String, defaultValue: T) -> Binding<T> {
-        Binding(
-            get: {
-                SettingsStore.shared.get(key, defaultValue: defaultValue)
-            },
-            set: { newValue in
-                SettingsStore.shared.set(key, value: newValue)
-            }
-        )
+    private func revealTutorialSettings() {
+        if tutorial?.currentStep == .persona || tutorial?.currentStep == .priorityRules {
+            showsAdvancedSettings = true
+        }
     }
 }

@@ -159,6 +159,20 @@ image: /assets/images/app-icon.webp
     </div>
   </section>
 
+  <section class="section resources-section" aria-labelledby="resources-title">
+    <div class="container">
+      <div class="section-heading">
+        <h2 id="resources-title">화면 너머의 동작까지,<br>열어두었습니다.</h2>
+        <p>개발 소스의 처리 흐름과 데이터 경계, 실제 앱 화면으로 만든 소개 자료를 확인하세요.</p>
+      </div>
+      <div class="resource-links">
+        <a href="{{ '/workflows.html' | relative_url }}"><strong>작동 방식과 데이터 경계 <span aria-hidden="true">↗</span></strong><span>할 일·메일·회의·루틴이 이어지는 과정을 탐색하는 도표</span></a>
+        <a href="{{ '/media.html' | relative_url }}"><strong>앱 미리보기와 소개 이미지 <span aria-hidden="true">↗</span></strong><span>한국어·영어 iPhone·iPad 이미지와 웹 미리보기 다운로드</span></a>
+      </div>
+      <p class="resources-note">현재 개발 소스는 한국어·영어·스페인어·일본어·중국어 간체·프랑스어·이탈리아어·독일어를 지원합니다. 출시 앱의 지원 범위는 App Store에서 확인하세요.</p>
+    </div>
+  </section>
+
   <section class="download-section" id="download" aria-labelledby="download-title">
     <div class="container download-inner reveal">
       <img class="download-icon" src="{{ '/assets/images/app-icon.webp' | relative_url }}" width="96" height="96" alt="SIFT 앱 아이콘" loading="lazy" decoding="async">

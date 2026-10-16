@@ -46,7 +46,7 @@ struct OnboardingView: View {
                     descriptionStep
                 }
             }
-            .navigationTitle(isResetup ? "페르소나 다시 설정" : "처음 오셨군요!")
+            .navigationTitle(AppLanguage.localized(isResetup ? "페르소나 다시 설정" : "처음 오셨군요!", defaultValue: isResetup ? "페르소나 다시 설정" : "처음 오셨군요!", language: .current, comment: "Persona onboarding title."))
             .navigationBarTitleDisplayMode(.large)
             .toolbar { toolbarContent }
             .animation(.easeInOut(duration: 0.25), value: step)
@@ -209,7 +209,7 @@ struct OnboardingView: View {
                 Button {
                     save()
                 } label: {
-                    Text(isResetup ? "저장" : "시작하기")
+                    Text(AppLanguage.localized(isResetup ? "action.save" : "시작하기", defaultValue: isResetup ? "저장" : "시작하기", language: .current, comment: "Complete persona onboarding."))
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 14)
                         .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 14))
@@ -262,7 +262,18 @@ struct OnboardingView: View {
                     .font(.title2.bold())
                     .padding(.horizontal, 20)
                 
-                Text("할 일, 페르소나 등의 데이터를 iCloud에 동기화할지 선택해 주세요. 연동 시 다른 기기의 데이터가 즉시 로드됩니다.")
+                Group {
+                    if SettingsStore.supportsICloud {
+                        Text("할 일, 페르소나 등의 데이터를 iCloud에 동기화할지 선택해 주세요. 연동 시 다른 기기의 데이터가 즉시 로드됩니다.")
+                    } else {
+                        Text(AppLanguage.localized(
+                            "settings.sync.unavailableMessage",
+                            defaultValue: "이 빌드에서는 iCloud 동기화를 사용할 수 없습니다. 기존 데이터는 기기에만 보존됩니다.",
+                            language: .current,
+                            comment: "iCloud sync unavailable in this build."
+                        ))
+                    }
+                }
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 20)
@@ -270,6 +281,7 @@ struct OnboardingView: View {
                 VStack(spacing: 16) {
                     // Option 1: iCloud Sync
                     Button {
+                        guard SettingsStore.supportsICloud else { return }
                         withAnimation(.spring(duration: 0.2)) {
                             tempICloudSync = true
                         }
@@ -303,6 +315,8 @@ struct OnboardingView: View {
                         )
                     }
                     .buttonStyle(.plain)
+                    .disabled(!SettingsStore.supportsICloud)
+                    .opacity(SettingsStore.supportsICloud ? 1 : 0.5)
                     
                     // Option 2: Local Only
                     Button {
@@ -321,11 +335,13 @@ struct OnboardingView: View {
                                         .foregroundStyle(.white)
                                 }
                             }
-                            Text("데이터를 클라우드에 업로드하지 않고 현재 기기에만 보관합니다. 추후 설정에서 언제든지 iCloud 동기화를 켤 수 있습니다.")
-                                .font(.caption)
-                                .foregroundStyle(!tempICloudSync ? .white.opacity(0.8) : .secondary)
-                                .multilineTextAlignment(.leading)
-                                .lineSpacing(4)
+                            if SettingsStore.supportsICloud {
+                                Text("데이터를 클라우드에 업로드하지 않고 현재 기기에만 보관합니다. 추후 설정에서 언제든지 iCloud 동기화를 켤 수 있습니다.")
+                                    .font(.caption)
+                                    .foregroundStyle(!tempICloudSync ? .white.opacity(0.8) : .secondary)
+                                    .multilineTextAlignment(.leading)
+                                    .lineSpacing(4)
+                            }
                         }
                         .padding()
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -343,7 +359,7 @@ struct OnboardingView: View {
                 .padding(.horizontal, 20)
                 
                 Button {
-                    if tempICloudSync {
+                    if SettingsStore.supportsICloud && tempICloudSync {
                         iCloudSyncEnabled = true
                         SettingsStore.shared.uploadLocalSettingsToCloud()
                         KeychainStore.applySyncPolicy()
@@ -355,7 +371,7 @@ struct OnboardingView: View {
                         }
                     }
                 } label: {
-                    Text(tempICloudSync ? "iCloud 연동하고 시작하기" : "로컬 전용으로 다음 단계 진행")
+                    Text(AppLanguage.localized(SettingsStore.supportsICloud && tempICloudSync ? "iCloud 연동하고 시작하기" : "로컬 전용으로 다음 단계 진행", defaultValue: SettingsStore.supportsICloud && tempICloudSync ? "iCloud 연동하고 시작하기" : "로컬 전용으로 다음 단계 진행", language: .current, comment: "Continue onboarding with the chosen storage mode."))
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 14)
                         .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 14))

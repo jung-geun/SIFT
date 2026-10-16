@@ -1,0 +1,30 @@
+{
+  "schema_version":2,
+  "diagram_type":"workflow",
+  "meta":{"title":"SIFT · 기기 안과 선택형 외부 연결", "quality_profile":"showcase"},
+  "lanes":[{"id":"sync","label":"선택형 동기화"},{"id":"remote","label":"선택형 외부 분석"},{"id":"local","label":"별도 로컬 저장"}],
+  "mainPath":["appData","syncChoice","cloud"],
+  "nodes":[
+    {"id":"appData","lane":"sync","col":0,"type":"database","label":"앱 기본 데이터","sublabel":"할 일 · 페르소나 · 기록","width":180},
+    {"id":"syncChoice","lane":"sync","col":1,"type":"security","label":"iCloud 사용 선택","sublabel":"지원 빌드 · 사용자 설정","width":180},
+    {"id":"cloud","lane":"sync","col":2,"type":"cloud","label":"CloudKit 비공개 DB","sublabel":"같은 Apple 계정 동기화","width":190},
+    {"id":"selectedData","lane":"remote","col":0,"type":"frontend","label":"분석할 데이터","sublabel":"할 일 · 선택 메일 · 근거","width":180},
+    {"id":"scope","lane":"remote","col":1,"type":"security","label":"연결 + 범위별 동의","sublabel":"활성 제공자 · 유효 계정","width":190},
+    {"id":"openai","lane":"remote","col":2,"type":"external","label":"OpenAI Responses","sublabel":"완료 응답은 검토 초안","width":190},
+    {"id":"sourceData","lane":"local","col":0,"type":"database","label":"메일·회의·루틴 원본","sublabel":"본문 · 음성 · 전사 · 근거","width":190},
+    {"id":"localStore","lane":"local","col":1,"type":"database","label":"독립된 로컬 저장소","sublabel":"CloudKit 대상에서 분리","width":190},
+    {"id":"sourceRule","lane":"local","col":2,"type":"security","label":"자동 원격 정렬 제외","sublabel":"메일·회의 출처 할 일","width":190}
+  ],
+  "edges":[
+    {"from":"appData","to":"syncChoice"},
+    {"from":"syncChoice","to":"cloud","label":"켜진 경우","variant":"dashed"},
+    {"from":"selectedData","to":"scope"},
+    {"from":"scope","to":"openai","label":"허용 범위만","variant":"security"},
+    {"from":"sourceData","to":"localStore"},
+    {"from":"localStore","to":"sourceRule"}
+  ],
+  "cards":[
+    {"dot":"emerald","title":"저장과 전송은 다른 동의","items":["로컬 원본을 동기화하지 않아도, 사용자가 확정한 할 일·직접 적용한 설명은 기본 앱 데이터 정책을 따릅니다.","선택한 메일의 명시적 분석에는 별도 메일 동의를 적용합니다. 회의 음성·전사·화자는 OpenAI 전송 대상이 아닙니다."]},
+    {"dot":"amber","title":"네트워크가 필요한 다른 지점","items":["메일 수신·서버 변경, 명시적 모델 설치, 시스템 캘린더 계정 동작도 각각의 서비스 경계가 있습니다.","동의 철회·로그아웃 시 관련 요청을 취소합니다. store:false는 제공자의 무보존 보장을 뜻하지 않습니다."]}
+  ]
+}

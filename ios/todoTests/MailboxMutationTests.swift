@@ -126,7 +126,7 @@ struct MailboxMutationTests {
         #expect(remoteCallCount == 1)
         #expect(email.isRead)
         #expect(
-            MailboxPendingMutationStore(defaults: defaults).mutations == [
+            MailboxMutationStore(defaults: defaults, queue: .acknowledged).mutations == [
                 PendingMailboxMutation(
                     providerRawValue: MailProvider.gmail.rawValue,
                     providerMessageID: "message-id",
@@ -149,7 +149,7 @@ struct MailboxMutationTests {
             replayFailureContext.fetch(FetchDescriptor<EmailMessage>()).first
         )
         #expect(!stillUnread.isRead)
-        #expect(!MailboxPendingMutationStore(defaults: defaults).mutations.isEmpty)
+        #expect(!MailboxMutationStore(defaults: defaults, queue: .acknowledged).mutations.isEmpty)
 
         let replayContext = ModelContext(container)
         let replayStore = MailboxLocalStore(
@@ -162,7 +162,7 @@ struct MailboxMutationTests {
         )
         #expect(replayed.isRead)
         #expect(!replayed.labelIDs.contains("UNREAD"))
-        #expect(MailboxPendingMutationStore(defaults: defaults).mutations.isEmpty)
+        #expect(MailboxMutationStore(defaults: defaults, queue: .acknowledged).mutations.isEmpty)
         #expect(remoteCallCount == 1)
     }
 
@@ -233,7 +233,7 @@ struct MailboxMutationTests {
         #expect(remoteCallCount == 1)
         #expect(!email.isInInbox)
         #expect(
-            MailboxPendingMutationStore(defaults: defaults).mutations.contains(
+            MailboxMutationStore(defaults: defaults, queue: .acknowledged).mutations.contains(
                 PendingMailboxMutation(
                     providerRawValue: MailProvider.gmail.rawValue,
                     providerMessageID: "message-id",
@@ -253,7 +253,7 @@ struct MailboxMutationTests {
         let replayed = try #require(replayContext.fetch(FetchDescriptor<EmailMessage>()).first)
         #expect(!replayed.isInInbox)
         #expect(replayed.analysisKeyPoints == ["Retained after replay"])
-        #expect(MailboxPendingMutationStore(defaults: defaults).mutations.isEmpty)
+        #expect(MailboxMutationStore(defaults: defaults, queue: .acknowledged).mutations.isEmpty)
         #expect(remoteCallCount == 1)
     }
 
@@ -564,6 +564,75 @@ struct MailboxMutationTests {
         #expect(successfulFlushes == 1)
         #expect(remoteCalls == 2)
         #expect(!email.isInInbox)
+        #expect(store.stagedTrashMutations.isEmpty)
+    }
+
+    @Test("cancelled remote read restores the unread state before any later save")
+    func cancelledReadRollsBackOptimisticState() async throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        context.autosaveEnabled = false
+        let email = try insertEmail(provider: .gmail, into: context)
+        let store = MailboxLocalStore(defaults: try makeDefaults(), saveContext: { try $0.save() })
+
+        await #expect(throws: CancellationError.self) {
+            try await store.markAsRead(email, in: context) { throw CancellationError() }
+        }
+        try context.save()
+        let persisted = try #require(ModelContext(container).fetch(FetchDescriptor<EmailMessage>()).first)
+        #expect(!persisted.isRead)
+        #expect(persisted.labelIDs.contains("UNREAD"))
+    }
+
+    @Test("provider acknowledgement is persisted even if the caller is cancelled", arguments: [MailboxMutationAction.markAsRead, .trash])
+    func acknowledgedMutationSurvivesLateCancellation(action: MailboxMutationAction) async throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        context.autosaveEnabled = false
+        let email = try insertEmail(provider: .gmail, into: context)
+        let store = MailboxLocalStore(defaults: try makeDefaults(), saveContext: { try $0.save() })
+
+        let operation = Task { @MainActor in
+            let acknowledge: () async throws -> Void = {
+                withUnsafeCurrentTask { $0?.cancel() }
+            }
+            switch action {
+            case .markAsRead: try await store.markAsRead(email, in: context, remote: acknowledge)
+            case .trash: try await store.trash(email, in: context, remote: acknowledge)
+            }
+        }
+        try await operation.value
+        let persisted = try #require(ModelContext(container).fetch(FetchDescriptor<EmailMessage>()).first)
+        switch action {
+        case .markAsRead:
+            #expect(persisted.isRead)
+            #expect(!persisted.labelIDs.contains("UNREAD"))
+        case .trash:
+            #expect(!persisted.isInInbox)
+        }
+    }
+
+    @Test("a cancelled deferred batch stops and releases all leases for retry")
+    func cancelledDeferredBatchRetainsRetryableMutations() async throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let first = try insertEmail(provider: .gmail, into: context)
+        let second = try insertEmail(provider: .gmail, into: context)
+        second.id = "gmail-imap:second-global-id"
+        second.rawMessageID = "second-message-id"
+        try context.save()
+        let store = MailboxLocalStore(defaults: try makeDefaults(), saveContext: { try $0.save() })
+        let mutations = try store.stageTrash([first, second], in: context, now: .distantPast)
+        var attempts = 0
+        let cancelled = await store.flushStagedTrash(mutations, now: .distantFuture) { _ in
+            attempts += 1
+            throw CancellationError()
+        }
+        #expect(cancelled == 0)
+        #expect(attempts == 1)
+        #expect(store.stagedTrashMutations == mutations)
+        let retried = await store.flushStagedTrash(mutations, now: .distantFuture) { _ in }
+        #expect(retried == 2)
         #expect(store.stagedTrashMutations.isEmpty)
     }
 }

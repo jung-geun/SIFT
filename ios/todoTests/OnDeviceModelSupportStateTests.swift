@@ -18,13 +18,13 @@ struct OnDeviceModelSupportStateTests {
     @Test("MiniCPM5 1B MLX 모델은 낮은 메모리 티어에서 선택 가능하다")
     func testMiniCPM5ModelCatalogEntry() {
         let model = OnDeviceLLMService.modelCatalog.first {
-            $0.id == "openbmb/MiniCPM5-1B-MLX"
+            $0.id == OnDeviceLLMService.miniCPMModelID
         }
 
         #expect(model?.sizeMB == 620)
         #expect(model?.minMemoryGiB == 5.0)
-        #expect(model?.promptPrefix == "")
-        #expect(model?.assistantPrimer == "")
+        #expect(model?.promptPrefix == "<s>")
+        #expect(model?.assistantPrimer == "<think>\n\n</think>\n\n")
         #expect(
             !OnDeviceLLMService.modelCatalog.contains {
                 $0.id == "mlx-community/LFM2.5-1.2B-Instruct-4bit"

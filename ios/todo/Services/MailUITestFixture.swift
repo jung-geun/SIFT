@@ -43,7 +43,7 @@ enum MailUITestFixture {
         }
 
         let namespace = IMAPCredentialStore.canonicalAccount(gmailAccount) ?? gmailAccount
-        let stagedTrashStore = MailboxPendingRemoteMutationStore(defaults: .standard)
+        let stagedTrashStore = MailboxMutationStore(defaults: .standard, queue: .deferred)
         stagedTrashStore.remove(
             stagedTrashStore.mutations.filter {
                 $0.sourceAccountNamespace == namespace
@@ -70,13 +70,19 @@ enum MailUITestFixture {
                 snippet: "Deterministic UI-test fixture row \(index). Never live mail.",
                 body: "Deterministic UI-test fixture row \(index). Never live mail.",
                 receivedAt: now.addingTimeInterval(TimeInterval(-index * 60)),
-                isRead: false,
+                isRead: true,
                 provider: .gmail,
                 rawMessageID: "ui-test-fixture-mail-\(index)",
                 labelIDs: ["INBOX"],
                 isInInbox: true,
                 sourceAccountNamespace: namespace
             )
+            if index == 1 {
+                email.analysisTodoCandidate = true
+                email.analysisTodoCandidateFingerprint = EmailAnalysisContract.fingerprint(
+                    subject: email.subject, body: email.body
+                )
+            }
             context.insert(email)
         }
         try? context.save()

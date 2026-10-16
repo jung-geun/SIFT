@@ -19,7 +19,7 @@ enum MeetingTodoImporter {
             throw MeetingTodoImportError.staleOrUnknownDraft
         }
 
-        let language = AppLanguage.resolve(languageTag: meeting.languageTag)
+        let language = AppLanguage.current
         let sourceRef = "meeting:\(meeting.meetingID):action:\(draft.id)"
         let descriptor = FetchDescriptor<Todo>(predicate: #Predicate { todo in
             todo.sourceRef == sourceRef
@@ -43,10 +43,6 @@ enum MeetingTodoImporter {
             TaskBehaviorRecorder.recordCreation(of: todo, actor: .meetingImport, in: todoContext)
             try todoContext.save()
         }
-        Task { @MainActor in
-            await TodoEligibilityReconciler.shared.reconcile(todo)
-        }
-
         if !meeting.confirmedTodoIDs.contains(todo.id.uuidString) {
             meeting.confirmedTodoIDs.append(todo.id.uuidString)
             meeting.updatedAt = Date()
@@ -98,6 +94,11 @@ enum MeetingTodoImporter {
     }
 }
 
-enum MeetingTodoImportError: Error, Equatable {
+enum MeetingTodoImportError: LocalizedError, Equatable {
     case staleOrUnknownDraft
+
+    var errorDescription: String? {
+        AppLanguage.localized("meeting.action.error.staleDraft", defaultValue: "This action item has changed. Review the meeting again before adding it.",
+                              language: .current, comment: "A stale or missing meeting action draft cannot be imported.")
+    }
 }

@@ -5,16 +5,15 @@ import SwiftData
 
 private struct TodoRowView: View {
     let todo: Todo
+    var onToggleComplete: (() -> Void)? = nil
+    var onDelete: (() -> Void)? = nil
+    var onPromote: (() -> Void)? = nil
+
+    @State private var isHovered = false
 
     var body: some View {
         HStack(spacing: 12) {
-            // 우선순위 컬러 인디케이터
-            RoundedRectangle(cornerRadius: 3)
-                .fill(priorityColor)
-                .frame(width: 4)
-                .frame(maxHeight: .infinity)
-
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 5) {
                 Text(todo.title.isEmpty
                      ? AppLanguage.localized("todo.noTitle", defaultValue: "(제목 없음)", language: .current, comment: "Untitled to-do placeholder.")
                      : todo.title)
@@ -22,113 +21,248 @@ private struct TodoRowView: View {
                     .strikethrough(todo.isCompleted)
                     .foregroundStyle(todo.isCompleted ? .secondary : .primary)
 
+                if let dueDate = todo.dueDate {
+                    Label(
+                        dueDate.formatted(
+                            .dateTime.year().month(.abbreviated).day().hour().minute()
+                                .locale(AppLanguage.current.locale)
+                        ),
+                        systemImage: "calendar"
+                    )
+                    .font(.subheadline)
+                    .foregroundStyle(todo.isOverdue ? AppTheme.destructive : .secondary)
+                }
+
                 if todo.todoSource == .email, !todo.sourceSender.isEmpty {
-                    Label(todo.sourceSender, systemImage: "person.crop.circle")
-                        .font(.caption2)
+                    Label(todo.sourceSender, systemImage: "envelope")
+                        .font(.subheadline)
                         .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-
-                HStack(spacing: 6) {
-                    if let label = todo.dueDateLabel {
-                        Label(label, systemImage: "clock")
-                            .font(.caption)
-                            .foregroundStyle(todo.isOverdue ? AppTheme.destructive : .secondary)
-                    }
-                    if !todo.tags.isEmpty {
-                        Label(todo.tags.prefix(2).joined(separator: ", "), systemImage: "tag")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                if !todo.priorityReason.isEmpty && todo.manualPriority == nil {
-                    HStack(spacing: 4) {
-                        if todo.aiPersonaFit {
-                            Image(systemName: "sparkles")
-                                .font(.caption2)
-                                .foregroundStyle(AppTheme.accent)
-                        }
-                        // 산출 엔진 배지 — "휴리스틱"이면 LLM 경로가 실패로 폴백됐음을 의미
-                        if let engine = PriorityEngine(rawValue: todo.aiEngine) {
-                            let isHeuristic = engine == .heuristic
-                            Text(engine.displayName)
-                                .font(.caption2.weight(.medium))
-                                .foregroundStyle(isHeuristic ? AppTheme.warning : AppTheme.accent)
-                                .padding(.horizontal, 4)
-                                .padding(.vertical, 1)
-                                .background(
-                                    (isHeuristic ? AppTheme.warning : AppTheme.accent).opacity(0.1)
-                                )
-                                .clipShape(RoundedRectangle(cornerRadius: 3))
-                        }
-                        if !todo.aiFallbackReason.isEmpty {
-                            Label(
-                                AppLanguage.localized("todo.priority.fallback", defaultValue: "폴백", language: .current, comment: "Heuristic fallback badge."),
-                                systemImage: "exclamationmark.triangle.fill"
-                            )
-                                .font(.caption2.weight(.medium))
-                                .foregroundStyle(AppTheme.warning)
-                        }
-                        Text(todo.priorityReason)
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
-                            .lineLimit(1)
-                        if let rec = todo.aiRecommendedTime {
-                            Text("· \(rec.formatted(.dateTime.hour().minute()))")
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
-                        }
-                    }
                 }
             }
 
-            Spacer()
+            Spacer(minLength: 0)
 
-            // 출처 배지
-            sourceBadge
+            if todo.hasSuccessfulAIAnalysis {
+                Image(systemName: "sparkles")
+                    .font(.caption2)
+                    .foregroundStyle(AppTheme.accent)
+                    .accessibilityLabel("AI 정리 완료")
+                    .accessibilityIdentifier("todo.row.aiAnalyzed")
+            }
+
+            // Preserve the pointer shortcut alongside swipe and context actions.
+            if isHovered {
+                Menu {
+                    rowMenuActions
+                } label: {
+                    Image(systemName: "ellipsis.circle.fill")
+                        .font(.system(size: 16))
+                        .foregroundStyle(.secondary)
+                        .padding(4)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .transition(.opacity.animation(.easeInOut(duration: 0.15)))
+            }
         }
         .padding(.vertical, 4)
-    }
-
-    private var priorityColor: Color {
-        // 등록 대기열 항목은 선호도 대신 마감일 기반 색상
-        if todo.triage == .review { return deadlineColor }
-        switch todo.effectivePriority {
-        case 0.8...: return AppTheme.destructive
-        case 0.6...: return AppTheme.warning
-        case 0.4...: return AppTheme.accent
-        default:     return .gray.opacity(0.4)
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.15)) {
+                isHovered = hovering
+            }
         }
-    }
-
-    private var deadlineColor: Color {
-        guard let due = todo.dueDate else { return .gray.opacity(0.4) }
-        let days = due.timeIntervalSinceNow / 86400
-        if days < 1 { return AppTheme.destructive }      // 당일 또는 이미 지남
-        if days < 3 { return AppTheme.warning }          // 2-3일
-        if days < 7 { return AppTheme.accent }           // 4-7일
-        return .gray.opacity(0.4)                        // 1주+
+        .contextMenu {
+            rowMenuActions
+        }
     }
 
     @ViewBuilder
-    private var sourceBadge: some View {
-        switch todo.todoSource {
-        case .email:
-            Image(systemName: "envelope.fill")
-                .font(.caption)
-                .foregroundStyle(AppTheme.accent)
-        case .calendar:
-            Image(systemName: todo.isFixedSchedule ? "arrow.triangle.2.circlepath" : "calendar")
-                .font(.caption)
-                .foregroundStyle(AppTheme.accent)
-        case .meeting:
-            Image(systemName: "person.2.fill")
-                .font(.caption)
-                .foregroundStyle(AppTheme.accent)
-        case .manual:
-            EmptyView()
+    private var rowMenuActions: some View {
+        if todo.triage == .review {
+            Button {
+                onPromote?()
+            } label: {
+                Label(
+                    AppLanguage.localized("action.promoteToActive", defaultValue: "진행중으로 추가", language: .current, comment: "Promote review item to active action."),
+                    systemImage: "checkmark.circle"
+                )
+            }
+        } else {
+            Button {
+                onToggleComplete?()
+            } label: {
+                Label(
+                    AppLanguage.localized(
+                        todo.isCompleted ? "action.undo" : "action.complete",
+                        defaultValue: todo.isCompleted ? "되돌리기" : "완료",
+                        language: .current,
+                        comment: "Complete or undo to-do action."
+                    ),
+                    systemImage: todo.isCompleted ? "arrow.uturn.left" : "checkmark"
+                )
+            }
         }
+
+        Button(role: .destructive) {
+            onDelete?()
+        } label: {
+            Label(
+                AppLanguage.localized("action.delete", defaultValue: "삭제", language: .current, comment: "Delete to-do action."),
+                systemImage: "trash"
+            )
+        }
+    }
+
+}
+
+// MARK: - Todo Undo Support
+
+private struct TodoUndoSnapshot {
+    let id: UUID
+    let title: String
+    let notes: String
+    let dueDate: Date?
+    let startDate: Date?
+    let isCompleted: Bool
+    let completedAt: Date?
+    let manualPriority: Int?
+    let computedPriorityScore: Double
+    let priorityReason: String
+    let reminderOffsets: [Double]
+    let estimatedDurationMinutes: Int
+    let source: String
+    let sourceRef: String
+    let sourceSender: String
+    let sourceMessageID: String
+    let sourceThreadID: String
+    let sourceSenderEmail: String
+    let sourceAccountNamespace: String
+    let triageStatus: String
+    let tags: [String]
+    let calendarEventID: String?
+    let isFixedSchedule: Bool
+    let aiRecommendedTime: Date?
+    let aiEngine: String
+    let aiPersonaFit: Bool
+    let aiFallbackReason: String
+
+    init(from todo: Todo) {
+        self.id = todo.id
+        self.title = todo.title
+        self.notes = todo.notes
+        self.dueDate = todo.dueDate
+        self.startDate = todo.startDate
+        self.isCompleted = todo.isCompleted
+        self.completedAt = todo.completedAt
+        self.manualPriority = todo.manualPriority
+        self.computedPriorityScore = todo.computedPriorityScore
+        self.priorityReason = todo.priorityReason
+        self.reminderOffsets = todo.reminderOffsets
+        self.estimatedDurationMinutes = todo.estimatedDurationMinutes
+        self.source = todo.source
+        self.sourceRef = todo.sourceRef
+        self.sourceSender = todo.sourceSender
+        self.sourceMessageID = todo.sourceMessageID
+        self.sourceThreadID = todo.sourceThreadID
+        self.sourceSenderEmail = todo.sourceSenderEmail
+        self.sourceAccountNamespace = todo.sourceAccountNamespace
+        self.triageStatus = todo.triageStatus
+        self.tags = todo.tags
+        self.calendarEventID = todo.calendarEventID
+        self.isFixedSchedule = todo.isFixedSchedule
+        self.aiRecommendedTime = todo.aiRecommendedTime
+        self.aiEngine = todo.aiEngine
+        self.aiPersonaFit = todo.aiPersonaFit
+        self.aiFallbackReason = todo.aiFallbackReason
+    }
+
+    func restore(into context: ModelContext) -> Todo {
+        let todo = Todo(title: title, dueDate: dueDate, tags: tags)
+        todo.id = id
+        todo.notes = notes
+        todo.startDate = startDate
+        todo.isCompleted = isCompleted
+        todo.completedAt = completedAt
+        todo.manualPriority = manualPriority
+        todo.computedPriorityScore = computedPriorityScore
+        todo.priorityReason = priorityReason
+        todo.reminderOffsets = reminderOffsets
+        todo.estimatedDurationMinutes = estimatedDurationMinutes
+        todo.source = source
+        todo.sourceRef = sourceRef
+        todo.sourceSender = sourceSender
+        todo.sourceMessageID = sourceMessageID
+        todo.sourceThreadID = sourceThreadID
+        todo.sourceSenderEmail = sourceSenderEmail
+        todo.sourceAccountNamespace = sourceAccountNamespace
+        todo.triageStatus = triageStatus
+        todo.calendarEventID = calendarEventID
+        todo.isFixedSchedule = isFixedSchedule
+        todo.aiRecommendedTime = aiRecommendedTime
+        todo.aiEngine = aiEngine
+        todo.aiPersonaFit = aiPersonaFit
+        todo.aiFallbackReason = aiFallbackReason
+        context.insert(todo)
+        try? context.save()
+        return todo
+    }
+
+    func apply(to todo: Todo) {
+        todo.title = title
+        todo.notes = notes
+        todo.dueDate = dueDate
+        todo.startDate = startDate
+        todo.isCompleted = isCompleted
+        todo.completedAt = completedAt
+        todo.manualPriority = manualPriority
+        todo.computedPriorityScore = computedPriorityScore
+        todo.priorityReason = priorityReason
+        todo.reminderOffsets = reminderOffsets
+        todo.estimatedDurationMinutes = estimatedDurationMinutes
+        todo.source = source
+        todo.sourceRef = sourceRef
+        todo.sourceSender = sourceSender
+        todo.sourceMessageID = sourceMessageID
+        todo.sourceThreadID = sourceThreadID
+        todo.sourceSenderEmail = sourceSenderEmail
+        todo.sourceAccountNamespace = sourceAccountNamespace
+        todo.triageStatus = triageStatus
+        todo.tags = tags
+        todo.calendarEventID = calendarEventID
+        todo.isFixedSchedule = isFixedSchedule
+        todo.aiRecommendedTime = aiRecommendedTime
+        todo.aiEngine = aiEngine
+        todo.aiPersonaFit = aiPersonaFit
+        todo.aiFallbackReason = aiFallbackReason
+        todo.updatedAt = Date()
+    }
+}
+
+private enum TodoUndoAction {
+    case toggleComplete(todoID: UUID, wasCompleted: Bool, previousCompletedAt: Date?)
+    case promote(todoID: UUID, previousTriage: String)
+    case delete(snapshot: TodoUndoSnapshot)
+    case restore(snapshot: TodoUndoSnapshot)
+}
+
+// The iPhone home list is deadline-led; AI scores never hide or outrank an overdue task.
+enum TodoListOrdering {
+    static func activeTodos(from todos: [Todo]) -> [Todo] {
+        todos.filter { !$0.isCompleted && $0.triage == .todo }
+            .sorted { lhs, rhs in
+                switch (lhs.dueDate, rhs.dueDate) {
+                case let (left?, right?) where left != right: return left < right
+                case (.some, nil): return true
+                case (nil, .some): return false
+                default: break
+                }
+                if lhs.manualPriority != rhs.manualPriority {
+                    return (lhs.manualPriority ?? 0) > (rhs.manualPriority ?? 0)
+                }
+                if lhs.createdAt != rhs.createdAt { return lhs.createdAt < rhs.createdAt }
+                return lhs.id.uuidString < rhs.id.uuidString
+            }
     }
 }
 
@@ -136,6 +270,7 @@ private struct TodoRowView: View {
 
 struct TodoListView: View {
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Query(sort: \Todo.createdAt, order: .reverse) private var todos: [Todo]
     @Query(sort: \Persona.updatedAt, order: .reverse) private var personas: [Persona]
     @Query private var auditEvents: [TaskAuditEvent]
@@ -146,6 +281,17 @@ struct TodoListView: View {
     @AppStorage("pieroot.todo.hasOnboarded") private var hasOnboarded = false
     @AppStorage("pieroot.todo.hasCompletedTutorial") private var hasCompletedTutorial = false
     @AppStorage("pieroot.todo.iCloudSyncEnabled") private var iCloudSyncEnabled = false
+    @AppStorage("pieroot.todo.board.showActive") private var showActiveColumn = true
+    @AppStorage("pieroot.todo.board.showOverdue") private var showOverdueColumn = true
+    @AppStorage("pieroot.todo.board.showReview") private var showReviewColumn = true
+    @AppStorage("pieroot.todo.board.showCompleted") private var showCompletedColumn = true
+    @AppStorage("pieroot.todo.board.isBoardMode") private var isBoardMode = true
+    @AppStorage("pieroot.todo.board.autoHideEmpty") private var autoHideEmpty = false
+    @State private var undoStack: [TodoUndoAction] = []
+
+    private var areAllColumnsVisible: Bool {
+        showActiveColumn && showOverdueColumn && showReviewColumn && showCompletedColumn
+    }
 
     /// Global search is surfaced from this tab's native pull-down search drawer.
     let globalSearchAppContainer: ModelContainer?
@@ -166,6 +312,7 @@ struct TodoListView: View {
     )
     @State private var prioritizingProgressValue: Double? = nil
     @State private var showAFMError = false
+    @State private var saveError: String?
     @State private var lastNotificationSignature = ""
     @State private var replayTutorialAfterSettingsDismiss = false
 
@@ -237,9 +384,9 @@ struct TodoListView: View {
 
     enum TodoFilter: String, CaseIterable {
         case active
+        case review
         case overdue
         case all
-        case review
         case completed
 
         var localizedTitle: String {
@@ -263,11 +410,7 @@ struct TodoListView: View {
             return todos.filter { !$0.isCompleted && $0.triage == .todo }
                 .sorted(by: TodoPriorityOrdering.higherPriorityFirst)
         case .active:
-            return todos.filter {
-                guard !$0.isCompleted && $0.triage == .todo else { return false }
-                return !$0.isOverdue || $0.effectivePriority >= 0.8
-            }
-            .sorted(by: TodoPriorityOrdering.higherPriorityFirst)
+            return TodoListOrdering.activeTodos(from: todos)
         case .overdue:
             return todos.filter { $0.isOverdue && $0.triage == .todo }
                 .sorted(by: TodoPriorityOrdering.higherPriorityFirst)
@@ -282,26 +425,55 @@ struct TodoListView: View {
                     }
                 }
         case .completed:
-            let oneMonthAgo = Calendar.current.date(byAdding: .day, value: -30, to: Date()) ?? Date().addingTimeInterval(-30 * 86400)
-            return todos.filter { $0.isCompleted && ($0.completedAt == nil || $0.completedAt! >= oneMonthAgo) }
-                .sorted(by: TodoPriorityOrdering.higherPriorityFirst)
+            return todos.filter { $0.isCompleted }
+                .sorted {
+                    let date0 = $0.completedAt ?? $0.updatedAt
+                    let date1 = $1.completedAt ?? $1.updatedAt
+                    return date0 > date1
+                }
         }
     }
 
     var overdueCount: Int { todos.filter { $0.isOverdue && $0.triage == .todo }.count }
-    var activeCount: Int  {
-        todos.filter {
-            guard !$0.isCompleted && $0.triage == .todo else { return false }
-            return !$0.isOverdue || $0.effectivePriority >= 0.8
-        }.count
-    }
     var reviewCount: Int  { todos.filter { !$0.isCompleted && $0.triage == .review }.count }
 
     // MARK: - Body
 
     var body: some View {
         NavigationStack {
-            todoList
+            Group {
+                if horizontalSizeClass == .regular && isBoardMode {
+                    TodoBoardView(
+                        todos: todos,
+                        showActiveColumn: $showActiveColumn,
+                        showOverdueColumn: $showOverdueColumn,
+                        showReviewColumn: $showReviewColumn,
+                        showCompletedColumn: $showCompletedColumn,
+                        autoHideEmpty: $autoHideEmpty,
+                        onToggleComplete: { toggleComplete($0) },
+                        onDelete: { deleteTodo($0) },
+                        onPromote: { promoteTodo($0) },
+                        onMoveTodoToColumn: { moveTodo($0, toColumn: $1) },
+                        onAddTodo: { openAddTodoIfAllowed() },
+                        canOpenAddTodo: canOpenAddTodoDuringTutorial
+                    )
+                } else {
+                    todoList
+                }
+            }
+                .searchable(
+                    text: $globalSearchText,
+                    placement: .navigationBarDrawer(displayMode: .automatic),
+                    prompt: Text(AppLanguage.localized(
+                        "search.prompt",
+                        defaultValue: "할 일, 메일, 회의 검색",
+                        language: .current,
+                        comment: "Global pull-down search prompt."
+                    ))
+                )
+                .navigationDestination(for: Todo.self) { todo in
+                    TodoDetailView(todo: todo)
+                }
                 .overlay {
                     if let globalSearchAppContainer,
                        let globalSearchEmailContainer,
@@ -316,9 +488,10 @@ struct TodoListView: View {
                         )
                     }
                 }
-                .navigationBarTitleDisplayMode(.large)
+                .navigationBarTitleDisplayMode(horizontalSizeClass == .regular ? .inline : .large)
                 .navigationTitle("할 일")
                 .toolbar { toolbarContent }
+                .disableNavigationBarMinimization()
             .overlay(alignment: .bottom) {
                 VStack(spacing: 8) {
                     if let updateInfo = appUpdate.updateInfo {
@@ -338,6 +511,22 @@ struct TodoListView: View {
                 }
                 .padding(.bottom, 8)
             }
+        }
+        .background {
+            Button("실행 취소 (Control)") {
+                undoLastAction()
+            }
+            .keyboardShortcut("z", modifiers: .control)
+            .opacity(0)
+            .allowsHitTesting(false)
+        }
+        .background {
+            Button("실행 취소 (Command)") {
+                undoLastAction()
+            }
+            .keyboardShortcut("z", modifiers: .command)
+            .opacity(0)
+            .allowsHitTesting(false)
         }
         .fullScreenCover(
             isPresented: Binding(
@@ -417,7 +606,7 @@ struct TodoListView: View {
             syncMonitor.updateCount(totalSyncedCount)
         }
         .onChange(of: syncMonitor.phase) { _, newPhase in
-            guard iCloudSyncEnabled else { return }
+            guard SettingsStore.supportsICloud && iCloudSyncEnabled else { return }
             // 첫 동기화 완료/타임아웃 후 페르소나 유무 판정
             if (newPhase == .idle || newPhase == .completed) && !initialSyncDone {
                 initialSyncDone = true
@@ -448,6 +637,19 @@ struct TodoListView: View {
             Button(AppLanguage.localized("action.cancel", defaultValue: "취소", language: .current, comment: "Cancel action."), role: .cancel) {}
         } message: {
             Text(AppLanguage.localized("todo.priority.error.message", defaultValue: "우선순위 분석 중 오류가 발생했습니다.", language: .current, comment: "Priority analysis error message."))
+        }
+        .alert(
+            AppLanguage.localized("todo.detail.saveErrorTitle", defaultValue: "저장 오류", language: .current, comment: "To-do save error title."),
+            isPresented: Binding(
+                get: { saveError != nil },
+                set: { if !$0 { saveError = nil } }
+            )
+        ) {
+            Button(AppLanguage.localized("action.confirm", defaultValue: "확인", language: .current, comment: "Dismiss to-do save error.")) {
+                saveError = nil
+            }
+        } message: {
+            Text(saveError ?? "")
         }
     }
 
@@ -487,14 +689,14 @@ struct TodoListView: View {
                         .foregroundStyle(.white)
                 }
             }
-            .font(.subheadline)
+            .font(.subheadline.weight(isSelected ? .semibold : .regular))
             .padding(.horizontal, 12)
-            .padding(.vertical, 6)
+            .padding(.vertical, 8)
             .background(
                 isSelected ? AppTheme.accentSoft : AppTheme.neutralFill,
                 in: Capsule()
             )
-            .foregroundStyle(isSelected ? AppTheme.accent : Color.gray)
+            .foregroundStyle(isSelected ? AppTheme.accent : .secondary)
 
             .overlay {
                 if isSelected {
@@ -523,9 +725,14 @@ struct TodoListView: View {
             } else {
                 ForEach(filteredTodos) { todo in
                     NavigationLink(value: todo) {
-                        TodoRowView(todo: todo)
+                        TodoRowView(
+                            todo: todo,
+                            onToggleComplete: { toggleComplete(todo) },
+                            onDelete: { deleteTodo(todo) },
+                            onPromote: { promoteTodo(todo) }
+                        )
                     }
-                    .swipeActions(edge: .leading) {
+                    .swipeActions(edge: .leading, allowsFullSwipe: true) {
                         if todo.triage == .review {
                             promoteButton(todo)
                         } else {
@@ -539,16 +746,6 @@ struct TodoListView: View {
             }
         }
         .listStyle(.insetGrouped)
-        .searchable(
-            text: $globalSearchText,
-            placement: .navigationBarDrawer(displayMode: .automatic),
-            prompt: Text(AppLanguage.localized(
-                "search.prompt",
-                defaultValue: "할 일, 메일, 회의 검색",
-                language: .current,
-                comment: "Global pull-down search prompt."
-            ))
-        )
         .refreshable {
             await CalendarService.shared.syncCalendarWithTodos(context: modelContext)
 #if DEBUG
@@ -567,32 +764,52 @@ struct TodoListView: View {
             }
         }
 #endif
-        .navigationDestination(for: Todo.self) { todo in
-            TodoDetailView(todo: todo)
-        }
     }
 
-    @ViewBuilder
     private var emptyState: some View {
-        ContentUnavailableView {
-            Label(emptyTitle, systemImage: emptyIcon)
-        } description: {
-            Text(emptyDescription)
-        } actions: {
+        VStack(spacing: 12) {
+            Image(systemName: emptyIcon)
+                .font(.system(size: 38, weight: .light))
+                .foregroundStyle(.tertiary)
+                .accessibilityHidden(true)
+            Text(emptyTitle)
+                .font(.title3.weight(.semibold))
+            if !emptyDescription.isEmpty {
+                Text(emptyDescription)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
             if filter != .completed {
-                Button(AppLanguage.localized("todo.add", defaultValue: "할 일 추가", language: .current, comment: "Add to-do button")) {
+                Button {
                     openAddTodoIfAllowed()
+                } label: {
+                    Label(
+                        AppLanguage.localized("todo.add", defaultValue: "할 일 추가", language: .current, comment: "Add to-do button"),
+                        systemImage: "plus"
+                    )
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 12)
+                    .background(AppTheme.accent, in: Capsule())
                 }
+                .buttonStyle(.plain)
+                .padding(.top, 8)
                 .disabled(!canOpenAddTodoDuringTutorial)
                 .appTutorialGlow(tutorial?.currentStep == .addTodoOpen)
             }
         }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 24)
     }
 
     private var emptyTitle: String {
         let (key, fallback): (String, String) = switch filter {
         case .all:       ("todo.empty.title.all", "할 일이 없습니다")
-        case .active:    ("todo.empty.title.active", "모두 완료했습니다!")
+        case .active:    todos.contains(where: \.isCompleted)
+            ? ("todo.empty.title.active", "모두 완료했습니다!")
+            : ("todo.empty.title.all", "할 일이 없습니다")
         case .overdue:   ("todo.empty.title.overdue", "기한 초과 항목 없음")
         case .review:    ("todo.empty.title.review", "등록 대기열이 비어 있습니다")
         case .completed: ("todo.empty.title.completed", "완료된 항목 없음")
@@ -611,7 +828,7 @@ struct TodoListView: View {
 
     private var emptyDescription: String {
         let (key, fallback): (String, String) = switch filter {
-        case .active:    ("todo.empty.description.active", "+ 버튼을 눌러 새 할 일을 추가하세요.")
+        case .active:    ("todo.empty.description.active", "새 할 일을 적고 필요하면 마감일을 설정하세요.")
         case .overdue:   ("todo.empty.description.overdue", "모든 항목이 기한 내에 있습니다.")
         case .completed: ("todo.empty.description.completed", "완료한 항목이 여기에 표시됩니다.")
         case .review:    ("todo.empty.description.review", "캘린더에서 가져온 일정이 마감일 순으로 표시됩니다. 스와이프해 진행중으로 추가하면 캘린더에 등록됩니다.")
@@ -777,15 +994,20 @@ struct TodoListView: View {
             )
         }
     }
+    private func promoteTodo(_ todo: Todo) {
+        undoStack.append(.promote(todoID: todo.id, previousTriage: todo.triageStatus))
+        Task { @MainActor in
+            await TodoEligibilityReconciler.shared.setTriage(.todo, for: todo)
+            _ = withAnimation {
+                CalendarService.shared.applyAutoRegistration(for: todo)
+            }
+        }
+    }
+
     /// 등록 대기열 항목을 진행중으로 승격 + 캘린더 자동 등록 정책 적용
     private func promoteButton(_ todo: Todo) -> some View {
         Button {
-            Task { @MainActor in
-                await TodoEligibilityReconciler.shared.setTriage(.todo, for: todo)
-                _ = withAnimation {
-                    CalendarService.shared.applyAutoRegistration(for: todo)
-                }
-            }
+            promoteTodo(todo)
         } label: {
             Label(
                 AppLanguage.localized("action.promoteToActive", defaultValue: "진행중으로 추가", language: .current, comment: "Promote review item to active action."),
@@ -809,6 +1031,8 @@ struct TodoListView: View {
     private var canOpenAddTodoDuringTutorial: Bool {
         guard tutorial?.isActive == true else { return true }
         return tutorial?.currentStep == .addTodoOpen
+            || (tutorial?.currentStep == .autoSort
+                && !todos.contains { !$0.isCompleted && $0.triage == .todo })
     }
 
     private var canOpenSettingsDuringTutorial: Bool {
@@ -816,44 +1040,154 @@ struct TodoListView: View {
         return settingsButtonNeedsTutorialGlow
     }
 
+    private var prioritizeToolbarPlacement: ToolbarItemPlacement {
+        #if targetEnvironment(macCatalyst)
+        .primaryAction
+        #else
+        .navigationBarLeading
+        #endif
+    }
+
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        ToolbarItem(placement: .navigationBarTrailing) {
-            Button {
-                guard canOpenSettingsDuringTutorial else { return }
-                showSettings = true
-            } label: {
-                Image(systemName: "gear")
-                    .appTutorialGlow(settingsButtonNeedsTutorialGlow)
+        if horizontalSizeClass == .regular {
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    if isBoardMode {
+                        Section(AppLanguage.localized("board.columns.title", defaultValue: "보드 컬럼 표시", language: .current, comment: "Board columns")) {
+                            Toggle(isOn: $showActiveColumn) {
+                                Label(TodoFilter.active.localizedTitle, systemImage: "play.circle")
+                            }
+                            Toggle(isOn: $showOverdueColumn) {
+                                Label(TodoFilter.overdue.localizedTitle, systemImage: "exclamationmark.circle")
+                            }
+                            Toggle(isOn: $showReviewColumn) {
+                                Label(TodoFilter.review.localizedTitle, systemImage: "tray.full")
+                            }
+                            Toggle(isOn: $showCompletedColumn) {
+                                Label(TodoFilter.completed.localizedTitle, systemImage: "checkmark.circle")
+                            }
+                        }
+
+                        Section {
+                            Toggle(isOn: $autoHideEmpty) {
+                                Label(
+                                    AppLanguage.localized("board.columns.autoHideEmpty", defaultValue: "빈 컬럼 숨기기", language: .current, comment: "Auto hide empty columns"),
+                                    systemImage: "eye.slash.circle"
+                                )
+                            }
+                        }
+                    }
+
+                    Section(AppLanguage.localized("board.viewMode.title", defaultValue: "보기 방식", language: .current, comment: "View mode toggle")) {
+                        Button {
+                            withAnimation { isBoardMode = true }
+                        } label: {
+                            Label(
+                                AppLanguage.localized("board.viewMode.board", defaultValue: "보드 보기", language: .current, comment: "Board view mode"),
+                                systemImage: isBoardMode ? "checkmark" : "rectangle.split.3x1"
+                            )
+                        }
+
+                        Button {
+                            withAnimation { isBoardMode = false }
+                        } label: {
+                            Label(
+                                AppLanguage.localized("board.viewMode.list", defaultValue: "목록 보기", language: .current, comment: "List view mode"),
+                                systemImage: !isBoardMode ? "checkmark" : "list.bullet"
+                            )
+                        }
+                    }
+
+                    if isBoardMode && !areAllColumnsVisible {
+                        Section {
+                            Button(AppLanguage.localized("board.columns.showAll", defaultValue: "모든 컬럼 표시", language: .current, comment: "Show all columns")) {
+                                withAnimation {
+                                    showActiveColumn = true
+                                    showOverdueColumn = true
+                                    showReviewColumn = true
+                                    showCompletedColumn = true
+                                }
+                            }
+                        }
+                    }
+                } label: {
+                    Image(systemName: (areAllColumnsVisible && !autoHideEmpty) ? "eye" : "eye.slash")
+                        .fontWeight(.medium)
+                }
+                .accessibilityLabel(AppLanguage.localized("board.visibility.label", defaultValue: "컬럼 표시 설정", language: .current, comment: "Column visibility menu"))
+                .accessibilityIdentifier("todo.boardVisibilityMenu")
             }
-            .disabled(!canOpenSettingsDuringTutorial)
-            .accessibilityLabel(AppLanguage.localized("todo.settings.accessibilityLabel", defaultValue: "설정", language: .current, comment: "Settings button."))
-            .accessibilityIdentifier("todo.settingsButton")
         }
+
         ToolbarItem(placement: .topBarTrailing) {
             Button {
                 openAddTodoIfAllowed()
             } label: {
-                Image(systemName: "plus")
-                    .fontWeight(.semibold)
-                    .appTutorialGlow(tutorial?.currentStep == .addTodoOpen)
+                Label {
+                    Text(AppLanguage.localized("todo.add.accessibilityLabel", defaultValue: "새 할 일 추가", language: .current, comment: "Add to-do button."))
+                } icon: {
+                    Image(systemName: "plus.circle.fill")
+                        .font(.title3)
+                        .foregroundStyle(AppTheme.accent)
+                        .appTutorialGlow(tutorial?.currentStep == .addTodoOpen)
+                }
+                .labelStyle(.iconOnly)
             }
             .disabled(!canOpenAddTodoDuringTutorial)
             .accessibilityLabel(AppLanguage.localized("todo.add.accessibilityLabel", defaultValue: "새 할 일 추가", language: .current, comment: "Add to-do button."))
             .accessibilityIdentifier("todo.addButton")
         }
-        ToolbarItem(placement: .navigationBarLeading) {
-            Button {
-                tutorial?.handlePrioritizeTriggered()
-                Task { await runPrioritize() }
-            } label: {
-                Label(
-                    AppLanguage.localized("action.prioritize", defaultValue: "AI 정리", language: .current, comment: "Prioritize with AI action."),
-                    systemImage: "sparkles"
-                )
-                .appTutorialGlow(tutorial?.currentStep == .autoSort)
+        if horizontalSizeClass == .regular || tutorial?.currentStep == .autoSort {
+            ToolbarItem(placement: prioritizeToolbarPlacement) {
+                Button {
+                    tutorial?.handlePrioritizeTriggered()
+                    Task { await runPrioritize() }
+                } label: {
+                    Label(
+                        AppLanguage.localized("action.prioritize", defaultValue: "AI 정리", language: .current, comment: "Prioritize with AI action."),
+                        systemImage: "sparkles"
+                    )
+                    .appTutorialGlow(tutorial?.currentStep == .autoSort)
+                }
+                .disabled(isPrioritizing || !todos.contains { !$0.isCompleted && $0.triage == .todo })
+                .accessibilityIdentifier("todo.prioritizeButton")
             }
-            .disabled(isPrioritizing || todos.filter { !$0.isCompleted }.isEmpty)
+        }
+        ToolbarItem(placement: .topBarTrailing) {
+            Menu {
+                Button {
+                    guard canOpenSettingsDuringTutorial else { return }
+                    showSettings = true
+                } label: {
+                    Label(
+                        AppLanguage.localized("todo.settings.accessibilityLabel", defaultValue: "설정", language: .current, comment: "Settings button."),
+                        systemImage: "gear"
+                    )
+                    .appTutorialGlow(settingsButtonNeedsTutorialGlow)
+                }
+                .disabled(!canOpenSettingsDuringTutorial)
+                .accessibilityIdentifier("todo.settingsButton")
+
+                if horizontalSizeClass != .regular && tutorial?.isActive != true {
+                    Button {
+                        Task { await runPrioritize() }
+                    } label: {
+                        Label(
+                            AppLanguage.localized("action.prioritize", defaultValue: "AI 정리", language: .current, comment: "Prioritize with AI action."),
+                            systemImage: "sparkles"
+                        )
+                    }
+                    .disabled(isPrioritizing || !todos.contains { !$0.isCompleted && $0.triage == .todo })
+                    .accessibilityIdentifier("todo.prioritizeButton")
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .appTutorialGlow(settingsButtonNeedsTutorialGlow)
+            }
+            .disabled(tutorial?.isActive == true && !canOpenSettingsDuringTutorial)
+            .accessibilityLabel(AppLanguage.localized("todo.moreActions", defaultValue: "더 보기", language: .current, comment: "Secondary to-do toolbar menu accessibility label."))
+            .accessibilityIdentifier("todo.moreActionsMenu")
         }
     }
 
@@ -865,16 +1199,111 @@ struct TodoListView: View {
         showAddTodo = true
     }
 
+    private func undoLastAction() {
+        guard let lastAction = undoStack.popLast() else { return }
+        withAnimation {
+            switch lastAction {
+            case .toggleComplete(let todoID, let wasCompleted, let previousCompletedAt):
+                if let todo = todos.first(where: { $0.id == todoID }) {
+                    TodoMutations.setCompleted(todo, completed: wasCompleted, in: modelContext)
+                    todo.completedAt = previousCompletedAt
+                    try? modelContext.save()
+                }
+            case .promote(let todoID, let previousTriage):
+                if let todo = todos.first(where: { $0.id == todoID }) {
+                    todo.triageStatus = previousTriage
+                    todo.updatedAt = Date()
+                    try? modelContext.save()
+                }
+            case .delete(let snapshot):
+                _ = snapshot.restore(into: modelContext)
+            case .restore(let snapshot):
+                if let todo = todos.first(where: { $0.id == snapshot.id }) {
+                    snapshot.apply(to: todo)
+                    try? modelContext.save()
+                }
+            }
+        }
+    }
+
+    private func moveTodo(_ todoID: UUID, toColumn col: BoardColumnType) {
+        guard let todo = todos.first(where: { $0.id == todoID }) else { return }
+        let snapshot = TodoUndoSnapshot(from: todo)
+        undoStack.append(.restore(snapshot: snapshot))
+
+        withAnimation {
+            switch col {
+            case .active:
+                if todo.isCompleted {
+                    TodoMutations.setCompleted(todo, completed: false, in: modelContext)
+                }
+                if todo.triage != .todo {
+                    Task { @MainActor in
+                        await TodoEligibilityReconciler.shared.setTriage(.todo, for: todo)
+                        _ = withAnimation {
+                            CalendarService.shared.applyAutoRegistration(for: todo)
+                        }
+                    }
+                }
+                if todo.isOverdue {
+                    let endOfToday = Calendar.current.date(bySettingHour: 23, minute: 59, second: 0, of: Date()) ?? Date().addingTimeInterval(3600 * 4)
+                    todo.dueDate = endOfToday
+                }
+                todo.updatedAt = Date()
+                try? modelContext.save()
+
+            case .overdue:
+                if todo.isCompleted {
+                    TodoMutations.setCompleted(todo, completed: false, in: modelContext)
+                }
+                if todo.triage != .todo {
+                    todo.triageStatus = TodoTriage.todo.rawValue
+                }
+                if !todo.isOverdue {
+                    todo.dueDate = Date().addingTimeInterval(-3600)
+                }
+                todo.updatedAt = Date()
+                try? modelContext.save()
+
+            case .review:
+                if todo.isCompleted {
+                    TodoMutations.setCompleted(todo, completed: false, in: modelContext)
+                }
+                todo.triageStatus = TodoTriage.review.rawValue
+                todo.updatedAt = Date()
+                try? modelContext.save()
+
+            case .completed:
+                if !todo.isCompleted {
+                    TodoMutations.setCompleted(todo, completed: true, in: modelContext)
+                }
+            }
+        }
+    }
+
     private func toggleComplete(_ todo: Todo) {
+        undoStack.append(.toggleComplete(todoID: todo.id, wasCompleted: todo.isCompleted, previousCompletedAt: todo.completedAt))
         TodoMutations.setCompleted(todo, completed: !todo.isCompleted, in: modelContext)
     }
 
-    private func deleteTodo(_ todo: Todo) {
-        TodoMutations.delete(todo, in: modelContext)
+    @discardableResult
+    private func deleteTodo(_ todo: Todo) -> Bool {
+        let snapshot = TodoUndoSnapshot(from: todo)
+        do {
+            try TodoMutations.delete(todo, in: modelContext)
+            undoStack.append(.delete(snapshot: snapshot))
+            return true
+        } catch {
+            saveError = error.localizedDescription
+            return false
+        }
     }
 
     private func deleteItems(at offsets: IndexSet) {
-        for index in offsets { deleteTodo(filteredTodos[index]) }
+        let selectedTodos = offsets.map { filteredTodos[$0] }
+        for todo in selectedTodos {
+            guard deleteTodo(todo) else { break }
+        }
     }
 
     private func applyPriorityResult(_ result: PriorityResult, in activeTodos: [Todo]) {
@@ -978,16 +1407,17 @@ struct TodoListView: View {
                     }
                 }
             )
+            for result in results where !appliedResultIDs.contains(result.todoID) {
+                applyPriorityResult(result, in: activeTodos)
+                appliedResultIDs.insert(result.todoID)
+            }
+            // Finish only after streamed and final results survive app termination.
+            try modelContext.save()
         } catch is CancellationError {
             return
         } catch {
             showAFMError = true
             return
-        }
-
-        for result in results where !appliedResultIDs.contains(result.todoID) {
-            applyPriorityResult(result, in: activeTodos)
-            appliedResultIDs.insert(result.todoID)
         }
     }
 }

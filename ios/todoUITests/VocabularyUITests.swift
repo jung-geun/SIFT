@@ -1,40 +1,24 @@
 import XCTest
 
-final class VocabularyUITests: XCTestCase {
-    override func setUpWithError() throws {
-        continueAfterFailure = false
-        XCUIApplication().terminate()
-    }
+@MainActor
+final class VocabularyUITests: SIFTUITestCase {
+    func testUserCanAddManualVocabularyTerm() throws {
+        launch()
 
-    @MainActor
-    func testManualVocabularyTermAppearsInReviewScreen() throws {
-        let app = XCUIApplication()
-        app.launchArguments = [
-            "-ApplePersistenceIgnoreState", "YES",
-            "-AppleLanguages", "(ko)",
-            "-AppleLocale", "ko_KR",
-            "-pieroot.todo.hasOnboarded", "YES",
-            "-pieroot.todo.hasCompletedTutorial", "YES",
-            "-pieroot.todo.selectedTab", "0",
-            "-ui-test-suppress-crash-prompt"
-        ]
-        app.launchEnvironment["SIFT_UI_TESTING"] = "1"
-        app.launch()
+        step("사용자 단어 화면 열기") {
+            openSettings()
+            tap(app.buttons["settings.advanced"], message: "고급 설정을 펼칠 수 없습니다.")
+            let row = app.buttons["settings.vocabularyRow"]
+            requireHittable(row, message: "사용자 단어 설정 행이 없습니다.")
+            row.tap()
+        }
 
-        let settings = app.buttons["todo.settingsButton"]
-        XCTAssertTrue(settings.waitForExistence(timeout: 10))
-        settings.tap()
-
-        let vocabulary = app.buttons["settings.vocabularyRow"]
-        XCTAssertTrue(vocabulary.waitForExistence(timeout: 10))
-        vocabulary.tap()
-
-        let termField = app.textFields["정규 표기"]
-        XCTAssertTrue(termField.waitForExistence(timeout: 10))
-        termField.tap()
-        termField.typeText("쿠버네티스")
-        app.buttons["추가"].tap()
-
-        XCTAssertTrue(app.staticTexts["쿠버네티스"].waitForExistence(timeout: 10))
+        step("단어를 추가하고 목록 반영 확인") {
+            let field = app.textFields["정규 표기"]
+            tap(field, message: "정규 표기 입력 필드가 없습니다.")
+            field.typeText("쿠버네티스")
+            tap(app.buttons["추가"], message: "단어 추가 버튼이 없습니다.")
+            require(app.staticTexts["쿠버네티스"], message: "추가한 단어가 목록에 나타나지 않습니다.")
+        }
     }
 }

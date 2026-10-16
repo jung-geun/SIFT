@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "command": "deliver",
+  "type": "workflow",
+  "input": "/Users/pieroot/code/todo/docs/assets/workflows/meeting.workflow.json",
+  "output": "/Users/pieroot/code/todo/docs/assets/workflows/meeting.html",
+  "specification": {
+    "sha256": "bd0d5672fc320b84375dea8cadbdacabda82d5ebe660540b014df74f1b8d1579",
+    "bytes": 2744
+  },
+  "artifact": {
+    "sha256": "72dc7ac3268b6568f10e2e3476ff62eb115c6d1ecdf288005e66efb22c0bcaa8",
+    "bytes": 806729
+  },
+  "validation": {
+    "checksPassed": 9,
+    "checkCount": 9,
+    "compositionProfile": "showcase",
+    "compositionStatus": "pass",
+    "errors": 0,
+    "warnings": 0
+  }
+}

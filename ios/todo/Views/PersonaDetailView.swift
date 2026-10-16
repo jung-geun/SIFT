@@ -15,6 +15,8 @@ struct PersonaDetailView: View {
     @State private var errorMessage: String?
     @State private var showError = false
     @State private var showOnboardingResetup = false
+    @State private var generationTask: Task<Void, Never>?
+    @State private var showAdvancedRequest = false
     
     private let generationService = PersonaGenerationService()
     
@@ -67,8 +69,7 @@ struct PersonaDetailView: View {
                     .buttonStyle(.borderless)
                     
                     Button {
-                        generationResult = nil
-                        Task { await runGeneration() }
+                        startGeneration()
                     } label: {
                         if isGenerating {
                             HStack(spacing: 8) {
@@ -77,7 +78,7 @@ struct PersonaDetailView: View {
                             }
                         } else {
                             Label(
-                                personas.first?.descriptionText.isEmpty ?? true ? "패턴 기반 페르소나 생성" : "패턴 기반 페르소나 개선",
+                                personas.first?.descriptionText.isEmpty ?? true ? AppLanguage.localized("persona.detail.generate", defaultValue: "Generate Pattern-Based Persona", language: .current, comment: "Action generating a persona from behavior patterns.") : AppLanguage.localized("persona.detail.improve", defaultValue: "Improve Pattern-Based Persona", language: .current, comment: "Action improving an existing persona from behavior patterns."),
                                 systemImage: "person.crop.circle.badge.checkmark"
                             )
                             .fontWeight(.medium)
@@ -85,6 +86,14 @@ struct PersonaDetailView: View {
                     }
                     .buttonStyle(.borderless)
                     .disabled(isGenerating)
+                    Button(AppLanguage.localized("memory.analysis.advancedRequest", defaultValue: "Re-request with gpt-6.1-sol", language: .current, comment: "Explicit advanced persona analysis request.")) {
+                        showAdvancedRequest = true
+                    }
+                    .disabled(isGenerating)
+                    .accessibilityIdentifier("persona.advancedRequest")
+                    if isGenerating {
+                        Button(AppLanguage.localized("memory.analysis.cancelRequest", defaultValue: "Cancel request", language: .current, comment: "Cancel persona analysis request."), role: .cancel) { generationTask?.cancel() }
+                    }
                     
                     
                     if let result = generationResult {
@@ -102,6 +111,7 @@ struct PersonaDetailView: View {
             } footer: {
                 Text("최근 행동 기록을 결정론적으로 분석합니다. 모든 지원 기기에서 같은 근거, 계산 규칙, 신뢰도를 사용합니다.")
             }
+            OpenAIConsentSection(scope: .persona)
         }
         .navigationTitle("나의 페르소나")
         .navigationBarTitleDisplayMode(.inline)
@@ -110,7 +120,7 @@ struct PersonaDetailView: View {
             todoApp.deduplicatePersonas(context: modelContext)
             
             // iCloud 활성화 시 CloudKit 동기화 도착을 최대 3초 대기한 뒤 Persona 생성
-            let useICloud = UserDefaults.standard.bool(forKey: todoApp.iCloudSyncKey)
+            let useICloud = SettingsStore.isICloudSyncEnabled
             if personas.isEmpty && useICloud {
                 for _ in 0..<30 {
                     try? await Task.sleep(for: .milliseconds(100))
@@ -123,6 +133,7 @@ struct PersonaDetailView: View {
             }
         }
         .onDisappear {
+            generationTask?.cancel()
             tutorial?.handlePersonaDetailClosed()
         }
         .safeAreaInset(edge: .bottom, spacing: 12) {
@@ -132,6 +143,10 @@ struct PersonaDetailView: View {
         }
         .sheet(isPresented: $showOnboardingResetup) {
             OnboardingView(isPresented: $showOnboardingResetup, isResetup: true)
+        }
+        .confirmationDialog(AppLanguage.localized("persona.detail.advancedConfirmation", defaultValue: "Send the persona and verified behavior evidence to OpenAI using gpt-6.1-sol?", language: .current, comment: "Confirmation before sharing persona and behavior evidence with OpenAI."), isPresented: $showAdvancedRequest, titleVisibility: .visible) {
+            Button(AppLanguage.localized("memory.analysis.sendAdvanced", defaultValue: "Send advanced request", language: .current, comment: "Send advanced persona analysis request.")) { startGeneration(tier: .advanced) }
+            Button(AppLanguage.localized("action.cancel", defaultValue: "Cancel", language: .current, comment: "Cancel action."), role: .cancel) {}
         }
         .alert("오류", isPresented: $showError, presenting: errorMessage) { _ in
             Button("확인", role: .cancel) {}
@@ -150,6 +165,7 @@ struct PersonaDetailView: View {
             Label("페르소나 미리보기", systemImage: "person.crop.circle.badge.checkmark")
                 .font(.subheadline.bold())
                 .foregroundStyle(.green)
+            Text(result.processorDescription).font(.caption2).foregroundStyle(.secondary)
 
             HStack(alignment: .top, spacing: 8) {
                 VStack(alignment: .leading, spacing: 6) {
@@ -157,11 +173,11 @@ struct PersonaDetailView: View {
                         .font(.caption.bold())
                         .foregroundStyle(.secondary)
                     Text(existingTypes.map(\.displayName).joined(separator: ", ").isEmpty
-                         ? "선택된 유형 없음"
+                         ? AppLanguage.localized("persona.detail.noTypes", defaultValue: "No types selected", language: .current, comment: "Placeholder when no persona types are selected.")
                          : existingTypes.map(\.displayName).joined(separator: ", "))
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Text(existingDescription.isEmpty ? "설명 없음" : existingDescription)
+                    Text(existingDescription.isEmpty ? AppLanguage.localized("persona.detail.noDescription", defaultValue: "No description", language: .current, comment: "Placeholder when persona description is empty.") : existingDescription)
                         .font(.body)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -174,7 +190,7 @@ struct PersonaDetailView: View {
                         .font(.caption.bold())
                         .foregroundStyle(.tint)
                     Text(result.personaTypes.map(\.displayName).joined(separator: ", ").isEmpty
-                         ? "선택된 유형 없음"
+                         ? AppLanguage.localized("persona.detail.noTypes", defaultValue: "No types selected", language: .current, comment: "Placeholder when no persona types are selected.")
                          : result.personaTypes.map(\.displayName).joined(separator: ", "))
                         .font(.caption)
                         .foregroundStyle(.tint)
@@ -217,8 +233,7 @@ struct PersonaDetailView: View {
                     .controlSize(.small)
 
                 Button("다시 생성") {
-                    generationResult = nil
-                    Task { await runGeneration() }
+                    startGeneration()
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
@@ -232,7 +247,14 @@ struct PersonaDetailView: View {
         .padding(.vertical, 4)
     }
     
-    private func runGeneration() async {
+    private func startGeneration(tier: OpenAIAnalysisTier = .basic) {
+        guard !isGenerating else { return }
+        generationTask?.cancel()
+        generationTask = Task { await runGeneration(tier: tier) }
+    }
+
+    private func runGeneration(tier: OpenAIAnalysisTier = .basic) async {
+        guard !isGenerating else { return }
         isGenerating = true
         defer { isGenerating = false }
         do {
@@ -258,9 +280,13 @@ struct PersonaDetailView: View {
                 existingPersona: existing,
                 todos: todos,
                 context: context,
-                now: now
+                now: now,
+                tier: tier
             )
+        } catch is CancellationError {
+            return
         } catch {
+            guard !Task.isCancelled else { return }
             errorMessage = error.localizedDescription
             showError = true
         }
@@ -268,9 +294,28 @@ struct PersonaDetailView: View {
     }
     private func applyGeneratedPersona() {
         guard let result = generationResult, let p = personas.first else { return }
+        do {
+            if modelContext.hasChanges { try modelContext.save() }
+        } catch {
+            errorMessage = error.localizedDescription
+            showError = true
+            return
+        }
+        let previousTypes = p.personaTypes
+        let previousDescription = p.descriptionText
+        let previousDate = p.updatedAt
         p.personaTypes = result.personaTypes
         p.descriptionText = result.descriptionText
         p.updatedAt = Date()
-        generationResult = nil
+        do {
+            try modelContext.save()
+            generationResult = nil
+        } catch {
+            p.personaTypes = previousTypes
+            p.descriptionText = previousDescription
+            p.updatedAt = previousDate
+            errorMessage = error.localizedDescription
+            showError = true
+        }
     }
 }

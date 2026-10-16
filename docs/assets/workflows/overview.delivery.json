@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "command": "deliver",
+  "type": "workflow",
+  "input": "/Users/pieroot/code/todo/docs/assets/workflows/overview.workflow.json",
+  "output": "/Users/pieroot/code/todo/docs/assets/workflows/overview.html",
+  "specification": {
+    "sha256": "52e81ef6692f4bb6a14531ddaaa9780d3126b1d7872ce766fb673064ee5b2065",
+    "bytes": 2874
+  },
+  "artifact": {
+    "sha256": "18c53110c9dab87e44f0befcbf8ca62ea318b6809ecc46223d253011f24f62d6",
+    "bytes": 809184
+  },
+  "validation": {
+    "checksPassed": 9,
+    "checkCount": 9,
+    "compositionProfile": "showcase",
+    "compositionStatus": "pass",
+    "errors": 0,
+    "warnings": 0
+  }
+}

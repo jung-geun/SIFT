@@ -1,0 +1,30 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {"title":"SIFT · 원음을 먼저 지키는 회의 처리", "quality_profile":"showcase"},
+  "lanes":[{"id":"capture","label":"소스별 기록"},{"id":"analysis","label":"기기 내 후처리"},{"id":"recovery","label":"실패와 재시도","variant":"exception"}],
+  "mainPath":["consent","audio","base","offline","refine","draft"],
+  "nodes":[
+    {"id":"consent","lane":"capture","col":0,"type":"security","label":"소스 선택·동의","sublabel":"마이크 · 승인한 출력","width":170},
+    {"id":"audio","lane":"capture","col":1,"type":"database","label":"소스별 FLAC 저장","sublabel":"복구 기록을 먼저 확정","width":170},
+    {"id":"base","lane":"capture","col":2,"type":"backend","label":"기본 전사 확정","sublabel":"Apple Speech · 임시본 보존","width":180},
+    {"id":"offline","lane":"analysis","col":2,"type":"backend","label":"저장 음성 재전사","sublabel":"설치·활성화한 WhisperKit","width":180},
+    {"id":"refine","lane":"analysis","col":3,"type":"backend","label":"화자·교정·분석","sublabel":"각 허용 상태에 따라 처리","width":180},
+    {"id":"draft","lane":"analysis","col":4,"type":"frontend","label":"연결된 행동 초안","sublabel":"선택하면 할 일 대기열로","width":180},
+    {"id":"retained","lane":"recovery","col":2,"type":"database","label":"실패해도 보존","sublabel":"저장된 원음 · 기존 전사","width":180},
+    {"id":"retry","lane":"recovery","col":3,"type":"frontend","label":"사용자가 재시도","sublabel":"회의 메뉴 · 저장 음성 사용","width":180}
+  ],
+  "edges":[
+    {"from":"consent","to":"audio"},
+    {"from":"audio","to":"base"},
+    {"from":"base","to":"offline","label":"선택형","variant":"dashed"},
+    {"from":"offline","to":"refine"},
+    {"from":"refine","to":"draft"},
+    {"from":"offline","to":"retained","label":"실패","role":"error","variant":"security"},
+    {"from":"retained","to":"retry"}
+  ],
+  "cards":[
+    {"dot":"emerald","title":"소스는 섞지 않고, 오류도 격리","items":["각 소스의 원음·전사를 독립 저장합니다. 한 소스가 중지되어도 다른 승인 소스는 계속됩니다.","고급 재전사는 선택 사항입니다. 꺼져 있으면 기본 전사를 사용하고, 실패해도 사용 가능한 기존 전사로 후속 처리합니다."]},
+    {"dot":"amber","title":"정확성과 플랫폼의 경계","items":["일부 언어·기기에서는 전사가 불가하며, 완성 전사가 없는 실패는 재시도가 필요합니다.","모델 설치는 별도 네트워크 작업입니다. 회의 음성·전사·화자는 OpenAI 분석에 보내지 않습니다."]}
+  ]
+}

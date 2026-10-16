@@ -10,11 +10,11 @@ struct MeetingMediaPart: Codable, Equatable, Sendable {
 }
 
 struct MeetingMediaTimeline: Sendable {
-    static let sampleRate: Int64 = 16_000
-    static let ownedSamplesPerPart: Int64 = 9_600_000
-    static let overlapSamples: Int64 = 32_000
-    static let maximumSamples: Int64 = 345_600_000
-    static let maximumParts = 36
+    nonisolated static let sampleRate: Int64 = 16_000
+    nonisolated static let ownedSamplesPerPart: Int64 = 9_600_000
+    nonisolated static let overlapSamples: Int64 = 32_000
+    nonisolated static let maximumSamples: Int64 = 345_600_000
+    nonisolated static let maximumParts = 36
 
     private(set) var capturedSamples: Int64 = 0
     private(set) var parts: [MeetingMediaPart] = []

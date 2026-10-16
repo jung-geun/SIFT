@@ -26,6 +26,21 @@ struct MailDetailSelection: Identifiable, Hashable {
     ) -> EmailMessage? {
         candidates.first { EmailMessageKey($0) == key }
     }
+
+    /// 병합·삭제 후에도 같은 메일을 다시 찾는 라이브 쿼리. 상세·등록 시트가 공유한다.
+    var liveQuery: Query<EmailMessage, [EmailMessage]> {
+        let providerRawValue = key.providerRawValue
+        let sourceAccountNamespace = key.sourceAccountNamespace
+        let providerMessageID = key.providerMessageID
+        return Query(
+            filter: #Predicate<EmailMessage> { email in
+                email.providerRawValue == providerRawValue
+                    && email.sourceAccountNamespace == sourceAccountNamespace
+                    && (email.rawMessageID == providerMessageID || email.id == providerMessageID)
+            },
+            sort: [SortDescriptor(\EmailMessage.receivedAt, order: .reverse)]
+        )
+    }
 }
 
 struct MailDetailSelectionView: View {
@@ -35,17 +50,7 @@ struct MailDetailSelectionView: View {
 
     init(selection: MailDetailSelection) {
         self.selection = selection
-        let providerRawValue = selection.key.providerRawValue
-        let sourceAccountNamespace = selection.key.sourceAccountNamespace
-        let providerMessageID = selection.key.providerMessageID
-        _candidates = Query(
-            filter: #Predicate<EmailMessage> { email in
-                email.providerRawValue == providerRawValue
-                    && email.sourceAccountNamespace == sourceAccountNamespace
-                    && (email.rawMessageID == providerMessageID || email.id == providerMessageID)
-            },
-            sort: [SortDescriptor(\EmailMessage.receivedAt, order: .reverse)]
-        )
+        _candidates = selection.liveQuery
     }
 
     var body: some View {
@@ -74,9 +79,26 @@ struct MailDetailView: View {
     @State private var isTrashing = false
     @State private var isReanalyzing = false
     @State private var alert: MailDetailAlert?
+    @State private var showOpenAIAnalysis = false
+    @State private var openAITier: OpenAIAnalysisTier = .basic
 
     private var analysisCardTitle: String {
-        guard email.analysisFailureReasonRaw != nil else { return "AI 정리" }
+        if email.analysisVersion != EmailAnalysisContract.summaryContractVersion {
+            return AppLanguage.localized(
+                "mail.summaryHeader",
+                defaultValue: AppLanguage.current == .english ? "Email Summary" : "메일 요약",
+                language: .current,
+                comment: "Neutral title for an older cached email summary."
+            )
+        }
+        guard email.analysisFailureReasonRaw != nil else {
+            return AppLanguage.localized(
+                "mail.analysis.afmTitle",
+                defaultValue: "Apple Intelligence 요약",
+                language: .current,
+                comment: "Email detail heading for an Apple Intelligence-generated summary."
+            )
+        }
         return AppLanguage.localized(
             "mail.analysis.ruleBasedTitle",
             defaultValue: AppLanguage.current == .english ? "Rule-based summary" : "규칙 기반 요약",
@@ -90,7 +112,7 @@ struct MailDetailView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     VStack(alignment: .leading, spacing: 6) {
-                        Text(email.subject.isEmpty ? "(제목 없음)" : email.subject)
+                        Text(email.subject.isEmpty ? AppLanguage.localized("todo.noTitle", defaultValue: "(No Title)", language: .current) : email.subject)
                             .font(.title3)
                             .fontWeight(.semibold)
 
@@ -110,6 +132,24 @@ struct MailDetailView: View {
                         }
                     }
                     .padding()
+                    if let candidate = email.analysisTodoCandidate {
+                        Label(
+                            AppLanguage.localized(
+                                candidate ? "mail.analysis.layaCandidate" : "mail.analysis.layaNotCandidate",
+                                defaultValue: candidate
+                                    ? "할 일 후보 · Laya"
+                                    : "Laya: 할 일 후보 아님 · 직접 저장 가능",
+                                language: .current,
+                                comment: "Laya email-to-do suggestion; user may override."
+                            ),
+                            systemImage: candidate ? "checkmark.circle" : "info.circle"
+                        )
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(candidate ? AppTheme.accent : Color.secondary)
+                        .padding(.horizontal)
+                        .padding(.bottom, 12)
+                        .accessibilityIdentifier("mail.detail.layaDecision")
+                    }
 
                     Divider()
 
@@ -224,6 +264,36 @@ struct MailDetailView: View {
                         .padding(.horizontal)
                         .padding(.top, 12)
                     }
+                    VStack(alignment: .leading, spacing: 8) {
+                        Button(AppLanguage.localized(
+                            "mail.openai.basicRequest",
+                            defaultValue: "OpenAI 기초 분석 · gpt-6-luna",
+                            language: .current,
+                            comment: "Open the optional basic OpenAI analysis for this email. Keep the model name unchanged."
+                        )) {
+                            openAITier = .basic
+                            showOpenAIAnalysis = true
+                        }
+                        .accessibilityIdentifier("mail.detail.openAIBasic")
+                        Button(AppLanguage.localized(
+                            "mail.openai.advancedRequest",
+                            defaultValue: "중요 내용 고급 재요청 · gpt-6.1-sol",
+                            language: .current,
+                            comment: "Open an explicit advanced re-request for important email content. Keep the model name unchanged."
+                        )) {
+                            openAITier = .advanced
+                            showOpenAIAnalysis = true
+                        }
+                        .accessibilityIdentifier("mail.detail.openAIAdvanced")
+                        Text(AppLanguage.localized(
+                            "mail.openai.explanation",
+                            defaultValue: "선택적 외부 분석에는 별도 전송 동의가 필요합니다. 자동 메일 분석은 계속 기기 내에서 처리합니다.",
+                            language: .current,
+                            comment: "Explain that optional remote email analysis needs separate sharing consent and automatic analysis stays on device."
+                        ))
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                    .padding()
 
                     if let html = email.htmlBody, !html.isEmpty {
                         EmailWebView(htmlBody: html, contentHeight: $webViewHeight)
@@ -274,14 +344,23 @@ struct MailDetailView: View {
             }
             .navigationTitle("메일")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarLeading) {
-                    Button {
-                        showRegisterSheet = true
-                    } label: {
-                        Label("일정 등록하기", systemImage: "calendar.badge.plus")
-                    }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                Button {
+                    showRegisterSheet = true
+                } label: {
+                    Label(MailRegisterSheet.saveActionTitle, systemImage: "checkmark.circle")
+                        .font(.body.weight(.semibold))
+                        .frame(maxWidth: .infinity)
                 }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .tint(AppTheme.accent)
+                .padding(.horizontal)
+                .padding(.vertical, 8)
+                .background(.bar)
+                .accessibilityIdentifier("mail.detail.saveTodo")
+            }
+            .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button(role: .destructive) {
                         Task { await trashCurrentEmail() }
@@ -297,6 +376,9 @@ struct MailDetailView: View {
             }
             .sheet(isPresented: $showRegisterSheet) {
                 MailRegisterSheet(email: email)
+            }
+            .sheet(isPresented: $showOpenAIAnalysis) {
+                OpenAIEmailAnalysisView(selection: MailDetailSelection(email), tier: openAITier)
             }
             .task {
                 await synchronizeReadLoadContentAndAnalyze()
@@ -439,7 +521,7 @@ struct MailDetailView: View {
             try modelContext.save()
         } catch {
             alert = MailDetailAlert(
-                title: "AI 정리 오류",
+                title: AppLanguage.localized("mail.alert.analysisError", defaultValue: "AI 정리 오류", language: .current, comment: "Mail analysis failure title."),
                 message: error.localizedDescription
             )
             return
@@ -530,6 +612,7 @@ struct EmailWebView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
+        config.websiteDataStore = .nonPersistent()
         config.defaultWebpagePreferences.allowsContentJavaScript = false
 
         let webView = WKWebView(frame: .zero, configuration: config)
@@ -551,6 +634,7 @@ struct EmailWebView: UIViewRepresentable {
         let html = sanitizedHTML
         guard context.coordinator.lastLoadedHTML != html else { return }
         context.coordinator.lastLoadedHTML = html
+        context.coordinator.prepareForDocumentLoad()
         webView.loadHTMLString(html, baseURL: nil)
     }
 
@@ -561,48 +645,7 @@ struct EmailWebView: UIViewRepresentable {
     }
 
     private var sanitizedHTML: String {
-        var html = htmlBody
-
-        // <script> 태그 전체 제거
-        if let re = try? NSRegularExpression(pattern: "<script[\\s\\S]*?</script>", options: .caseInsensitive) {
-            let range = NSRange(html.startIndex..., in: html)
-            html = re.stringByReplacingMatches(in: html, range: range, withTemplate: "")
-        }
-        // on* 이벤트 핸들러 제거 (onclick=, onerror= 등)
-        if let re = try? NSRegularExpression(pattern: #"\s+on\w+\s*=\s*(?:"[^"]*"|'[^']*')"#, options: .caseInsensitive) {
-            let range = NSRange(html.startIndex..., in: html)
-            html = re.stringByReplacingMatches(in: html, range: range, withTemplate: "")
-        }
-
-        let viewport = #"<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5">"#
-        let contentSecurityPolicy = #"<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: cid: blob:; style-src 'unsafe-inline'; font-src data:; connect-src 'none'; media-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'">"#
-        let css = """
-        <style>
-        body{font-family:-apple-system,Helvetica,sans-serif;font-size:15px;
-             color:#1c1c1e;max-width:100%;word-wrap:break-word;
-             padding:12px;margin:0;background:#fff;}
-        img{max-width:100%!important;height:auto!important;}
-        table{max-width:100%!important;}
-        a{color:#007AFF;}
-        *{box-sizing:border-box;}
-        </style>
-        """
-        let injectedHead = "\(viewport)\(contentSecurityPolicy)\(css)"
-
-        if html.range(of: "<head", options: .caseInsensitive) != nil {
-            // 기존 <head> 안에 삽입
-            html = html.replacingOccurrences(
-                of: "</head>", with: "\(injectedHead)</head>",
-                options: .caseInsensitive
-            )
-        } else {
-            html = """
-            <!DOCTYPE html>
-            <html><head>\(injectedHead)</head>
-            <body>\(html)</body></html>
-            """
-        }
-        return html
+        EmailHTMLSanitizer.sanitize(htmlBody)
     }
 
     // MARK: Coordinator
@@ -624,8 +667,13 @@ struct EmailWebView: UIViewRepresentable {
         }
 
         var lastLoadedHTML: String?
+        private var mainFrameNavigationGate = EmailHTMLMainFrameNavigationGate()
 
-        // 외부 링크는 Safari로 열고, 메일 HTML 내부의 원격 리소스 요청은 차단한다.
+        func prepareForDocumentLoad() {
+            mainFrameNavigationGate.reset()
+        }
+
+        // Only user-activated web/mail/phone links may leave the isolated document.
         func webView(
             _ webView: WKWebView,
             decidePolicyFor action: WKNavigationAction,
@@ -635,23 +683,117 @@ struct EmailWebView: UIViewRepresentable {
             preferences.allowsContentJavaScript = false
             if action.navigationType == .linkActivated,
                let url = action.request.url {
-                UIApplication.shared.open(url)
+                if EmailHTMLSanitizer.isAllowedExternalLinkURL(url) {
+                    UIApplication.shared.open(url)
+                }
                 decisionHandler(.cancel, preferences)
                 return
             }
 
+            if action.targetFrame?.isMainFrame == true {
+                decisionHandler(
+                    mainFrameNavigationGate.allows(action.request.url) ? .allow : .cancel,
+                    preferences
+                )
+                return
+            }
+
             if let url = action.request.url,
-               !Self.isAllowedEmbeddedResourceURL(url) {
+               !EmailHTMLSanitizer.isAllowedEmbeddedResourceURL(url) {
                 decisionHandler(.cancel, preferences)
                 return
             }
 
             decisionHandler(.allow, preferences)
         }
+    }
+}
 
-        private static func isAllowedEmbeddedResourceURL(_ url: URL) -> Bool {
-            guard let scheme = url.scheme?.lowercased() else { return true }
-            return ["about", "data", "blob", "cid"].contains(scheme)
+// MARK: - EmailHTMLMainFrameNavigationGate
+
+/// Ensures the email document never navigates away after its initial local load.
+struct EmailHTMLMainFrameNavigationGate {
+    private var hasAdmittedInitialDocument = false
+
+    mutating func reset() {
+        hasAdmittedInitialDocument = false
+    }
+
+    mutating func allows(_ url: URL?) -> Bool {
+        guard !hasAdmittedInitialDocument, url?.scheme?.lowercased() == "about" else {
+            return false
+        }
+        hasAdmittedInitialDocument = true
+        return true
+    }
+}
+
+// MARK: - EmailHTMLSanitizer
+
+
+/// HTML 이메일 보안 세니타이징 및 임베디드 리소스 허용 여부 판별 헬퍼.
+enum EmailHTMLSanitizer {
+    /// HTML 본문을 세니타이징하고 보안 CSP / Viewport / CSS 스타일을 주입한다.
+    static func sanitize(_ htmlBody: String) -> String {
+        var html = htmlBody
+
+        // <script> 태그 및 내용 제거
+        if let re = try? NSRegularExpression(pattern: "(?i)<script[\\s\\S]*?</script>|<script[^>]*/>", options: []) {
+            let range = NSRange(html.startIndex..., in: html)
+            html = re.stringByReplacingMatches(in: html, range: range, withTemplate: "")
+        }
+
+        // <base> 태그 제거
+        if let re = try? NSRegularExpression(pattern: "(?i)<base\\b[^>]*>(?:</base>)?", options: []) {
+            let range = NSRange(html.startIndex..., in: html)
+            html = re.stringByReplacingMatches(in: html, range: range, withTemplate: "")
+        }
+
+        // on* 이벤트 핸들러 제거 (quoted & unquoted: onclick=, onerror=, onload= 등)
+        if let re = try? NSRegularExpression(pattern: "(?i)\\s+on\\w+\\s*=\\s*(?:\"[^\"]*\"|'[^']*'|[^\\s>/]+)", options: []) {
+            let range = NSRange(html.startIndex..., in: html)
+            html = re.stringByReplacingMatches(in: html, range: range, withTemplate: "")
+        }
+
+        let viewport = #"<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5">"#
+        let contentSecurityPolicy = #"<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: cid: blob: https:; style-src 'unsafe-inline' https:; font-src data: https:; connect-src 'none'; media-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none';">"#
+        let css = """
+        <style>
+        body{font-family:-apple-system,Helvetica,sans-serif;font-size:15px;
+             color:#1c1c1e;max-width:100%;word-wrap:break-word;
+             padding:12px;margin:0;background:#fff;}
+        img{max-width:100%!important;height:auto!important;}
+        table{max-width:100%!important;}
+        a{color:#007AFF;}
+        *{box-sizing:border-box;}
+        </style>
+        """
+        let injectedHead = "\(viewport)\(contentSecurityPolicy)\(css)"
+
+        // The policy must precede all untrusted markup, even with a missing or
+        // malformed <head>. Appending to a sender's head applies the CSP too late.
+        return """
+        <!DOCTYPE html>
+        <html><head>\(injectedHead)</head>
+        <body>\(html)</body></html>
+        """
+    }
+
+
+    /// 내장 리소스 요청에 허용되는 URL 스킴인지 확인한다. (HTTPS visual resources 포함, HTTP 차단)
+    static func isAllowedEmbeddedResourceURL(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased() else { return true }
+        return ["about", "data", "blob", "cid", "https"].contains(scheme)
+    }
+
+    static func isAllowedExternalLinkURL(_ url: URL) -> Bool {
+        switch url.scheme?.lowercased() {
+        case "http", "https":
+            return !(url.host ?? "").isEmpty
+        case "mailto", "tel":
+            return !url.path.isEmpty
+        default:
+            return false
         }
     }
 }

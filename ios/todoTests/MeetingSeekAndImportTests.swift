@@ -243,17 +243,26 @@ struct MeetingSeekAndImportTests {
 
     @Test("analysis engine falls back to the heuristic when AFM is unavailable")
     func analysisHeuristicFallback() async throws {
-        // The test host has no Apple Intelligence, so the engine must degrade to
-        // the deterministic keyword heuristic rather than throw.
-        let segment = MeetingSegment(id: "seg-1", startMs: 0, endMs: 1_000, text: "김대리가 보고서를 제출해주세요")
-        let result = MeetingResult(segments: [segment])
-        let outcome = try await MeetingAnalysisEngine().analyze(
-            meetingID: meetingID,
-            result: result,
-            language: .korean
-        )
-        #expect(outcome.usedOnDeviceLLM == false)
-        #expect(outcome.result.actionDrafts.isEmpty == false)
+        try await AIProviderTestIsolation.shared.withLock {
+            UserDefaults.standard.set(false, forKey: SettingsStore.betaFoundationModelsEnabledKey)
+            UserDefaults.standard.set(false, forKey: SettingsStore.betaOnDeviceModelEnabledKey)
+            UserDefaults.standard.set(false, forKey: SettingsStore.betaOpenAIEnabledKey)
+            defer {
+                UserDefaults.standard.removeObject(forKey: SettingsStore.betaFoundationModelsEnabledKey)
+                UserDefaults.standard.removeObject(forKey: SettingsStore.betaOnDeviceModelEnabledKey)
+                UserDefaults.standard.removeObject(forKey: SettingsStore.betaOpenAIEnabledKey)
+            }
+
+            let segment = MeetingSegment(id: "seg-1", startMs: 0, endMs: 1_000, text: "김대리가 보고서를 제출해주세요")
+            let result = MeetingResult(segments: [segment])
+            let outcome = try await MeetingAnalysisEngine().analyze(
+                meetingID: meetingID,
+                result: result,
+                language: .korean
+            )
+            #expect(outcome.usedOnDeviceLLM == false)
+            #expect(outcome.result.actionDrafts.isEmpty == false)
+        }
     }
     @Test("English action cues use whole-word matching and preserve original title")
     func englishActionCueUnion() {
@@ -277,15 +286,6 @@ struct MeetingSeekAndImportTests {
         #expect(result.actionDrafts.count == 1)
         #expect(result.actionDrafts.first?.title == action.text)
         #expect(result.actionDrafts.first?.notes == "Meeting transcript: \(action.text)")
-    }
-    @Test("meeting prompt builders carry explicit output language and no-translation rule")
-    func meetingPromptLanguageContract() {
-        let englishAnalysis = Prompts.MeetingFM.systemInstruction(language: .english)
-        let koreanAnalysis = Prompts.MeetingFM.systemInstruction(language: .korean)
-        #expect(englishAnalysis.contains("English"))
-        #expect(koreanAnalysis.contains("Korean"))
-        #expect(englishAnalysis.contains("번역하지"))
-        #expect(Prompts.MeetingCorrectionLocal.requestSuffix(language: .english).contains("English"))
     }
     @Test("analysis due dates canonicalize offsets and reject timezone-less output")
     @MainActor

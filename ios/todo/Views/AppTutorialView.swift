@@ -95,7 +95,7 @@ struct AppTutorialHint: Equatable {
     }
 
     var localizedBody: String {
-        AppTutorialCopy.localized(body)
+        AppTutorialCopy.localized(body, isBody: true)
     }
 }
 
@@ -105,81 +105,20 @@ struct AppTutorialCompletionNotice: Identifiable, Equatable {
 
 private enum AppTutorialCopy {
     static var next: String { localized("다음") }
-    static var close: String { localized("닫기") }
+    static var close: String { AppLanguage.localized("action.close", defaultValue: "닫기", language: .current, comment: "Close button label.") }
     static var endTutorial: String { localized("튜토리얼 종료") }
     static var completionTitle: String { localized("튜토리얼 완료") }
-    static var completionMessage: String { localized("튜토리얼을 다시 확인하고 싶다면 설정 > 앱 정보 > 튜토리얼 다시 시작에 있습니다.") }
+    static var completionMessage: String { localized("튜토리얼을 다시 확인하고 싶다면 할 일 > 더 보기 > 설정 > 앱 정보 > 튜토리얼 다시 시작에 있습니다.", isBody: true) }
     static var confirm: String { localized("확인") }
 
-    static func localized(_ korean: String) -> String {
-        guard AppLanguage.current == .english else { return korean }
-        return english[korean] ?? korean
+    static func localized(_ korean: String, isBody: Bool = false) -> String {
+        AppLanguage.localized(
+            "tutorial.\(isBody ? "body." : "")\(korean)",
+            defaultValue: korean,
+            language: .current,
+            comment: isBody ? "Tutorial hint body." : "Tutorial hint title or action."
+        )
     }
-
-    private static let english: [String: String] = [
-        "다음": "Next",
-        "닫기": "Close",
-        "확인": "OK",
-        "튜토리얼 종료": "End Tutorial",
-        "튜토리얼 완료": "Tutorial Complete",
-        "튜토리얼을 다시 확인하고 싶다면 설정 > 앱 정보 > 튜토리얼 다시 시작에 있습니다.": "To review the tutorial again, go to Settings > App Info > Replay Tutorial.",
-        "새 할 일 추가": "Add a New To-Do",
-        "우측 상단 + 버튼을 눌러 새 할 일 화면을 열어보세요.": "Tap the + button in the upper right to open the new to-do screen.",
-        "제목과 메모": "Title and Notes",
-        "제목은 필수입니다. 메모에는 배경 정보나 처리 기준을 적어두면 나중에 AI 정리와 검색에 도움이 됩니다.": "The title is required. Use notes for background or handling criteria so AI sorting and search can work better later.",
-        "마감 시각 설정": "Set Due Time",
-        "마감 시각 설정을 켜면 날짜와 시간을 고를 수 있습니다. 캘린더 권한이 있으면 캘린더 등록도 함께 켜지고, 마감이 있는 할 일에는 알림 프리셋을 추가할 수 있습니다.": "Turn on Set Due Time to choose a date and time. If calendar permission is available, calendar registration can also be enabled, and to-dos with due times can use reminder presets.",
-        "우선순위 선택": "Choose Priority",
-        "기본 우선순위는 자동입니다. AI 정리와 마감 정보를 기준으로 계산되지만, 중요도가 확실한 일은 낮음·보통·높음·긴급 중 하나를 직접 선택해 강제로 고정할 수 있습니다.": "Priority is automatic by default. It is calculated from AI sorting and due-date information, but you can force a fixed priority by choosing Low, Medium, High, or Urgent.",
-        "저장하기": "Save",
-        "내용을 확인한 뒤 추가를 누르면 할 일이 저장됩니다. 지금 저장하지 않으려면 취소로 나가도 튜토리얼은 다음 단계로 이어집니다.": "After reviewing the details, tap Add to save the to-do. You can cancel without saving and the tutorial will continue to the next step.",
-        "설정 다시 열기": "Open Settings Again",
-        "우측 상단 설정 버튼을 눌러 TODO 자동 정렬 및 AI 항목으로 이동해보세요.": "Tap Settings in the upper right and open To-Do Auto Sorting and AI.",
-        "우측 상단 설정 버튼을 눌러 이메일 연동 항목을 확인해보세요.": "Tap Settings in the upper right and review Email Integration.",
-        "우측 상단 설정 버튼을 눌러 시스템 권한 및 상태 항목을 확인해보세요.": "Tap Settings in the upper right and review System Permissions and Status.",
-        "설정 열기": "Open Settings",
-        "우측 상단 설정 버튼을 눌러 나의 페르소나를 확인해보세요.": "Tap Settings in the upper right to review My Persona.",
-        "나의 페르소나": "My Persona",
-        "설정 목록에서 나의 페르소나를 눌러 프로필을 확인해보세요.": "In Settings, tap My Persona to review your profile.",
-        "페르소나 확인": "Review Persona",
-        "여기서 생활 유형과 설명을 확인하거나 다시 설정할 수 있습니다. 확인했으면 뒤로 돌아가 계속하세요.": "Here you can review or reset your lifestyle type and description. Go back when you are done.",
-        "자동 정렬 AI": "Auto Sorting AI",
-        "TODO 자동 정렬 및 AI를 눌러 자동 정렬에 사용할 AI를 선택할 수 있는 화면으로 들어가보세요.": "Tap To-Do Auto Sorting and AI to choose which AI is used for automatic sorting.",
-        "AI 선택": "Choose AI",
-        "이 화면에서 TODO 자동 정렬에 사용할 AI를 선택할 수 있습니다. 확인했으면 뒤로 돌아가 계속하세요.": "This screen lets you choose the AI used for to-do auto sorting. Go back when you are done.",
-        "이메일 연동": "Email Integration",
-        "이메일 연동을 눌러 메일 연결 화면을 확인해보세요. 메일 연동은 선택입니다.": "Tap Email Integration to review mail connection. Mail integration is optional.",
-        "메일 연결": "Connect Mail",
-        "필요하면 여기서 메일 계정을 연결하세요. 메일 연동은 건너뛰어도 됩니다. 확인했으면 뒤로 돌아가 계속하세요.": "Connect a mail account here if needed. You can skip mail integration. Go back when you are done.",
-        "시스템 권한": "System Permissions",
-        "시스템 권한 및 상태를 눌러 알림과 캘린더 권한 상태를 확인해보세요.": "Tap System Permissions and Status to review notification and calendar permissions.",
-        "권한 허용": "Allow Permissions",
-        "필요하면 허용 버튼으로 알림과 캘린더 권한을 주세요. 확인했으면 뒤로 돌아가 계속하세요.": "If needed, use the Allow buttons to grant notification and calendar permissions. Go back when you are done.",
-        "캘린더 탭으로 이동": "Go to the Calendar Tab",
-        "이제 설정을 닫고 탭바의 캘린더를 눌러 실제 캘린더 탭을 열어보세요.": "Close Settings, then tap Calendar in the tab bar to open the calendar tab.",
-        "캘린더 탭 열기": "Open Calendar Tab",
-        "탭바의 캘린더를 눌러 일정과 할 일을 함께 보는 화면을 확인해보세요.": "Tap Calendar in the tab bar to see schedules and to-dos together.",
-        "캘린더 확인": "Review Calendar",
-        "여기서 캘린더 일정과 앱 할 일을 함께 볼 수 있습니다. 확인했으면 할 일 탭으로 돌아가 계속하세요.": "Here you can view calendar events and app to-dos together. Return to the To-Dos tab when you are done.",
-        "메일 탭으로 이동": "Go to the Mail Tab",
-        "이제 설정을 닫고 탭바의 메일을 눌러 실제 메일 탭을 열어보세요.": "Close Settings, then tap Mail in the tab bar to open the mail tab.",
-        "메일 탭 열기": "Open Mail Tab",
-        "탭바의 메일을 눌러 연결된 메일을 확인하는 화면을 열어보세요.": "Tap Mail in the tab bar to open connected mail.",
-        "메일 확인": "Review Mail",
-        "여기서 연결된 메일을 확인하고 할 일로 등록할 수 있습니다. 확인했으면 할 일 탭으로 돌아가 계속하세요.": "Here you can review connected mail and add messages as to-dos. Return to the To-Dos tab when you are done.",
-        "설정 닫기": "Close Settings",
-        "이제 설정을 닫고 할 일 탭으로 돌아가 AI 정리를 눌러보세요.": "Close Settings, return to the To-Dos tab, and tap AI Sort.",
-        "AI 정리 실행": "Run AI Sort",
-        "왼쪽 위 AI 정리 버튼을 눌러 실제 자동 정렬을 실행해보세요. 할 일이 없으면 먼저 하나 추가한 뒤 눌러보세요.": "Tap AI Sort in the upper left to run automatic sorting. If there are no to-dos, add one first.",
-        "필요한 권한 허용": "Allow Required Permissions",
-        "알림과 캘린더가 아직 허용되지 않았습니다. 각 행의 허용 버튼을 눌러 마감 알림과 캘린더 등록을 사용할 수 있게 해주세요.": "Notifications and Calendar are not allowed yet. Tap Allow in each row so due reminders and calendar registration can work.",
-        "알림 권한 허용": "Allow Notifications",
-        "알림이 아직 허용되지 않았습니다. 알림 행의 허용 버튼을 눌러 마감 알림을 받을 수 있게 해주세요.": "Notifications are not allowed yet. Tap Allow in the Notifications row to receive due reminders.",
-        "캘린더 권한 허용": "Allow Calendar",
-        "캘린더가 아직 허용되지 않았습니다. 캘린더 행의 허용 버튼을 눌러 마감 일정을 자동 등록할 수 있게 해주세요.": "Calendar is not allowed yet. Tap Allow in the Calendar row so due dates can be registered automatically.",
-        "권한 확인 완료": "Permissions Checked",
-        "필요한 권한이 허용되어 있습니다. 뒤로 돌아가 튜토리얼을 계속하세요.": "The required permissions are allowed. Go back to continue the tutorial."
-    ]
 }
 
 @MainActor
@@ -345,13 +284,13 @@ final class AppTutorialState: ObservableObject {
         case (.addTodoDueDate, .addTodo):
             return AppTutorialHint(
                 title: "마감 시각 설정",
-                body: "마감 시각 설정을 켜면 날짜와 시간을 고를 수 있습니다. 캘린더 권한이 있으면 캘린더 등록도 함께 켜지고, 마감이 있는 할 일에는 알림 프리셋을 추가할 수 있습니다.",
+                body: "마감 시각 설정을 켜면 날짜와 시간을 고를 수 있습니다. 추가 옵션에서 캘린더에 지금 등록하거나 알림을 선택할 수 있습니다.",
                 allowsNextAction: true
             )
         case (.addTodoPriority, .addTodo):
             return AppTutorialHint(
                 title: "우선순위 선택",
-                body: "기본 우선순위는 자동입니다. AI 정리와 마감 정보를 기준으로 계산되지만, 중요도가 확실한 일은 낮음·보통·높음·긴급 중 하나를 직접 선택해 강제로 고정할 수 있습니다.",
+                body: "기본 우선순위는 자동입니다. 추가 옵션에서 필요할 때만 직접 우선순위를 고정하세요.",
                 allowsNextAction: true
             )
         case (.addTodoSave, .addTodo):
@@ -363,25 +302,25 @@ final class AppTutorialState: ObservableObject {
         case (.priorityRules, .todoList):
             return AppTutorialHint(
                 title: "설정 다시 열기",
-                body: "우측 상단 설정 버튼을 눌러 TODO 우선순위 규칙 항목으로 이동해보세요."
+                body: "우측 상단 더 보기 > 설정을 눌러 TODO 우선순위 규칙 항목으로 이동해보세요."
             )
 
         case (.emailOptional, .todoList):
             return AppTutorialHint(
                 title: "설정 다시 열기",
-                body: "우측 상단 설정 버튼을 눌러 이메일 연동 항목을 확인해보세요."
+                body: "우측 상단 더 보기 > 설정을 눌러 이메일 연동 항목을 확인해보세요."
             )
 
         case (.permissions, .todoList):
             return AppTutorialHint(
                 title: "설정 다시 열기",
-                body: "우측 상단 설정 버튼을 눌러 시스템 권한 및 상태 항목을 확인해보세요."
+                body: "우측 상단 더 보기 > 설정을 눌러 시스템 권한 및 상태 항목을 확인해보세요."
             )
 
         case (.persona, .todoList):
             return AppTutorialHint(
                 title: "설정 열기",
-                body: "우측 상단 설정 버튼을 눌러 나의 페르소나를 확인해보세요."
+                body: "우측 상단 더 보기 > 설정을 눌러 나의 페르소나를 확인해보세요."
             )
         case (.persona, .settings):
             return AppTutorialHint(

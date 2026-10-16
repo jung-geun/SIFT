@@ -1,0 +1,51 @@
+{
+  "evidenceKind": "image-capable-review",
+  "reviewDate": "2026-10-16",
+  "artifacts": [
+    {
+      "diagram_type": "workflow",
+      "output": "overview.html",
+      "specification_sha256": "52e81ef6692f4bb6a14531ddaaa9780d3126b1d7872ce766fb673064ee5b2065",
+      "artifact_sha256": "18c53110c9dab87e44f0befcbf8ca62ea318b6809ecc46223d253011f24f62d6",
+      "validation": "9/9 showcase, 0 errors, 0 warnings",
+      "browser_evidence": "passed",
+      "visual_review": "passed",
+      "correction_rounds": 1,
+      "reviewedScreenshots": [
+        "overview.visual-check.2048x1320.light.png",
+        "overview.visual-check.2048x1320.dark.png"
+      ],
+      "observations": "Reviewed node/card containment, label legibility, route crossings and visual hierarchy. Korean authored content with English viewer controls."
+    },
+    {
+      "diagram_type": "workflow",
+      "output": "meeting.html",
+      "specification_sha256": "bd0d5672fc320b84375dea8cadbdacabda82d5ebe660540b014df74f1b8d1579",
+      "artifact_sha256": "72dc7ac3268b6568f10e2e3476ff62eb115c6d1ecdf288005e66efb22c0bcaa8",
+      "validation": "9/9 showcase, 0 errors, 0 warnings",
+      "browser_evidence": "passed",
+      "visual_review": "passed",
+      "correction_rounds": 1,
+      "reviewedScreenshots": [
+        "meeting.visual-check.2048x1320.light.png",
+        "meeting.visual-check.1440x900.dark.png"
+      ],
+      "observations": "Reviewed node/card containment, label legibility, route crossings and visual hierarchy. Korean authored content with English viewer controls."
+    },
+    {
+      "diagram_type": "workflow",
+      "output": "boundaries.html",
+      "specification_sha256": "092566f92f172dedf5c8e9a2ddcd216265113c909cf3fd8844a955c38808087f",
+      "artifact_sha256": "1f457498cb0a2fc9a8a8b8bdf6e7c5c7a4055cbb2e79c591c99bfb60d2738ef6",
+      "validation": "9/9 showcase, 0 errors, 0 warnings",
+      "browser_evidence": "passed",
+      "visual_review": "passed",
+      "correction_rounds": 1,
+      "reviewedScreenshots": [
+        "boundaries.visual-check.2048x1320.light.png",
+        "boundaries.visual-check.2048x1320.dark.png"
+      ],
+      "observations": "Reviewed node/card containment, label legibility, route crossings and visual hierarchy. Korean authored content with English viewer controls."
+    }
+  ]
+}

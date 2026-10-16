@@ -38,6 +38,7 @@ final class MeetingProcessingReporter: ObservableObject {
     /// post-processing reuses the saved transcript, while "다시 전사" sets this
     /// true so the UI includes the 전사 step.
     @Published private(set) var includesTranscription = false
+    @Published private(set) var transcriptionProgress: MeetingTranscriptionProgress?
 
     var isBusy: Bool {
         switch phase {
@@ -47,15 +48,23 @@ final class MeetingProcessingReporter: ObservableObject {
     }
 
     /// Begin a run that starts by re-transcribing the saved audio.
-    func startTranscribing() {
+    func startTranscribing(totalMilliseconds: Int64 = 0) {
         includesTranscription = true
+        transcriptionProgress = MeetingTranscriptionProgress(totalMilliseconds: totalMilliseconds)
         phase = .transcribing
+    }
+
+    func updateTranscription(_ update: MeetingTranscriptionProgress.Update) {
+        guard phase == .transcribing, var progress = transcriptionProgress else { return }
+        progress.receive(update)
+        transcriptionProgress = progress
     }
 
     func set(_ phase: Phase) { self.phase = phase }
 
     func reset() {
         includesTranscription = false
+        transcriptionProgress = nil
         phase = .idle
     }
 }

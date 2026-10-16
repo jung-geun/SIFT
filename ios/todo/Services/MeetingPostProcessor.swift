@@ -8,6 +8,34 @@ import SwiftData
 /// an already-saved transcription or leave in-memory state ahead of disk.
 @MainActor
 enum MeetingPostProcessor {
+    enum Failure: LocalizedError, Equatable {
+        case superseded
+
+        var errorDescription: String? {
+            AppLanguage.localized("meeting.error.changedDuringSummary", defaultValue: "The meeting changed during processing. Please try again.",
+                                  language: .current, comment: "Meeting processing lost a race to an edit or deletion.")
+        }
+    }
+
+    /// SwiftData can retain a deleted record's cached fields. Fetch the persisted
+    /// row as well as comparing its source before committing a suspended pass.
+    private static func requireCurrent(
+        _ record: MeetingRecord, in context: ModelContext, revision: Int, data: Data,
+        reporter: MeetingProcessingReporter? = nil
+    ) throws {
+        try Task.checkCancellation()
+        let meetingID = record.meetingID
+        let descriptor = FetchDescriptor<MeetingRecord>(predicate: #Predicate { $0.meetingID == meetingID })
+        guard let persisted = try context.fetch(descriptor).first,
+              persisted.persistentModelID == record.persistentModelID,
+              persisted.transcriptRevision == revision, persisted.resultData == data,
+              record.transcriptRevision == revision, record.resultData == data
+        else {
+            reporter?.reset()
+            throw Failure.superseded
+        }
+    }
+
     struct Result {
         /// True when the correction pass actually changed the transcript.
         let refined: Bool
@@ -108,12 +136,18 @@ enum MeetingPostProcessor {
         dependencies: Dependencies? = nil
     ) async throws -> Result {
         let dependencies = dependencies ?? .empty
-        let language = AppLanguage.resolve(languageTag: record.languageTag)
+        guard let language = AppLanguage.supportedLanguage(for: record.languageTag) else {
+            throw MeetingTranscriptionError.unsupportedLocale(record.languageTag)
+        }
         guard let base = record.result else {
             reporter?.reset()
             return Result(refined: false, analysisLabel: "", correctionCount: 0)
         }
         var result = base
+        let meetingID = record.meetingID
+        var sourceRevision = base.transcriptRevision
+        var sourceData = record.resultData
+        try requireCurrent(record, in: context, revision: sourceRevision, data: sourceData, reporter: reporter)
         var refined = false
         var correctionCount = 0
         var proofreadOutcome: MeetingProcessingReporter.ProofreadOutcome = base.segments.isEmpty
@@ -128,6 +162,7 @@ enum MeetingPostProcessor {
             }
             do {
                 let vocabulary = await dependencies.snapshot()
+                try requireCurrent(record, in: context, revision: sourceRevision, data: sourceData, reporter: reporter)
                 let outcome = try await dependencies.refine(
                     record.meetingID,
                     result,
@@ -135,6 +170,7 @@ enum MeetingPostProcessor {
                     language,
                     allowModelLoad
                 )
+                try requireCurrent(record, in: context, revision: sourceRevision, data: sourceData, reporter: reporter)
                 if case .rules(let reason) = outcome.executionPath {
                     record.refinementFallbackReasonRaw = reason.rawValue
                 } else {
@@ -151,7 +187,7 @@ enum MeetingPostProcessor {
                     proofreadEngine = engineLabel
                     let count = MeetingProofread.corrections(raw: base, current: refinedResult).count
                     do {
-                        try await MeetingRefinementCommitter.commit(
+                        let committedData = try await MeetingRefinementCommitter.commit(
                             record: record,
                             result: refinedResult,
                             changed: changed,
@@ -162,12 +198,17 @@ enum MeetingPostProcessor {
                                 await dependencies.learnCorrections(record.meetingID, pairs)
                             }
                         )
+                        sourceRevision = changed ? refinedResult.transcriptRevision : sourceRevision
+                        sourceData = committedData
+                        try requireCurrent(record, in: context, revision: sourceRevision, data: sourceData, reporter: reporter)
                         result = refinedResult
                         refined = changed
                         correctionCount = changed ? count : 0
                         proofreadOutcome = changed
                             ? .changed(count: correctionCount, engine: engineLabel)
                             : .unchanged(engine: engineLabel)
+                    } catch Failure.superseded {
+                        throw Failure.superseded
                     } catch is CancellationError {
                         throw CancellationError()
                     } catch {
@@ -180,9 +221,13 @@ enum MeetingPostProcessor {
                         )
                     }
                 }
+            } catch Failure.superseded {
+                reporter?.reset()
+                throw Failure.superseded
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
+                try requireCurrent(record, in: context, revision: sourceRevision, data: sourceData, reporter: reporter)
                 let reason = ProviderErrorMapper.fallbackReason(for: error) ?? .providerExecutionFailed
                 record.refinementFallbackReasonRaw = reason.rawValue
                 try? dependencies.save(context)
@@ -198,7 +243,14 @@ enum MeetingPostProcessor {
 
         reporter?.set(.summarizing(engine: ""))
         let analysisHint = (await dependencies.snapshot()).promptHint
-        let analysis = try await dependencies.analyze(record.meetingID, result, analysisHint, language)
+        try requireCurrent(record, in: context, revision: sourceRevision, data: sourceData, reporter: reporter)
+        let analysis = try await dependencies.analyze(meetingID, result, analysisHint, language)
+        do {
+            try requireCurrent(record, in: context, revision: sourceRevision, data: sourceData, reporter: reporter)
+        } catch Failure.superseded {
+            reporter?.reset()
+            throw Failure.superseded
+        }
         let analysisLabel = analysis.engineSource?.displayName(language: .current)
             ?? AppLanguage.localized(
                 "meeting.engine.unknown",
@@ -213,7 +265,11 @@ enum MeetingPostProcessor {
                 mutate: { try record.update(result: analysis.result, status: .ready) }
             )
         } catch {
-            reporter?.set(.completed(proofread: proofreadOutcome, analysisEngine: analysisLabel))
+            // Never report `.completed` when the final persist failed — the
+            // documented invariant on `Phase.completed` is "never a
+            // fabricated success." Leave the reporter idle; the caller
+            // surfaces the real failure via its own error path.
+            reporter?.reset()
             throw error
         }
 
@@ -231,7 +287,7 @@ enum MeetingRefinementCommitter {
         correctionPairs: [MeetingRefinementEngine.CorrectionPair],
         save: () throws -> Void,
         learnCorrections: @escaping ([MeetingRefinementEngine.CorrectionPair]) async -> Void
-    ) async throws {
+    ) async throws -> Data {
         try MeetingRecordCommitter.persist(
             record: record,
             save: save,
@@ -244,6 +300,8 @@ enum MeetingRefinementCommitter {
                 record.refinementEngineLabel = source.rawValue
             }
         )
+        let committedData = record.resultData
         await learnCorrections(correctionPairs)
+        return committedData
     }
 }

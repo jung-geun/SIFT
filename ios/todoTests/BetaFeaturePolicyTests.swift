@@ -12,7 +12,7 @@ struct BetaFeaturePolicyTests {
             let betaKeys = [
                 SettingsStore.betaFoundationModelsEnabledKey,
                 SettingsStore.betaOnDeviceModelEnabledKey,
-                SettingsStore.betaGeminiEnabledKey,
+                SettingsStore.betaOpenAIEnabledKey,
                 SettingsStore.betaMeetingVoiceProcessingEnabledKey,
                 SettingsStore.betaSelectedProviderKey,
                 SettingsStore.betaLegacySelectionMigratedKey
@@ -25,13 +25,11 @@ struct BetaFeaturePolicyTests {
             (betaKeys + legacyKeys).forEach(defaults.removeObject(forKey:))
             defer {
                 (betaKeys + legacyKeys).forEach(defaults.removeObject(forKey:))
-                GeminiProviderService.deleteAPIKey()
             }
 
             defaults.set(true, forKey: SettingsStore.betaFeaturesKey)
             defaults.set(true, forKey: "pieroot.todo.onDeviceLLMEnabled")
-            defaults.set(PersonaAIProvider.gemini.rawValue, forKey: "selectedAIProvider")
-            GeminiProviderService.saveAPIKey("legacy-gemini-key")
+            defaults.set("gemini", forKey: "selectedAIProvider")
 
             let policy = BetaFeaturePolicy()
             #expect(SettingsStore.betaProviderAccess().foundationModelsEnabled)
@@ -48,7 +46,8 @@ struct BetaFeaturePolicyTests {
             let enabled = BetaProviderAccess(
                 foundationModelsEnabled: true,
                 onDeviceEnabled: true,
-                geminiEnabled: false,
+                openAIEnabled: false,
+                layaEnabled: false,
                 meetingVoiceProcessingEnabled: false
             )
 
@@ -68,7 +67,7 @@ struct BetaFeaturePolicyTests {
 
             let disabled = BetaFeaturePolicy(
                 accessReader: { enabled },
-                selectionReader: { .gemini }
+                selectionReader: { .openAI }
             )
             #expect(disabled.routingDecision(for: .standardAnalysis) == .rules(.providerDisabled))
         }
@@ -82,18 +81,19 @@ struct BetaFeaturePolicyTests {
                     BetaProviderAccess(
                         foundationModelsEnabled: true,
                         onDeviceEnabled: true,
-                        geminiEnabled: true,
+                        openAIEnabled: true,
+                        layaEnabled: false,
                         meetingVoiceProcessingEnabled: false
                     )
                 },
-                selectionReader: { .gemini }
+                selectionReader: { .openAI }
             )
 
             #expect(
                 policy.routingDecision(for: .transcriptRefinement)
                     == .providers([.foundationModels, .onDevice])
             )
-            #expect(policy.authorizes(.gemini, for: .transcriptRefinement) == false)
+            #expect(policy.authorizes(.openAI, for: .transcriptRefinement) == false)
             #expect(policy.authorizes(.onDevice, for: .modelManagement))
         }
     }
@@ -105,7 +105,7 @@ struct BetaFeaturePolicyTests {
             let keys = [
                 SettingsStore.betaFoundationModelsEnabledKey,
                 SettingsStore.betaOnDeviceModelEnabledKey,
-                SettingsStore.betaGeminiEnabledKey,
+                SettingsStore.betaOpenAIEnabledKey,
                 SettingsStore.betaMeetingVoiceProcessingEnabledKey,
                 SettingsStore.betaSelectedProviderKey,
                 SettingsStore.betaLegacySelectionMigratedKey
@@ -117,17 +117,17 @@ struct BetaFeaturePolicyTests {
             #expect(SettingsStore.betaProviderAccess().foundationModelsEnabled)
             #expect(SettingsStore.betaSelectedProvider() == .foundationModels)
 
-            SettingsStore.shared.setBetaProvider(.gemini, enabled: true)
+            SettingsStore.shared.setBetaProvider(.openAI, enabled: true)
             #expect(SettingsStore.betaSelectedProvider() == .foundationModels)
-            #expect(SettingsStore.betaProviderEnabled(.gemini))
+            #expect(SettingsStore.betaProviderEnabled(.openAI))
 
             SettingsStore.shared.setBetaProvider(.foundationModels, enabled: true)
             #expect(SettingsStore.betaSelectedProvider() == .foundationModels)
 
             SettingsStore.shared.setBetaProvider(.foundationModels, enabled: false)
-            #expect(SettingsStore.betaSelectedProvider() == .gemini)
+            #expect(SettingsStore.betaSelectedProvider() == .openAI)
 
-            SettingsStore.shared.setBetaProvider(.gemini, enabled: false)
+            SettingsStore.shared.setBetaProvider(.openAI, enabled: false)
             #expect(SettingsStore.betaSelectedProvider() == nil)
         }
 
@@ -220,10 +220,75 @@ struct BetaFeaturePolicyTests {
         )
         #expect(
             ProviderErrorMapper.fallbackReason(for: IntelligenceRoutingError.parseFailed(
-                provider: .gemini,
+                provider: .openAI,
                 reason: "invalid"
             )) == .invalidResponse
         )
         #expect(ProviderErrorMapper.fallbackReason(for: CancellationError()) == nil)
+    }
+
+    @Test("laya-only access routes standard analysis and model management to laya")
+    func layaOnlyAccessRoutesToLaya() {
+        let access = BetaProviderAccess(
+            foundationModelsEnabled: false,
+            onDeviceEnabled: false,
+            openAIEnabled: false,
+            layaEnabled: true,
+            meetingVoiceProcessingEnabled: false
+        )
+        let policy = BetaFeaturePolicy(accessReader: { access }, selectionReader: { .laya })
+        #expect(policy.routingDecision(for: .standardAnalysis) == .providers([.laya]))
+        #expect(policy.routingDecision(for: .transcriptRefinement) == .rules(.noEligibleProvider))
+        #expect(policy.routingDecision(for: .layaModelManagement) == .providers([.laya]))
+        #expect(policy.authorizes(.laya, for: .standardAnalysis))
+
+        let disabledAccess = BetaProviderAccess(
+            foundationModelsEnabled: false,
+            onDeviceEnabled: false,
+            openAIEnabled: false,
+            layaEnabled: false,
+            meetingVoiceProcessingEnabled: false
+        )
+        let disabledPolicy = BetaFeaturePolicy(accessReader: { disabledAccess }, selectionReader: { nil })
+        #expect(disabledPolicy.routingDecision(for: .layaModelManagement) == .rules(.providerDisabled))
+    }
+
+    @Test("메일 요약은 Laya 우선순위 선택과 독립적으로 AFM 동의를 따른다")
+    func emailAnalysisKeepsAFMSeparateFromLayaSelection() {
+        let both = BetaProviderAccess(
+            foundationModelsEnabled: true,
+            onDeviceEnabled: false,
+            openAIEnabled: false,
+            layaEnabled: true,
+            meetingVoiceProcessingEnabled: false
+        )
+        let policy = BetaFeaturePolicy(accessReader: { both }, selectionReader: { .laya })
+        #expect(policy.routingDecision(for: .standardAnalysis) == .providers([.laya]))
+        #expect(policy.routingDecision(for: .emailAnalysis) == .providers([.foundationModels]))
+        #expect(policy.authorizes(.foundationModels, for: .emailAnalysis))
+        #expect(!policy.authorizes(.laya, for: .emailAnalysis))
+
+        let layaOnly = BetaProviderAccess(
+            foundationModelsEnabled: false,
+            onDeviceEnabled: false,
+            openAIEnabled: false,
+            layaEnabled: true,
+            meetingVoiceProcessingEnabled: false
+        )
+        let unavailable = BetaFeaturePolicy(accessReader: { layaOnly }, selectionReader: { .laya })
+        #expect(unavailable.routingDecision(for: .emailAnalysis) == .rules(.providerDisabled))
+    }
+
+    @Test("meeting analysis rejects remote and priority-only providers without changing ordinary priority routing", arguments: [PersonaAIProvider.openAI, .laya])
+    func meetingAnalysisIsLocalOnly(selection: PersonaAIProvider) {
+        let policy = BetaFeaturePolicy(
+            accessReader: {
+                BetaProviderAccess(foundationModelsEnabled: true, onDeviceEnabled: true, openAIEnabled: true,
+                                   layaEnabled: true, meetingVoiceProcessingEnabled: false)
+            },
+            selectionReader: { selection }
+        )
+        #expect(policy.routingDecision(for: .standardAnalysis) == .providers([selection]))
+        #expect(policy.routingDecision(for: .meetingAnalysis) == .rules(.providerNotApplicable))
     }
 }

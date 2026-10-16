@@ -1,0 +1,12 @@
+# Deployed offline Core ML evaluator and typed parity generator.
+coremltools==9.0
+numpy==2.5.3
+tokenizers==0.23.3
+regex==2026.9.29
+# English research/export scripts below still require the original source stack.
+laya==0.3.20
+huggingface-hub==1.33.0
+torch==2.14.0
+transformers==5.17.0
+sacremoses==0.1.1
+sentencepiece==0.2.1

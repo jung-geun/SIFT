@@ -1,15 +1,13 @@
 import Foundation
 
-/// Routes meeting transcript analysis through the user's selected AI provider,
-/// then falls back through the same provider chain used by task prioritization.
-/// The deterministic keyword heuristic remains the last resort.
+/// Analyzes transcripts only with a selected, enabled on-device provider.
+/// A remote task-priority selection falls back to the local keyword heuristic.
 @MainActor
 struct MeetingAnalysisEngine {
 
     enum AnalysisSource: String, Sendable {
         case appleIntelligence = "apple-intelligence"
         case qwen = "qwen"
-        case gemini = "gemini"
         case heuristic = "heuristic"
 
         func displayName(language: AppLanguage) -> String {
@@ -18,8 +16,6 @@ struct MeetingAnalysisEngine {
                 return MeetingRefinementEngine.Source.appleIntelligence.displayName(language: language)
             case .qwen:
                 return MeetingRefinementEngine.Source.qwen.displayName(language: language)
-            case .gemini:
-                return PersonaAIProvider.gemini.displayName(language: language)
             case .heuristic:
                 return AppLanguage.localized(
                     "meeting.engine.heuristic",
@@ -63,7 +59,7 @@ struct MeetingAnalysisEngine {
         glossaryHint: String = "",
         language: AppLanguage
     ) async throws -> Outcome {
-        let decision = BetaFeaturePolicy().routingDecision(for: .standardAnalysis)
+        let decision = BetaFeaturePolicy().routingDecision(for: .meetingAnalysis)
         guard case .providers(let providers) = decision, let provider = providers.first else {
             let reason: RuleFallbackReason
             if case .rules(let fallback) = decision {
@@ -148,20 +144,8 @@ struct MeetingAnalysisEngine {
                 engineSource: .qwen,
                 executionPath: .beta(.onDevice)
             )
-        case .gemini:
-            guard let extraction = try await analyzeViaGemini(
-                meetingID: meetingID,
-                segments: result.segments,
-                glossaryHint: glossaryHint,
-                language: language
-            ) else { return nil }
-            return Outcome(
-                result: merge(extraction, into: result, meetingID: meetingID),
-                engineLabel: AnalysisSource.gemini.displayName(language: language),
-                usedOnDeviceLLM: false,
-                engineSource: .gemini,
-                executionPath: .beta(.gemini)
-            )
+        case .openAI, .laya:
+            return nil
         }
     }
     private func analyzeViaFoundationModels(
@@ -192,41 +176,6 @@ struct MeetingAnalysisEngine {
         )
     }
 
-    // MARK: - Gemini analysis
-
-    private func analyzeViaGemini(
-        meetingID: String,
-        segments: [MeetingSegment],
-        glossaryHint: String,
-        language: AppLanguage
-    ) async throws -> ProviderMeetingExtraction? {
-        let baseResult = MeetingResult(segments: segments)
-
-
-        let analyzed = try await GeminiProviderService().analyzeMeeting(
-            meetingID: meetingID,
-            result: baseResult,
-            glossaryHint: glossaryHint,
-            language: language
-        )
-        return ProviderMeetingExtraction(
-            title: analyzed.title,
-            summary: analyzed.summary,
-            decisions: analyzed.decisions,
-            unresolvedQuestions: analyzed.unresolvedQuestions,
-            actionDrafts: analyzed.actionDrafts.map {
-                ProviderActionDraftInput(
-                    title: $0.title,
-                    notes: $0.notes,
-                    assignee: $0.assignee,
-                    dueAtISO8601: $0.dueAtISO8601,
-                    sourceSegmentIDs: $0.sourceSegmentIDs,
-                    confidence: $0.confidence,
-                    requiresReview: $0.requiresReview
-                )
-            }
-        )
-    }
 
     // MARK: - On-device LLM analysis
 
@@ -264,7 +213,7 @@ struct MeetingAnalysisEngine {
             systemPrompt: Prompts.MeetingAnalysisLocal.systemInstruction(language: language),
             userPrompt: userPrompt,
             maxTokens: 900,
-            use: .standardAnalysis
+            use: .meetingAnalysis
         )
         guard let extraction = Self.extraction(from: raw, included: context.included) else {
             throw IntelligenceRoutingError.parseFailed(

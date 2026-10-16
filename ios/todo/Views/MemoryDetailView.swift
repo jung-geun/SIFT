@@ -13,6 +13,8 @@ struct MemoryDetailView: View {
     @State private var pendingMemoryResult: MemoryAnalysisResult?
     @State private var errorMessage: String?
     @State private var showError = false
+    @State private var analysisTask: Task<Void, Never>?
+    @State private var showAdvancedRequest = false
     
     private var evidenceRecordCount: Int {
         todos.filter { $0.triage == .todo }.count
@@ -34,7 +36,7 @@ struct MemoryDetailView: View {
                 }
                 
                 Button {
-                    Task { await analyzeMemory() }
+                    startAnalysis()
                 } label: {
                     if isAnalyzing {
                         HStack(spacing: 8) {
@@ -47,18 +49,36 @@ struct MemoryDetailView: View {
                             ))
                         }
                     } else {
-                        Label(pendingMemoryResult == nil ? "지금 패턴 분석" : "다시 분석", systemImage: "chart.bar.xaxis")
+                        Label(AppLanguage.localized(pendingMemoryResult == nil ? "지금 패턴 분석" : "다시 분석", defaultValue: pendingMemoryResult == nil ? "지금 패턴 분석" : "다시 분석", language: .current, comment: "Start or repeat behavior analysis."), systemImage: "chart.bar.xaxis")
                     }
                 }
                 .buttonStyle(.borderless)
+                .disabled(isAnalyzing)
+                Button(AppLanguage.localized(
+                    "memory.analysis.advancedRequest",
+                    defaultValue: "gpt-6.1-sol로 다시 요청",
+                    language: .current,
+                    comment: "Button to explicitly re-request behavior analysis using gpt-6.1-sol. Keep the model name unchanged."
+                )) { showAdvancedRequest = true }
+                    .disabled(isAnalyzing)
+                    .accessibilityIdentifier("memory.advancedRequest")
+                if isAnalyzing {
+                    Button(AppLanguage.localized(
+                        "memory.analysis.cancelRequest",
+                        defaultValue: "요청 취소",
+                        language: .current,
+                        comment: "Cancel the currently running behavior-analysis request."
+                    ), role: .cancel) { analysisTask?.cancel() }
+                }
             } footer: {
                 Text(AppLanguage.localized(
-                    "memory.analysis.footer",
-                    defaultValue: "최근 90일의 현재 TODO 상태, 사용자 삭제 스냅샷, typed 변경 이벤트를 분리합니다. 구조화 지표와 신뢰도는 모든 지원 기기에서 동일하게 계산하고, AFM은 선택되었을 때 그 지표의 서술만 개선합니다. 결과는 적용을 눌러야 저장됩니다.",
+                    "memory.analysis.footer.providers",
+                    defaultValue: "최근 90일의 TODO 상태와 변경 이벤트로 결정론적 지표를 계산합니다. 활성화·동의한 OpenAI는 gpt-6-luna로 서술하고, gpt-6.1-sol은 직접 재요청할 때만 사용합니다. 완료 시각은 실제 활동 수행의 증거가 아닙니다. 적용해야 저장되며, 활동별 루틴 후보와 할 일 추천은 루틴 화면에서 별도로 검토합니다.",
                     language: .current,
-                    comment: "Behavior-pattern analysis scope and AFM narrative explanation."
+                    comment: "Behavior metrics, remote prose, and routine-review boundaries."
                 ))
             }
+            OpenAIConsentSection(scope: .routines)
 
             Section {
                 if analyses.isEmpty {
@@ -76,6 +96,26 @@ struct MemoryDetailView: View {
         }
         .navigationTitle("행동 패턴 분석")
         .navigationBarTitleDisplayMode(.inline)
+        .onDisappear { analysisTask?.cancel() }
+        .confirmationDialog(AppLanguage.localized(
+            "memory.analysis.advancedConfirmation",
+            defaultValue: "결정론적 행동 통계를 OpenAI의 gpt-6.1-sol로 보낼까요?",
+            language: .current,
+            comment: "Confirmation before sharing deterministic behavior statistics with OpenAI for an advanced request. Keep the model name unchanged."
+        ), isPresented: $showAdvancedRequest, titleVisibility: .visible) {
+            Button(AppLanguage.localized(
+                "memory.analysis.sendAdvanced",
+                defaultValue: "고급 분석 요청",
+                language: .current,
+                comment: "Confirm sending the advanced behavior-analysis request."
+            )) { startAnalysis(tier: .advanced) }
+            Button(AppLanguage.localized(
+                "action.cancel",
+                defaultValue: "취소",
+                language: .current,
+                comment: "Dismiss the advanced behavior-analysis confirmation without sending a request."
+            ), role: .cancel) {}
+        }
         .alert("분석 오류", isPresented: $showError) {
             Button("확인", role: .cancel) {
                 errorMessage = nil
@@ -101,7 +141,19 @@ struct MemoryDetailView: View {
                     .background(.quaternary, in: Capsule())
             }
 
-            Text("\(result.behaviorProfile.confidence.label) · 근거 \(result.behaviorProfile.sampleCount)건 · \(result.behaviorProfile.windowStart.formatted(date: .abbreviated, time: .omitted))~\(result.behaviorProfile.windowEnd.formatted(date: .abbreviated, time: .omitted))")
+            Text(String(
+                format: AppLanguage.localized(
+                    "memory.analysis.evidence.window",
+                    defaultValue: "%2$@ · 근거 %1$lld건 · %3$@~%4$@",
+                    language: .current,
+                    comment: "Preview evidence line: %1$lld is the evidence-record count (not completed activities), %2$@ is the confidence label, and %3$@/%4$@ are the formatted start/end dates. Plural selection uses the first argument. Positional placeholders may be reordered."
+                ),
+                locale: AppLanguage.current.locale,
+                Int64(result.behaviorProfile.sampleCount),
+                result.behaviorProfile.confidence.label,
+                result.behaviorProfile.windowStart.formatted(date: .abbreviated, time: .omitted),
+                result.behaviorProfile.windowEnd.formatted(date: .abbreviated, time: .omitted)
+            ))
                 .font(.caption2)
                 .foregroundStyle(.secondary)
             
@@ -134,7 +186,7 @@ struct MemoryDetailView: View {
                     .controlSize(.small)
                 
                 Button("다시 분석") {
-                    Task { await analyzeMemory() }
+                    startAnalysis()
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
@@ -161,7 +213,17 @@ struct MemoryDetailView: View {
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
-                    Text("\(analysis.confidence.label) · 근거 \(analysis.sampleCount)건")
+                    Text(String(
+                        format: AppLanguage.localized(
+                            "memory.analysis.evidence.count",
+                            defaultValue: "%2$@ · 근거 %1$lld건",
+                            language: .current,
+                            comment: "Saved analysis evidence line: %1$lld is the evidence-record count, not a count of completed activities, and %2$@ is the confidence label. Plural selection uses the first argument. Positional placeholders may be reordered."
+                        ),
+                        locale: AppLanguage.current.locale,
+                        Int64(analysis.sampleCount),
+                        analysis.confidence.label
+                    ))
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
@@ -194,7 +256,14 @@ struct MemoryDetailView: View {
         .padding(.vertical, 4)
     }
 
-    private func analyzeMemory() async {
+    private func startAnalysis(tier: OpenAIAnalysisTier = .basic) {
+        guard !isAnalyzing else { return }
+        analysisTask?.cancel()
+        analysisTask = Task { await analyzeMemory(tier: tier) }
+    }
+
+    private func analyzeMemory(tier: OpenAIAnalysisTier = .basic) async {
+        guard !isAnalyzing else { return }
         isAnalyzing = true
         defer { isAnalyzing = false }
 
@@ -202,12 +271,16 @@ struct MemoryDetailView: View {
             let result = try await MemoryService.shared.analyzeForegroundPreview(
                 todos: todos,
                 auditEvents: auditEvents,
-                behaviorEvents: behaviorEvents
+                behaviorEvents: behaviorEvents,
+                tier: tier
             )
             if !result.summary.isEmpty || !result.insights.isEmpty {
                 pendingMemoryResult = result
             }
+        } catch is CancellationError {
+            return
         } catch {
+            guard !Task.isCancelled else { return }
             errorMessage = error.localizedDescription
             showError = true
         }

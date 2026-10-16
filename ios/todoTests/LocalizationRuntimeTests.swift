@@ -3,44 +3,325 @@ import Testing
 @testable import todo
 
 @MainActor
+@Suite(.serialized)
 struct LocalizationRuntimeTests {
-    @Test("App language resolution keeps supported tags stable")
-    func resolvesLanguageTags() {
-        #expect(AppLanguage.resolve(languageTag: "en-US") == .english)
-        #expect(AppLanguage.resolve(languageTag: "en_GB") == .english)
-        #expect(AppLanguage.resolve(languageTag: "ko-KR") == .korean)
+    private static let identifiers = ["ko", "en", "es", "ja", "zh-Hans", "fr", "it", "de"]
+
+    @Test("Every shipped locale is selectable exactly once and retains its canonical identifier")
+    func supportedSelections() {
+        #expect(AppLanguage.supportedIdentifiers == Self.identifiers)
+        #expect(Set(AppLanguage.supported.map(\.rawValue)) == Set(Self.identifiers))
+        #expect(AppLanguage.supported.count == Self.identifiers.count)
+        for identifier in Self.identifiers {
+            #expect(AppLanguage.resolve(languageTag: identifier).rawValue == identifier)
+        }
+    }
+
+    @Test("Regional aliases, casing, underscores and Chinese script selection are canonicalized")
+    func regionalAndScriptAliases() {
+        let aliases = [
+            "ko-KR": "ko", "en_GB": "en", "es-MX": "es", "es-419": "es",
+            "ja-JP": "ja", "zh": "zh-Hans", "zh_CN": "zh-Hans", "zh-SG": "zh-Hans",
+            "zh-Hans-CN": "zh-Hans", "zh-Hans-TW": "zh-Hans", " ZH_hAnS ": "zh-Hans",
+            "zh-CN-u-nu-latn": "zh-Hans", "fr-CA": "fr", "it-CH": "it", "de-AT": "de"
+        ]
+        for (alias, expected) in aliases {
+            #expect(AppLanguage.supportedLanguage(for: alias)?.rawValue == expected)
+        }
+        for unsupported in ["", "  ", "pt-BR", "ar", "zh-Hant", "zh-Hant-CN", "zh-TW", "zh-HK", "zh-MO"] {
+            #expect(AppLanguage.supportedLanguage(for: unsupported) == nil)
+        }
+        #expect(AppLanguage.resolve(preferredLocalizations: ["zh-Hant-TW", "fr-CA", "en-US"]) == .french)
         #expect(AppLanguage.resolve(preferredLocalizations: []) == .korean)
-        #expect(AppLanguage.resolve(preferredLocalizations: ["fr-FR"]) == .korean)
+        #expect(AppLanguage.resolve(preferredLocalizations: ["pt-BR"]) == .korean)
     }
 
-    @Test("User locale override wins over system preference and unsupported values fall back")
-    func userLocaleOverrideAndFallback() {
-        #expect(
-            AppLanguage.resolve(preferredLocalizations: ["ko-KR"], userOverride: "en-US")
-                == .english
-        )
-        #expect(
-            AppLanguage.resolve(preferredLocalizations: ["fr-FR"], userOverride: "en-US")
-                == .english
-        )
-        #expect(
-            AppLanguage.resolve(preferredLocalizations: ["fr-FR"], userOverride: "fr-FR")
-                == .korean
-        )
-        #expect(AppLanguage.supported.contains(.english))
-        #expect(AppLanguage.supported.contains(.korean))
+    @Test("Supported overrides win; unsupported overrides defer to the system preference list")
+    func overrideResolution() {
+        #expect(AppLanguage.resolve(preferredLocalizations: ["ko-KR"], userOverride: "es-MX") == .spanish)
+        #expect(AppLanguage.resolve(preferredLocalizations: ["fr-FR"], userOverride: "zh-Hant") == .french)
+        #expect(AppLanguage.resolve(preferredLocalizations: ["pt-BR", "de-CH"], userOverride: "invalid") == .german)
     }
 
-    @Test("Selected language supplies the matching formatting locale")
-    func selectedLanguageLocale() {
-        #expect(AppLanguage.english.locale.language.languageCode?.identifier == "en")
-        #expect(AppLanguage.korean.locale.language.languageCode?.identifier == "ko")
-        #expect(AppLanguage.english.outputLanguageName == "English")
-    }
-
-    @Test("User language override persists and resets to system mode")
-    @MainActor
+    @Test("Every selection persists canonically and reset restores system mode")
     func persistedLanguageOverride() {
+        preservingOverride {
+            for identifier in Self.identifiers {
+                let language = AppLanguage(rawValue: identifier)
+                AppLanguage.setUserOverride(language)
+                #expect(AppLanguage.userOverride == language)
+                #expect(AppLanguage.current == language)
+                #expect(UserDefaults.standard.string(forKey: AppLanguage.userOverrideKey) == identifier)
+            }
+            UserDefaults.standard.set("fr-CA", forKey: AppLanguage.userOverrideKey)
+            #expect(AppLanguage.userOverride == .french)
+            AppLanguage.setUserOverride(AppLanguage(rawValue: "es-MX"))
+            #expect(UserDefaults.standard.string(forKey: AppLanguage.userOverrideKey) == "es")
+            AppLanguage.setUserOverride(nil)
+            #expect(AppLanguage.userOverride == nil)
+            #expect(UserDefaults.standard.object(forKey: AppLanguage.userOverrideKey) == nil)
+        }
+    }
+
+    @Test("Native picker labels, speech tags and English machine language names are distinct contracts")
+    func languageMetadata() {
+        let metadata: [(AppLanguage, String, String, String)] = [
+            (.korean, "한국어", "ko-KR", "Korean"),
+            (.english, "English", "en-US", "English"),
+            (.spanish, "Español", "es-ES", "Spanish"),
+            (.japanese, "日本語", "ja-JP", "Japanese"),
+            (.simplifiedChinese, "简体中文", "zh-CN", "Simplified Chinese"),
+            (.french, "Français", "fr-FR", "French"),
+            (.italian, "Italiano", "it-IT", "Italian"),
+            (.german, "Deutsch", "de-DE", "German")
+        ]
+        for (language, nativeName, speechTag, outputName) in metadata {
+            #expect(language.displayName == nativeName)
+            #expect(language.speechLanguageTag == speechTag)
+            #expect(language.outputLanguageName == outputName)
+            #expect(AppLanguage.resolve(languageTag: speechTag) == language)
+            #expect(language.locale.language.languageCode == Locale(identifier: language.rawValue).language.languageCode)
+        }
+        #expect(AppLanguage.simplifiedChinese.locale.language.script?.identifier == "Hans")
+    }
+
+    @Test("Missing resources honor fallback while a translation identical to its key is not missing")
+    func resourceFallbackBoundaries() {
+        for identifier in Self.identifiers {
+            let language = AppLanguage(rawValue: identifier)
+            #expect(AppLanguage.localized("localization.runtime.missing.sentinel", defaultValue: "sentinel", language: language) == "sentinel")
+        }
+        // This source-key equality is a lookup regression, not a wording snapshot.
+        let sourceKey = "녹음 시작"
+        #expect(AppLanguage.localized(sourceKey, defaultValue: "missing", language: .korean) == sourceKey)
+        #expect(AppLanguage.localized(sourceKey, defaultValue: "missing", language: .english) != sourceKey)
+    }
+
+    @Test("Each shipped locale has its own compiled resources rather than relying on fallback")
+    func compiledLocaleResources() throws {
+        let hostBundle = Bundle(for: MeetingAudioPlaybackController.self)
+        for identifier in Self.identifiers {
+            let path = try #require(hostBundle.path(forResource: identifier, ofType: "lproj"))
+            let resources = try #require(Bundle(path: path))
+            let language = AppLanguage(rawValue: identifier)
+            for key in ["calendar.todoDeadline", "todo.priority.critical", "mail.summaryHeader", "date.deadline.overdue"] {
+                let selected = resources.localizedString(forKey: key, value: "missing", table: "Localizable")
+                #expect(selected != "missing")
+                #expect(selected != key)
+                #expect(AppLanguage.localized(key, defaultValue: "missing", language: language) == selected)
+            }
+        }
+    }
+
+    @Test("Explicit catalog lookups ignore an opposing ambient app language")
+    func explicitResourceLookup() {
+        preservingOverride {
+            for identifier in Self.identifiers {
+                let language = AppLanguage(rawValue: identifier)
+                AppLanguage.setUserOverride(language == .korean ? .english : .korean)
+                let actual = AppLanguage.localized("calendar.todoDeadline", defaultValue: "missing", language: language)
+                #expect(actual != "missing")
+                #expect(actual != "calendar.todoDeadline")
+                if language != .korean {
+                    #expect(actual != AppLanguage.localized("calendar.todoDeadline", defaultValue: "missing", language: .korean))
+                }
+            }
+        }
+    }
+
+    @Test("Deadline formatting uses the selected Foundation locale without changing the date")
+    func deadlineFormatting() {
+        let date = Date(timeIntervalSince1970: 1_783_680_000)
+        for identifier in Self.identifiers {
+            let language = AppLanguage(rawValue: identifier)
+            for allDay in [true, false] {
+                let expected = DateFormatter()
+                expected.locale = language.locale
+                expected.dateStyle = .long
+                expected.timeStyle = allDay ? .none : .short
+                #expect(AppDateFormat.deadlineString(from: date, isAllDay: allDay, language: language) == expected.string(from: date))
+            }
+        }
+        // Machine dates stay language-independent and round-trip the same instant.
+        let machineDate = AppDateFormat.llmString(from: date)
+        #expect(AppDateFormat.parseLLMDate(machineDate) == date)
+    }
+
+    @Test("Deadline unit transitions and zero/minimum count behavior use catalog plural resources")
+    func deadlineUnitBoundaries() {
+        let now = Date(timeIntervalSince1970: 1_783_680_000)
+        let boundaries: [(TimeInterval, String, Int)] = [
+            (0, "date.deadline.minutes", 1), (59, "date.deadline.minutes", 1),
+            (60, "date.deadline.minutes", 1), (120, "date.deadline.minutes", 2),
+            (3_599, "date.deadline.minutes", 59), (3_600, "date.deadline.hours", 1),
+            (7_200, "date.deadline.hours", 2), (86_399, "date.deadline.hours", 23),
+            (86_400, "date.deadline.days", 1), (172_800, "date.deadline.days", 2)
+        ]
+        for identifier in Self.identifiers {
+            let language = AppLanguage(rawValue: identifier)
+            for (offset, key, count) in boundaries {
+                let expected = AppLanguage.localizedCount(key, count: count, defaultValue: "missing %lld", language: language)
+                #expect(!expected.contains("missing"))
+                #expect(!expected.contains("%lld"))
+                #expect(AppDateFormat.remainingTimeDescription(for: now.addingTimeInterval(offset), now: now, language: language) == expected)
+            }
+            #expect(AppDateFormat.remainingTimeDescription(for: now.addingTimeInterval(-1), now: now, language: language)
+                == AppLanguage.localized("date.deadline.overdue", defaultValue: "missing", language: language))
+        }
+    }
+
+    @Test("Reminder locale affects presentation, not offsets or minimum-duration semantics")
+    func reminderSemantics() {
+        let offsets: [Double] = [-900, -3_600, -21_600, -86_400, -259_200]
+        for identifier in Self.identifiers {
+            let language = AppLanguage(rawValue: identifier)
+            #expect(NotificationService.presetOffsets(language: language).map(\.offset) == offsets)
+            #expect(ReminderTiming.durationText(for: -3_600, language: language) == ReminderTiming.durationText(for: 3_600, language: language))
+            #expect(ReminderTiming.durationText(for: 0, language: language) == ReminderTiming.durationText(for: -60, language: language))
+            let duration = ReminderTiming.durationText(for: -120, language: language)
+            #expect(!duration.isEmpty)
+            #expect(ReminderTiming.detailLabel(for: -120, language: language).contains(duration))
+        }
+    }
+
+    @Test("Domain display localization never changes persisted identifiers or source keywords")
+    func stableDomainData() {
+        #expect(TodoPriority.critical.rawValue == 5)
+        #expect(PersonaType.officeWorker.rawValue == "officeWorker")
+        #expect(PersonaType.officeWorker.weightedKeywords.contains("회의"))
+        #expect(PersonaType.officeWorker.weightedKeywords.contains("meeting"))
+        #expect(PriorityEngine.heuristic.rawValue == "휴리스틱")
+        #expect(MeetingRefinementEngine.Source.appleIntelligence.rawValue == "apple-intelligence")
+        for identifier in Self.identifiers {
+            let language = AppLanguage(rawValue: identifier)
+            #expect(TodoPriority.critical.displayName(language: language)
+                == AppLanguage.localized("todo.priority.critical", defaultValue: "missing", language: language))
+            if language != .korean {
+                #expect(BehaviorConfidence.high.label(language: language) != BehaviorConfidence.high.label(language: .korean))
+                #expect(PersonaType.officeWorker.displayName(language: language) != PersonaType.officeWorker.displayName(language: .korean))
+            }
+        }
+    }
+
+    @Test("Meeting draft localization preserves source transcript and canonical action identity")
+    func meetingDraftSourceIdentity() throws {
+        let meetingID = "00000000-0000-4000-8000-000000000001"
+        let source = MeetingResult(transcriptRevision: 7, segments: [
+            MeetingSegment(id: "source_segment", startMs: 0, endMs: 1_000, text: "Please send the original report")
+        ])
+        let analyzer = MeetingTranscriptAnalysisService()
+        let baseline = try #require(analyzer.analyze(meetingID: meetingID, result: source, language: .english).actionDrafts.first)
+        for identifier in Self.identifiers {
+            let language = AppLanguage(rawValue: identifier)
+            let result = analyzer.analyze(meetingID: meetingID, result: source, language: language)
+            let draft = try #require(result.actionDrafts.first)
+            #expect(result.segments == source.segments)
+            #expect(result.transcriptRevision == source.transcriptRevision)
+            #expect(draft.id == baseline.id)
+            #expect(draft.title == baseline.title)
+            #expect(draft.sourceSegmentIDs == ["source_segment"])
+            #expect(draft.notes.contains(source.segments[0].text))
+            #expect(draft.requiresReview)
+        }
+        // Unsupported deterministic source grammar is preserved, not guessed or translated.
+        let unmatched = MeetingResult(segments: [
+            MeetingSegment(id: "french-source", startMs: 0, endMs: 1_000, text: "Veuillez envoyer le rapport")
+        ])
+        let unchanged = analyzer.analyze(meetingID: meetingID, result: unmatched, language: .french)
+        #expect(unchanged.segments == unmatched.segments)
+        #expect(unchanged.actionDrafts.isEmpty)
+    }
+
+    @Test("Offline transcription accepts shipped language aliases but never silently chooses Korean")
+    func offlineTranscriptionLanguageBoundary() throws {
+        #expect(try MeetingOfflineTranscriptionService.languageCode(for: nil) == nil)
+        let aliases = ["ko-KR": "ko", "en-GB": "en", "es-MX": "es", "ja-JP": "ja",
+                       "zh-Hans": "zh", "zh-CN": "zh", "fr-CA": "fr", "it-CH": "it", "de-AT": "de"]
+        for (tag, expectedCode) in aliases {
+            #expect(try MeetingOfflineTranscriptionService.languageCode(for: tag) == expectedCode)
+        }
+        for unsupported in ["", "pt-BR", "zh-Hant", "zh-TW"] {
+            #expect(throws: MeetingOfflineTranscriptionService.Failure.unsupportedLanguage) {
+                try MeetingOfflineTranscriptionService.languageCode(for: unsupported)
+            }
+        }
+    }
+
+    @Test("Selecting an app language cannot bypass speech backend locale and asset capability checks")
+    func speechBackendCapabilityBoundary() async {
+        for identifier in Self.identifiers {
+            let language = AppLanguage(rawValue: identifier)
+            for capability in [MeetingTranscriptionCapability.unsupportedLocale, .unsupportedAsset, .unavailable] {
+                let factory = DefaultMeetingTranscriptionSessionFactory(
+                    foundationModelsAvailable: { true },
+                    capabilityProbe: { _, requested in
+                        #expect(requested.language.languageCode == language.locale.language.languageCode)
+                        return capability
+                    },
+                    sessionBuilder: { _, _, _, _ in
+                        Issue.record("An unsupported speech capability must not build a session")
+                        throw MeetingTranscriptionError.runtimeFailed
+                    },
+                    snapshotProvider: { .empty },
+                    forcedBackend: nil)
+                do {
+                    _ = try await factory.make(languageTag: language.speechLanguageTag, purpose: .live)
+                    Issue.record("An unsupported speech capability must be rejected")
+                } catch let error as MeetingTranscriptionError {
+                    switch capability {
+                    case .unsupportedLocale: #expect(error == .unsupportedLocale(language.speechLanguageTag))
+                    case .unsupportedAsset: #expect(error == .staticAssetUnavailable(language.speechLanguageTag))
+                    default: #expect(error == .backendUnavailable)
+                    }
+                } catch {
+                    Issue.record("Unexpected capability error: \(error)")
+                }
+            }
+        }
+    }
+
+    @Test("App-owned errors hide provider diagnostics in every selected locale")
+    func errorDiagnosticBoundary() {
+        let diagnostic = NSError(domain: "AVFAudio-private-detail", code: 42, userInfo: [NSLocalizedDescriptionKey: "private backend diagnostic"])
+        for identifier in Self.identifiers {
+            let language = AppLanguage(rawValue: identifier)
+            let message = MeetingAudioPlaybackController.userFacingErrorMessage(
+                MeetingAudioPlaybackController.PlaybackError.operation("decode", diagnostic), language: language)
+            #expect(!message.isEmpty)
+            #expect(!message.contains(diagnostic.domain))
+            #expect(!message.contains("private backend diagnostic"))
+            let routing = IntelligenceRoutingError.backendUnavailable(provider: .foundationModels, reason: "private backend diagnostic")
+                .errorDescription(language: language)
+            #expect(!routing.contains("private backend diagnostic"))
+            if language != .korean {
+                #expect(CalendarError.notAuthorized.errorDescription(language: language) != CalendarError.notAuthorized.errorDescription(language: .korean))
+                #expect(EmailError.apiFailed.errorDescription(language: language) != EmailError.apiFailed.errorDescription(language: .korean))
+            }
+        }
+    }
+
+
+    @Test("Manual email fallback retains source text and identity in every output language")
+    func emailSourcePreservation() async {
+        let message = GmailMessage(
+            id: "localization-message", threadID: "localization-thread", messageID: "<localization@example.com>",
+            subject: "Original source 제목 — untouched", from: "Source Sender <sender@example.com>",
+            snippet: "Original body 本文 — untouched", body: "Body with source facts", htmlBody: nil,
+            receivedAt: Date(timeIntervalSince1970: 1_700_000_000), labelIds: [], isBulk: false)
+        for identifier in Self.identifiers {
+            let language = AppLanguage(rawValue: identifier)
+            let todo = await EmailIngestionEngine().makeManualTodo(from: message, allowFoundationModels: false, language: language)
+            #expect(todo.title == message.subject)
+            #expect(todo.notes.contains(message.snippet))
+            #expect(todo.sourceRef == message.id)
+            #expect(todo.sourceMessageID == message.messageID)
+            #expect(todo.sourceThreadID == message.threadID)
+            #expect(todo.sourceSenderEmail == "sender@example.com")
+            #expect(todo.notes.contains(AppLanguage.localized("mail.summaryHeader", defaultValue: "missing", language: language)))
+        }
+    }
+
+    private func preservingOverride(_ body: () -> Void) {
         let defaults = UserDefaults.standard
         let previous = defaults.string(forKey: AppLanguage.userOverrideKey)
         defer {
@@ -51,292 +332,6 @@ struct LocalizationRuntimeTests {
             }
             NotificationCenter.default.post(name: AppLanguage.didChangeNotification, object: nil)
         }
-
-        AppLanguage.setUserOverride(.english)
-        #expect(AppLanguage.userOverride == .english)
-        #expect(AppLanguage.current == .english)
-
-        AppLanguage.setUserOverride(nil)
-        #expect(AppLanguage.userOverride == nil)
-    }
-
-    @Test("Missing localized resources use the supplied fallback")
-    func missingResourceFallback() {
-        #expect(
-            AppLanguage.localized(
-                "localization.runtime.missing.sentinel",
-                defaultValue: "Sentinel fallback",
-                language: .english
-            ) == "Sentinel fallback"
-        )
-    }
-
-    @Test("To-do detail editing copy is localized")
-    func todoDetailEditingCopyIsLocalized() {
-        #expect(AppLanguage.localized("action.save", defaultValue: "저장", language: .english) == "Save")
-        #expect(AppLanguage.localized("action.discard", defaultValue: "폐기", language: .english) == "Discard")
-        #expect(AppLanguage.localized("todo.detail.navigationTitle", defaultValue: "할 일 세부", language: .english) == "To-Do Details")
-        #expect(AppLanguage.localized("todo.detail.unsavedChanges", defaultValue: "저장하지 않은 변경사항이 있습니다", language: .english) == "You have unsaved changes")
-        #expect(AppLanguage.localized("todo.detail.completeAction", defaultValue: "완료 처리", language: .english) == "Mark Complete")
-        #expect(AppLanguage.localized("todo.detail.saveErrorTitle", defaultValue: "저장 오류", language: .english) == "Save Error")
-        #expect(AppLanguage.localized("todo.detail.titleRequired", defaultValue: "제목을 입력해주세요.", language: .english) == "Enter a title.")
-        #expect(AppLanguage.localized("todo.detail.startTimeToggle", defaultValue: "시작 시각 설정", language: .english) == "Set Start Time")
-        #expect(AppLanguage.localized("todo.detail.startTimeLabel", defaultValue: "시작", language: .english) == "Start")
-    }
-
-    @Test("Explicit locale controls deadline and reminder copy")
-    func explicitLanguageFormatting() {
-        let now = Date(timeIntervalSince1970: 1_783_680_000)
-        let due = now.addingTimeInterval(2 * 3_600)
-        #expect(AppDateFormat.remainingTimeDescription(for: due, now: now, language: .english) == "Due in 2 hours")
-        #expect(AppDateFormat.remainingTimeDescription(for: now.addingTimeInterval(3_600), now: now, language: .english) == "Due in 1 hour")
-        #expect(AppDateFormat.remainingTimeDescription(for: now.addingTimeInterval(2 * 60), now: now, language: .english) == "Due in 2 minutes")
-        #expect(AppDateFormat.remainingTimeDescription(for: now.addingTimeInterval(60), now: now, language: .english) == "Due in 1 minute")
-        #expect(AppDateFormat.remainingTimeDescription(for: now.addingTimeInterval(2 * 86_400), now: now, language: .english) == "Due in 2 days")
-        #expect(AppDateFormat.remainingTimeDescription(for: now.addingTimeInterval(86_400), now: now, language: .english) == "Due in 1 day")
-        #expect(AppDateFormat.remainingTimeDescription(for: due, now: now, language: .korean) == "2시간 후 마감")
-        #expect(ReminderTiming.durationText(for: -2 * 3_600, language: .english) == "2 hours")
-        #expect(ReminderTiming.detailLabel(for: -2 * 3_600, language: .english).contains("2 hours"))
-    }
-
-    @Test("Localized display names preserve persisted raw values")
-    func stableRawValuesAndDisplayNames() {
-        #expect(TodoPriority.critical.rawValue == 5)
-        #expect(TodoPriority.critical.displayName(language: .english) == "Critical")
-        #expect(PersonaType.officeWorker.rawValue == "officeWorker")
-        #expect(PersonaType.officeWorker.displayName(language: .english) == "Office Worker")
-        #expect(PersonaType.officeWorker.weightedKeywords.contains("회의"))
-        #expect(PersonaType.officeWorker.weightedKeywords.contains("meeting"))
-        #expect(BehaviorConfidence.high.label(language: .english) == "High confidence")
-    }
-
-    @Test("Localized app-owned errors use the selected language")
-    func localizedErrors() {
-        #expect(CalendarError.notAuthorized.errorDescription(language: .english) == "Calendar access is not authorized. Allow access in Settings > Privacy & Security.")
-        #expect(CalendarError.notAuthorized.errorDescription(language: .korean) == "캘린더 접근 권한이 없습니다. 설정 > 개인정보 보호에서 허용해주세요.")
-        #expect(EmailError.apiFailed.errorDescription(language: .english) == "The Gmail API request failed.")
-        #expect(EmailError.apiFailed.errorDescription(language: .korean) == "Gmail API 호출에 실패했습니다.")
-        #expect(IntelligenceRoutingError.backendUnavailable(provider: .foundationModels, reason: "ignored").errorDescription(language: .english) == "Apple Foundation Models (AFM) is unavailable on this device.")
-        #expect(IntelligenceRoutingError.backendUnavailable(provider: .foundationModels, reason: "ignored").errorDescription(language: .korean) == "Apple Foundation Models (AFM)을 이 기기에서 사용할 수 없습니다.")
-        #expect(PriorityEngine.heuristic.rawValue == "휴리스틱")
-        #expect(PriorityEngine.heuristic.displayName(language: .english) == "Heuristic")
-    }
-
-    @Test("Review fixes keep engine IDs stable and user errors generic")
-    @MainActor
-    func reviewFixContracts() {
-        #expect(PriorityEngine(rawValue: "휴리스틱")?.displayName(language: .english) == "Heuristic")
-        #expect(MeetingRefinementEngine.Source.appleIntelligence.rawValue == "apple-intelligence")
-        #expect(MeetingRefinementEngine.Source.qwen.displayName(language: .english) == "On-Device LLM (Qwen)")
-        let diagnostic = NSError(domain: "AVFAudio", code: 42, userInfo: [NSLocalizedDescriptionKey: "device detail"])
-        let message = MeetingAudioPlaybackController.userFacingErrorMessage(
-            MeetingAudioPlaybackController.PlaybackError.operation("decode", diagnostic),
-            language: .english
-        )
-        #expect(message == "The meeting recording could not be played.")
-        #expect(!message.contains("AVFAudio"))
-        #expect(!message.contains("42"))
-        let controller = MeetingAudioPlaybackController()
-        controller.report(diagnostic)
-        #expect(
-            controller.errorMessage
-                == MeetingAudioPlaybackController.userFacingErrorMessage(diagnostic, language: .current)
-        )
-    }
-
-
-    @Test("Explicit locale lookup is independent of ambient app language")
-    func explicitResourceLookup() {
-        let english = AppLanguage.localized(
-            "calendar.todoDeadline",
-            defaultValue: "To-Do Deadline",
-            language: .english,
-            comment: "Calendar fallback title"
-        )
-        let korean = AppLanguage.localized(
-            "calendar.todoDeadline",
-            defaultValue: "할 일 마감",
-            language: .korean,
-            comment: "Calendar fallback title"
-        )
-        #expect(AppLanguage.localized("calendar.permissionUnavailable", defaultValue: "Calendar Access Unavailable", language: .english) == "Calendar Access Unavailable")
-        #expect(AppLanguage.localized("calendar.permissionUnavailable", defaultValue: "캘린더 접근 권한 없음", language: .korean) == "캘린더 접근 권한 없음")
-        #expect(english == "To-Do Deadline")
-        #expect(korean == "할 일 마감")
-    }
-    @Test("Reminder plural values and presets use localized units")
-    func reminderPluralAndPresets() {
-        #expect(ReminderTiming.durationText(for: -60, language: .english) == "1 minute")
-        #expect(ReminderTiming.durationText(for: -120, language: .english) == "2 minutes")
-        #expect(ReminderTiming.durationText(for: -3_600, language: .english) == "1 hour")
-        #expect(ReminderTiming.durationText(for: -7_200, language: .english) == "2 hours")
-        #expect(NotificationService.presetOffsets(language: .english).map(\.label).contains("1 hour before due"))
-        #expect(NotificationService.presetOffsets(language: .korean).map(\.label).contains("마감 1시간 전"))
-    }
-
-    @Test("English email fallback preserves source content")
-    func emailFallback() async {
-        let message = GmailMessage(
-            id: "localization-message",
-            threadID: "localization-thread",
-            messageID: "<localization@example.com>",
-            subject: "",
-            from: "Sender <sender@example.com>",
-            snippet: "",
-            body: "",
-            htmlBody: nil,
-            receivedAt: Date(timeIntervalSince1970: 1_700_000_000),
-            labelIds: [],
-            isBulk: false
-        )
-        let todo = await EmailIngestionEngine().makeManualTodo(
-            from: message,
-            allowFoundationModels: false,
-            language: .english
-        )
-        #expect(todo.title == "Check Email")
-        #expect(todo.notes.contains("[Email Summary]"))
-        #expect(todo.notes.contains("[Sender]"))
-        #expect(todo.sourceSenderEmail == "sender@example.com")
-    }
-
-    @Test("English and Korean display models retain semantic data")
-    @MainActor
-    func modelDisplayAndDateCopy() {
-        let date = Date(timeIntervalSince1970: 1_783_680_000)
-        let englishDate = AppDateFormat.deadlineString(from: date, isAllDay: false, language: .english)
-        let koreanDate = AppDateFormat.deadlineString(from: date, isAllDay: false, language: .korean)
-        #expect(!englishDate.contains("년"))
-        #expect(koreanDate.contains("년") || koreanDate.contains("월"))
-        #expect(PersonaType.officeWorker.weightedKeywords.contains("meeting"))
-        #expect(PersonaType.officeWorker.weightedKeywords.contains("회의"))
-        #expect(BehaviorConfidence.high.label(language: .english) == "High confidence")
-    }
-    @Test("Heuristic priority reasons follow explicit language")
-    @MainActor
-    func heuristicPriorityReasonLanguage() {
-        let todo = Todo(title: "Read book")
-        let persona = PersonaContext(types: [.officeWorker], description: "")
-        let engine = HeuristicEngine()
-        #expect(engine.heuristicReason(todo: todo, persona: persona, language: .english) == "No deadline — low default priority")
-        #expect(engine.heuristicReason(todo: todo, persona: persona, language: .korean) == "마감 없음 — 낮은 기본 우선순위")
-    }
-
-    @Test("Email fetch status uses localized plural resources")
-    func emailFetchStatusPlural() {
-        let one = EmailDetailView.fetchStatusMessage(
-            todoCount: 1,
-            eventCount: 0,
-            failures: [],
-            language: .english
-        )
-        let many = EmailDetailView.fetchStatusMessage(
-            todoCount: 2,
-            eventCount: 0,
-            failures: [],
-            language: .english
-        )
-        let oneEvent = EmailDetailView.fetchStatusMessage(
-            todoCount: 0,
-            eventCount: 1,
-            failures: [],
-            language: .english
-        )
-        let korean = EmailDetailView.fetchStatusMessage(
-            todoCount: 2,
-            eventCount: 1,
-            failures: [],
-            language: .korean
-        )
-        #expect(one == "1 To-Do extracted")
-        #expect(!one.contains("To-Dos"))
-        #expect(oneEvent == "1 Calendar Event extracted")
-        #expect(many == "2 To-Dos extracted")
-        #expect(korean == "할 일 2개, 일정 1개 추출됨")
-    }
-    @Test("Mail and meeting correction counts preserve singular and plural")
-    func mailAndMeetingPluralResources() {
-        #expect(MailTabView.pendingTrashMessage(count: 1, language: .english) == "1 message will move to Trash")
-        #expect(MailTabView.pendingTrashMessage(count: 2, language: .english) == "2 messages will move to Trash")
-        #expect(MeetingDetailView.proofreadChangedText(corrections: 1, engineLabel: "Apple Intelligence (On Device)", language: .english) == "Proofreading complete · 1 correction · Apple Intelligence (On Device)")
-        #expect(MeetingDetailView.proofreadChangedText(corrections: 2, engineLabel: "Apple Intelligence (On Device)", language: .english) == "Proofreading complete · 2 corrections · Apple Intelligence (On Device)")
-    }
-
-    @Test("Imported item count uses exact singular and plural forms")
-    func importedItemPlural() {
-        #expect(
-            AppLanguage.localizedCount(
-                "todo.icloud.importedCount",
-                count: 1,
-                defaultValue: "%lld item imported",
-                language: .english
-            ) == "1 item imported"
-        )
-        #expect(
-            AppLanguage.localizedCount(
-                "todo.icloud.importedCount",
-                count: 2,
-                defaultValue: "%lld items imported",
-                language: .english
-            ) == "2 items imported"
-        )
-    }
-    @Test("English prioritization UI uses semantic catalog resources")
-    func englishPrioritizationCopy() {
-        #expect(
-            AppLanguage.localized(
-                "action.prioritize",
-                defaultValue: "AI 정리",
-                language: .english,
-                comment: "Prioritize with AI action."
-            ) == "Prioritize with AI"
-        )
-        #expect(
-            AppLanguage.localized(
-                "todo.ai.initial",
-                defaultValue: "AI 우선순위 정리 중…",
-                language: .english,
-                comment: "Initial AI prioritization progress."
-            ) == "Prioritization in progress…"
-        )
-        #expect(
-            AppLanguage.localized(
-                "todo.priority.backgroundWarning",
-                defaultValue: "앱을 나가거나 화면을 끄면 분석이 중단됩니다",
-                language: .english,
-                comment: "Background analysis warning."
-            ) == "Analysis stops if you leave the app or turn off the screen."
-        )
-    }
-    @Test("Capture status follows app language independently of meeting language")
-    func captureStatusResourcesSupportOppositeLanguage() {
-        let english = AppLanguage.localized(
-            "meeting.capture.finalization.transcript",
-            defaultValue: "전사 결과를 확정하는 중",
-            language: .english,
-            comment: "Meeting transcript finalization status."
-        )
-        let korean = AppLanguage.localized(
-            "meeting.capture.finalization.transcript",
-            defaultValue: "전사 결과를 확정하는 중",
-            language: .korean,
-            comment: "Meeting transcript finalization status."
-        )
-        let englishWarning = AppLanguage.localized(
-            "meeting.capture.transcription.warning",
-            defaultValue: "실시간 전사가 중단됐습니다.",
-            language: .english,
-            comment: "Live transcription warning."
-        )
-        let koreanWarning = AppLanguage.localized(
-            "meeting.capture.transcription.warning",
-            defaultValue: "실시간 전사가 중단됐습니다.",
-            language: .korean,
-            comment: "Live transcription warning."
-        )
-        #expect(english == "Finalizing the transcript")
-        #expect(korean == "전사 결과를 확정하는 중")
-        #expect(englishWarning.hasPrefix("Live transcription stopped."))
-        #expect(koreanWarning.hasPrefix("실시간 전사가 중단됐습니다."))
+        body()
     }
 }
