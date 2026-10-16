@@ -221,6 +221,18 @@ CloudKit·iCloud KVS entitlement를 제외한 별도 빌드에서는 기존 조�
 
 **기존 iCloud 원설정을 강제로 끄지 마세요.** 로컬 전용 빌드도 원설정이 켜져 있으면 기존 `icloud_v2.store`를 CloudKit 없이 열어 데이터를 보존합니다. 빈 `local_v2.store`로 전환해 기존 데이터를 숨기는 방식은 사용하지 않습니다. 이 조건은 메일·모델 다운로드·Firebase·OpenAI까지 막는 전체 네트워크 차단 스위치가 아닙니다.
 
+## 비공개 피드백 수신 서비스
+
+운영 API는 `https://sift-feedback-api.jgbong0306.workers.dev`, 관리자 화면은 `https://sift.pieroot.xyz/feedback-admin.html`입니다. 사용자 접수에는 로그인·이메일 연결이 없지만 목록·본문·상태·메모·삭제에는 별도 운영 Bearer 키가 필요합니다. 브라우저는 키를 탭 메모리에만 유지하며 연결 해제·새로고침·이탈 시 지웁니다. 기존 App Store 앱의 메일·공유 경로가 자동으로 갱신되는 것은 아니며 앱 내 직접 전송 UI는 별도 앱 업데이트에 포함해야 합니다.
+
+`backend/feedback-api`에서 Node.js 22 이상과 고정 lockfile을 사용합니다. 로컬 검증은 `npm ci`, `node scripts/local-secrets.mjs`, `npm run migrate:local`, `npm run dev` 순서입니다. `.dev.vars`와 `.wrangler`는 Git에서 제외합니다. `npm run check`와 `npm test`는 타입 및 workerd/D1 동작을 검사합니다.
+
+운영 배포는 `CLOUDFLARE_ACCOUNT_ID`와 Billing Read·Workers Scripts Write·D1 Write 토큰을 안전한 프로세스 환경으로 전달한 후 `npm run guard:free`, `npm run migrate:remote`, `npm run deploy` 순서입니다. 계정 구독 전체 목록에서 Workers 구독이 없는 기본 Free만 사용합니다. 별도 Zero Trust Free(`teams_free`/`prod_teams`, 50석·0 USD·비시험·비계약) 외의 유료·알 수 없는 상품, 불완전 목록과 조회 실패는 차단하며 우회 옵션은 없습니다. 구독·결제 변경은 수행하지 않습니다.
+
+`ADMIN_TOKEN`과 `NETWORK_HMAC_SECRET`은 Worker secrets로만 설정합니다. 이 워크스테이션의 운영 키는 Keychain의 서비스 `xyz.pieroot.sift.feedback.admin.production`, 계정 `operator`에 저장되어 있으며 소스·앱·사이트·URL에는 포함하지 않습니다. 키 유출 시 Worker secret을 교체하고 관리자 탭을 다시 연결하세요. 접수 중지는 `wrangler.jsonc`의 `INTAKE_ENABLED=false`를 검증·배포하며, 인증된 조회·삭제는 계속 사용할 수 있습니다.
+
+접수는 UTC 하루 전체 100건·일별 HMAC 네트워크당 10건, 본문 768KiB·진단 512KiB, 보관 원장 100MiB로 제한합니다. 원장은 요청·메모 크기와 건당 여유를 합한 값이며 D1 물리 파일 크기가 아닙니다. 내용·첨부·메모는 30일 후 조회에서 제외하고 매일 삭제합니다. 정기 작업 지연 및 D1 Free 복구 이력 최대 7일의 한계는 [개인정보 처리방침](docs/privacy-policy.md#앱-내-오류-보고기능-제안)을 확인하세요. Free 플랫폼 한도 초과는 실패할 수 있으며 유료로 자동 전환하지 않습니다. 운영자가 나중에 요금제를 바꾸면 무료 전제도 달라집니다.
+
 ## 문서와 검증 범위
 
 | 문서 | 내용 |

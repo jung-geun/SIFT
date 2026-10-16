@@ -1,0 +1,19 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "sift-feedback-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-01-14",
+  "workers_dev": true,
+  "preview_urls": false,
+  "observability": { "enabled": false },
+  "vars": { "ENVIRONMENT": "production", "INTAKE_ENABLED": "true" },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "sift-feedback",
+      "database_id": "1865d105-38ca-493c-9bac-acf7edb2d2ca",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "triggers": { "crons": ["0 0 * * *"] }
+}

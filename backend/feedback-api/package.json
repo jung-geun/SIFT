@@ -1,0 +1,23 @@
+{
+  "name": "sift-feedback-api",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.0.0" },
+  "scripts": {
+    "dev": "wrangler dev --config wrangler.local.jsonc --local --ip 127.0.0.1",
+    "migrate:local": "wrangler d1 migrations apply DB --config wrangler.local.jsonc --local",
+    "migrate:remote": "node scripts/free-guard.mjs && wrangler d1 migrations apply DB --config wrangler.jsonc --remote",
+    "check": "tsc --noEmit",
+    "test": "node --test --test-concurrency=1 test/*.test.mjs",
+    "guard:free": "node scripts/free-guard.mjs",
+    "deploy": "node scripts/free-guard.mjs --deploy"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20261006.1",
+    "esbuild": "0.28.2",
+    "miniflare": "5.20261012.1-beta",
+    "typescript": "5.9.3",
+    "wrangler": "4.151.1"
+  }
+}

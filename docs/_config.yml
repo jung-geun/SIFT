@@ -3,6 +3,7 @@ description: "iPhone·iPad·Mac에서 사용하는 무료 할 일 관리. 기본
 theme: jekyll-theme-cayman
 url: "https://sift.pieroot.xyz"
 app_store_url: "https://apps.apple.com/kr/app/sift-to-do-list/id6782752844"
+feedback_api_url: "https://sift-feedback-api.jgbong0306.workers.dev"
 
 github:
   is_project_page: false
