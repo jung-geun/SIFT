@@ -1,7 +1,7 @@
 ---
 layout: landing
-title: 할 일과 일정을 한곳에서
-description: 직접 적은 할 일부터 메일 속 요청까지. 실제 앱 화면으로 SIFT를 둘러보고, App Store에서 iPhone과 iPad용 앱을 다운로드하세요.
+title: iPhone·iPad·Mac에서 쓰는 무료 할 일 관리
+description: 직접 적은 할 일부터 메일 속 요청까지. 실제 마감을 확인하고 오늘 할 일에 집중하세요. SIFT는 무료이며 기본 처리는 기기 안에서, 메일·캘린더 연결과 iCloud 동기화는 사용자가 선택합니다.
 image: /assets/images/app-icon.webp
 ---
 
@@ -12,13 +12,14 @@ image: /assets/images/app-icon.webp
     <div class="container hero-grid">
       <div class="hero-copy">
         <h1 id="hero-title">할 일과 일정,<br><span>한곳에서.</span></h1>
-        <p class="hero-description">직접 적은 할 일부터 메일 속 요청까지.<br>마감을 확인하고, 오늘 할 일에 집중하세요.</p>
+        <p class="hero-description">직접 적은 할 일부터 메일 속 요청까지.<br>실제 마감을 확인하고, 오늘 할 일에 집중하세요.</p>
         <div class="hero-actions">
           <a class="store-link" href="{{ site.app_store_url }}">
             <img src="{{ '/assets/images/app-store-badge.svg' | relative_url }}" width="195" height="60" alt="App Store에서 다운로드">
           </a>
           <a class="text-link" href="#screens">앱 화면 보기 <span aria-hidden="true">→</span></a>
         </div>
+        <p class="download-meta">무료 · iPhone · iPad · Mac<br>메일이나 AI 계정 연결 없이 기본 할 일 관리부터 시작하세요.</p>
       </div>
       <div class="hero-visual" aria-label="SIFT의 실제 할 일 목록과 캘린더 화면">
         <figure class="hero-device hero-device-secondary device">
@@ -152,8 +153,8 @@ image: /assets/images/app-icon.webp
       </div>
       <div class="connections-copy reveal">
         <h2 id="connections-title">연결은 필요한 만큼.<br>선택은 내가.</h2>
-        <p>기본은 기기 저장. 메일·캘린더 연결과 iCloud 동기화는 설정에서 선택하세요.</p>
-        <p class="privacy-note">AI 기능은 기기와 설정에 따라 달라집니다. 클라우드 AI를 선택하면 할 일 등의 데이터가 외부로 전송될 수 있습니다.</p>
+        <p>기본은 기기 저장과 기기 내 처리. 메일·캘린더 연결과 iCloud 동기화는 필요할 때만 선택하세요.</p>
+        <p class="privacy-note">AI 기능은 기기·운영체제·모델 설치 상태와 출시 버전에 따라 달라집니다. 앱의 무료 제공이 외부 서비스의 구독이나 무제한 AI 이용을 포함하지는 않습니다. 외부 서비스의 이용 자격·한도·약관은 별도로 확인하세요.</p>
         <a class="text-link" href="{{ '/privacy-policy.html' | relative_url }}">데이터 처리 방식 보기 <span aria-hidden="true">↗</span></a>
       </div>
     </div>
@@ -177,11 +178,11 @@ image: /assets/images/app-icon.webp
     <div class="container download-inner reveal">
       <img class="download-icon" src="{{ '/assets/images/app-icon.webp' | relative_url }}" width="96" height="96" alt="SIFT 앱 아이콘" loading="lazy" decoding="async">
       <h2 id="download-title">오늘의 할 일을<br>SIFT에서.</h2>
-      <p>iPhone과 iPad에서 시작하세요.</p>
+      <p>iPhone·iPad·Mac에서 시작하세요.</p>
       <a class="store-link" href="{{ site.app_store_url }}">
         App Store에서 다운로드 <span aria-hidden="true">↗</span>
       </a>
-      <p class="download-meta">무료 · 한국어·영어 · 지원 기기는 App Store에서 확인</p>
+      <p class="download-meta">앱 무료 · iOS/iPadOS 26 이상 · macOS 26 이상<br>출시 버전의 지원 기기·언어·기능은 App Store에서 확인하세요.</p>
     </div>
   </section>
 </main>
