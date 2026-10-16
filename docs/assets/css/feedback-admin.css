@@ -1,0 +1,81 @@
+.feedback-admin .admin-main { padding-block: 3rem 4rem; }
+.feedback-admin .admin-heading { margin-bottom: 1.5rem; max-width: 48rem; }
+.feedback-admin h1 { margin-block: .5rem 1rem; font-size: clamp(2rem, 5vw, 3.2rem); letter-spacing: -.045em; }
+.feedback-admin h2 { font-size: 1.4rem; margin-bottom: 1.25rem; }
+.feedback-admin h3 { font-size: 1.05rem; margin-block: 1.5rem .75rem; }
+.feedback-admin .admin-label { font-size: .85rem; font-weight: 650; color: var(--accent-strong); }
+.feedback-admin .admin-heading > p:last-child,
+.feedback-admin .admin-help,
+.feedback-admin .admin-footer { color: var(--muted); }
+.feedback-admin .admin-notice { padding: 1.25rem; background: var(--surface-soft); border-radius: var(--radius); font-size: .9rem; }
+.feedback-admin .admin-notice p + p { margin-top: .5rem; }
+.feedback-admin .admin-panel { min-width: 0; padding: 1.5rem; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+.feedback-admin #login-panel { max-width: 44rem; }
+.feedback-admin .admin-error:empty,
+.feedback-admin .admin-announcement:empty { display: none; }
+.feedback-admin .admin-error { margin-block: 1rem; padding: 1rem; border: 1px solid #a52a39; border-radius: .5rem; color: #8b2130; background: #fff4f5; }
+.feedback-admin .admin-announcement { margin-block: 1rem; font-weight: 600; }
+.feedback-admin label { display: block; font-weight: 650; margin-bottom: .4rem; }
+.feedback-admin input,
+.feedback-admin select,
+.feedback-admin textarea { font: inherit; color: var(--text); background: var(--surface); border: 1px solid #89899f; border-radius: .5rem; padding: .65rem .75rem; max-width: 100%; min-height: 2.75rem; }
+.feedback-admin input,
+.feedback-admin textarea { width: 100%; }
+.feedback-admin textarea { resize: vertical; white-space: pre-wrap; overflow-wrap: anywhere; }
+.feedback-admin button { min-height: 2.75rem; padding: .6rem 1rem; border: 1px solid #89899f; border-radius: .5rem; background: var(--surface); font-weight: 600; transition: background-color .15s; }
+.feedback-admin button:hover:not(:disabled) { background: var(--surface-soft); }
+.feedback-admin button:active:not(:disabled) { transform: translateY(1px); }
+.feedback-admin button:disabled { opacity: .55; cursor: not-allowed; }
+.feedback-admin .admin-primary { background: var(--accent-strong); color: white; border-color: var(--accent-strong); }
+.feedback-admin .admin-primary:hover:not(:disabled) { background: #38348f; }
+.feedback-admin .admin-danger { color: #8b2130; border-color: #a52a39; }
+.feedback-admin .admin-danger:hover:not(:disabled) { background: #fff4f5; }
+.feedback-admin .admin-help { font-size: .875rem; margin-block: .5rem 1rem; }
+.feedback-admin .admin-login-row { display: flex; align-items: center; gap: .75rem; }
+.feedback-admin .admin-login-row input { flex: 1; min-width: 0; }
+.feedback-admin .admin-login-row button { flex-shrink: 0; }
+.feedback-admin .admin-toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: .75rem; margin-block: 1.5rem; }
+.feedback-admin .admin-toolbar p { color: var(--muted); font-size: .875rem; }
+.feedback-admin .admin-columns { display: grid; grid-template-columns: minmax(17rem, 2fr) minmax(0, 3fr); gap: 1.5rem; align-items: start; }
+.feedback-admin .admin-list-controls { display: flex; align-items: end; flex-wrap: wrap; gap: .75rem; }
+.feedback-admin .admin-report-list { list-style: none; margin: 0; padding: 0; }
+.feedback-admin .admin-report-list li + li { margin-top: .5rem; }
+.feedback-admin .admin-report-button { display: block; width: 100%; text-align: left; padding: 1rem; border-color: var(--border); overflow-wrap: anywhere; }
+.feedback-admin .admin-report-button[aria-current="true"] { border-color: var(--accent-strong); box-shadow: inset 3px 0 var(--accent-strong); background: var(--surface-soft); }
+.feedback-admin .admin-report-button span { display: block; }
+.feedback-admin .admin-report-summary { color: var(--muted); font-size: .8rem; margin-top: .5rem; font-weight: 400; }
+.feedback-admin .admin-pagination { display: flex; align-items: center; justify-content: space-between; gap: .75rem; margin-top: 1.5rem; font-variant-numeric: tabular-nums; }
+.feedback-admin .admin-report-title { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 1.35rem; line-height: 1.5; }
+.feedback-admin .admin-metadata { display: grid; grid-template-columns: 6rem minmax(0, 1fr); gap: .5rem .75rem; font-size: .875rem; }
+.feedback-admin .admin-metadata dt { color: var(--muted); }
+.feedback-admin .admin-metadata dd { margin: 0; overflow-wrap: anywhere; }
+.feedback-admin .admin-mono { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: .8rem; overflow-wrap: anywhere; }
+.feedback-admin .admin-text { margin: .75rem 0 1.5rem; padding: 1rem; max-height: 32rem; overflow: auto; border-radius: .5rem; background: var(--surface-soft); white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; font-family: inherit; font-size: .9rem; }
+.feedback-admin .admin-text.admin-mono { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: .8rem; }
+.feedback-admin details summary { cursor: pointer; padding-block: .75rem; font-weight: 600; }
+.feedback-admin fieldset { border: 0; padding: 0; margin: 1.5rem 0 0; min-width: 0; }
+.feedback-admin legend { font-weight: 700; margin-bottom: 1rem; }
+.feedback-admin #report-status { margin-bottom: 1rem; }
+.feedback-admin #save-button { margin-top: .75rem; }
+.feedback-admin .admin-delete-area { margin-top: 2rem; padding-top: 1.5rem; border-top: 1px solid var(--border); }
+.feedback-admin #delete-confirmation { margin-top: 1rem; }
+.feedback-admin #delete-ticket { margin-block: .75rem; }
+.feedback-admin .admin-actions { display: flex; flex-wrap: wrap; gap: .75rem; }
+.feedback-admin .admin-footer { margin-top: 2rem; font-size: .875rem; }
+.feedback-admin .admin-footer p { max-width: 70ch; margin-block: .75rem; }
+@media (max-width: 850px) {
+  .feedback-admin .admin-columns { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 480px) {
+  .feedback-admin .container { width: calc(100% - 2rem); }
+  .feedback-admin .admin-panel { padding: 1rem; }
+  .feedback-admin .admin-metadata { grid-template-columns: minmax(0, 1fr); gap: .25rem; }
+  .feedback-admin .admin-metadata dd { margin-bottom: .5rem; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .feedback-admin button { transition: none; }
+}
+@media print {
+  .feedback-admin .admin-main { display: none; }
+  .feedback-admin::after { content: "비공개 운영 수신함은 인쇄하지 않습니다."; display: block; padding: 2rem; }
+}
