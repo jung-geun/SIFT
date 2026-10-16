@@ -93,6 +93,8 @@ struct MailboxPagingTests {
             rawMessageID: "same",
             isInInbox: true
         )
+        newestEmpty.analysisTodoCandidate = true
+        newestEmpty.analysisTodoCandidateFingerprint = rich.analyzedBodyFingerprint
         context.insert(rich)
         context.insert(bodyOnly)
         context.insert(newestEmpty)
@@ -142,6 +144,8 @@ struct MailboxPagingTests {
             survivor.analysisVersion
                 == EmailAnalysisContract.summaryContractVersion
         )
+        #expect(survivor.analysisTodoCandidate == true)
+        #expect(survivor.analysisTodoCandidateFingerprint == rich.analyzedBodyFingerprint)
         #expect(survivor.isRead)
         #expect(survivor.gmailInboxCategories == Set([.updates]))
         let resolvedDetailEmail = MailDetailSelection.resolve(rows, matching: selection.key)
@@ -307,6 +311,8 @@ struct MailboxPagingTests {
         email.analysisSummary = "stale summary"
         email.analyzedBodyFingerprint = "old fingerprint"
         email.analysisVersion = 2
+        email.analysisTodoCandidate = true
+        email.analysisTodoCandidateFingerprint = "old fingerprint"
         context.insert(email)
         try context.save()
 
@@ -348,6 +354,8 @@ struct MailboxPagingTests {
         #expect(email.analysisSummary.isEmpty)
         #expect(email.analyzedBodyFingerprint.isEmpty)
         #expect(email.analysisVersion == 0)
+        #expect(email.analysisTodoCandidate == nil)
+        #expect(email.analysisTodoCandidateFingerprint.isEmpty)
     }
 
     @Test("Gmail content rehydration never downgrades a local read state")

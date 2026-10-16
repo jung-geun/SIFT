@@ -1,0 +1,2 @@
+# Install on top of scripts/laya-eval-requirements.txt in /tmp/sift-laya-eval.
+coremltools==9.0

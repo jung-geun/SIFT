@@ -13,7 +13,7 @@ struct CalendarDetailView: View {
                         get: { CalendarAutoPolicy.isAuto },
                         set: { newValue in
                             saveSetting(key: "pieroot.todo.calendarAutoRegister", value: newValue) { val in
-                                let isLocal = !iCloudSyncEnabled || SettingsStore.shared.isLocal(key: "pieroot.todo.calendarAutoRegister")
+                                let isLocal = !SettingsStore.supportsICloud || !iCloudSyncEnabled || SettingsStore.shared.isLocal(key: "pieroot.todo.calendarAutoRegister")
                                 if isLocal {
                                     SettingsStore.shared.setLocal("pieroot.todo.calendarAutoChoiceMade", value: true)
                                 } else {
@@ -23,7 +23,6 @@ struct CalendarDetailView: View {
                         }
                     ))
                     .disabled(!CalendarService.shared.isAuthorized)
-                    scopeBadge(for: "pieroot.todo.calendarAutoRegister", iCloudSyncEnabled: iCloudSyncEnabled)
                 }
                 
                 if !CalendarService.shared.isAuthorized {
@@ -39,7 +38,6 @@ struct CalendarDetailView: View {
                     }
                     .pickerStyle(.menu)
                     .disabled(!CalendarService.shared.isAuthorized)
-                    scopeBadge(for: "pieroot.todo.calendarCompletionAction", iCloudSyncEnabled: iCloudSyncEnabled)
                 }
             } footer: {
                 Text("마감 시각이 있는 모든 할 일(수동·이메일 모두)을 시스템 캘린더에 자동으로 등록합니다. 긴급·최우선 항목은 이 설정과 무관하게 항상 등록됩니다. '알람만 끄기'는 이벤트는 캘린더에 남기고 리마인더만 제거합니다.")
@@ -69,7 +67,7 @@ struct CalendarDetailView: View {
                     .availableCalendars()
                     .flatMap { $0.calendars }
                     .first { $0.id == currentID }
-                    .map { $0.title } ?? "기본"
+                    .map { $0.title } ?? AppLanguage.localized("calendar.default", defaultValue: "Default", language: .current, comment: "Fallback display name when the default calendar cannot be found.")
 
                 NavigationLink(destination: DefaultCalendarPickerView()) {
                     HStack(spacing: 10) {
@@ -91,7 +89,7 @@ struct CalendarDetailView: View {
     }
 
     private func saveSetting<T>(key: String, value: T, onChange: ((T) -> Void)? = nil) {
-        let isLocal = !iCloudSyncEnabled || SettingsStore.shared.isLocal(key: key)
+        let isLocal = !SettingsStore.supportsICloud || !iCloudSyncEnabled || SettingsStore.shared.isLocal(key: key)
         if isLocal {
             SettingsStore.shared.setLocal(key, value: value)
         } else {

@@ -1,11 +1,11 @@
 import SwiftUI
 import SwiftData
+import UIKit
 
 // 8. 앱 정보
 struct AppInfoDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var appUpdate: AppUpdateService
-    @State private var showDevChanges = false
     
     var body: some View {
         Form {
@@ -27,7 +27,9 @@ struct AppInfoDetailView: View {
                     }
                     .buttonStyle(.borderless)
                 }
-                LabeledContent("이메일 연동") { Text("Gmail (1계정)") }
+                NavigationLink(destination: LaunchScreenDetailView()) {
+                    Label("시작 화면", systemImage: "rectangle.on.rectangle")
+                }
                 NavigationLink(destination: DiagnosticReportView()) {
                     Label(
                         AppLanguage.localized(
@@ -51,12 +53,6 @@ struct AppInfoDetailView: View {
                 .accessibilityIdentifier("appInfo.replayTutorial")
                 .buttonStyle(.borderless)
 
-                Button {
-                    showDevChanges = true
-                } label: {
-                    Label("개발 현황 및 예정 기능", systemImage: "list.bullet.clipboard")
-                }
-                .buttonStyle(.borderless)
             }
 
             Section(header: Text("약관 및 정책")) {
@@ -66,70 +62,129 @@ struct AppInfoDetailView: View {
                 NavigationLink(destination: LegalDocumentView(document: .terms)) {
                     Label("서비스 약관", systemImage: "doc.text")
                 }
+                NavigationLink(destination: ThirdPartyNoticesView()) {
+                    Label(
+                        AppLanguage.localized("appInfo.licenses.title", defaultValue: "오픈소스 라이선스", language: .current),
+                        systemImage: "doc.plaintext"
+                    )
+                }
+                .accessibilityIdentifier("appInfo.licenses")
             }
         }
         .navigationTitle("앱 정보")
         .navigationBarTitleDisplayMode(.inline)
-        .sheet(isPresented: $showDevChanges) {
-            devChangesSheet
-        }
     }
     
     private var replayTutorialTitle: String {
-        AppLanguage.current == .english ? "Replay Tutorial" : "튜토리얼 다시 시작"
+        AppLanguage.localized("튜토리얼 다시 보기", defaultValue: "Replay Tutorial", language: .current, comment: "Replay the app tutorial.")
     }
 
-    private var devChangesSheet: some View {
-        NavigationStack {
-            List {
-                Section {
-                    devRow("✅", "SwiftData 기반 로컬/iCloud 데이터 저장소 구축")
-                    devRow("✅", "최초 기동 시 iCloud 동기화 여부 설정 지원 (0단계 온보딩)")
-                    devRow("✅", "iCloud 글로벌 설정 vs 기기별 로컬 설정 분리 및 중앙 관리")
-                    devRow("✅", "Gmail OAuth2 연동 및 메일 자동 분석 (할 일 자동 추출)")
-                    devRow("✅", "이메일 딥링크 지원 (앱 내에서 원본 메일로 바로 이동)")
-                    devRow("✅", "캘린더 마감 자동 등록 및 완료 처리 정책 연동")
-                    devRow("✅", "앱-시스템 캘린더 실시간 양방향 동기화 및 충돌 자동 해결")
-                    devRow("✅", "완료된 항목 1달 경과 시 자동 숨김 처리")
-                    devRow("✅", "데이터베이스 용량 초과 방지를 위한 자동 오래된 데이터 청소")
-                    devRow("✅", "시간대/태그별 처리 속도 통계 기반 행동 패턴 메모리 분석")
-                    devRow("✅", "설정 화면 8대 대분류 카테고리 분할 및 독립 뷰 리팩토링")
-                    devRow("✅", "온디바이스 AI 최적화 (가상 모델 제거 및 MLX 모델 탑재)")
-                } header: {
-                    Text(AppLanguage.localized("appInfo.completed", defaultValue: "완료", language: .current, comment: "Development status section."))
-                }
+}
 
-                Section {
-                    devRow("🔄", "온디바이스 AI 고성능 모델 기기 메모리 최적화")
-                    devRow("🔄", "백그라운드 캘린더 변경사항 감지 정확도 향상 및 자동 동기화 고도화")
-                } header: {
-                    Text(AppLanguage.localized("appInfo.inProgress", defaultValue: "진행 중", language: .current, comment: "Development status section."))
+private struct ThirdPartyNoticesView: View {
+    @State private var notices: [LicenseNotice]?
+    @State private var loadFailed = false
+
+    var body: some View {
+        Group {
+            if let notices {
+                List(notices) { notice in
+                    NavigationLink {
+                        LicenseNoticesTextView(notice: notice)
+                            .navigationTitle(notice.title)
+                            .navigationBarTitleDisplayMode(.inline)
+                    } label: {
+                        Text(notice.title)
+                    }
                 }
-                
-                Section {
-                    devRow("📋", "다중 이메일 계정 연동 및 Gmail 외 서비스(IMAP 등) 연동 확장")
-                    devRow("📋", "Apple Foundation Models 정식 버전 대응 및 통합 재도입")
-                    devRow("📋", "사용자 맞춤형 커스텀 파인튜닝 LLM 교체 및 간편 로드")
-                } header: {
-                    Text(AppLanguage.localized("appInfo.planned", defaultValue: "예정", language: .current, comment: "Development status section."))
-                }
+            } else if loadFailed {
+                Text(AppLanguage.localized(
+                    "appInfo.licenses.loadError",
+                    defaultValue: "앱에 포함된 라이선스 문서를 읽을 수 없습니다.",
+                    language: .current
+                ))
+                .padding()
+            } else {
+                ProgressView().padding()
             }
-            .navigationTitle("개발 현황")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("닫기") { showDevChanges = false }
+        }
+        .navigationTitle(AppLanguage.localized(
+            "appInfo.licenses.title", defaultValue: "오픈소스 라이선스", language: .current
+        ))
+        .navigationBarTitleDisplayMode(.inline)
+        .task {
+            guard notices == nil, !loadFailed else { return }
+            do {
+                guard let url = Bundle.main.url(forResource: "ThirdPartyNotices", withExtension: "txt") else {
+                    throw CocoaError(.fileNoSuchFile)
                 }
+                notices = try await Task.detached(priority: .utility) {
+                    try LicenseNotice.load(from: url)
+                }.value
+            } catch {
+                loadFailed = true
             }
         }
     }
-    
-    @ViewBuilder
-    private func devRow(_ icon: String, _ text: String) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            Text(icon).font(.body)
-            Text(AppLanguage.localized(text, defaultValue: text, language: .current, comment: "Development status item.")).font(.subheadline)
+}
+
+private struct LicenseNotice: Identifiable, Sendable {
+    let id: Int
+    let title: String
+    let text: Substring
+
+    nonisolated static func load(from url: URL) throws -> [LicenseNotice] {
+        let text = try String(contentsOf: url, encoding: .utf8)
+        let separator = "\n\n===== SIFT-LICENSE-SECTION =====\n"
+        var notices: [LicenseNotice] = []
+        var start = text.startIndex
+
+        func append(_ body: Substring) throws {
+            guard !body.isEmpty else { throw CocoaError(.fileReadCorruptFile) }
+            let titleEnd = body.firstIndex(of: "\n") ?? body.endIndex
+            let title = String(body[..<titleEnd])
+            guard !title.isEmpty else { throw CocoaError(.fileReadCorruptFile) }
+            notices.append(LicenseNotice(id: notices.count, title: title, text: body))
         }
+
+        while let range = text.range(of: separator, range: start..<text.endIndex) {
+            try append(text[start..<range.lowerBound])
+            start = range.upperBound
+        }
+        try append(text[start..<text.endIndex])
+        return notices
+    }
+}
+
+private struct LicenseNoticesTextView: UIViewRepresentable {
+    let notice: LicenseNotice
+
+    final class Coordinator {
+        var noticeID: Int?
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeUIView(context: Context) -> UITextView {
+        let view = UITextView(usingTextLayoutManager: true)
+        view.isEditable = false
+        view.isSelectable = true
+        view.backgroundColor = .clear
+        view.font = UIFontMetrics(forTextStyle: .footnote).scaledFont(
+            for: .monospacedSystemFont(ofSize: 13, weight: .regular)
+        )
+        view.adjustsFontForContentSizeCategory = true
+        view.textContainerInset = UIEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
+        view.accessibilityIdentifier = "appInfo.licenseText"
+        return view
+    }
+
+    func updateUIView(_ uiView: UITextView, context: Context) {
+        if context.coordinator.noticeID != notice.id {
+            uiView.text = String(notice.text)
+            context.coordinator.noticeID = notice.id
+        }
+        uiView.accessibilityLabel = notice.title
     }
 }
 

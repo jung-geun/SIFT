@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "reviewKind": "image-capable-review",
+  "date": "2026-10-16",
+  "diagramType": "workflow",
+  "visualReview": "passed",
+  "scope": "Default READ view; light at 2048x1320 and dark at 1440x900. Reviewed Korean node text, label fit, route separation, retained-source failure branch, conclusion cards, theme contrast and overall vertical balance. Interactive behavior and integrated website are not claimed by this image review.",
+  "artifacts": [
+    {
+      "name": "overview",
+      "specificationSha256": "14dcc75f0bd5a10129011f0e4d615510629b91bf0387cdff70ddad5a10013926",
+      "artifactSha256": "05bb33c474d07f659b5f1f4e0844d8bc91ef9949d5cdd950b069cdc2e274af66",
+      "artifactBytes": 809142,
+      "browserEvidence": "passed",
+      "correctionRounds": 1,
+      "images": ["overview.visual-check.2048x1320.light.png", "overview.visual-check.1440x900.dark.png"]
+    },
+    {
+      "name": "meeting",
+      "specificationSha256": "bd0d5672fc320b84375dea8cadbdacabda82d5ebe660540b014df74f1b8d1579",
+      "artifactSha256": "430a9d6905766730c4b8b83b6dc070c30b01aea318d9d41c755b1c3d307d92a8",
+      "artifactBytes": 806677,
+      "browserEvidence": "passed",
+      "correctionRounds": 0,
+      "images": ["meeting.visual-check.2048x1320.light.png", "meeting.visual-check.1440x900.dark.png"]
+    },
+    {
+      "name": "boundaries",
+      "specificationSha256": "092566f92f172dedf5c8e9a2ddcd216265113c909cf3fd8844a955c38808087f",
+      "artifactSha256": "e7903d26a38800a5e66a2ae72adf27beccf8dca7d0317f927aac928dee18b2c4",
+      "artifactBytes": 808221,
+      "browserEvidence": "passed",
+      "correctionRounds": 0,
+      "images": ["boundaries.visual-check.2048x1320.light.png", "boundaries.visual-check.1440x900.dark.png"]
+    }
+  ],
+  "limitations": [
+    "No app builds, app tests, deployments, physical-device meeting capture, actual ChatGPT account inference or iCloud synchronization were exercised.",
+    "The parent integration owner performs final website navigation, responsive layout, download and accessibility QA."
+  ]
+}

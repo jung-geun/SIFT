@@ -569,7 +569,7 @@ final class CalendarService {
 
         let event       = EKEvent(eventStore: store)
         event.title = title.isEmpty
-            ? (language == .english ? "(No Title)" : "(제목 없음)")
+            ? (AppLanguage.localized("todo.untitled", defaultValue: "(No Title)", language: language))
             : title
         event.startDate = start
         event.endDate   = end ?? start.addingTimeInterval(isAllDay ? 86400 : 3600)
@@ -660,7 +660,7 @@ enum CalendarAutoPolicy {
     /// 사용자가 선택한 값을 저장. choiceMade도 동시에 true로 설정.
     static func setChoice(auto: Bool) {
         let store = SettingsStore.shared
-        let useGlobal = UserDefaults.standard.bool(forKey: "pieroot.todo.iCloudSyncEnabled")
+        let useGlobal = SettingsStore.isICloudSyncEnabled
         if useGlobal {
             store.setGlobal(choiceKey, value: true)
             store.setGlobal(valueKey, value: auto)
@@ -685,9 +685,7 @@ enum CalendarError: LocalizedError {
     }
 
     func errorDescription(language: AppLanguage) -> String {
-        language == .english
-            ? "Calendar access is not authorized. Allow access in Settings > Privacy & Security."
-            : "캘린더 접근 권한이 없습니다. 설정 > 개인정보 보호에서 허용해주세요."
+        AppLanguage.localized("error.calendar.unauthorized", defaultValue: "Calendar access is not authorized. Allow access in Settings > Privacy & Security.", language: language)
     }
 }
 
@@ -702,6 +700,7 @@ extension CalendarService {
     static func missingImportedTodoIDs(
         from todos: [Todo],
         observedOccurrenceRefs: Set<String>,
+        observedExternalIDs: Set<String> = [],
         now: Date,
         calendar: Calendar = .current
     ) -> Set<UUID> {
@@ -715,9 +714,14 @@ extension CalendarService {
                   !todo.sourceRef.isEmpty,
                   let dueDate = todo.dueDate,
                   dueDate >= windowStart,
-                  dueDate <= windowEnd,
-                  !observedOccurrenceRefs.contains(todo.sourceRef)
+                  dueDate <= windowEnd
             else {
+                return nil
+            }
+            if !todo.calendarEventExternalID.isEmpty && observedExternalIDs.contains(todo.calendarEventExternalID) {
+                return nil
+            }
+            if observedOccurrenceRefs.contains(todo.sourceRef) {
                 return nil
             }
             return todo.id
@@ -841,8 +845,12 @@ extension CalendarService {
 
         let iso = ISO8601DateFormatter()
         var calendarTodosByRef: [String: Todo] = [:]
+        var calendarTodosByExternalID: [String: Todo] = [:]
         for todo in todos where todo.todoSource == .calendar {
             calendarTodosByRef[todo.sourceRef] = todo
+            if !todo.calendarEventExternalID.isEmpty {
+                calendarTodosByExternalID[todo.calendarEventExternalID] = todo
+            }
         }
 
         var todosByID: [UUID: Todo] = [:]
@@ -854,6 +862,9 @@ extension CalendarService {
         // calendar 출처 todo는 제외 — 반복 일정 occurrence dedup은 calendarTodosByRef가 전담
         let linkedEventIDs = Set(
             todos.filter { $0.todoSource != .calendar }.compactMap { $0.calendarEventID }
+        )
+        let linkedEventExternalIDs = Set(
+            todos.filter { $0.todoSource != .calendar }.compactMap { $0.calendarEventExternalID }.filter { !$0.isEmpty }
         )
 
         // 2. 반복 일정: identifier별 가장 빠른 다음 occurrence 1개만 처리
@@ -872,9 +883,17 @@ extension CalendarService {
             }
         }
         let eventsToProcess = Array(recurringNextByID.values) + nonRecurringEvents
-        let observedCalendarOccurrenceRefs = Set(eventsToProcess.compactMap { event -> String? in
-            guard event.marker == nil else { return nil }
-            return "\(event.identifier)#\(iso.string(from: event.startDate))"
+        let observedCalendarOccurrenceRefs = Set(eventsToProcess.flatMap { event -> [String] in
+            guard event.marker == nil else { return [] }
+            var refs = ["\(event.identifier)#\(iso.string(from: event.startDate))"]
+            if !event.externalIdentifier.isEmpty {
+                refs.append("\(event.externalIdentifier)#\(iso.string(from: event.startDate))")
+            }
+            return refs
+        })
+        let observedExternalIDs = Set(eventsToProcess.compactMap { event -> String? in
+            guard event.marker == nil, !event.externalIdentifier.isEmpty else { return nil }
+            return event.externalIdentifier
         })
 
 
@@ -963,12 +982,21 @@ extension CalendarService {
                 continue
             }
 
-            let ref = "\(event.identifier)#\(iso.string(from: event.startDate))"
+            let eventKey = !event.externalIdentifier.isEmpty ? event.externalIdentifier : event.identifier
+            let canonicalRef = "\(eventKey)#\(iso.string(from: event.startDate))"
+            let localRef = "\(event.identifier)#\(iso.string(from: event.startDate))"
+            let externalRef = !event.externalIdentifier.isEmpty ? "\(event.externalIdentifier)#\(iso.string(from: event.startDate))" : nil
+
             let window = Self.todoWindow(
                 eventStart: event.startDate, eventEnd: event.endDate, isAllDay: event.isAllDay
             )
 
-            if let existing = calendarTodosByRef[ref] {
+            let matchedExisting = calendarTodosByRef[canonicalRef]
+                ?? calendarTodosByRef[localRef]
+                ?? (externalRef.flatMap { calendarTodosByRef[$0] })
+                ?? (!event.externalIdentifier.isEmpty ? calendarTodosByExternalID[event.externalIdentifier] : nil)
+
+            if let existing = matchedExisting {
                 let previousDueDate = existing.dueDate
                 // 동기화: 제목·마감·고정 여부만 갱신, triageStatus·isCompleted 보존
                 let adoptTitle = Self.shouldAdoptCalendarTitle(
@@ -999,7 +1027,19 @@ extension CalendarService {
                     existing.calendarSyncedTitle = event.title
                     hasChanges = true
                 }
-            } else if linkedEventIDs.contains(event.identifier) {
+                if existing.calendarEventID != event.identifier {
+                    existing.calendarEventID = event.identifier
+                    hasChanges = true
+                }
+                if !event.externalIdentifier.isEmpty && existing.calendarEventExternalID != event.externalIdentifier {
+                    existing.calendarEventExternalID = event.externalIdentifier
+                    hasChanges = true
+                }
+                if existing.sourceRef != canonicalRef {
+                    existing.sourceRef = canonicalRef
+                    hasChanges = true
+                }
+            } else if linkedEventIDs.contains(event.identifier) || (!event.externalIdentifier.isEmpty && linkedEventExternalIDs.contains(event.externalIdentifier)) {
                 // 앱이 만든 캘린더 이벤트의 역import 방지
                 continue
 
@@ -1008,19 +1048,24 @@ extension CalendarService {
                 if event.isRecurring {
                     let hasActive = todos.contains {
                         $0.todoSource == .calendar
-                        && $0.calendarEventID == event.identifier
+                        && ($0.calendarEventID == event.identifier || (!event.externalIdentifier.isEmpty && $0.calendarEventExternalID == event.externalIdentifier))
                         && $0.triage == .todo
                         && !$0.isCompleted
                     }
                     if hasActive { continue }
                 }
 
-                // 보조 콘텐츠 매칭: identifier 재할당(Google/CalDAV) 대비
+                // 보조 콘텐츠 매칭: identifier 재할당(Google/CalDAV) 또는 타 기기 생성분 대비
                 let startLow  = event.startDate.addingTimeInterval(-60)
                 let startHigh = event.startDate.addingTimeInterval(60)
-                let isDuplicate = calendarTodosByRef.values.contains {
-                    $0.title == event.title
-                    && ($0.scheduleAnchor.map { $0 >= startLow && $0 <= startHigh } ?? false)
+                let isDuplicate = todos.contains { other in
+                    if !event.externalIdentifier.isEmpty && other.calendarEventExternalID == event.externalIdentifier {
+                        return true
+                    }
+                    if other.title == event.title, let anchor = other.scheduleAnchor, anchor >= startLow && anchor <= startHigh {
+                        return true
+                    }
+                    return false
                 }
                 if isDuplicate { continue }
 
@@ -1030,7 +1075,7 @@ extension CalendarService {
                     startDate: window.startDate,
                     dueDate: window.dueDate,
                     source: .calendar,
-                    sourceRef: ref
+                    sourceRef: canonicalRef
                 )
                 todo.calendarEventID = event.identifier
                 todo.triageStatus = TodoTriage.review.rawValue
@@ -1052,6 +1097,7 @@ extension CalendarService {
         let missingImportedIDs = Self.missingImportedTodoIDs(
             from: todos,
             observedOccurrenceRefs: observedCalendarOccurrenceRefs,
+            observedExternalIDs: observedExternalIDs,
             now: now
         )
         for todo in todos where missingImportedIDs.contains(todo.id) {

@@ -167,12 +167,17 @@ struct DiagnosticReportServiceTests {
 
         let data = try #require(await service.reportAttachment())
         let report = try decodedReport(data)
+        let preview = try #require(DiagnosticReportPreview(data: data))
+        #expect(Data(preview.text.utf8) == data)
+        #expect(preview.app == report.app)
+        #expect(preview.device == report.device)
+        #expect(preview.events == report.events)
 
         #expect(report.reportVersion == UserDiagnosticReport.currentVersion)
-        #expect(report.app.installSource == "simulator")
+        #expect(report.app.installSource == DiagnosticEnvironment.installSource())
         #expect(!report.app.bundleIdentifier.isEmpty)
         #expect(!report.device.modelIdentifier.isEmpty)
-        #expect(!report.settings.isEmpty)
+        #expect(report.settings?.isEmpty == false)
         #expect(report.events.count == 1)
         #expect(report.events[0].error?.domain == "SpeechAnalyzer")
         #expect(report.events[0].underlyingErrors.first?.domain == "Underlying")
@@ -215,6 +220,15 @@ struct DiagnosticReportServiceTests {
             operation: "first"
         )
         let delivered = try #require(await service.prepareAttachment())
+        let request = DiagnosticExportRequest(
+            data: delivered.data,
+            fileURL: nil,
+            canSendMail: false,
+            generatedAt: delivered.generatedAt,
+            metricPayloads: delivered.metricPayloads,
+            metricPayloadIDs: delivered.metricPayloadIDs
+        )
+        let preview = try #require(request.preview)
         // This repeats the sent incident's signature after preparation. The
         // preparation boundary must prevent coalescing it into the report event.
         recorder.record(
@@ -222,7 +236,15 @@ struct DiagnosticReportServiceTests {
             component: "diagnostics",
             operation: "first"
         )
-        service.acknowledgeDeliveredReport(delivered)
+        #expect(request.data == delivered.data)
+        #expect(Data(preview.text.utf8) == request.data)
+        #expect(preview.events.count == 1)
+        service.acknowledgeDeliveredReport(.init(
+            data: request.data,
+            generatedAt: request.generatedAt,
+            metricPayloads: request.metricPayloads,
+            metricPayloadIDs: request.metricPayloadIDs
+        ))
 
         let queued = recorder.snapshot().events
         #expect(queued.count == 1)
@@ -336,7 +358,19 @@ struct DiagnosticReportServiceTests {
             component: "diagnostics",
             operation: "cancel"
         )
-        _ = try #require(await service.prepareAttachment())
+        let prepared = try #require(await service.prepareAttachment())
+        let request = DiagnosticExportRequest(
+            data: prepared.data,
+            fileURL: nil,
+            canSendMail: false,
+            generatedAt: prepared.generatedAt,
+            metricPayloads: prepared.metricPayloads,
+            metricPayloadIDs: prepared.metricPayloadIDs
+        )
+        #expect(request.preview != nil)
+        let beforeCancellation = recorder.snapshot()
+        service.discardPreparedReport()
+        #expect(recorder.snapshot() == beforeCancellation)
 
         #expect(recorder.snapshot().events.count == 1)
         let retained = try #require(await service.reportAttachment())
@@ -448,6 +482,115 @@ struct DiagnosticReportServiceTests {
         #expect(recorder.snapshot() == DiagnosticReportArchive())
     }
 
+    @Test("error reports retain source and error-time locale metadata")
+    func reportsRetainSourceAndErrorTimeLocale() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let suiteName = "DiagnosticReportServiceTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        let recorder = DiagnosticRecorder(
+            store: DiagnosticReportStore(fileURL: directory.appendingPathComponent("diagnostics.json")),
+            defaults: defaults
+        )
+        let service = DiagnosticReportService(recorder: recorder, logTailProvider: { [] })
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+
+        service.setCollectionEnabled(true)
+        recorder.record(
+            error: NSError(domain: "DetailedDiagnostics", code: 41),
+            component: "diagnostics",
+            operation: "captureContext",
+            file: "todoTests/DiagnosticFixture.swift",
+            line: 867,
+            function: "reportsRetainSourceAndErrorTimeLocale()"
+        )
+
+        let event = try #require(recorder.snapshot().events.last)
+        #expect(event.source?.file == "todoTests/DiagnosticFixture.swift")
+        #expect(event.source?.line == 867)
+        #expect(event.source?.function == "reportsRetainSourceAndErrorTimeLocale()")
+        let runtime = try #require(event.runtime)
+        let locale = try #require(runtime.locale)
+        #expect(locale.identifier == Locale.current.identifier)
+        #expect(locale.regionCode == Locale.current.region?.identifier)
+        #expect(locale.timeZoneIdentifier == TimeZone.current.identifier)
+        #expect(locale.timeZoneOffsetSeconds == TimeZone.current.secondsFromGMT())
+        #expect(event.settings?["hasOnboarded"] != nil)
+
+        let data = try #require(await service.reportAttachment())
+        let report = try decodedReport(data)
+        #expect(report.reportVersion == UserDiagnosticReport.currentVersion)
+        #expect(report.events.first?.runtime?.locale == locale)
+        #expect(report.device.locale.identifier == Locale.current.identifier)
+        #expect(report.device.locale.regionCode == Locale.current.region?.identifier)
+        #expect(report.device.locale.timeZoneOffsetSeconds == TimeZone.current.secondsFromGMT())
+        #expect(report.settings == event.settings)
+    }
+
+    @Test("pre-locale runtime snapshots remain decodable")
+    func preLocaleRuntimeSnapshotsRemainDecodable() throws {
+        let data = Data(
+            """
+            {
+              "appVersion": "1.0",
+              "build": "1",
+              "systemVersion": "iOS Version 18.0",
+              "appState": "active",
+              "processUptimeSeconds": 12.5,
+              "thermalState": "nominal",
+              "isLowPowerModeEnabled": false,
+              "memoryFootprintBytes": 100,
+              "availableDiskBytes": 200
+            }
+            """.utf8
+        )
+
+        let runtime = try JSONDecoder().decode(DiagnosticRuntimeState.self, from: data)
+        #expect(runtime.operatingSystemBuild == nil)
+        #expect(runtime.locale == nil)
+    }
+
+    @Test("diagnostic settings use live mail preference keys and credential state")
+    func diagnosticSettingsUseLiveMailPreferenceKeysAndCredentialState() throws {
+        let suiteName = "DiagnosticReportServiceTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        let gmailAccount = "diagnostic-gmail@example.com"
+        let outlookAccount = "diagnostic-outlook@example.com"
+        defer {
+            try? IMAPCredentialStore.delete(for: gmailAccount)
+            try? OutlookIMAPCredentialStore.delete(for: outlookAccount)
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+
+        defaults.set(gmailAccount, forKey: "pieroot.todo.imap.account")
+        defaults.set(true, forKey: "pieroot.todo.imap.backgroundEnabled")
+        defaults.set(outlookAccount, forKey: "pieroot.todo.outlook.account")
+        defaults.set(true, forKey: "pieroot.todo.outlook.backgroundEnabled")
+        try IMAPCredentialStore.save(
+            appPassword: "gmail-test-password",
+            for: gmailAccount,
+            backgroundEnabled: true
+        )
+        try OutlookIMAPCredentialStore.save(
+            appPassword: "outlook-test-password",
+            for: outlookAccount,
+            backgroundEnabled: true
+        )
+
+        let settings = DiagnosticEnvironment.settingsSnapshot(defaults)
+
+        #expect(settings["imapBackgroundEnabled"] == true)
+        #expect(settings["outlookBackgroundEnabled"] == true)
+        #expect(settings["gmailAccountLinked"] == true)
+        #expect(settings["gmailCredentialStored"] == true)
+        #expect(settings["gmailCredentialRejected"] == false)
+        #expect(settings["outlookAccountLinked"] == true)
+        #expect(settings["outlookCredentialStored"] == true)
+    }
+
     private func event(code: Int, at seconds: TimeInterval) -> DiagnosticEvent {
         DiagnosticEvent(
             timestamp: Date(timeIntervalSince1970: seconds),
@@ -466,7 +609,8 @@ struct DiagnosticReportServiceTests {
                 userInfoKeys: []
             ),
             underlyingErrors: [],
-            runtime: nil
+            runtime: nil,
+            settings: nil
         )
     }
 
@@ -533,17 +677,13 @@ private final class DiagnosticLogTailGate: @unchecked Sendable {
 
     func waitUntilStarted() async -> Bool {
         for _ in 0..<200 {
-            condition.lock()
-            let didStart = started
-            condition.unlock()
+            let didStart = condition.withLock { started }
             if didStart {
                 return true
             }
             try? await Task.sleep(for: .milliseconds(10))
         }
-        condition.lock()
-        defer { condition.unlock() }
-        return started
+        return condition.withLock { started }
     }
 }
 

@@ -22,25 +22,15 @@ enum EmbeddedMailError: LocalizedError, Equatable, Sendable {
     func errorDescription(language: AppLanguage) -> String {
         switch self {
         case .missingSourceRef:
-            return language == .english
-                ? "The To-Do item does not have a valid email source reference."
-                : "할 일 항목에 유효한 이메일 출처 참조가 없습니다."
+            return AppLanguage.localized("error.mail.resolver.missingSourceRef", defaultValue: "The To-Do item does not have a valid email source reference.", language: language)
         case .ambiguousAccountNamespace:
-            return language == .english
-                ? "Multiple email accounts match this legacy message. Select an account or sync to resolve."
-                : "여러 이메일 계정이 이 레거시 메시지와 일치합니다. 계정을 확인하거나 다시 동기화해 주세요."
+            return AppLanguage.localized("error.mail.resolver.ambiguousAccountNamespace", defaultValue: "Multiple email accounts match this legacy message. Select an account or sync to resolve.", language: language)
         case .providerUnavailable(let provider):
-            return language == .english
-                ? "\(provider == .gmail ? "Gmail" : "Outlook") account is not connected or available."
-                : "\(provider == .gmail ? "Gmail" : "Outlook") 계정이 연결되어 있지 않거나 사용할 수 없습니다."
+            return String(format: AppLanguage.localized("error.mail.resolver.providerUnavailable", defaultValue: "%@ account is not connected or available.", language: language), locale: language.locale, String(provider == .gmail ? "Gmail" : "Outlook"))
         case .hydrationFailed(let message):
-            return language == .english
-                ? "Could not load email content: \(message)"
-                : "메일 본문을 불러올 수 없습니다: \(message)"
+            return String(format: AppLanguage.localized("error.mail.resolver.hydrationFailed", defaultValue: "Could not load email content: %@", language: language), locale: language.locale, String(message))
         case .identityMismatch:
-            return language == .english
-                ? "Downloaded email content did not match the expected message identity."
-                : "다운로드한 이메일 내용이 요청한 메시지 식별자와 일치하지 않습니다."
+            return AppLanguage.localized("error.mail.resolver.identityMismatch", defaultValue: "Downloaded email content did not match the expected message identity.", language: language)
         }
     }
 }

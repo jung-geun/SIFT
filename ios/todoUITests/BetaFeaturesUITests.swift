@@ -1,59 +1,36 @@
 import XCTest
 
-final class BetaFeaturesUITests: XCTestCase {
-    override func setUpWithError() throws {
-        continueAfterFailure = false
-        XCUIApplication().terminate()
-    }
-    @MainActor
-    private func scrollToHittable(_ element: XCUIElement, in app: XCUIApplication, maxSwipes: Int = 8) {
-        for _ in 0..<maxSwipes where !element.isHittable {
-            app.swipeUp()
+@MainActor
+final class BetaFeaturesUITests: SIFTUITestCase {
+    func testLegacySettingsNormalizeToSafeBetaDefaults() throws {
+        launch(.init(additionalArguments: ["-ui-test-reset-beta", "-ui-test-seed-legacy-ai"]))
+
+        step("설정에서 베타 기능 열기") {
+            openSettings()
+            tap(app.buttons["settings.advanced"], message: "고급 설정을 펼칠 수 없습니다.")
+            let row = app.buttons["settings.betaFeaturesRow"]
+            requireHittable(row, message: "베타 기능 설정 행이 없습니다.")
+            row.tap()
         }
-        XCTAssertTrue(element.waitForExistence(timeout: 2))
-        XCTAssertTrue(element.isHittable)
-    }
 
+        step("안전한 기본 provider 상태 확인") {
+            require(app.staticTexts["beta.warning"], message: "베타 기능 경고가 없습니다.")
+            XCTAssertEqual(app.switches["beta.foundationModels.toggle"].value as? String, "1")
+            XCTAssertEqual(app.switches["beta.onDevice.toggle"].value as? String, "0")
+            XCTAssertEqual(app.switches["beta.openAI.toggle"].value as? String, "0")
+        }
 
-    @MainActor
-    func testLegacyAISettingsKeepAFMAsTheDefaultBetaProvider() throws {
-        let app = XCUIApplication()
-        app.launchArguments += [
-            "-ApplePersistenceIgnoreState", "YES",
-            "-AppleLanguages", "(ko)",
-            "-AppleLocale", "ko_KR",
-            "-pieroot.todo.hasOnboarded", "YES",
-            "-pieroot.todo.hasCompletedTutorial", "YES",
-            "-pieroot.todo.launchBehavior", "lastUsed",
-            "-pieroot.todo.launchTab", "0",
-            "-pieroot.todo.selectedTab", "0",
-            "-ui-test-reset-beta",
-            "-ui-test-seed-legacy-ai",
-            "-ui-test-suppress-crash-prompt"
-        ]
-        app.launch()
-
-        let settings = app.buttons["todo.settingsButton"]
-        XCTAssertTrue(settings.waitForExistence(timeout: 10))
-        settings.tap()
-
-        let betaRow = app.buttons["settings.betaFeaturesRow"]
-        scrollToHittable(betaRow, in: app)
-        betaRow.tap()
-
-        XCTAssertTrue(app.staticTexts["beta.warning"].waitForExistence(timeout: 5))
-        let afm = app.switches["beta.foundationModels.toggle"]
-        let onDevice = app.switches["beta.onDevice.toggle"]
-        let gemini = app.switches["beta.gemini.toggle"]
-        let voice = app.switches["beta.voiceProcessing.toggle"]
-        scrollToHittable(voice, in: app)
-        XCTAssertTrue(afm.exists)
-        XCTAssertTrue(onDevice.exists)
-        XCTAssertTrue(gemini.exists)
-        XCTAssertTrue(voice.exists)
-        XCTAssertEqual(afm.value as? String, "1")
-        XCTAssertEqual(onDevice.value as? String, "0")
-        XCTAssertEqual(gemini.value as? String, "0")
-        XCTAssertEqual(voice.value as? String, "0")
+        step("오프라인 전사 동의와 모델 설치는 별도 동작") {
+            let auto = app.switches["beta.whisper.auto"]
+            if !auto.isHittable { app.swipeUp() }
+            requireHittable(auto, message: "오프라인 전사 동의 스위치가 없습니다.")
+            XCTAssertEqual(auto.value as? String, "0")
+            auto.coordinate(withNormalizedOffset: CGVector(dx: 0.93, dy: 0.5)).tap()
+            XCTAssertEqual(auto.value as? String, "1")
+            let install = app.buttons["beta.whisper.download"]
+            if !install.isHittable { app.swipeUp() }
+            requireHittable(install, message: "모델 설치가 동의 스위치와 별도로 제공되지 않습니다.")
+            XCTAssertFalse(app.buttons["beta.whisper.delete"].exists)
+        }
     }
 }

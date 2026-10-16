@@ -20,16 +20,31 @@ nonisolated struct DiagnosticErrorFrame: Codable, Equatable, Sendable {
     let userInfoKeys: [String]
 }
 
+nonisolated struct DiagnosticLocaleInfo: Codable, Equatable, Sendable {
+    let identifier: String
+    let languageCode: String?
+    let regionCode: String?
+    let scriptCode: String?
+    let calendarIdentifier: String
+    let timeZoneIdentifier: String
+    let timeZoneOffsetSeconds: Int
+    let uses24HourClock: Bool
+}
+
 nonisolated struct DiagnosticRuntimeState: Codable, Equatable, Sendable {
     let appVersion: String
     let build: String
     let systemVersion: String
+    let operatingSystemBuild: String?
     let appState: String
     let processUptimeSeconds: Double
     let thermalState: String
     let isLowPowerModeEnabled: Bool
     let memoryFootprintBytes: UInt64?
     let availableDiskBytes: Int64?
+    /// Locale at the error timestamp. Region is derived from this locale; no
+    /// physical location or device name is collected.
+    let locale: DiagnosticLocaleInfo?
 }
 
 nonisolated struct DiagnosticAppInfo: Codable, Equatable, Sendable {
@@ -46,6 +61,7 @@ nonisolated struct DiagnosticDeviceInfo: Codable, Equatable, Sendable {
     let modelIdentifier: String
     let systemName: String
     let systemVersion: String
+    let operatingSystemBuild: String?
     let idiom: String
     let isiOSAppOnMac: Bool
     let isMacCatalystApp: Bool
@@ -57,6 +73,7 @@ nonisolated struct DiagnosticDeviceInfo: Codable, Equatable, Sendable {
     let localeIdentifier: String
     let preferredLanguages: [String]
     let timeZoneIdentifier: String
+    let locale: DiagnosticLocaleInfo
     let thermalState: String
     let isLowPowerModeEnabled: Bool
     let systemUptimeSeconds: Double
@@ -225,16 +242,19 @@ enum DiagnosticEnvironment {
     }
 
     nonisolated static func runtimeState() -> DiagnosticRuntimeState {
-        DiagnosticRuntimeState(
-            appVersion: bundleVersion().version,
-            build: bundleVersion().build,
+        let version = bundleVersion()
+        return DiagnosticRuntimeState(
+            appVersion: version.version,
+            build: version.build,
             systemVersion: ProcessInfo.processInfo.operatingSystemVersionString,
+            operatingSystemBuild: operatingSystemBuild(),
             appState: currentAppState(),
             processUptimeSeconds: Date().timeIntervalSince(processStart),
             thermalState: thermalStateName(ProcessInfo.processInfo.thermalState),
             isLowPowerModeEnabled: ProcessInfo.processInfo.isLowPowerModeEnabled,
             memoryFootprintBytes: memoryFootprintBytes(),
-            availableDiskBytes: availableDiskBytes()
+            availableDiskBytes: availableDiskBytes(),
+            locale: localeInfo()
         )
     }
 
@@ -289,6 +309,16 @@ enum DiagnosticEnvironment {
         return values?.volumeTotalCapacity
     }
 
+    /// Boot time is sampled only for the optional, locally reviewed bug report.
+    nonisolated private static func currentBootEpoch() -> TimeInterval? {
+        var bootTime = timeval()
+        var size = MemoryLayout<timeval>.stride
+        guard sysctlbyname("kern.boottime", &bootTime, &size, nil, 0) == 0 else {
+            return nil
+        }
+        return TimeInterval(bootTime.tv_sec) + TimeInterval(bootTime.tv_usec) / 1_000_000
+    }
+
     nonisolated static func appInfo() -> DiagnosticAppInfo {
         let version = bundleVersion()
         return DiagnosticAppInfo(
@@ -309,10 +339,12 @@ enum DiagnosticEnvironment {
             .compactMap { $0 as? UIWindowScene }
             .first
         let screen = scene.map { "\($0.screen.bounds.width)x\($0.screen.bounds.height)@\($0.screen.scale)x" }
+        let locale = localeInfo()
         return DiagnosticDeviceInfo(
             modelIdentifier: modelIdentifier(),
             systemName: device.systemName,
             systemVersion: device.systemVersion,
+            operatingSystemBuild: operatingSystemBuild(),
             idiom: idiomName(device.userInterfaceIdiom),
             isiOSAppOnMac: ProcessInfo.processInfo.isiOSAppOnMac,
             isMacCatalystApp: ProcessInfo.processInfo.isMacCatalystApp,
@@ -321,36 +353,74 @@ enum DiagnosticEnvironment {
             totalDiskBytes: totalDiskBytes(),
             availableDiskBytes: availableDiskBytes(),
             screen: screen,
-            localeIdentifier: Locale.current.identifier,
+            localeIdentifier: locale.identifier,
             preferredLanguages: Array(Locale.preferredLanguages.prefix(3)),
-            timeZoneIdentifier: TimeZone.current.identifier,
+            timeZoneIdentifier: locale.timeZoneIdentifier,
+            locale: locale,
             thermalState: thermalStateName(ProcessInfo.processInfo.thermalState),
             isLowPowerModeEnabled: ProcessInfo.processInfo.isLowPowerModeEnabled,
             systemUptimeSeconds: ProcessInfo.processInfo.systemUptime,
-            bootEpoch: UnexpectedTerminationSessionStore.currentBootEpoch()
+            bootEpoch: currentBootEpoch()
         )
     }
 
+    nonisolated static func localeInfo() -> DiagnosticLocaleInfo {
+        let locale = Locale.current
+        let timeZone = TimeZone.current
+        let hourTemplate = DateFormatter.dateFormat(
+            fromTemplate: "j",
+            options: 0,
+            locale: locale
+        ) ?? ""
+        return DiagnosticLocaleInfo(
+            identifier: locale.identifier,
+            languageCode: locale.language.languageCode?.identifier,
+            regionCode: locale.region?.identifier,
+            scriptCode: locale.language.script?.identifier,
+            calendarIdentifier: String(describing: locale.calendar.identifier),
+            timeZoneIdentifier: timeZone.identifier,
+            timeZoneOffsetSeconds: timeZone.secondsFromGMT(),
+            uses24HourClock: hourTemplate.contains("H") || hourTemplate.contains("k")
+        )
+    }
+
+    nonisolated static func operatingSystemBuild() -> String? {
+        var size = 0
+        guard sysctlbyname("kern.osversion", nil, &size, nil, 0) == 0, size > 1 else {
+            return nil
+        }
+        var value = [CChar](repeating: 0, count: size)
+        guard sysctlbyname("kern.osversion", &value, &size, nil, 0) == 0 else {
+            return nil
+        }
+        return String(cString: value)
+    }
+
     nonisolated static func settingsSnapshot(_ defaults: UserDefaults = .standard) -> [String: Bool] {
-        [
+        let gmailAccount = defaults.string(forKey: "pieroot.todo.imap.account") ?? ""
+        let outlookAccount = defaults.string(forKey: "pieroot.todo.outlook.account") ?? ""
+
+        return [
             "iCloudSyncEnabled": defaults.bool(forKey: "pieroot.todo.iCloudSyncEnabled"),
             "emailAutoAnalysisEnabled": defaults.bool(forKey: "pieroot.todo.emailAutoAnalysisEnabled"),
-            "imapBackgroundEnabled": defaults.bool(forKey: "pieroot.todo.imapBackgroundEnabled"),
-            "outlookBackgroundEnabled": defaults.bool(forKey: "pieroot.todo.outlookBackgroundEnabled"),
-            "providerEmailAnalysisEnabled": defaults.bool(forKey: "pieroot.todo.providerEmailAnalysisEnabled"),
+            "imapBackgroundEnabled": defaults.bool(forKey: "pieroot.todo.imap.backgroundEnabled"),
+            "outlookBackgroundEnabled": defaults.bool(forKey: "pieroot.todo.outlook.backgroundEnabled"),
             "calendarAutoRegister": defaults.bool(forKey: "pieroot.todo.calendarAutoRegister"),
             "onDeviceLLMEnabled": defaults.bool(forKey: "pieroot.todo.onDeviceLLMEnabled"),
             "betaFeaturesEnabled": defaults.bool(forKey: "pieroot.todo.betaFeaturesEnabled"),
             "betaFoundationModelsEnabled": defaults.bool(forKey: "pieroot.todo.beta.foundationModelsEnabled"),
             "betaOnDeviceModelEnabled": defaults.bool(forKey: "pieroot.todo.beta.onDeviceModelEnabled"),
-            "betaGeminiEnabled": defaults.bool(forKey: "pieroot.todo.beta.geminiEnabled"),
+            "betaOpenAIEnabled": defaults.bool(forKey: SettingsStore.betaOpenAIEnabledKey),
             "betaMeetingVoiceProcessingEnabled": defaults.bool(forKey: "pieroot.todo.beta.meetingVoiceProcessingEnabled"),
             "meetingVoiceProcessingEnabled": defaults.bool(forKey: "pieroot.todo.meetingVoiceProcessingEnabled"),
             "meetingAutoRefineEnabled": defaults.bool(forKey: "pieroot.todo.meetingAutoRefineEnabled"),
             "hasOnboarded": defaults.bool(forKey: "pieroot.todo.hasOnboarded"),
             "hasCompletedTutorial": defaults.bool(forKey: "pieroot.todo.hasCompletedTutorial"),
-            "gmailAccountLinked": !(defaults.string(forKey: "pieroot.todo.imap.account") ?? "").isEmpty,
-            "outlookAccountLinked": !(defaults.string(forKey: "pieroot.todo.outlook.account") ?? "").isEmpty
+            "gmailAccountLinked": !gmailAccount.isEmpty,
+            "gmailCredentialStored": IMAPCredentialStore.hasCredential(for: gmailAccount),
+            "gmailCredentialRejected": IMAPCredentialStore.isCredentialRejected(for: gmailAccount),
+            "outlookAccountLinked": !outlookAccount.isEmpty,
+            "outlookCredentialStored": OutlookIMAPCredentialStore.hasCredential(for: outlookAccount)
         ]
     }
 

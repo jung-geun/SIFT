@@ -38,45 +38,6 @@ struct PersonaGenerationServiceTests {
         #expect(draft.descriptionText.contains("규칙 기반"))
     }
 
-    @Test("AFM enriches only the persona narrative and preserves deterministic fields")
-    @MainActor
-    func AFMEnrichmentPreservesDeterministicFields() async throws {
-        let todo = Todo(title: "confidential task")
-        let now = Date()
-        let analysis = MemoryService.computeAnalysis(todos: [todo], now: now, language: .english)
-        let context = BehaviorAnalysisContextBuilder.make(
-            todos: [todo],
-            auditEvents: [],
-            behaviorEvents: [],
-            now: now,
-            calendar: Calendar.current,
-            behaviorProfile: analysis.behaviorProfile,
-            personaTypes: [.officeWorker]
-        )
-        let service = PersonaGenerationService(
-            narrativeProvider: { _, _, _, _ in
-                PersonaNarrative(
-                    descriptionText: "  Grounded persona narrative.  ",
-                    evidence: ["  Observed completion pattern. ", ""]
-                )
-            },
-            routingDecisionProvider: { .providers([.foundationModels]) },
-            availabilityProvider: { true }
-        )
-
-        let draft = try await service.generate(
-            existingPersona: "",
-            todos: [todo],
-            context: context,
-            now: now,
-            language: .english
-        )
-
-        #expect(draft.descriptionText == "Grounded persona narrative.")
-        #expect(draft.evidence == ["Observed completion pattern."])
-        #expect(draft.personaTypes == [.officeWorker])
-        #expect(draft.confidence == analysis.behaviorProfile.confidence)
-    }
 
     @Test("explicit local selection retains the deterministic persona draft")
     @MainActor

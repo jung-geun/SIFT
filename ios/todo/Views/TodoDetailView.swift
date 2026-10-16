@@ -45,6 +45,7 @@ struct TodoDetailView: View {
     @State private var showDeleteConfirm = false
     @State private var showDiscardConfirm = false
     @State private var saveError: String?
+    @State private var showingScheduleApproval = false
     /// 앱 내 메일 상세 시트 — 로컬 EmailMessage가 있을 때 표시
     @State private var showingEmail: EmailMessage?
     @State private var isResolvingEmail = false
@@ -56,6 +57,17 @@ struct TodoDetailView: View {
         Form {
             titleSection
             schedulingSection
+            if !todo.isCompleted, !todo.isFixedSchedule, todo.todoSource != .calendar, todo.triage == .todo {
+                Section {
+                    Button(AppLanguage.localized("todo.detail.scheduleReview", defaultValue: "Recommend and approve a schedule", language: .current, comment: "Open schedule recommendation and approval.")) { showingScheduleApproval = true }
+                        .disabled(hasPendingChanges)
+                        .accessibilityIdentifier("todo.scheduleReview")
+                    if hasPendingChanges {
+                        Text(AppLanguage.localized("todo.detail.scheduleDraftNotice", defaultValue: "Save or discard this draft before scheduling.", language: .current, comment: "Scheduling disabled while the to-do draft has unsaved edits."))
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            }
             prioritySection
             remindersSection
             calendarSection
@@ -84,6 +96,12 @@ struct TodoDetailView: View {
                 initialDraft = draft
                 didLoadDraft = true
             }
+        }
+        .sheet(isPresented: $showingScheduleApproval, onDismiss: {
+            draft = TodoDraft(todo: todo)
+            initialDraft = draft
+        }) {
+            ScheduleApprovalView(todoID: todo.id)
         }
         .alert(
             "캘린더 오류",
@@ -411,7 +429,7 @@ struct TodoDetailView: View {
             } else if CalendarService.shared.isAuthorized {
                 Toggle(isOn: $draft.calendarLinked) {
                     Label(
-                        draft.calendarLinked ? "캘린더에 등록됨" : "캘린더에 등록",
+                        draft.calendarLinked ? AppLanguage.localized("todo.detail.calendarLinked", defaultValue: "Added to Calendar", language: .current, comment: "Calendar toggle label when linked.") : AppLanguage.localized("todo.detail.calendarLink", defaultValue: "Add to Calendar", language: .current, comment: "Calendar toggle label when unlinked."),
                         systemImage: "calendar"
                     )
                 }
@@ -435,18 +453,18 @@ struct TodoDetailView: View {
 
     private var metaSection: some View {
         Section {
-            metaRow("출처") {
+            metaRow(AppLanguage.localized("todo.detail.sourceLabel", defaultValue: "Source", language: .current, comment: "To-do metadata source label.")) {
                 sourceBadge
             }
             if todo.isFixedSchedule {
-                metaRow("유형") {
+                metaRow(AppLanguage.localized("todo.detail.typeLabel", defaultValue: "Type", language: .current, comment: "To-do metadata type label.")) {
                     Label("고정 일정 (반복)", systemImage: "arrow.triangle.2.circlepath")
                         .foregroundStyle(.green)
                 }
             }
             if todo.todoSource == .email {
                 if !todo.sourceSender.isEmpty {
-                    metaRow("발신자") {
+                    metaRow(AppLanguage.localized("todo.detail.senderLabel", defaultValue: "Sender", language: .current, comment: "Original email sender metadata label.")) {
                         Text(todo.sourceSender)
                             .foregroundStyle(.secondary)
                     }
@@ -464,12 +482,12 @@ struct TodoDetailView: View {
                     .disabled(isResolvingEmail)
                 }
             }
-            metaRow("생성일") {
+            metaRow(AppLanguage.localized("todo.detail.createdLabel", defaultValue: "Created", language: .current, comment: "To-do creation date metadata label.")) {
                 Text(todo.createdAt, style: .date)
                     .foregroundStyle(.secondary)
             }
             if let completed = todo.completedAt {
-                metaRow("완료일") {
+                metaRow(AppLanguage.localized("todo.detail.completedLabel", defaultValue: "Completed", language: .current, comment: "To-do completion date metadata label.")) {
                     Text(completed, style: .date)
                         .foregroundStyle(.secondary)
                 }
@@ -738,8 +756,12 @@ struct TodoDetailView: View {
 
     private func deleteTodo() {
         // 삭제는 초안 내용을 저장하지 않는다. 확인 후 현재 Todo 자체를 삭제한다.
-        TodoMutations.delete(todo, in: modelContext)
-        dismiss()
+        do {
+            try TodoMutations.delete(todo, in: modelContext)
+            dismiss()
+        } catch {
+            saveError = error.localizedDescription
+        }
     }
 }
 

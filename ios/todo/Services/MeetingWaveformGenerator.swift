@@ -2,6 +2,7 @@ import AVFoundation
 import Foundation
 
 struct MeetingWaveform: Equatable, Sendable {
+    /// Uniform time bins spanning the entire overlap-trimmed logical timeline.
     let buckets: [Float]
     let totalSamples: Int64
 }
@@ -13,9 +14,22 @@ enum MeetingWaveformGenerator {
     nonisolated(unsafe) private static var cache = [String: (manifest: MeetingAudioManifest, bucketCount: Int, waveform: MeetingWaveform)]()
     nonisolated private static let cacheLimit = 8
 
+    /// Ten peaks per second gives a four-point bar spacing at the view's 40pt/s.
+    /// Keep a useful minimum for short clips; do not cap long recordings at an
+    /// overview-sized count, which would stretch seconds of audio into one bar.
+    nonisolated static func recommendedBucketCount(totalSamples: Int64, sampleRate: Int64) -> Int {
+        guard totalSamples > 0, sampleRate > 0 else { return 180 }
+        let samplesPerBucket = max(1, sampleRate / 10)
+        let count = totalSamples / samplesPerBucket + (totalSamples % samplesPerBucket == 0 ? 0 : 1)
+        return max(180, Int(count))
+    }
+
     /// Uses an independent overlap-trimmed cursor, never the playback cursor.
-    nonisolated static func generate(manifest: MeetingAudioManifest, bucketCount: Int = 180) throws -> MeetingWaveform {
+    /// An explicit count is useful for exports/tests; playback uses time resolution.
+    nonisolated static func generate(manifest: MeetingAudioManifest, bucketCount requestedCount: Int? = nil) throws -> MeetingWaveform {
+        let bucketCount = requestedCount ?? recommendedBucketCount(totalSamples: manifest.totalSamples, sampleRate: manifest.sampleRate)
         guard bucketCount > 0 else { throw WaveformError.format }
+        try Task.checkCancellation()
         cacheLock.lock()
         let cached = cache[manifest.relativeDirectory]
         cacheLock.unlock()
@@ -29,31 +43,46 @@ enum MeetingWaveformGenerator {
             channels: 1,
             interleaved: false
         ) else { throw WaveformError.format }
-        let samplesPerBucket = max(Int64(1), (manifest.totalSamples + Int64(bucketCount) - 1) / Int64(bucketCount))
         var peaks = Array(repeating: Float(0), count: bucketCount)
+        var bucket = 0
+        // Ceil each boundary instead of rounding a fixed samples-per-bucket up:
+        // fixed rounding pads the tail and misaligns bars with seeking fractions.
+        func endSample(for bucket: Int) -> Int64 {
+            Int64(ceil(Double(manifest.totalSamples) * Double(bucket + 1) / Double(bucketCount)))
+        }
+        var bucketEnd = endSample(for: bucket)
         var sampleOffset: Int64 = 0
         while let buffer = try cursor.nextPCMBuffer(maxFrames: 8_192, outputFormat: format) {
             try Task.checkCancellation()
             guard let channel = buffer.floatChannelData?[0] else { throw WaveformError.format }
-            for index in 0..<Int(buffer.frameLength) {
-                let bucket = min(bucketCount - 1, Int((sampleOffset + Int64(index)) / samplesPerBucket))
-                peaks[bucket] = max(peaks[bucket], abs(channel[index]))
+            var index = 0
+            let frameCount = Int(buffer.frameLength)
+            while index < frameCount {
+                let logicalSample = sampleOffset + Int64(index)
+                while bucket < bucketCount - 1, logicalSample >= bucketEnd {
+                    bucket += 1
+                    bucketEnd = endSample(for: bucket)
+                }
+                let frames = min(frameCount - index, Int(max(1, bucketEnd - logicalSample)))
+                let end = index + frames
+                var peak = peaks[bucket]
+                for frame in index..<end {
+                    peak = max(peak, abs(channel[frame]))
+                }
+                peaks[bucket] = peak
+                index = end
             }
             sampleOffset += Int64(buffer.frameLength)
         }
+        try Task.checkCancellation()
         let nonSilent = peaks.filter { $0 >= 0.001 }.sorted()
-        let waveform: MeetingWaveform
-        if nonSilent.isEmpty {
-            waveform = MeetingWaveform(buckets: peaks, totalSamples: sampleOffset)
-        } else {
-            let p95 = nonSilent[min(nonSilent.count - 1, Int(Double(nonSilent.count - 1) * 0.95))]
-            let scale = max(p95, 0.01)
-            let normalized = peaks.map { peak -> Float in
-                guard peak >= 0.001 else { return 0 }
-                return sqrt(min(1, peak / scale))
-            }
-            waveform = MeetingWaveform(buckets: normalized, totalSamples: sampleOffset)
+        let scale = nonSilent.isEmpty ? Float(0.01) : max(nonSilent[min(nonSilent.count - 1, Int(Double(nonSilent.count - 1) * 0.95))], 0.01)
+        let normalized = peaks.map { peak -> Float in
+            guard peak >= 0.001 else { return 0 }
+            return sqrt(min(1, peak / scale))
         }
+        let waveform = MeetingWaveform(buckets: normalized, totalSamples: sampleOffset)
+        try Task.checkCancellation()
         cacheLock.lock()
         if cache.count >= cacheLimit { cache.removeAll() }
         cache[manifest.relativeDirectory] = (manifest, bucketCount, waveform)
@@ -61,5 +90,12 @@ enum MeetingWaveformGenerator {
         return waveform
     }
 
-    enum WaveformError: Error { case format }
+    enum WaveformError: LocalizedError {
+        case format
+
+        var errorDescription: String? {
+            AppLanguage.localized("meeting.waveform.error.format", defaultValue: "The recording waveform could not be prepared.",
+                                  language: .current, comment: "Waveform generation failed without exposing audio diagnostics.")
+        }
+    }
 }

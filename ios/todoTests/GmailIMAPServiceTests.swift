@@ -7,6 +7,10 @@ import Testing
 struct GmailIMAPServiceTests {
     private let email = "imap@example.com"
 
+    private func literal(_ value: String) -> String {
+        "{\(value.utf8.count)}\(value)"
+    }
+
     private func setupCredentials() throws {
         try? IMAPCredentialStore.delete(for: email)
         try IMAPCredentialStore.save(appPassword: "app-password", for: email, backgroundEnabled: false)
@@ -16,15 +20,95 @@ struct GmailIMAPServiceTests {
         try? IMAPCredentialStore.delete(for: email)
     }
 
-    private func setupAuth(transport: ScriptedIMAPTransport) {
+    private func setupAuth(transport: ScriptedIMAPTransport, messageCount: UInt32? = nil) {
         transport.addRoute(matching: "CAPABILITY", response: [
             "* CAPABILITY IMAP4rev1 UNSELECT IDLE NAMESPACE QUOTA ID UIDPLUS MOVE X-GM-EXT-1",
             "A0000 OK CAPABILITY"
         ])
-        transport.addRoute(matching: "SELECT INBOX", response: [
+        transport.addRoute(matching: "SELECT INBOX", response: (messageCount.map { ["* \($0) EXISTS"] } ?? []) + [
             "* OK [UIDVALIDITY 42] selected",
             "A0001 OK SELECT"
         ])
+    }
+
+    @Test("connection verification fails closed and preserves the saved password", arguments: ["denied", "disconnected", "missingHeaders", "missingIdentity"], [false, true])
+    func connectionVerificationFailsClosed(failure: String, replacingPassword: Bool) async throws {
+        try await AIProviderTestIsolation.shared.withLock {
+            try setupCredentials()
+            defer { cleanupCredentials() }
+            IMAPCredentialStore.markCredentialRejected(for: email)
+            let transport = ScriptedIMAPTransport()
+            setupAuth(transport: transport, messageCount: 1)
+            let expected: GmailIMAPError = failure == "disconnected" ? .transport("IMAP is not connected") : .invalidResponse
+            switch failure {
+            case "denied", "disconnected":
+                transport.addRoute(matching: "FETCH *", error: expected, once: true)
+            case "missingHeaders":
+                transport.addRoute(matching: "FETCH *", response: ["* 1 FETCH (UID 7 X-GM-MSGID 900)", "A0002 OK FETCH"], once: true)
+            default:
+                transport.addRoute(matching: "FETCH *", response: ["* 1 FETCH (UID 7 BODY[HEADER.FIELDS] \(literal("Subject: Mail\r\n\r\n")))", "A0002 OK FETCH"], once: true)
+            }
+            let service = GmailIMAPService(transport: transport)
+            // Start from an authenticated session to catch stale connected state on failure.
+            try await service.authenticate(email: email, backgroundEnabled: false)
+            await #expect(throws: expected) {
+                if replacingPassword {
+                    try await service.authenticateAndSave(email: email, appPassword: "replacement-password", backgroundEnabled: false)
+                } else {
+                    try await service.validateConnection(email: email, backgroundEnabled: false)
+                }
+            }
+            #expect(await service.authenticatedAccount == nil)
+            #expect(!(await service.isAuthenticated))
+            #expect(try IMAPCredentialStore.credential(for: email) == "app-password")
+            #expect(IMAPCredentialStore.isCredentialRejected(for: email))
+
+            transport.addRoute(matching: "FETCH *", response: [
+                "* 1 FETCH (UID 7 X-GM-MSGID 900 BODY[HEADER.FIELDS] \(literal("Subject: Mail\r\n\r\n")))",
+                "A0003 OK FETCH"
+            ])
+            try await service.validateConnection(email: email, backgroundEnabled: false)
+            #expect(await service.authenticatedAccount == email)
+        }
+    }
+
+    @Test("verifies readable and explicitly empty inboxes before saving", arguments: [UInt32(0), UInt32(1)])
+    func verifiesInboxBeforeSaving(messageCount: UInt32) async throws {
+        try await AIProviderTestIsolation.shared.withLock {
+            try setupCredentials()
+            defer { cleanupCredentials() }
+            let transport = ScriptedIMAPTransport()
+            setupAuth(transport: transport, messageCount: messageCount)
+            transport.addRoute(matching: "FETCH *", response: [
+                "* 1 FETCH (UID 7 X-GM-MSGID 900 BODY[HEADER.FIELDS] \(literal("Subject: Mail\r\nFrom: sender@example.com\r\n\r\n")))",
+                "A0002 OK FETCH"
+            ])
+            let service = GmailIMAPService(transport: transport)
+            try await service.validateConnection(email: email, backgroundEnabled: false)
+            #expect(await service.authenticatedAccount == email)
+            try await service.authenticateAndSave(email: email, appPassword: "replacement-password", backgroundEnabled: false)
+            #expect(try IMAPCredentialStore.credential(for: email) == "replacement-password")
+            #expect(await service.authenticatedAccount == email)
+            #expect(transport.commands.contains { $0.hasPrefix("FETCH *") } == (messageCount > 0))
+            #expect(transport.commands.allSatisfy { !$0.contains("STORE") && !$0.contains("EXPUNGE") && !$0.contains("UID SEARCH ALL") })
+            #expect(transport.commands.filter { $0.hasPrefix("FETCH *") }.allSatisfy { $0.contains("BODY.PEEK[") })
+        }
+    }
+
+    @Test("a missing EXISTS response is not an empty inbox")
+    func verificationRequiresExplicitMailboxCount() async throws {
+        try await AIProviderTestIsolation.shared.withLock {
+            try setupCredentials()
+            defer { cleanupCredentials() }
+            let transport = ScriptedIMAPTransport()
+            setupAuth(transport: transport)
+            let service = GmailIMAPService(transport: transport)
+            await #expect(throws: GmailIMAPError.invalidResponse) {
+                try await service.validateConnection(email: email, backgroundEnabled: false)
+            }
+            #expect(!(await service.isAuthenticated))
+            #expect(try IMAPCredentialStore.credential(for: email) == "app-password")
+        }
     }
 
     @Test("failed reconnect keeps the stored App Password")
@@ -408,8 +492,10 @@ struct GmailIMAPServiceTests {
                 "A0002 OK FETCH"
             ])
             transport.addRoute(matching: "BODY.PEEK[1.MIME]", response: [
-                "* 1 FETCH (UID 7 X-GM-MSGID 900 X-GM-THRID 901 BODY[HEADER] {84}Subject: =?UTF-8?B?67O07JWIIA==?= =?UTF-8?B?7JWM66a8?=\r\nFrom: sender@example.com\r\n\r\n BODY[1.MIME] {88}Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n",
-                " BODY[1]<0> {16}Hello=20world=21)",
+                "* 1 FETCH (UID 7 X-GM-MSGID 900 X-GM-THRID 901 BODY[HEADER] "
+                    + literal("Subject: =?UTF-8?B?67O07JWIIA==?= =?UTF-8?B?7JWM66a8?=\r\nFrom: sender@example.com\r\n\r\n")
+                    + " BODY[1.MIME] " + literal("Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n")
+                    + " BODY[1]<0> " + literal("Hello=20world=21") + ")",
                 "A0003 OK FETCH"
             ])
 
@@ -439,8 +525,10 @@ struct GmailIMAPServiceTests {
                 "A0002 OK FETCH"
             ])
             transport.addRoute(matching: "BODY.PEEK[2.MIME]", response: [
-                "* 1 FETCH (UID 8 X-GM-MSGID 901 X-GM-THRID 901 BODY[HEADER] {48}Subject: HTML Test\r\nFrom: sender@example.com\r\n\r\n BODY[2.MIME] {42}Content-Type: text/html; charset=utf-8\r\n\r\n",
-                " BODY[2]<0> {24}<p>Hello <b>HTML</b></p>)",
+                "* 1 FETCH (UID 8 X-GM-MSGID 901 X-GM-THRID 901 BODY[HEADER] "
+                    + literal("Subject: HTML Test\r\nFrom: sender@example.com\r\n\r\n")
+                    + " BODY[2.MIME] " + literal("Content-Type: text/html; charset=utf-8\r\n\r\n")
+                    + " BODY[2]<0> " + literal("<p>Hello <b>HTML</b></p>") + ")",
                 "A0003 OK FETCH"
             ])
 
@@ -468,8 +556,10 @@ struct GmailIMAPServiceTests {
                 "A0002 OK FETCH"
             ])
             transport.addRoute(matching: "BODY.PEEK[2.MIME]", response: [
-                "* 1 FETCH (UID 9 X-GM-MSGID 902 X-GM-THRID 901 BODY[HEADER] {50}Subject: Attach test\r\nFrom: sender@example.com\r\n\r\n BODY[2.MIME] {42}Content-Type: text/html; charset=utf-8\r\n\r\n",
-                " BODY[2]<0> {18}<h1>Main Body</h1>)",
+                "* 1 FETCH (UID 9 X-GM-MSGID 902 X-GM-THRID 901 BODY[HEADER] "
+                    + literal("Subject: Attach test\r\nFrom: sender@example.com\r\n\r\n")
+                    + " BODY[2.MIME] " + literal("Content-Type: text/html; charset=utf-8\r\n\r\n")
+                    + " BODY[2]<0> " + literal("<h1>Main Body</h1>") + ")",
                 "A0003 OK FETCH"
             ])
 
@@ -496,8 +586,10 @@ struct GmailIMAPServiceTests {
                 "A0002 OK FETCH"
             ])
             transport.addRoute(matching: "BODY.PEEK[1.MIME]", response: [
-                "* 1 FETCH (UID 10 X-GM-MSGID 903 X-GM-THRID 901 BODY[HEADER] {47}Subject: Non UTF8\r\nFrom: sender@example.com\r\n\r\n BODY[1.MIME] {79}Content-Type: text/plain; charset=euc-kr\r\nContent-Transfer-Encoding: base64\r\n\r\n",
-                " BODY[1]<0> {16}vsiz58fPvLy/5A==)",
+                "* 1 FETCH (UID 10 X-GM-MSGID 903 X-GM-THRID 901 BODY[HEADER] "
+                    + literal("Subject: Non UTF8\r\nFrom: sender@example.com\r\n\r\n")
+                    + " BODY[1.MIME] " + literal("Content-Type: text/plain; charset=euc-kr\r\nContent-Transfer-Encoding: base64\r\n\r\n")
+                    + " BODY[1]<0> " + literal("vsiz58fPvLy/5A==") + ")",
                 "A0003 OK FETCH"
             ])
 
@@ -523,8 +615,10 @@ struct GmailIMAPServiceTests {
             ])
             let hugePayload = String(repeating: "A", count: 500000)
             transportTruncated.addRoute(matching: "BODY.PEEK[1.MIME]", response: [
-                "* 1 FETCH (UID 11 X-GM-MSGID 904 X-GM-THRID 901 BODY[HEADER] {47}Subject: Big Mail\r\nFrom: sender@example.com\r\n\r\n BODY[1.MIME] {42}Content-Type: text/html; charset=utf-8\r\n\r\n",
-                " BODY[1]<0> {500000}\(hugePayload))",
+                "* 1 FETCH (UID 11 X-GM-MSGID 904 X-GM-THRID 901 BODY[HEADER] "
+                    + literal("Subject: Big Mail\r\nFrom: sender@example.com\r\n\r\n")
+                    + " BODY[1.MIME] " + literal("Content-Type: text/html; charset=utf-8\r\n\r\n")
+                    + " BODY[1]<0> " + literal(hugePayload) + ")",
                 "A0003 OK FETCH"
             ])
             let serviceTruncated = GmailIMAPService(transport: transportTruncated)
@@ -796,8 +890,10 @@ struct GmailIMAPServiceTests {
                 "A0010 OK FETCH"
             ])
             transport.addRoute(matching: "BODY.PEEK[1.MIME]", response: [
-                "* 1 FETCH (UID 10 X-GM-MSGID 1010 X-GM-THRID 2000 BODY[HEADER] {76}Subject: Test\r\nFrom: sender@example.com\r\n\r\n BODY[1.MIME] {38}Content-Type: text/plain; charset=utf-8\r\n\r\n",
-                " BODY[1]<0> {11}Hello world)",
+                "* 1 FETCH (UID 10 X-GM-MSGID 1010 X-GM-THRID 2000 BODY[HEADER] "
+                    + literal("Subject: Test\r\nFrom: sender@example.com\r\n\r\n")
+                    + " BODY[1.MIME] " + literal("Content-Type: text/plain; charset=utf-8\r\n\r\n")
+                    + " BODY[1]<0> " + literal("Hello world") + ")",
                 "A0011 OK FETCH"
             ])
 

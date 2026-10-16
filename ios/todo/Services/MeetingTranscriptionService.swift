@@ -1,15 +1,24 @@
-import AVFoundation
+@preconcurrency import AVFoundation
 import CoreMedia
 import Foundation
 import OSLog
 import Speech
 
 
-nonisolated private func recordTranscriptionDiagnostic(_ error: Error, operation: String) {
+nonisolated private func recordTranscriptionDiagnostic(
+    _ error: Error,
+    operation: String,
+    file: String = #fileID,
+    line: Int = #line,
+    function: String = #function
+) {
     DiagnosticRecorder.shared.record(
         error: error,
         component: "meeting.transcription",
-        operation: operation
+        operation: operation,
+        file: file,
+        line: line,
+        function: function
     )
 }
 enum MeetingTranscriptionPurpose: Sendable {
@@ -488,7 +497,7 @@ private func averageConfidence(of text: AttributedString) -> Double? {
 
 /// Converts canonical PCM to the analyzer's selected input format while preserving
 /// resampler tail frames at end of stream.
-final class MeetingPCMConverter: @unchecked Sendable {
+nonisolated final class MeetingPCMConverter: @unchecked Sendable {
     enum ConversionError: Error {
         case unsupportedFormat
         case conversionFailed
@@ -558,7 +567,7 @@ final class MeetingPCMConverter: @unchecked Sendable {
 /// Keeps best-effort live transcription isolated from the canonical recording
 /// path. A bounded queue preserves the chronological prefix and reports any
 /// saturation without ever stopping FLAC persistence.
-final class MeetingTranscriptionInputPipeline: @unchecked Sendable {
+nonisolated final class MeetingTranscriptionInputPipeline: @unchecked Sendable {
     typealias Consume = @Sendable (AnalyzerInput) -> AsyncStream<AnalyzerInput>.Continuation.YieldResult
 
     private enum TerminalRequest {

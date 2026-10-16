@@ -145,7 +145,7 @@ enum AppDateFormat {
         english: String,
         language: AppLanguage
     ) -> String {
-        language == .english ? english : korean
+        AppLanguage.localized(key, defaultValue: language == .korean ? korean : english, language: language)
     }
 
     private static func normalizedMailDateString(_ string: String) -> String? {

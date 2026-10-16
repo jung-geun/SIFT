@@ -352,4 +352,40 @@ struct MailboxViewStateTests {
             )
         )
     }
+
+    @Test("locally stored credentials select and render provider immediately without remote auth")
+    func testLocalCredentialStartupSelectionAndVisibility() {
+        let presentation = MailboxStartupPresentation(
+            authenticationState: .resolved,
+            cachedProviders: [],
+            authenticatedProviders: [],
+            storedCredentialProviders: [.gmail]
+        )
+
+        #expect(presentation.showsMailbox == true)
+        #expect(presentation.visibleProviders == [.gmail])
+        #expect(presentation.showsAuthenticationCheckingStatus == false)
+
+        var viewState = MailboxViewState()
+        viewState.reconcileProviders(presentation.visibleProviders)
+        #expect(viewState.selectedProvider == .gmail)
+    }
+
+    @Test("locally stored credentials for Outlook select Outlook when no Gmail credentials exist")
+    func testLocalCredentialOutlookSelection() {
+        let presentation = MailboxStartupPresentation(
+            authenticationState: .resolved,
+            cachedProviders: [],
+            authenticatedProviders: [],
+            storedCredentialProviders: [.outlook]
+        )
+
+        #expect(presentation.showsMailbox == true)
+        #expect(presentation.visibleProviders == [.outlook])
+        #expect(presentation.showsAuthenticationCheckingStatus == false)
+
+        var viewState = MailboxViewState()
+        viewState.reconcileProviders(presentation.visibleProviders)
+        #expect(viewState.selectedProvider == .outlook)
+    }
 }

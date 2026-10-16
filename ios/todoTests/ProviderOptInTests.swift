@@ -5,58 +5,6 @@ import FoundationModels
 import Testing
 @testable import todo
 
-private final class GeminiMockURLProtocol: URLProtocol {
-    static var requestHandler: ((URLRequest) throws -> (HTTPURLResponse, Data?))?
-
-    override class func canInit(with request: URLRequest) -> Bool { true }
-    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
-
-    override func startLoading() {
-        guard let handler = Self.requestHandler else {
-            fatalError("GeminiMockURLProtocol handler missing")
-        }
-        do {
-            let (response, data) = try handler(request)
-            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-            if let data {
-                client?.urlProtocol(self, didLoad: data)
-            }
-            client?.urlProtocolDidFinishLoading(self)
-        } catch {
-            client?.urlProtocol(self, didFailWithError: error)
-        }
-    }
-
-    override func stopLoading() {}
-}
-
-private final class CountingGeminiTransport: @unchecked Sendable, GeminiHTTPTransport {
-    private let lock = NSLock()
-    private var requests = 0
-    private let cancels: Bool
-
-    init(cancels: Bool = false) {
-        self.cancels = cancels
-    }
-
-    func data(for request: URLRequest) async throws -> (Data, URLResponse) {
-        lock.withLock {
-            requests += 1
-        }
-        if cancels { throw CancellationError() }
-        let response = HTTPURLResponse(
-            url: request.url ?? URL(string: "https://example.invalid")!,
-            statusCode: 200,
-            httpVersion: nil,
-            headerFields: nil
-        )!
-        return (Data(), response)
-    }
-
-    func requestCount() -> Int {
-        lock.withLock { requests }
-    }
-}
 
 private final class CountingOnDeviceRuntime: OnDeviceModelRuntime, @unchecked Sendable {
     private let lock = NSLock()
@@ -130,56 +78,14 @@ private struct UncalledFoundationRuntime: FoundationModelsRuntime {
 }
 #endif
 
-@Suite("GeminiProviderService", .serialized)
+@Suite("Provider opt-in boundaries", .serialized)
 @MainActor
-struct GeminiProviderServiceTests {
-    private func makeSession() -> URLSession {
-        let config = URLSessionConfiguration.ephemeral
-        config.protocolClasses = [GeminiMockURLProtocol.self]
-        return URLSession(configuration: config)
-    }
-
-    private func requestBodyData(from request: URLRequest) throws -> Data {
-        if let body = request.httpBody {
-            return body
-        }
-        guard let stream = request.httpBodyStream else {
-            throw NSError(domain: "GeminiProviderServiceTests", code: 1, userInfo: [NSLocalizedDescriptionKey: "Missing request body"])
-        }
-        stream.open()
-        defer { stream.close() }
-        var data = Data()
-        let bufferSize = 4096
-        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
-        defer { buffer.deallocate() }
-        while stream.hasBytesAvailable {
-            let read = stream.read(buffer, maxLength: bufferSize)
-            if read < 0 {
-                throw stream.streamError ?? NSError(domain: "GeminiProviderServiceTests", code: 2, userInfo: [NSLocalizedDescriptionKey: "Failed reading request body stream"])
-            }
-            if read == 0 { break }
-            data.append(buffer, count: read)
-        }
-        return data
-    }
+struct ProviderOptInTests {
 
     private func reset() {
-        GeminiMockURLProtocol.requestHandler = nil
-        GeminiProviderService.deleteAPIKey()
-        UserDefaults.standard.set(false, forKey: "pieroot.todo.iCloudSyncEnabled")
-        UserDefaults.standard.removeObject(forKey: SettingsStore.betaGeminiEnabledKey)
         UserDefaults.standard.removeObject(forKey: SettingsStore.betaSelectedProviderKey)
         UserDefaults.standard.removeObject(forKey: SettingsStore.betaFoundationModelsEnabledKey)
         UserDefaults.standard.removeObject(forKey: SettingsStore.betaOnDeviceModelEnabledKey)
-        UserDefaults.standard.removeObject(forKey: "pieroot.todo.providerEmailAnalysisEnabled")
-    }
-
-    private func enableGeminiBeta() {
-        UserDefaults.standard.set(true, forKey: SettingsStore.betaGeminiEnabledKey)
-        UserDefaults.standard.set(
-            PersonaAIProvider.gemini.rawValue,
-            forKey: SettingsStore.betaSelectedProviderKey
-        )
     }
 
 

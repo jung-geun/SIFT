@@ -3,7 +3,8 @@ import Foundation
 nonisolated enum BetaProvider: String, CaseIterable, Identifiable, Sendable {
     case foundationModels
     case onDevice
-    case gemini
+    case openAI
+    case laya
 
     var id: String { rawValue }
 
@@ -11,7 +12,8 @@ nonisolated enum BetaProvider: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .foundationModels: .foundationModels
         case .onDevice: .onDevice
-        case .gemini: .gemini
+        case .openAI: .openAI
+        case .laya: .laya
         }
     }
 
@@ -19,7 +21,8 @@ nonisolated enum BetaProvider: String, CaseIterable, Identifiable, Sendable {
         switch provider {
         case .foundationModels: self = .foundationModels
         case .onDevice: self = .onDevice
-        case .gemini: self = .gemini
+        case .openAI: self = .openAI
+        case .laya: self = .laya
         }
     }
 }
@@ -27,13 +30,15 @@ nonisolated enum BetaProvider: String, CaseIterable, Identifiable, Sendable {
 nonisolated struct BetaProviderAccess: Equatable, Sendable {
     let foundationModelsEnabled: Bool
     let onDeviceEnabled: Bool
-    let geminiEnabled: Bool
+    let openAIEnabled: Bool
+    let layaEnabled: Bool
     let meetingVoiceProcessingEnabled: Bool
 
     static let disabled = BetaProviderAccess(
         foundationModelsEnabled: false,
         onDeviceEnabled: false,
-        geminiEnabled: false,
+        openAIEnabled: false,
+        layaEnabled: false,
         meetingVoiceProcessingEnabled: false
     )
 
@@ -41,15 +46,19 @@ nonisolated struct BetaProviderAccess: Equatable, Sendable {
         switch provider {
         case .foundationModels: foundationModelsEnabled
         case .onDevice: onDeviceEnabled
-        case .gemini: geminiEnabled
+        case .openAI: openAIEnabled
+        case .laya: layaEnabled
         }
     }
 }
 
 nonisolated enum ProviderUse: Sendable {
     case standardAnalysis
+    case meetingAnalysis
+    case emailAnalysis
     case transcriptRefinement
     case modelManagement
+    case layaModelManagement
 }
 
 nonisolated enum RuleFallbackReason: String, Equatable, Sendable {
@@ -57,6 +66,7 @@ nonisolated enum RuleFallbackReason: String, Equatable, Sendable {
     case noEligibleProvider
     case providerDisabled
     case unavailable
+    case providerNotApplicable
     case modelNotLoaded
     case credentialMissing
     case consentMissing
@@ -76,12 +86,14 @@ extension RuleFallbackReason {
             values = ("선택한 provider가 비활성화되어 있습니다.", "The selected provider is disabled.")
         case .unavailable:
             values = ("이 기기에서 provider를 사용할 수 없습니다.", "The provider is unavailable on this device.")
+        case .providerNotApplicable:
+            values = ("선택한 provider는 이 분석을 지원하지 않습니다.", "The selected provider does not support this analysis.")
         case .modelNotLoaded:
             values = ("온디바이스 모델이 로드되지 않았습니다.", "The on-device model is not loaded.")
         case .credentialMissing:
             values = ("provider 인증 정보가 없습니다.", "Provider credentials are missing.")
         case .consentMissing:
-            values = ("이메일 전송 동의가 필요합니다.", "Email sharing consent is required.")
+            values = ("이 데이터의 외부 전송 동의가 필요합니다.", "Sharing consent is required for this data.")
         case .invalidResponse:
             values = ("provider 응답을 해석하지 못했습니다.", "The provider returned an invalid response.")
         case .providerExecutionFailed:
@@ -125,15 +137,23 @@ nonisolated struct BetaFeaturePolicy: Sendable {
         let access = accessReader()
 
         switch use {
-        case .standardAnalysis:
-            guard access.foundationModelsEnabled || access.onDeviceEnabled || access.geminiEnabled else {
+        case .standardAnalysis, .meetingAnalysis:
+            guard access.foundationModelsEnabled || access.onDeviceEnabled || access.openAIEnabled || access.layaEnabled else {
                 return .rules(.noProviderOptIn)
             }
             guard let selection = selectionReader(), access.isEnabled(selection) else {
                 return .rules(.providerDisabled)
             }
+            if case .meetingAnalysis = use, selection != .foundationModels && selection != .onDevice {
+                return .rules(.providerNotApplicable)
+            }
             return .providers([selection])
 
+        case .emailAnalysis:
+            // Mail summaries and drafts are local AFM work, independent of the selected task-priority provider.
+            return access.foundationModelsEnabled
+                ? .providers([.foundationModels])
+                : .rules(.providerDisabled)
         case .transcriptRefinement:
             let providers = [PersonaAIProvider.foundationModels, .onDevice]
                 .filter(access.isEnabled)
@@ -142,6 +162,11 @@ nonisolated struct BetaFeaturePolicy: Sendable {
         case .modelManagement:
             return access.onDeviceEnabled
                 ? .providers([.onDevice])
+                : .rules(.providerDisabled)
+
+        case .layaModelManagement:
+            return access.layaEnabled
+                ? .providers([.laya])
                 : .rules(.providerDisabled)
         }
     }
@@ -161,6 +186,24 @@ nonisolated enum ProviderErrorMapper {
         if error is CancellationError {
             return nil
         }
+        if let error = error as? OpenAIRequestError {
+            switch error {
+            case .disabled: return .providerDisabled
+            case .consentRequired: return .consentMissing
+            case .modelUnavailable: return .unavailable
+            case .invalidResponse, .interrupted: return .invalidResponse
+            case .http(let status): return status == 401 ? .credentialMissing : .providerExecutionFailed
+            case .usageLimit, .failed: return .providerExecutionFailed
+            }
+        }
+        if let error = error as? OpenAIConnectionError {
+            switch error {
+            case .cancelled: return nil
+            case .permissionRequired: return .consentMissing
+            case .signInRequired, .invalidClient, .invalidIdentity, .storage: return .credentialMissing
+            default: return .providerExecutionFailed
+            }
+        }
 
         if let error = error as? IntelligenceRoutingError {
             switch error {
@@ -174,6 +217,8 @@ nonisolated enum ProviderErrorMapper {
                 return .providerExecutionFailed
             }
         }
+
+        if error is LayaDecisionService.LayaError { return .modelNotLoaded }
 
         if let error = error as? OnDeviceLLMService.LLMError {
             switch error {

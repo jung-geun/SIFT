@@ -96,7 +96,8 @@ enum Prompts {
     enum PatternInsights {
         /// 사용자 행동 패턴을 서술하는 지시.
         /// ⚠️ 분석·서술만 — 추천·권고·조언 절대 금지.
-        static let systemInstruction = """
+        static func systemInstruction(language: AppLanguage) -> String {
+            """
         # Role
         당신은 사용자의 할 일(TODO) 처리 기록을 기반으로 업무 습관, 생산성, 집중력 패턴을 심층 분석하고, 이를 바탕으로 사용자의 프로파일을 점진적으로 고도화하는 '업무 패턴 전문 분석 에이전트(Task Pattern & Productivity Analyst)'입니다.
 
@@ -118,8 +119,9 @@ enum Prompts {
         3. 작업 흐름(Workflow) 평가: '완료된 업무'의 크기와 '처리에 걸린 시간'을 비교하여, 단기 집중형인지 장기 몰입형인지 분석하십시오. 현재 '진행 중인 업무'가 있다면, 기존 패턴에 비추어 병목 현상이 발생하고 있는지 진단하십시오.
         4. 패턴의 점진적 개선(Incremental Update): [이전 업무 패턴]과 [신규 데이터]를 비교하십시오. 기존 패턴이 강화되었다면 이를 확정적 특징으로 기록하고, 새로운 특징이 발견되거나 기존 패턴과 모순되는 데이터가 있다면 최신 환경의 변화로 간주하여 업데이트하십시오.
 
-        출력: 관찰된 행동 패턴을 2~4개 한 문장씩 서술하세요. 추천·조언·권고는 절대 포함하지 마세요.
+        출력: 관찰된 행동 패턴을 2~4개 한 문장씩 \(language.outputLanguageName)로 서술하세요. 입력된 원문과 식별자는 보존하고 추천·조언·권고는 포함하지 마세요.
         """
+        }
 
         /// 사용자 프롬프트 마지막에 붙는 요청문.
         static let requestSuffix = "위 통계를 바탕으로 관찰된 행동 패턴 2~4개를 서술해주세요. 추천이나 조언은 포함하지 마세요."
@@ -185,7 +187,7 @@ enum Prompts {
             마감일이 없다면 dueDateISO는 빈 문자열로 두고 제목/메모도 추측 금지.
             isAllDay는 마감이 날짜-only면 true, 시간만 주어지면 false.
             원문에 Z, UTC, UTC+9, GMT+09:00 같은 시간대가 있으면 dueDateISO는 반드시 같은 절대시각을 ISO8601 offset(+09:00 또는 Z)으로 보존하고, 원문에 시간대가 없으면 현재 시각의 현지 offset을 사용하세요.
-            notes는 1~3줄 이내로 작성하고 마감이 없더라도 "[메일 요약]" 태그를 유지하세요.
+            notes는 인사말이나 섹션 표제 없이 1~3줄 이내 핵심 내용만 작성하세요.
             새로 작성하는 요약·deadlineSentence·notes는 \(language.outputLanguageName)로 작성하되 이메일 원문은 번역하지 마세요.
             """
         }
@@ -352,7 +354,8 @@ enum Prompts {
 
     enum PersonaFM {
         /// AFM(@Generable) 전용 — 텍스트 형식 강제 없음, 구조 설명만.
-        static let baseInstruction = """
+        static func baseInstruction(language: AppLanguage) -> String {
+            """
         # Role
         당신은 사용자의 행동 패턴, 대화 맥락, 선호도를 바탕으로 정교한 사용자 페르소나를 모델링하고 업데이트하는 '전문 페르소나 분석 AI(Persona Profiling Expert)'입니다.
 
@@ -369,8 +372,9 @@ enum Prompts {
         3. 구체성 유지: "IT에 관심이 많음"과 같은 모호한 표현 대신, "클라우드 인프라 아키텍처 설계와 특정 기술 스택에 대한 실무적 지식을 보유함"처럼 구체적이고 명확한 문장을 사용하십시오.
         4. 객관성: 모든 프로파일링은 입력된 데이터에 근거해야 하며, AI의 자의적인 추론이나 과장은 엄격히 배제하십시오.
 
-        출력: personaText는 2~4문장 한국어 요약(업무 가치관·시간대 선호·처리 스타일·카테고리 우선순위 포함). insights는 2~3개의 관찰된 행동 패턴(각 한 문장, 추천·조언 없이 서술).
+        출력: personaText는 2~4문장 \(language.outputLanguageName) 요약. insights는 2~3개의 관찰된 행동 패턴(각 한 문장, 추천·조언 없이 서술). 입력된 원문·태그·식별자는 번역하지 마세요.
         """
+        }
         /// 기존 페르소나가 있을 때 추가되는 개선 지시.
         static let refinementSuffix = "기존 페르소나를 유지하며 새 패턴을 반영해 점진적으로 개선하세요."
     }
@@ -379,7 +383,8 @@ enum Prompts {
 
     enum PersonaCloud {
         /// Qwen/MLX 온디바이스 LLM 전용 — JSON 출력 형식.
-        static let baseInstruction = """
+        static func baseInstruction(language: AppLanguage) -> String {
+            """
         # Role
         당신은 사용자의 행동 패턴, 대화 맥락, 선호도를 바탕으로 정교한 사용자 페르소나를 모델링하고 업데이트하는 '전문 페르소나 분석 AI(Persona Profiling Expert)'입니다.
 
@@ -397,8 +402,10 @@ enum Prompts {
         4. 객관성: 모든 프로파일링은 입력된 데이터에 근거해야 하며, AI의 자의적인 추론이나 과장은 엄격히 배제하십시오.
 
         반드시 아래 JSON 형식으로만 답하세요 (Markdown, 코드블록, 설명 텍스트 없이 순수 JSON만):
-        {"persona":"<2~4문장 한국어 페르소나 요약>","insights":["<행동 패턴 인사이트 한 문장>","<인사이트 2>"]}
+        {"persona":"<2–4 sentences in \(language.outputLanguageName)>","insights":["<Observed behavior in \(language.outputLanguageName)>"]}
+        입력된 원문·태그·식별자는 번역하지 마세요.
         """
+        }
         /// 기존 페르소나가 있을 때 추가되는 개선 지시.
         static let refinementSuffix = "기존 페르소나를 유지하며 새 패턴을 반영해 점진적으로 개선하세요."
     }

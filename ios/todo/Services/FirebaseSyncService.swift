@@ -1,6 +1,7 @@
 import Foundation
 import CryptoKit
 import CommonCrypto
+import Security
 
 struct FirebaseSyncResult: Sendable {
     let email: String
@@ -77,6 +78,17 @@ private struct FirebaseEncryptedEnvelope: Codable, Sendable {
 }
 
 struct FirebaseSyncService {
+    private static let envelopeVersion = 1
+    private static let encryptionKDF = "PBKDF2WithHmacSHA256"
+    private static let encryptionIterations = 210_000
+
+    // Keep QA snapshots separate under the existing per-user Firestore rules.
+    #if SIFT_QA
+    private static let snapshotDocumentName = "snapshot-qa"
+    #else
+    private static let snapshotDocumentName = "snapshot"
+    #endif
+
     private let apiKey: String
     private let projectID: String
     private let session: URLSession
@@ -174,13 +186,13 @@ struct FirebaseSyncService {
     }
 
     private func firestoreDocumentURL(uid: String) -> URL {
-        URL(string: "https://firestore.googleapis.com/v1/projects/\(projectID)/databases/(default)/documents/users/\(uid)/appData/snapshot")!
+        URL(string: "https://firestore.googleapis.com/v1/projects/\(projectID)/databases/(default)/documents/users/\(uid)/appData/\(Self.snapshotDocumentName)")!
     }
 
     private func firestorePayload(email: String, envelope: FirebaseEncryptedEnvelope) -> [String: Any] {
         [
             "fields": [
-                "version": ["integerValue": "1"],
+                "version": ["integerValue": "\(envelope.version)"],
                 "provider": ["stringValue": "firebase-google"],
                 "email": ["stringValue": email],
                 "updatedAt": ["timestampValue": ISO8601DateFormatter().string(from: Date())],
@@ -204,6 +216,8 @@ struct FirebaseSyncService {
             return nil
         }
         guard
+            let version = intField("version"),
+            let kdf = stringField("kdf"),
             let salt = stringField("salt"),
             let iv = stringField("iv"),
             let ciphertext = stringField("ciphertext"),
@@ -211,23 +225,22 @@ struct FirebaseSyncService {
         else {
             throw FirebaseSyncError.invalidSnapshot
         }
-        let kdf = stringField("kdf") ?? "PBKDF2WithHmacSHA256"
-        return FirebaseEncryptedEnvelope(version: 1, kdf: kdf, salt: salt, iterations: iterations, iv: iv, ciphertext: ciphertext)
+        return FirebaseEncryptedEnvelope(version: version, kdf: kdf, salt: salt, iterations: iterations, iv: iv, ciphertext: ciphertext)
     }
 
     private func encrypt(snapshotJSON: String, passphrase: String) throws -> FirebaseEncryptedEnvelope {
         guard passphrase.count >= 8 else { throw FirebaseSyncError.invalidPassphrase }
-        let salt = randomData(count: 16)
-        let iv = randomData(count: 12)
-        let key = try derivedKey(passphrase: passphrase, salt: salt, iterations: 210_000)
+        let salt = try randomData(count: 16)
+        let iv = try randomData(count: 12)
+        let key = try derivedKey(passphrase: passphrase, salt: salt, iterations: Self.encryptionIterations)
         let sealed = try AES.GCM.seal(Data(snapshotJSON.utf8), using: key, nonce: try AES.GCM.Nonce(data: iv))
         var ciphertextAndTag = sealed.ciphertext
         ciphertextAndTag.append(sealed.tag)
         return FirebaseEncryptedEnvelope(
-            version: 1,
-            kdf: "PBKDF2WithHmacSHA256",
+            version: Self.envelopeVersion,
+            kdf: Self.encryptionKDF,
             salt: salt.base64EncodedString(),
-            iterations: 210_000,
+            iterations: Self.encryptionIterations,
             iv: iv.base64EncodedString(),
             ciphertext: ciphertextAndTag.base64EncodedString()
         )
@@ -235,15 +248,16 @@ struct FirebaseSyncService {
 
     private func decrypt(envelope: FirebaseEncryptedEnvelope, passphrase: String) throws -> String {
         guard passphrase.count >= 8 else { throw FirebaseSyncError.invalidPassphrase }
-        guard
-            let salt = Data(base64Encoded: envelope.salt),
-            let iv = Data(base64Encoded: envelope.iv),
-            let ciphertext = Data(base64Encoded: envelope.ciphertext)
+        guard envelope.version == Self.envelopeVersion,
+              envelope.kdf == Self.encryptionKDF,
+              envelope.iterations == Self.encryptionIterations,
+              let salt = Data(base64Encoded: envelope.salt), salt.count == 16,
+              let iv = Data(base64Encoded: envelope.iv), iv.count == 12,
+              let ciphertext = Data(base64Encoded: envelope.ciphertext), ciphertext.count >= 16
         else {
             throw FirebaseSyncError.invalidSnapshot
         }
         let key = try derivedKey(passphrase: passphrase, salt: salt, iterations: envelope.iterations)
-        guard ciphertext.count >= 16 else { throw FirebaseSyncError.invalidSnapshot }
         let tag = ciphertext.suffix(16)
         let encrypted = ciphertext.prefix(ciphertext.count - 16)
         let sealed = try AES.GCM.SealedBox(
@@ -277,9 +291,11 @@ struct FirebaseSyncService {
         return SymmetricKey(data: derived)
     }
 
-    private func randomData(count: Int) -> Data {
+    private func randomData(count: Int) throws -> Data {
         var bytes = [UInt8](repeating: 0, count: count)
-        _ = SecRandomCopyBytes(kSecRandomDefault, count, &bytes)
+        guard SecRandomCopyBytes(kSecRandomDefault, count, &bytes) == errSecSuccess else {
+            throw FirebaseSyncError.invalidResponse
+        }
         return Data(bytes)
     }
 }

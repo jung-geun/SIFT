@@ -21,12 +21,21 @@ nonisolated enum BehaviorConfidence: String, Codable, CaseIterable, Sendable {
     }
 
     func label(language: AppLanguage) -> String {
+        let key: String
+        let korean: String
+        let english: String
         switch self {
-        case .insufficient: return language == .english ? "Insufficient data" : "데이터 부족"
-        case .low: return language == .english ? "Low confidence" : "낮은 신뢰도"
-        case .medium: return language == .english ? "Medium confidence" : "중간 신뢰도"
-        case .high: return language == .english ? "High confidence" : "높은 신뢰도"
+        case .insufficient: (key, korean, english) = ("behavior.confidence.insufficient", "데이터 부족", "Insufficient data")
+        case .low: (key, korean, english) = ("behavior.confidence.low", "낮은 신뢰도", "Low confidence")
+        case .medium: (key, korean, english) = ("behavior.confidence.medium", "중간 신뢰도", "Medium confidence")
+        case .high: (key, korean, english) = ("behavior.confidence.high", "높은 신뢰도", "High confidence")
         }
+        return AppLanguage.localized(
+            key,
+            defaultValue: language == .korean ? korean : english,
+            language: language,
+            comment: "Confidence in behavior-analysis evidence, not certainty that an activity occurred."
+        )
     }
 
     var allowsPersonalization: Bool {

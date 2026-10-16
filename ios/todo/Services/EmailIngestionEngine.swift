@@ -1,6 +1,26 @@
 import Foundation
 
 struct EmailIngestionEngine {
+    /// nil retains deterministic ingestion; uncertainty always requires review.
+    typealias CandidateDecision = @MainActor (GmailMessage) async throws -> EmailCandidateOutcome?
+
+    private let candidateDecision: CandidateDecision
+
+    init(candidateDecision: @escaping CandidateDecision = { message in
+        try Task.checkCancellation()
+        let laya = LayaDecisionService.shared
+        guard BetaFeaturePolicy().authorizes(.laya, for: .layaModelManagement),
+              laya.isCapable, laya.isModelInstalled,
+              !laya.isLoading, !laya.isDeleting else { return nil }
+        return try await LayaEmailDecisionService().candidateOutcome(
+            subject: message.subject,
+            sender: message.from,
+            body: message.body.isEmpty ? message.snippet : message.body
+        )
+    }) {
+        self.candidateDecision = candidateDecision
+    }
+
     func makeManualTodo(
         from message: GmailMessage,
         allowFoundationModels: Bool = true,
@@ -13,6 +33,7 @@ struct EmailIngestionEngine {
             #if canImport(FoundationModels)
             if #available(iOS 26.0, *), FoundationModelsAvailability.isAvailable {
                 do {
+                    try Task.checkCancellation()
                     draft = try await FoundationModelsService().draftTodoFromEmail(
                         message,
                         now: Date(),
@@ -47,41 +68,69 @@ struct EmailIngestionEngine {
         return todo
     }
 
+    /// Unavailable decisions preserve the deterministic baseline; only `.notCandidate`
+    /// rejects mail. `.uncertain` always stays in review, retaining a locally evidenced
+    /// deadline or using the same undated manual draft as `.candidate` when none exists.
     func extractTodos(
         from message: GmailMessage,
         allowFoundationModels: Bool = true,
         language: AppLanguage = .current
     ) async throws -> [Todo] {
-        let engine = EmailAnalysisEngineFactory.makeEngine(allowFoundationModels: allowFoundationModels)
-        let outcome = try await engine.analyze(
-            message,
-            now: Date(),
-            language: language
-        )
-        guard let extraction = outcome.value else {
-            return []
-        }
-
         let labels = Set(message.labelIds)
         let dropLabels: Set<String> = ["CATEGORY_SOCIAL", "CATEGORY_FORUMS"]
         let reviewLabels: Set<String> = ["CATEGORY_PROMOTIONS"]
+        guard labels.isDisjoint(with: dropLabels) else { return [] }
 
-        if !labels.isDisjoint(with: dropLabels) {
-            return []
+        // Candidate decisions run independently of Apple Intelligence availability.
+        // nil retains the deterministic date path; uncertainty is never a negative.
+        try Task.checkCancellation()
+        let candidate = try await candidateDecision(message)
+        try Task.checkCancellation()
+        guard candidate != .notCandidate else { return [] }
+
+        let now = Date()
+        try Task.checkCancellation()
+        let outcome = try await EmailAnalysisEngineFactory.makeEngine(
+            allowFoundationModels: allowFoundationModels
+        ).analyze(message, now: now, language: language)
+        try Task.checkCancellation()
+        let analyzer = EmailContentAnalyzer()
+        // AI prose can help organize mail, but an automatic deadline requires a date
+        // found in the original message by the deterministic reader.
+        let confirmedExtraction: EmailExtraction?
+        if case .beta(.foundationModels) = outcome.executionPath {
+            confirmedExtraction = analyzer.analyze(message, now: now, language: language)
+        } else {
+            confirmedExtraction = outcome.value
+        }
+        guard let extraction = confirmedExtraction else {
+            guard candidate == .candidate || candidate == .uncertain else { return [] }
+            // Positive and uncertain mail without deterministic date evidence stays in
+            // review; never use an AFM-guessed date without explicit local evidence.
+            try Task.checkCancellation()
+            let todo = await makeManualTodo(
+                from: message, allowFoundationModels: allowFoundationModels, language: language
+            )
+            try Task.checkCancellation()
+            todo.dueDate = nil
+            todo.sourceSender = analyzer.parseSender(from: message.from)
+            todo.sourceSenderEmail = analyzer.parseSenderEmail(from: message.from)
+            todo.triageStatus = TodoTriage.review.rawValue
+            return [todo]
         }
 
         let isPromotion = !labels.isDisjoint(with: reviewLabels) || message.isBulk
-        let triage: TodoTriage = (isPromotion || extraction.keywordScore == 0) ? .review : .todo
+        let triage: TodoTriage = (candidate == .uncertain || isPromotion || extraction.keywordScore == 0) ? .review : .todo
 
         let todo = Todo(
             title: message.subject,
-            notes: extraction.notes,
+            notes: outcome.value.flatMap { $0.notes.isEmpty ? nil : $0.notes } ?? extraction.notes,
             dueDate: extraction.dueDate,
             source: .email,
             sourceRef: message.id
         )
-        todo.sourceSender = extraction.sender
-        todo.sourceSenderEmail = extraction.senderEmail
+        todo.sourceSender = analyzer.parseSender(from: message.from)
+        todo.sourceSenderEmail = analyzer.parseSenderEmail(from: message.from)
         todo.sourceMessageID = message.messageID
         todo.sourceThreadID = message.threadID
         todo.sourceAccountNamespace = message.sourceAccountNamespace

@@ -1,0 +1,182 @@
+{
+  "capturedOn": "iOS 27 Simulator",
+  "privacy": "Synthetic to-do examples only; no personal mail, meeting, or account data.",
+  "captures": [
+    {
+      "path": "promo-iphone-ko-04-languages.png",
+      "test": "PromotionalCaptureUITests/testCaptureKorean()",
+      "resultBundle": "sift-media-iphone-ko-clean-20261016.xcresult",
+      "capturedAt": "2026-10-15T19:56:41.429Z",
+      "normalization": "None",
+      "sourceAttachmentSHA256": "0af7554e40d77e56163c2e974e84a804b7a787b8e3f75b39712ace0f2fa5d6d9",
+      "sha256": "0af7554e40d77e56163c2e974e84a804b7a787b8e3f75b39712ace0f2fa5d6d9",
+      "bytes": 291457,
+      "syntheticSampleData": true
+    },
+    {
+      "path": "promo-iphone-ko-03-calendar.png",
+      "test": "PromotionalCaptureUITests/testCaptureKorean()",
+      "resultBundle": "sift-media-iphone-ko-clean-20261016.xcresult",
+      "capturedAt": "2026-10-15T19:56:26.810Z",
+      "normalization": "None",
+      "sourceAttachmentSHA256": "32b72773f08e28449cfd2d4c4b19bde076d883660b3ca3cd1dd1dab3531c63e3",
+      "sha256": "32b72773f08e28449cfd2d4c4b19bde076d883660b3ca3cd1dd1dab3531c63e3",
+      "bytes": 185759,
+      "syntheticSampleData": true
+    },
+    {
+      "path": "promo-iphone-ko-02-capture.png",
+      "test": "PromotionalCaptureUITests/testCaptureKorean()",
+      "resultBundle": "sift-media-iphone-ko-clean-20261016.xcresult",
+      "capturedAt": "2026-10-15T19:56:18.883Z",
+      "normalization": "None",
+      "sourceAttachmentSHA256": "f7a9dc2008a329dfdd310cecd965a422af9a891c4f8b4473727b2533102f87f4",
+      "sha256": "f7a9dc2008a329dfdd310cecd965a422af9a891c4f8b4473727b2533102f87f4",
+      "bytes": 209270,
+      "syntheticSampleData": true
+    },
+    {
+      "path": "promo-iphone-ko-01-tasks.png",
+      "test": "PromotionalCaptureUITests/testCaptureKorean()",
+      "resultBundle": "sift-media-iphone-ko-clean-20261016.xcresult",
+      "capturedAt": "2026-10-15T19:56:00.448Z",
+      "normalization": "None",
+      "sourceAttachmentSHA256": "37ed9d0fec7c964b37a730e544aa46139b3d21630045df638a70a9e91fbd8e99",
+      "sha256": "37ed9d0fec7c964b37a730e544aa46139b3d21630045df638a70a9e91fbd8e99",
+      "bytes": 180620,
+      "syntheticSampleData": true
+    },
+    {
+      "path": "promo-iphone-en-04-languages.png",
+      "test": "PromotionalCaptureUITests/testCaptureEnglish()",
+      "resultBundle": "sift-media-iphone-en-clean-20261016.xcresult",
+      "capturedAt": "2026-10-15T19:56:40.916Z",
+      "normalization": "None",
+      "sourceAttachmentSHA256": "74f3a922359c1db7f8695f0ac15d797b538fb6d2a637da57bec16c11342b47f2",
+      "sha256": "74f3a922359c1db7f8695f0ac15d797b538fb6d2a637da57bec16c11342b47f2",
+      "bytes": 339210,
+      "syntheticSampleData": true
+    },
+    {
+      "path": "promo-iphone-en-03-calendar.png",
+      "test": "PromotionalCaptureUITests/testCaptureEnglish()",
+      "resultBundle": "sift-media-iphone-en-clean-20261016.xcresult",
+      "capturedAt": "2026-10-15T19:56:26.114Z",
+      "normalization": "None",
+      "sourceAttachmentSHA256": "71d43dd27ec50513ebffef64191a9220585307417c87b2ea716f124270ae16f8",
+      "sha256": "71d43dd27ec50513ebffef64191a9220585307417c87b2ea716f124270ae16f8",
+      "bytes": 201205,
+      "syntheticSampleData": true
+    },
+    {
+      "path": "promo-iphone-en-02-capture.png",
+      "test": "PromotionalCaptureUITests/testCaptureEnglish()",
+      "resultBundle": "sift-media-iphone-en-clean-20261016.xcresult",
+      "capturedAt": "2026-10-15T19:56:18.431Z",
+      "normalization": "None",
+      "sourceAttachmentSHA256": "e4798d66b45b27ce857da843570531f4a5689fc440211a5cd39f3279c57f4c36",
+      "sha256": "e4798d66b45b27ce857da843570531f4a5689fc440211a5cd39f3279c57f4c36",
+      "bytes": 228448,
+      "syntheticSampleData": true
+    },
+    {
+      "path": "promo-iphone-en-01-tasks.png",
+      "test": "PromotionalCaptureUITests/testCaptureEnglish()",
+      "resultBundle": "sift-media-iphone-en-clean-20261016.xcresult",
+      "capturedAt": "2026-10-15T19:55:58.214Z",
+      "normalization": "None",
+      "sourceAttachmentSHA256": "ab5f70bc5205e7e332e49972399d0c71bf87b67eed7eefcfe3e8be4a9ef99f79",
+      "sha256": "ab5f70bc5205e7e332e49972399d0c71bf87b67eed7eefcfe3e8be4a9ef99f79",
+      "bytes": 196331,
+      "syntheticSampleData": true
+    },
+    {
+      "path": "promo-ipad-ko-04-languages.png",
+      "test": "PromotionalCaptureUITests/testCaptureKorean()",
+      "resultBundle": "sift-media-ipad-ko-clean-20261016.xcresult",
+      "capturedAt": "2026-10-15T19:56:44.437Z",
+      "normalization": "Rotate pixels 270 degrees clockwise and reset orientation metadata to upright; no crop or app-content edits",
+      "sourceAttachmentSHA256": "71c68452611fe299659536b676971985a2eba3d26689139b06fee3cb6b5dc52a",
+      "sha256": "362b591a8860e8ed24533ce7dbea1beb3a6927dec68359e82e1c6c2e0f96ed84",
+      "bytes": 419755,
+      "syntheticSampleData": true
+    },
+    {
+      "path": "promo-ipad-ko-03-calendar.png",
+      "test": "PromotionalCaptureUITests/testCaptureKorean()",
+      "resultBundle": "sift-media-ipad-ko-clean-20261016.xcresult",
+      "capturedAt": "2026-10-15T19:56:29.995Z",
+      "normalization": "Rotate pixels 270 degrees clockwise and reset orientation metadata to upright; no crop or app-content edits",
+      "sourceAttachmentSHA256": "4af1638aef144e8999492db53e6ebda4bd8991d3fae37b6e614fed84933164a6",
+      "sha256": "dd6093c1ab4994e1ca2494145d8301f430b4b6b81b8a2c4e298754a71a721eeb",
+      "bytes": 178144,
+      "syntheticSampleData": true
+    },
+    {
+      "path": "promo-ipad-ko-02-capture.png",
+      "test": "PromotionalCaptureUITests/testCaptureKorean()",
+      "resultBundle": "sift-media-ipad-ko-clean-20261016.xcresult",
+      "capturedAt": "2026-10-15T19:56:22.227Z",
+      "normalization": "Rotate pixels 270 degrees clockwise and reset orientation metadata to upright; no crop or app-content edits",
+      "sourceAttachmentSHA256": "1fe6e7b89d1cba650fdca9542b5c6981e621842b777a49e7c6bf369f3367db95",
+      "sha256": "54e277e9194d0e30d009dc86559295d9b112b2c10b12aae1df8a291b4582ee13",
+      "bytes": 379418,
+      "syntheticSampleData": true
+    },
+    {
+      "path": "promo-ipad-ko-01-tasks.png",
+      "test": "PromotionalCaptureUITests/testCaptureKorean()",
+      "resultBundle": "sift-media-ipad-ko-clean-20261016.xcresult",
+      "capturedAt": "2026-10-15T19:56:01.181Z",
+      "normalization": "Rotate pixels 270 degrees clockwise and reset orientation metadata to upright; no crop or app-content edits",
+      "sourceAttachmentSHA256": "270da6fe69ef67b935616a2bde9e796d73f0fc6f413dfabc05d24e89cf527d8f",
+      "sha256": "07d33b4e843e7768cbb0577c64a4ba4aa3e1c39825df3e6e8a53d55a81ffedd8",
+      "bytes": 259886,
+      "syntheticSampleData": true
+    },
+    {
+      "path": "promo-ipad-en-04-languages.png",
+      "test": "PromotionalCaptureUITests/testCaptureEnglish()",
+      "resultBundle": "sift-media-ipad-20261016.xcresult",
+      "capturedAt": "2026-10-15T19:47:24.283Z",
+      "normalization": "Rotate pixels 270 degrees clockwise and reset orientation metadata to upright; no crop or app-content edits",
+      "sourceAttachmentSHA256": "e52cdb23f882139963e92d22aec661f136861a660b5bc8f1cc8b2d0cca83a666",
+      "sha256": "1b369c930c2adcb722c6020cc7b0197f18df7be2b6be10843fd7676ff407231e",
+      "bytes": 465325,
+      "syntheticSampleData": true
+    },
+    {
+      "path": "promo-ipad-en-03-calendar.png",
+      "test": "PromotionalCaptureUITests/testCaptureEnglish()",
+      "resultBundle": "sift-media-ipad-20261016.xcresult",
+      "capturedAt": "2026-10-15T19:47:11.074Z",
+      "normalization": "Rotate pixels 270 degrees clockwise and reset orientation metadata to upright; no crop or app-content edits",
+      "sourceAttachmentSHA256": "e3249ab383cebbd7c75f06f18d1ffb1d06bbd52424cf10c9858d5671da13b031",
+      "sha256": "5c06036efacf2c2b61f8b30636c52eb4732f112d77221cbc0e4b8575568ad0b5",
+      "bytes": 195062,
+      "syntheticSampleData": true
+    },
+    {
+      "path": "promo-ipad-en-02-capture.png",
+      "test": "PromotionalCaptureUITests/testCaptureEnglish()",
+      "resultBundle": "sift-media-ipad-20261016.xcresult",
+      "capturedAt": "2026-10-15T19:47:04.585Z",
+      "normalization": "Rotate pixels 270 degrees clockwise and reset orientation metadata to upright; no crop or app-content edits",
+      "sourceAttachmentSHA256": "71851eef682f2d445770b425bf768263b1fe5dd44a2c130d359e4196c26b2ee1",
+      "sha256": "cd90dce27fbf6a8c186afc9f9f3fcd50c52e8a5609014aedaec966ef9c205ee0",
+      "bytes": 417710,
+      "syntheticSampleData": true
+    },
+    {
+      "path": "promo-ipad-en-01-tasks.png",
+      "test": "PromotionalCaptureUITests/testCaptureEnglish()",
+      "resultBundle": "sift-media-ipad-20261016.xcresult",
+      "capturedAt": "2026-10-15T19:46:52.552Z",
+      "normalization": "Rotate pixels 270 degrees clockwise and reset orientation metadata to upright; no crop or app-content edits",
+      "sourceAttachmentSHA256": "1c16e54107a82ab2e61e423949911fe79760c423272e987ecbd8bfb980cbf36e",
+      "sha256": "51ef49d25e97f9a09c94b8efaf41643033960718c0a95344ecd671ecb81d0ad8",
+      "bytes": 276757,
+      "syntheticSampleData": true
+    }
+  ]
+}

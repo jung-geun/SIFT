@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "command": "deliver",
+  "type": "workflow",
+  "input": "/Users/pieroot/code/todo/docs/assets/workflows/boundaries.workflow.json",
+  "output": "/Users/pieroot/code/todo/docs/assets/workflows/boundaries.html",
+  "specification": {
+    "sha256": "092566f92f172dedf5c8e9a2ddcd216265113c909cf3fd8844a955c38808087f",
+    "bytes": 2881
+  },
+  "artifact": {
+    "sha256": "1f457498cb0a2fc9a8a8b8bdf6e7c5c7a4055cbb2e79c591c99bfb60d2738ef6",
+    "bytes": 808273
+  },
+  "validation": {
+    "checksPassed": 9,
+    "checkCount": 9,
+    "compositionProfile": "showcase",
+    "compositionStatus": "pass",
+    "errors": 0,
+    "warnings": 0
+  }
+}

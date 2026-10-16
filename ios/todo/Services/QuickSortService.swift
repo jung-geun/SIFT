@@ -7,7 +7,7 @@ import SwiftData
 // 근사 우선순위 점수를 부여한다.
 //
 // 설계 원칙:
-//   - 동일 라우팅 사용: 목록의 "AI 정리"와 같은 provider 선택 / Gemini 폴백 정책을 따른다.
+//   - 동일 라우팅 사용: 목록의 "AI 정리"와 같은 provider 선택 / 전송 동의 / 규칙 폴백 정책을 따른다.
 //   - 비차단: 호출부가 Task { } 로 감싸 UI 지연 없이 background 실행.
 //   - 수동 우선순위 보호: manualPriority != nil이면 분석 자체를 건너뜀.
 //   - 폴백: 라우터 전체 실패 시에만 HeuristicEngine으로 즉시·결정론적 점수 부여.

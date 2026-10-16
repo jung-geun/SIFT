@@ -19,6 +19,22 @@ struct MeetingProofreadTests {
         MeetingResult(transcriptRevision: revision, segments: segments)
     }
 
+    @MainActor
+    private func persistedMeeting() throws -> (ModelContext, MeetingRecord) {
+        let configuration = ModelConfiguration(
+            schema: AppDataContainer.meetingSchema,
+            isStoredInMemoryOnly: true,
+            cloudKitDatabase: .none
+        )
+        let container = try ModelContainer(for: AppDataContainer.meetingSchema, configurations: configuration)
+        let context = ModelContext(container)
+        let record = MeetingRecord(meetingID: UUID().uuidString.lowercased(), languageTag: "en-US")
+        try record.replaceTranscriptionBase(result([seg(0, "Original words")], revision: 2), status: .ready)
+        context.insert(record)
+        try context.save()
+        return (context, record)
+    }
+
     @Test("바뀐 구간만 교정 목록에 포함")
     func onlyChangedSegments() {
         let raw = result([seg(0, "쿠버네이트 배포"), seg(1_000, "회의를 시작합니다")])
@@ -374,6 +390,47 @@ struct MeetingProofreadTests {
         #expect(record.refinementEngineLabel == MeetingRefinementEngine.Source.appleIntelligence.rawValue)
         #expect(learnedCount == 1)
     }
+
+    @Test("processing reporter never reports completed when the final save fails")
+    @MainActor
+    func reporterStaysHonestOnFinalSaveFailure() async throws {
+        let meetingID = "223e4567-e89b-12d3-a456-426614174001"
+        let base = MeetingResult(segments: [seg(0, "원문")])
+        let configuration = ModelConfiguration(
+            schema: AppDataContainer.meetingSchema,
+            isStoredInMemoryOnly: true,
+            cloudKitDatabase: .none
+        )
+        let container = try ModelContainer(for: AppDataContainer.meetingSchema, configurations: configuration)
+        let context = ModelContext(container)
+        let record = MeetingRecord(meetingID: meetingID, languageTag: "ko-KR", timezoneIdentifier: "UTC")
+        try record.replaceTranscriptionBase(base, status: .ready)
+        context.insert(record)
+        try context.save()
+
+        let dependencies = MeetingPostProcessor.Dependencies(
+            snapshot: { .empty },
+            refine: { _, _, _, _, _ in .skipped(.disabled) },
+            analyze: { _, input, _, _ in
+                MeetingAnalysisEngine.Outcome(result: input, engineLabel: "테스트", usedOnDeviceLLM: false)
+            },
+            save: { _ in throw ProofreadTestError.saveFailed },
+            learnCorrections: { _, _ in }
+        )
+        let reporter = MeetingProcessingReporter()
+
+        await #expect(throws: ProofreadTestError.saveFailed) {
+            _ = try await MeetingPostProcessor.refineAndAnalyze(
+                record: record,
+                context: context,
+                allowRefine: false,
+                allowModelLoad: false,
+                reporter: reporter,
+                dependencies: dependencies
+            )
+        }
+        #expect(reporter.phase == .idle)
+    }
     @Test("meeting language tag propagates to refinement and analysis dependencies")
     @MainActor
     func meetingLanguagePropagation() async throws {
@@ -535,8 +592,149 @@ struct MeetingProofreadTests {
         #expect(!analysisCalled)
         #expect(record.refinementFallbackReasonRaw == nil)
     }
+    @Test("an older refinement cannot replace a user-edited transcript or start analysis")
+    @MainActor
+    func refinementEditWins() async throws {
+        let (context, record) = try persistedMeeting()
+        let gate = SuspendedProofreadEngine()
+        var analyzed = false
+        let dependencies = MeetingPostProcessor.Dependencies(
+            snapshot: { .empty },
+            refine: { _, input, _, _, _ in
+                await gate.pause()
+                var corrected = input
+                corrected.segments[0].text = "Automated correction"
+                corrected.transcriptRevision += 1
+                return .applied(result: corrected, changed: true, source: .appleIntelligence,
+                                correctionPairs: [], providerRan: true)
+            },
+            analyze: { _, input, _, _ in
+                analyzed = true
+                return MeetingAnalysisEngine.Outcome(result: input, engineLabel: "test", usedOnDeviceLLM: false)
+            },
+            save: { try $0.save() },
+            learnCorrections: { _, _ in }
+        )
+        let run = Task {
+            try await MeetingPostProcessor.refineAndAnalyze(
+                record: record, context: context, allowRefine: true, allowModelLoad: false,
+                dependencies: dependencies
+            )
+        }
+        await gate.waitUntilPaused()
+        let revised = try MeetingTranscriptEditor.editText(
+            result: try #require(record.result), meetingID: record.meetingID,
+            segmentID: "seg-0", text: "My own correction"
+        )
+        try record.update(result: revised)
+        try context.save()
+        let edited = record.persistenceSnapshot()
+        await gate.resume()
+        await #expect(throws: MeetingPostProcessor.Failure.superseded) { try await run.value }
+        #expect(record.persistenceSnapshot() == edited)
+        #expect(!analyzed)
+    }
+
+    @Test("analysis cannot overwrite a same-revision user review")
+    @MainActor
+    func analysisReviewWins() async throws {
+        let (context, record) = try persistedMeeting()
+        let gate = SuspendedProofreadEngine()
+        let dependencies = MeetingPostProcessor.Dependencies(
+            snapshot: { .empty },
+            refine: { _, _, _, _, _ in .skipped(.disabled) },
+            analyze: { _, input, _, _ in
+                await gate.pause()
+                var analyzed = input
+                analyzed.summary = "Outdated automated summary"
+                return MeetingAnalysisEngine.Outcome(result: analyzed, engineLabel: "test", usedOnDeviceLLM: false)
+            },
+            save: { try $0.save() },
+            learnCorrections: { _, _ in }
+        )
+        let run = Task {
+            try await MeetingPostProcessor.refineAndAnalyze(
+                record: record, context: context, allowRefine: false, allowModelLoad: false,
+                dependencies: dependencies
+            )
+        }
+        await gate.waitUntilPaused()
+        var reviewed = try #require(record.result)
+        reviewed.summary = "My reviewed summary"
+        try record.update(result: reviewed)
+        try context.save()
+        let edited = record.persistenceSnapshot()
+        await gate.resume()
+        await #expect(throws: MeetingPostProcessor.Failure.superseded) { try await run.value }
+        #expect(record.persistenceSnapshot() == edited)
+    }
+
+    @Test("deleting a meeting during refinement or analysis never resurrects it")
+    @MainActor
+    func deletionWins() async throws {
+        for refining in [true, false] {
+            let (context, record) = try persistedMeeting()
+            let id = record.meetingID
+            let gate = SuspendedProofreadEngine()
+            var analyzed = false
+            let dependencies = MeetingPostProcessor.Dependencies(
+                snapshot: { .empty },
+                refine: { _, input, _, _, _ in
+                    await gate.pause()
+                    return .applied(result: input, changed: false, source: .appleIntelligence,
+                                    correctionPairs: [], providerRan: true)
+                },
+                analyze: { _, input, _, _ in
+                    analyzed = true
+                    if !refining { await gate.pause() }
+                    var output = input
+                    output.summary = "No longer relevant"
+                    return MeetingAnalysisEngine.Outcome(result: output, engineLabel: "test", usedOnDeviceLLM: false)
+                },
+                save: { try $0.save() },
+                learnCorrections: { _, _ in }
+            )
+            let run = Task {
+                try await MeetingPostProcessor.refineAndAnalyze(
+                    record: record, context: context, allowRefine: refining, allowModelLoad: false,
+                    dependencies: dependencies
+                )
+            }
+            await gate.waitUntilPaused()
+            context.delete(record)
+            try context.save()
+            await gate.resume()
+            await #expect(throws: MeetingPostProcessor.Failure.superseded) { try await run.value }
+            #expect(try context.fetch(FetchDescriptor<MeetingRecord>(predicate: #Predicate { $0.meetingID == id })).isEmpty)
+            #expect(analyzed == !refining)
+        }
+    }
+
 }
 
 private enum ProofreadTestError: Error {
     case saveFailed
+}
+
+private actor SuspendedProofreadEngine {
+    private var paused = false
+    private var started: CheckedContinuation<Void, Never>?
+    private var release: CheckedContinuation<Void, Never>?
+
+    func pause() async {
+        paused = true
+        started?.resume()
+        started = nil
+        await withCheckedContinuation { release = $0 }
+    }
+
+    func waitUntilPaused() async {
+        if paused { return }
+        await withCheckedContinuation { started = $0 }
+    }
+
+    func resume() {
+        release?.resume()
+        release = nil
+    }
 }

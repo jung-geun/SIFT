@@ -348,6 +348,7 @@ enum GlobalSearchCorpusBuilder {
     }
 
     private static func buildMeetingDocument(_ meeting: MeetingRecord, result: MeetingResult) -> GlobalSearchDocument? {
+        guard !meeting.isAudioTrackGroup else { return nil }
         let rawTitle = result.title.trimmingCharacters(in: .whitespacesAndNewlines)
         let summary = result.summary.trimmingCharacters(in: .whitespacesAndNewlines)
         let decisions = result.decisions.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
@@ -387,7 +388,8 @@ enum GlobalSearchCorpusBuilder {
             source: .meeting,
             stableSortKey: meeting.meetingID,
             title: title,
-            subtitle: summary,
+            subtitle: meeting.parentMeetingID == nil ? summary
+                : [meeting.audioTrackDisplayName, summary].filter { !$0.isEmpty }.joined(separator: " · "),
             date: meeting.updatedAt,
             content: content
         )

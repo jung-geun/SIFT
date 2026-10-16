@@ -1,26 +1,21 @@
 import Foundation
 import Combine
-import Darwin
 
 /// Minimal, content-free state for detecting that a foreground app session did
 /// not transition through the normal background path. This detects unexpected
 /// foreground termination, not a definitive crash classification.
 struct UnexpectedTerminationSessionStore {
     private enum Key {
-        static let activeSessionBootEpoch = "pieroot.todo.unexpectedTermination.activeSessionBootEpoch.v1"
+        // Removed on every write/clear; never read for recovery classification.
+        static let obsoleteBootEpoch = "pieroot.todo.unexpectedTermination.activeSessionBootEpoch.v1"
         static let activeSessionID = "pieroot.todo.unexpectedTermination.activeSessionID.v1"
         static let activeSessionUptime = "pieroot.todo.unexpectedTermination.activeSessionUptime.v1"
+        static let activeSessionWallEventTime = "pieroot.todo.unexpectedTermination.activeSessionWallEventTime.v1"
+        static let activeSessionVersion = "pieroot.todo.unexpectedTermination.activeSessionVersion.v1"
         static let presentedSessionID = "pieroot.todo.unexpectedTermination.presentedSessionID.v1"
     }
+    private static let activeSessionVersion = 3
 
-    static func currentBootEpoch() -> TimeInterval? {
-        var bootTime = timeval()
-        var size = MemoryLayout<timeval>.stride
-        guard sysctlbyname("kern.boottime", &bootTime, &size, nil, 0) == 0 else {
-            return nil
-        }
-        return TimeInterval(bootTime.tv_sec) + TimeInterval(bootTime.tv_usec) / 1_000_000
-    }
 
     private let defaults: UserDefaults
 
@@ -28,36 +23,49 @@ struct UnexpectedTerminationSessionStore {
         self.defaults = defaults
     }
 
-    /// Starts a foreground session and returns whether the preceding session
-    /// ended without being marked clean during the same system boot.
+    /// Compares elapsed time between foreground events using uptime and wall
+    /// time. Disagreement conservatively suppresses reboot/clock-change prompts;
+    /// this is a termination signal, not proof of a crash or boot identity.
     func beginForegroundSession(
         id: String = UUID().uuidString,
         systemUptime: TimeInterval = ProcessInfo.processInfo.systemUptime,
-        systemBootEpoch: TimeInterval? = nil
+        wallEventTime: Date = Date()
     ) -> Bool {
-        let currentBootEpoch = systemBootEpoch ?? Self.currentBootEpoch()
+        let currentWallEventTime = wallEventTime.timeIntervalSince1970
         let previousID = defaults.string(forKey: Key.activeSessionID)
         let previousUptime = defaults.object(forKey: Key.activeSessionUptime) as? TimeInterval
-        let previousBootEpoch = defaults.object(forKey: Key.activeSessionBootEpoch) as? TimeInterval
+        let previousWallEventTime = defaults.object(forKey: Key.activeSessionWallEventTime) as? TimeInterval
         let alreadyPresentedID = defaults.string(forKey: Key.presentedSessionID)
-        let sameBoot = currentBootEpoch.flatMap { currentBootEpoch in
-            previousBootEpoch.map { abs($0 - currentBootEpoch) < 1 }
-        } ?? false
-        let shouldPrompt = previousID != nil
+        let previousVersion = defaults.integer(forKey: Key.activeSessionVersion)
+        let elapsedTimesAgree: Bool
+        if let previousUptime, let previousWallEventTime {
+            let uptimeElapsed = systemUptime - previousUptime
+            let wallElapsed = currentWallEventTime - previousWallEventTime
+            elapsedTimesAgree = previousUptime.isFinite && previousUptime >= 0
+                && uptimeElapsed.isFinite && wallElapsed.isFinite
+                && uptimeElapsed >= 0 && wallElapsed >= 0
+                && abs(uptimeElapsed - wallElapsed) <= 2
+        } else {
+            elapsedTimesAgree = false
+        }
+        let shouldPrompt = previousVersion == Self.activeSessionVersion
+            && previousID != nil
             && previousID != alreadyPresentedID
-            && sameBoot
-            && (previousUptime ?? systemUptime) <= systemUptime
+            && elapsedTimesAgree
 
         if shouldPrompt, let previousID {
             defaults.set(previousID, forKey: Key.presentedSessionID)
         }
         defaults.set(id, forKey: Key.activeSessionID)
-        defaults.set(systemUptime, forKey: Key.activeSessionUptime)
-        if let currentBootEpoch {
-            defaults.set(currentBootEpoch, forKey: Key.activeSessionBootEpoch)
+        if systemUptime.isFinite, systemUptime >= 0, currentWallEventTime.isFinite {
+            defaults.set(systemUptime, forKey: Key.activeSessionUptime)
+            defaults.set(currentWallEventTime, forKey: Key.activeSessionWallEventTime)
         } else {
-            defaults.removeObject(forKey: Key.activeSessionBootEpoch)
+            defaults.removeObject(forKey: Key.activeSessionUptime)
+            defaults.removeObject(forKey: Key.activeSessionWallEventTime)
         }
+        defaults.set(Self.activeSessionVersion, forKey: Key.activeSessionVersion)
+        defaults.removeObject(forKey: Key.obsoleteBootEpoch)
         return shouldPrompt
     }
 
@@ -66,7 +74,9 @@ struct UnexpectedTerminationSessionStore {
     func finishForegroundSession() {
         defaults.removeObject(forKey: Key.activeSessionID)
         defaults.removeObject(forKey: Key.activeSessionUptime)
-        defaults.removeObject(forKey: Key.activeSessionBootEpoch)
+        defaults.removeObject(forKey: Key.activeSessionWallEventTime)
+        defaults.removeObject(forKey: Key.obsoleteBootEpoch)
+        defaults.removeObject(forKey: Key.activeSessionVersion)
         defaults.removeObject(forKey: Key.presentedSessionID)
     }
 }
@@ -82,8 +92,9 @@ struct UnexpectedTerminationPrompt: Identifiable {
 final class UnexpectedTerminationRecoveryService: ObservableObject {
     private static var defaultSuppression: Bool {
         #if DEBUG
-        return ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
-            || ProcessInfo.processInfo.arguments.contains("-ui-test-suppress-crash-prompt")
+        // Xcode's Stop command sends SIGKILL without a UIKit lifecycle callback.
+        // A development session must never create a user-facing crash candidate.
+        return true
         #else
         return false
         #endif
@@ -112,11 +123,17 @@ final class UnexpectedTerminationRecoveryService: ObservableObject {
         pendingPrompt = UnexpectedTerminationPrompt()
     }
 
-    func enterBackground() {
+    /// Leaving `.active` is a normal lifecycle transition. A later process
+    /// termination must not be presented as an unexpected active-session exit.
+    func enterInactive() {
         guard foregroundSessionActive else { return }
         foregroundSessionActive = false
         guard !isSuppressed else { return }
         store.finishForegroundSession()
+    }
+
+    func enterBackground() {
+        enterInactive()
     }
 
 }

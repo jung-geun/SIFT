@@ -10,28 +10,33 @@ struct ICloudSyncDetailView: View {
         Form {
             Section {
                 Toggle("데이터 동기화 (iCloud)", isOn: Binding(
-                    get: { iCloudSyncEnabled },
+                    get: { SettingsStore.supportsICloud && iCloudSyncEnabled },
                     set: { newValue in
+                        guard SettingsStore.supportsICloud else { return }
                         iCloudSyncEnabled = newValue
                         if newValue {
                             SettingsStore.shared.uploadLocalSettingsToCloud()
                         }
                         KeychainStore.applySyncPolicy()
+                        Task { @MainActor in
+                            AppDataContainer.shared.rebuild(useICloud: newValue)
+                        }
                         showSyncRestartAlert = true
                     }
                 ))
+                .disabled(!SettingsStore.supportsICloud)
                 
-                if iCloudSyncEnabled {
-                    Label("할 일·페르소나·행동 패턴 분석이 iCloud를 통해 동기화됩니다", systemImage: "checkmark.icloud.fill")
-                        .font(.caption)
-                        .foregroundStyle(.green)
-                } else {
-                    Label("데이터가 이 기기에만 저장됩니다", systemImage: "iphone")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
             } footer: {
-                Text("iCloud 동기화를 활성화하면 할 일, 페르소나, 할 일 감사 기록, 행동 패턴 분석이 같은 Apple ID로 로그인한 모든 기기와 동기화됩니다. 이메일 본문 캐시와 이메일 학습 데이터는 기기 로컬에만 저장됩니다.")
+                if SettingsStore.supportsICloud {
+                    Text("iCloud 동기화를 활성화하면 할 일, 페르소나, 할 일 감사 기록, 행동 패턴 분석이 같은 Apple ID로 로그인한 모든 기기와 동기화됩니다. 이메일 본문 캐시와 이메일 학습 데이터는 기기 로컬에만 저장됩니다.")
+                } else {
+                    Text(AppLanguage.localized(
+                        "settings.sync.unavailableMessage",
+                        defaultValue: "이 빌드에서는 iCloud 동기화를 사용할 수 없습니다. 기존 데이터는 기기에만 보존됩니다.",
+                        language: .current,
+                        comment: "Cloud sync unavailable in a local-only build."
+                    ))
+                }
             }
             .alert("앱 재시작 필요", isPresented: $showSyncRestartAlert) {
                 Button("확인", role: .cancel) {}
@@ -48,18 +53,20 @@ struct ICloudSyncDetailView: View {
                 )
             }
             
-            if iCloudSyncEnabled {
+            if SettingsStore.supportsICloud && iCloudSyncEnabled {
                 Section {
-                    syncManagementRow(title: "메일 자동 분석", key: "pieroot.todo.emailAutoAnalysisEnabled")
-                    syncManagementRow(title: "Gemini 메일 본문 공유", key: "pieroot.todo.providerEmailAnalysisEnabled")
-                    syncManagementRow(title: "자동 동기화 시각", key: "pieroot.todo.emailRefreshHour")
-                    syncManagementRow(title: "메일 분석 기간", key: EmailAnalysisLookbackPolicy.lookbackSettingKey)
-                    syncManagementRow(title: "마감 자동 캘린더 등록", key: "pieroot.todo.calendarAutoRegister")
-                    syncManagementRow(title: "완료 시 처리", key: "pieroot.todo.calendarCompletionAction")
-                } header: {
-                    Label("iCloud 동기화 관리", systemImage: "icloud.fill")
-                } footer: {
-                    Text("각 설정 항목의 저장 위치를 iCloud 동기화 또는 로컬 전용으로 일괄 지정할 수 있습니다.")
+                    DisclosureGroup(AppLanguage.localized(
+                        "settings.sync.storageLocation",
+                        defaultValue: "설정별 저장 위치",
+                        language: .current,
+                        comment: "Advanced iCloud preference storage controls."
+                    )) {
+                        syncManagementRow(title: "메일 자동 분석", key: "pieroot.todo.emailAutoAnalysisEnabled")
+                        syncManagementRow(title: "자동 동기화 시각", key: "pieroot.todo.emailRefreshHour")
+                        syncManagementRow(title: "메일 분석 기간", key: EmailAnalysisLookbackPolicy.lookbackSettingKey)
+                        syncManagementRow(title: "마감 자동 캘린더 등록", key: "pieroot.todo.calendarAutoRegister")
+                        syncManagementRow(title: "완료 시 처리", key: "pieroot.todo.calendarCompletionAction")
+                    }
                 }
             }
         }
@@ -72,7 +79,6 @@ struct ICloudSyncDetailView: View {
             let keyName: String
             switch key {
             case "pieroot.todo.emailAutoAnalysisEnabled": keyName = "settings.sync.mailAnalysis"
-            case "pieroot.todo.providerEmailAnalysisEnabled": keyName = "settings.sync.mailBodySharing"
             case "pieroot.todo.emailRefreshHour": keyName = "settings.sync.refreshHour"
             case EmailAnalysisLookbackPolicy.lookbackSettingKey: keyName = "settings.sync.mailLookback"
             case "pieroot.todo.calendarAutoRegister": keyName = "settings.sync.calendarAutoRegister"

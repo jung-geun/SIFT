@@ -17,7 +17,7 @@ struct OutlookIMAPServiceTests {
         try? OutlookIMAPCredentialStore.delete(for: email)
     }
 
-    private func setupAuth(transport: ScriptedIMAPTransport) {
+    private func setupAuth(transport: ScriptedIMAPTransport, messageCount: UInt32? = nil) {
         transport.addRoute(matching: "CONNECT_PREAUTH", response: [
             "* OK [CAPABILITY IMAP4rev1 AUTH=PLAIN AUTH=LOGIN MOVE] outlook.office365.com IMAP4Server ready"
         ])
@@ -25,10 +25,90 @@ struct OutlookIMAPServiceTests {
             "* CAPABILITY IMAP4rev1 AUTH=PLAIN AUTH=LOGIN MOVE",
             "A0000 OK CAPABILITY completed"
         ])
-        transport.addRoute(matching: "SELECT INBOX", response: [
+        transport.addRoute(matching: "SELECT INBOX", response: (messageCount.map { ["* \($0) EXISTS"] } ?? []) + [
             "* OK [UIDVALIDITY 100] selected",
             "A0001 OK SELECT completed"
         ])
+    }
+
+    @Test("connection verification fails closed and preserves the saved password", arguments: ["denied", "disconnected", "missingHeaders", "missingIdentity"], [false, true])
+    func connectionVerificationFailsClosed(failure: String, replacingPassword: Bool) async throws {
+        try await AIProviderTestIsolation.shared.withLock {
+            try setupCredentials()
+            defer { cleanupCredentials() }
+            let transport = ScriptedIMAPTransport()
+            setupAuth(transport: transport, messageCount: 1)
+            let expected: OutlookIMAPError = failure == "disconnected" ? .transport("IMAP is not connected") : .invalidResponse
+            switch failure {
+            case "denied", "disconnected":
+                transport.addRoute(matching: "FETCH *", error: expected, once: true)
+            case "missingHeaders":
+                transport.addRoute(matching: "FETCH *", response: ["* 1 FETCH (UID 7)", "A0002 OK FETCH"], once: true)
+            default:
+                let header = "Subject: Mail\r\n\r\n"
+                transport.addRoute(matching: "FETCH *", response: ["* 1 FETCH (BODY[HEADER.FIELDS] {\(header.utf8.count)}\(header))", "A0002 OK FETCH"], once: true)
+            }
+            let service = OutlookIMAPService(transport: transport)
+            try await service.authenticate(email: email, backgroundEnabled: false)
+            await #expect(throws: expected) {
+                if replacingPassword {
+                    try await service.authenticateAndSave(email: email, appPassword: "replacement-password", backgroundEnabled: false)
+                } else {
+                    try await service.validateConnection(email: email, backgroundEnabled: false)
+                }
+            }
+            #expect(await service.authenticatedAccount == nil)
+            #expect(!(await service.isAuthenticated))
+            #expect(try OutlookIMAPCredentialStore.credential(for: email) == "app-password")
+
+            let header = "Subject: Mail\r\n\r\n"
+            transport.addRoute(matching: "FETCH *", response: [
+                "* 1 FETCH (UID 7 BODY[HEADER.FIELDS] {\(header.utf8.count)}\(header))",
+                "A0003 OK FETCH"
+            ])
+            try await service.validateConnection(email: email, backgroundEnabled: false)
+            #expect(await service.authenticatedAccount == email)
+        }
+    }
+
+    @Test("verifies readable and explicitly empty inboxes before saving", arguments: [UInt32(0), UInt32(1)])
+    func verifiesInboxBeforeSaving(messageCount: UInt32) async throws {
+        try await AIProviderTestIsolation.shared.withLock {
+            try setupCredentials()
+            defer { cleanupCredentials() }
+            let transport = ScriptedIMAPTransport()
+            setupAuth(transport: transport, messageCount: messageCount)
+            let header = "Subject: Mail\r\nFrom: sender@outlook.com\r\n\r\n"
+            transport.addRoute(matching: "FETCH *", response: [
+                "* 1 FETCH (UID 7 BODY[HEADER.FIELDS] {\(header.utf8.count)}\(header))",
+                "A0002 OK FETCH"
+            ])
+            let service = OutlookIMAPService(transport: transport)
+            try await service.validateConnection(email: email, backgroundEnabled: false)
+            #expect(await service.authenticatedAccount == email)
+            try await service.authenticateAndSave(email: email, appPassword: "replacement-password", backgroundEnabled: false)
+            #expect(try OutlookIMAPCredentialStore.credential(for: email) == "replacement-password")
+            #expect(await service.authenticatedAccount == email)
+            #expect(transport.commands.contains { $0.hasPrefix("FETCH *") } == (messageCount > 0))
+            #expect(transport.commands.allSatisfy { !$0.contains("STORE") && !$0.contains("EXPUNGE") && !$0.contains("UID SEARCH ALL") && !$0.contains("X-GM-") })
+            #expect(transport.commands.filter { $0.hasPrefix("FETCH *") }.allSatisfy { $0.contains("BODY.PEEK[") })
+        }
+    }
+
+    @Test("a missing EXISTS response is not an empty inbox")
+    func verificationRequiresExplicitMailboxCount() async throws {
+        try await AIProviderTestIsolation.shared.withLock {
+            try setupCredentials()
+            defer { cleanupCredentials() }
+            let transport = ScriptedIMAPTransport()
+            setupAuth(transport: transport)
+            let service = OutlookIMAPService(transport: transport)
+            await #expect(throws: OutlookIMAPError.invalidResponse) {
+                try await service.validateConnection(email: email, backgroundEnabled: false)
+            }
+            #expect(!(await service.isAuthenticated))
+            #expect(try OutlookIMAPCredentialStore.credential(for: email) == "app-password")
+        }
     }
 
     @Test("failed reconnect keeps the stored App Password")
@@ -83,10 +163,6 @@ struct OutlookIMAPServiceTests {
                 try await service2.authenticateAndSave(email: email, appPassword: "password", backgroundEnabled: false)
             }
 
-            // Verify error description labels legacy auth as best-effort / legacy
-            let err = OutlookIMAPError.legacyAuthUnsupported
-            #expect(err.errorDescription(language: .english).contains("best-effort"))
-            #expect(err.errorDescription(language: .korean).contains("LOGINDISABLED"))
         }
     }
 

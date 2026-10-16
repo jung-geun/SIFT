@@ -6,13 +6,22 @@ nonisolated struct MIMETextDecoder: Sendable {
         let html: String
     }
 
+    // The services fetch at most 500,000 body bytes. Allow room for MIME headers,
+    // but reject oversized input before normalization, regexes, or part copies.
+    static let maximumMessageBytes = 1_048_576
+    static let maximumHeaderBytes = 65_536
+    static let maximumParts = 256
+    static let maximumDepth = 5
+
+    /// Returns empty content for unsupported, attached, malformed, or over-budget
+    /// MIME entities. `html` is decoded source, not safe-to-render sanitized HTML.
     static func decode(_ raw: String) -> Result {
+        guard raw.utf8.count <= maximumMessageBytes else { return Result(text: "", html: "") }
         let normalized = raw.replacingOccurrences(of: "\r\n", with: "\n")
-        let top = headersAndBody(normalized)
+        guard let top = headersAndBody(normalized) else { return Result(text: "", html: "") }
         if top.headers.isEmpty {
             return Result(text: normalizeText(normalized.trimmingCharacters(in: .whitespacesAndNewlines)), html: "")
         }
-        let contentType = top.headers["content-type"]?.lowercased() ?? ""
         var found = MultipartFind()
         find(top, depth: 0, into: &found)
         if let plain = found.plain {
@@ -21,72 +30,98 @@ nonisolated struct MIMETextDecoder: Sendable {
         if let html = found.html {
             return Result(text: normalizeText(sanitizeHTML(html)), html: html)
         }
-        if contentType.hasPrefix("multipart/") {
-            // Every part was an attachment, or none carried readable text.
-            return Result(text: "", html: "")
-        }
-        let decoded = decodePart(top)
-        return contentType.contains("text/html")
-            ? Result(text: normalizeText(sanitizeHTML(decoded)), html: decoded)
-            : Result(text: normalizeText(decoded), html: "")
+        return Result(text: "", html: "")
     }
 
     private struct MultipartFind {
         var plain: String?
         var html: String?
+        var visitedParts = 0
     }
 
-    /// Depth-first walk of a (possibly nested) multipart tree. Recurses into any
-    /// `multipart/*` child (e.g. `multipart/mixed` wrapping `multipart/alternative`
-    /// when an attachment is present) instead of only matching leaves one level
-    /// deep, and skips parts marked `Content-Disposition: attachment` so a `.txt`
-    /// attachment sibling never wins over the real message body.
+    /// Traverse only readable leaves, with one shared budget for the entire tree.
+    /// Never fall back to decoding a skipped attachment or an invalid multipart.
     private static func find(
         _ part: (headers: [String: String], body: String),
         depth: Int,
         into result: inout MultipartFind
     ) {
-        guard depth <= 5, !isAttachment(part.headers) else { return }
-        let declaredContentType = part.headers["content-type"]?.lowercased() ?? ""
-        let contentType = declaredContentType.isEmpty ? "text/plain" : declaredContentType
-        if contentType.hasPrefix("multipart/"),
-           let boundary = parameter("boundary", in: part.headers["content-type"] ?? "") {
-            let subparts = multipartParts(part.body, boundary: boundary)
-            for subpart in subparts {
-                find(subpart, depth: depth + 1, into: &result)
+        guard depth <= maximumDepth, result.visitedParts < maximumParts else { return }
+        result.visitedParts += 1
+        guard !isAttachment(part.headers) else { return }
+        let contentType = mediaType(part.headers["content-type"] ?? "text/plain")
+        if contentType.hasPrefix("multipart/") {
+            guard let boundary = parameter("boundary", in: part.headers["content-type"] ?? ""),
+                  validBoundary(boundary) else { return }
+            for section in multipartParts(part.body, boundary: boundary, limit: maximumParts - result.visitedParts) {
+                guard result.visitedParts < maximumParts else { return }
+                if let subpart = headersAndBody(String(section)) {
+                    find(subpart, depth: depth + 1, into: &result)
+                } else {
+                    result.visitedParts += 1
+                }
                 if result.plain != nil && result.html != nil { return }
             }
-            return
-        }
-        if result.plain == nil, contentType.contains("text/plain") {
+        } else if result.plain == nil, contentType == "text/plain" {
             result.plain = decodePart(part)
-        } else if result.html == nil, contentType.contains("text/html") {
+        } else if result.html == nil, contentType == "text/html" {
             result.html = decodePart(part)
         }
     }
 
-    private static func isAttachment(_ headers: [String: String]) -> Bool {
-        (headers["content-disposition"] ?? "").lowercased().hasPrefix("attachment")
+    private static func mediaType(_ value: String) -> String {
+        String(value.prefix(while: { $0 != ";" })).trimmingCharacters(in: .whitespaces).lowercased()
     }
 
-    private static func multipartParts(
-        _ body: String,
-        boundary: String
-    ) -> [(headers: [String: String], body: String)] {
-        let marker = "--\(boundary)"
-        var parts: [(headers: [String: String], body: String)] = []
-        for section in body.components(separatedBy: marker).dropFirst() {
-            let trimmed = section.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed == "--" || trimmed.hasPrefix("--\n") {
-                break
+    private static func isAttachment(_ headers: [String: String]) -> Bool {
+        let disposition = headers["content-disposition"] ?? ""
+        if mediaType(disposition) == "attachment" { return true }
+        // Some senders omit disposition but still declare a named text file.
+        return parameters(in: disposition).keys.contains { $0 == "filename" || $0.hasPrefix("filename*") }
+            || parameters(in: headers["content-type"] ?? "").keys.contains { $0 == "name" || $0.hasPrefix("name*") }
+    }
+
+    private static func validBoundary(_ boundary: String) -> Bool {
+        let bytes = boundary.utf8
+        return !bytes.isEmpty && bytes.count <= 70 && bytes.last != 32
+            && bytes.allSatisfy { byte in
+                (48...57).contains(byte) || (65...90).contains(byte) || (97...122).contains(byte)
+                    || "'()+_,-./:=? ".utf8.contains(byte)
             }
-            let parsed = headersAndBody(section)
-            guard !parsed.headers.isEmpty
-                    || !parsed.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            else {
-                continue
+    }
+
+    /// RFC 2046 delimiters occupy an entire line, optionally followed by SP/HTAB.
+    /// Substring views avoid copying every sibling body before traversal.
+    private static func multipartParts(_ body: String, boundary: String, limit: Int) -> [Substring] {
+        guard limit > 0 else { return [] }
+        let marker = "--" + boundary
+        var parts: [Substring] = []
+        var partStart: String.Index?
+        var cursor = body.startIndex
+        while cursor < body.endIndex {
+            let end = body[cursor...].firstIndex(of: "\n") ?? body.endIndex
+            let next = end == body.endIndex ? end : body.index(after: end)
+            let line = body[cursor..<end]
+            if line.hasPrefix(marker) {
+                let tail = line.dropFirst(marker.count)
+                let closing = tail.hasPrefix("--")
+                let padding = closing ? tail.dropFirst(2) : tail
+                if padding.allSatisfy({ $0 == " " || $0 == "\t" }) {
+                    if let start = partStart {
+                        // The newline preceding a delimiter belongs to the delimiter.
+                        let partEnd = cursor > start ? body.index(before: cursor) : cursor
+                        parts.append(body[start..<partEnd])
+                        if parts.count == limit { return parts }
+                    }
+                    if closing { return parts }
+                    partStart = next
+                }
             }
-            parts.append(parsed)
+            cursor = next
+        }
+        // A partially fetched message may omit the closing delimiter.
+        if let start = partStart, start < body.endIndex, parts.count < limit {
+            parts.append(body[start...])
         }
         return parts
     }
@@ -160,9 +195,13 @@ nonisolated struct MIMETextDecoder: Sendable {
         return result.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private static func headersAndBody(_ value: String) -> (headers: [String: String], body: String) {
+    private static func headersAndBody(_ value: String) -> (headers: [String: String], body: String)? {
         let pieces = value.split(separator: "\n\n", maxSplits: 1, omittingEmptySubsequences: false)
-        let headerBlock = String(pieces.first ?? "")
+        guard pieces.count == 2 else {
+            return (headers: [:], body: value)
+        }
+        let headerBlock = String(pieces[0])
+        guard headerBlock.utf8.count <= maximumHeaderBytes else { return nil }
         var headers: [String: String] = [:]
         var current: String?
         for line in headerBlock.split(separator: "\n", omittingEmptySubsequences: false).map(String.init) {
@@ -176,7 +215,10 @@ nonisolated struct MIMETextDecoder: Sendable {
                 current = nil
             }
         }
-        return (headers, pieces.count == 2 ? String(pieces[1]) : "")
+        if headers.isEmpty && !headerBlock.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return (headers: [:], body: value)
+        }
+        return (headers, String(pieces[1]))
     }
 
     /// RFC 5322 `field-name` is 1*ftext, i.e. printable US-ASCII excluding SP —
@@ -252,12 +294,19 @@ nonisolated struct MIMETextDecoder: Sendable {
     }
 
     private static func parameter(_ name: String, in value: String) -> String? {
+        parameters(in: value)[name.lowercased()]
+    }
+
+    private static func parameters(in value: String) -> [String: String] {
+        var results: [String: String] = [:]
         for piece in value.split(separator: ";").dropFirst(1) {
             let pair = piece.split(separator: "=", maxSplits: 1).map(String.init)
-            guard pair.count == 2, pair[0].trimmingCharacters(in: .whitespaces).lowercased() == name else { continue }
-            return pair[1].trimmingCharacters(in: CharacterSet(charactersIn: " \""))
+            guard pair.count == 2 else { continue }
+            let key = pair[0].trimmingCharacters(in: .whitespaces).lowercased()
+            let val = pair[1].trimmingCharacters(in: CharacterSet(charactersIn: " \""))
+            results[key] = val
         }
-        return nil
+        return results
     }
 
     private static func sanitizeHTML(_ html: String) -> String {

@@ -8,7 +8,7 @@ import Foundation
 /// Each accepted tap buffer is copied before the realtime callback returns.
 /// The pipeline owns that copy until `consume` returns; its converter produces
 /// a fresh output buffer for each input.
-struct MeetingAudioPipelineMetrics: Sendable {
+nonisolated struct MeetingAudioPipelineMetrics: Sendable {
     let capacity: Int
     let highWaterMark: Int
 }

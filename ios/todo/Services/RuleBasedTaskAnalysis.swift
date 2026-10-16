@@ -211,12 +211,12 @@ nonisolated enum RuleBasedPriorityAnalyzer {
         )
         let recommended = recommendedTime(for: candidate, context: context)
         let reason: String
-        if deadline >= 10 { reason = "마감 초과" }
-        else if deadline >= 7 { reason = "임박한 마감" }
-        else if urgent { reason = "명시적 긴급 신호" }
-        else if important || personaInTitleOrTags || personaInNotes || fastTag { reason = "중요도 신호" }
-        else if siblingCount > 0 { reason = "같은 이메일 스레드" }
-        else { reason = "기본 우선순위 규칙" }
+        if deadline >= 10 { reason = AppLanguage.localized("기한초과", defaultValue: "Overdue", language: AppLanguage.current) }
+        else if deadline >= 7 { reason = AppLanguage.localized("priority.reason.rules.upcomingDeadline", defaultValue: "Upcoming deadline", language: AppLanguage.current) }
+        else if urgent { reason = AppLanguage.localized("priority.reason.rules.urgentSignal", defaultValue: "Explicit urgency signal", language: AppLanguage.current) }
+        else if important || personaInTitleOrTags || personaInNotes || fastTag { reason = AppLanguage.localized("priority.reason.rules.importantSignal", defaultValue: "Importance signal", language: AppLanguage.current) }
+        else if siblingCount > 0 { reason = AppLanguage.localized("priority.reason.rules.sameThread", defaultValue: "Same email thread", language: AppLanguage.current) }
+        else { reason = AppLanguage.localized("priority.reason.rules.default", defaultValue: "Default priority rules", language: AppLanguage.current) }
         return PriorityResult(
             todoID: candidate.id,
             score: ScheduleScorer.normalizedScore(axes, weights: context.personalization.weights),

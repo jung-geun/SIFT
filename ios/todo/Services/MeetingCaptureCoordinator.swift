@@ -6,40 +6,16 @@ import Foundation
 import os
 import Speech
 
-private struct TranscriptRangeKey: Hashable {
-    let startValue: Int64
-    let startTimescale: Int32
-    let durationValue: Int64
-    let durationTimescale: Int32
-
-    init(_ range: CMTimeRange) {
-        startValue = range.start.value
-        startTimescale = range.start.timescale
-        durationValue = range.duration.value
-        durationTimescale = range.duration.timescale
-    }
-
-    var startSeconds: Double {
-        guard startTimescale != 0 else { return 0 }
-        return Double(startValue) / Double(startTimescale)
-    }
-
-    var endSeconds: Double {
-        guard durationTimescale != 0 else { return startSeconds }
-        return startSeconds + Double(durationValue) / Double(durationTimescale)
-    }
-}
 
 struct LiveTranscriptEntry: Identifiable, Equatable {
     let id: String
     let startMs: Int64
     let endMs: Int64
     let text: String
-    /// nil until post-stop whole-recording diarization completes.
-    let speakerIDs: [String]
     /// Average per-word transcription confidence (0...1) from accuracy-first
     /// batch re-transcription; nil for the live path, which does not request it.
     let confidence: Double?
+    let timedRuns: [MeetingTimedTextRun]?
     /// Final segments cannot be replaced by a later volatile overlap.
     let isFinal: Bool
 
@@ -48,23 +24,117 @@ struct LiveTranscriptEntry: Identifiable, Equatable {
         startMs: Int64,
         endMs: Int64,
         text: String,
-        speakerIDs: [String],
         confidence: Double? = nil,
+        timedRuns: [MeetingTimedTextRun]? = nil,
         isFinal: Bool = false
     ) {
         self.id = id
         self.startMs = startMs
         self.endMs = endMs
         self.text = text
-        self.speakerIDs = speakerIDs
         self.confidence = confidence
+        self.timedRuns = timedRuns
         self.isFinal = isFinal
     }
 }
 
+/// Display-only live caption turn: raw transcript text plus tentative speakers.
+struct MeetingLiveTranscriptRow: Identifiable, Equatable {
+    let id: String
+    let startMs: Int64
+    let endMs: Int64
+    let text: String
+    let speakerIDs: [String]
+}
+
+/// Derives display-only labels from the covered prefix without rewriting raw
+/// transcript entries. Cache keys include speaker evidence, not text finality:
+/// fixed text can still acquire labels as the live timeline advances.
+struct MeetingLiveTranscriptRowBuilder {
+    private var cache: [String: (entry: LiveTranscriptEntry, coverage: Int64, intervals: [MeetingSpeakerInterval], rows: [MeetingLiveTranscriptRow])] = [:]
+
+    mutating func rows(
+        for entries: [LiveTranscriptEntry],
+        timeline: MeetingLiveSpeakerTimeline?
+    ) -> [MeetingLiveTranscriptRow] {
+        guard let timeline else {
+            // Without live speaker evidence every row is simply the raw entry.
+            cache = [:]
+            return entries.map {
+                MeetingLiveTranscriptRow(id: $0.id, startMs: $0.startMs, endMs: $0.endMs, text: $0.text, speakerIDs: [])
+            }
+        }
+        let coverage = timeline.coveredThroughSample
+        let intervals = timeline.activeIntervals
+        var next: [String: (entry: LiveTranscriptEntry, coverage: Int64, intervals: [MeetingSpeakerInterval], rows: [MeetingLiveTranscriptRow])] = [:]
+        var rows: [MeetingLiveTranscriptRow] = []
+        for entry in entries {
+            let start = entry.startMs * MeetingSpeakerAlignment.samplesPerMillisecond
+            let end = entry.endMs * MeetingSpeakerAlignment.samplesPerMillisecond
+            // An open interval growing beyond this entry cannot change its label.
+            let relevant = intervals.compactMap { interval -> MeetingSpeakerInterval? in
+                let lower = max(start, interval.startSample)
+                let upper = min(end, interval.endSample)
+                guard upper > lower else { return nil }
+                return MeetingSpeakerInterval(speakerID: interval.speakerID, startSample: lower, endSample: upper)
+            }
+            let entryCoverage = min(coverage, end)
+            if let cached = cache[entry.id], cached.entry == entry,
+               cached.coverage == entryCoverage, cached.intervals == relevant {
+                next[entry.id] = cached
+                rows.append(contentsOf: cached.rows)
+                continue
+            }
+            let entryRows = Self.rows(for: entry, intervals: relevant, coverage: entryCoverage)
+            next[entry.id] = (entry, entryCoverage, relevant, entryRows)
+            rows.append(contentsOf: entryRows)
+        }
+        cache = next
+        return rows
+    }
+
+    private static func rows(
+        for entry: LiveTranscriptEntry,
+        intervals: [MeetingSpeakerInterval],
+        coverage: Int64
+    ) -> [MeetingLiveTranscriptRow] {
+        guard let runs = entry.timedRuns, !runs.isEmpty else {
+            let ids = MeetingSpeakerAlignment.assignLiveSegment(
+                startMs: entry.startMs, endMs: entry.endMs, intervals: intervals, coveredThroughSample: coverage
+            )
+            return [MeetingLiveTranscriptRow(id: entry.id, startMs: entry.startMs, endMs: entry.endMs, text: entry.text, speakerIDs: ids)]
+        }
+        // Strict word alignment waits for the entire word, never a tiny fragment.
+        let labels = MeetingSpeakerAlignment.assign(runs: runs, intervals: intervals, coveredThroughSample: coverage)
+        let units = Array(entry.text.utf16)
+        let turns = MeetingSpeakerAlignment.turns(
+            textLength: units.count, startMs: entry.startMs, endMs: entry.endMs, runs: runs, labels: labels
+        )
+        return turns.enumerated().compactMap { index, turn in
+            let lower = min(max(0, turn.utf16Start), units.count)
+            let upper = min(max(lower, turn.utf16End), units.count)
+            let text = String(decoding: units[lower..<upper], as: UTF16.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty || turns.count == 1 else { return nil }
+            return MeetingLiveTranscriptRow(
+                id: index == 0 ? entry.id : "\(entry.id)#\(index)",
+                startMs: turn.startMs, endMs: turn.endMs, text: text, speakerIDs: turn.speakerIDs
+            )
+        }
+    }
+}
+
 struct MeetingCaptureArtifact: Sendable {
-    let directoryURL: URL
-    let audioManifest: MeetingAudioManifest
+    let meetingID: String
+    let tracks: [MeetingCaptureTrackArtifact]
+}
+
+struct MeetingAppAudioSourceSnapshot: Identifiable, Equatable {
+    let id: String
+    let meetingID: String?
+    let sourceKind: MeetingAudioTrackKind
+    let sourceLabel: String?
+    let state: MeetingAppAudioCapture.State
 }
 
 @MainActor
@@ -85,75 +155,222 @@ final class MeetingCaptureTerminationGate<Outcome: Sendable> {
     }
 }
 
-private final class MeetingCaptureProgressGate: @unchecked Sendable {
+/// Consent obtained before a revoke/interruption cannot authorize a later start.
+nonisolated final class MeetingMicrophoneConsentGate: @unchecked Sendable {
     private let lock = NSLock()
-    private var meetingID: String?
-    private var lastScheduledSamples: Int64 = 0
+    private var generation = 0
+    private var permitted = false
+    private var interrupted = false
+    var isInterrupted: Bool { lock.withLock { interrupted } }
+    func clearInterruption() { lock.withLock { interrupted = false } }
+    var isPermitted: Bool { lock.withLock { permitted } }
+    func beginApproval() -> Int {
+        lock.withLock { generation += 1; permitted = false; return generation }
+    }
+    @discardableResult
+    func approve(_ ticket: Int, enabled: Bool) -> Bool {
+        lock.withLock {
+            guard generation == ticket, !interrupted else { return false }
+            permitted = enabled
+            return permitted
+        }
+    }
+    @discardableResult
+    func revoke(_ close: () -> Void) -> Int {
+        lock.withLock { generation += 1; permitted = false; close(); return generation }
+    }
+    @discardableResult
+    func interrupt(_ close: () -> Void) -> Int {
+        lock.withLock { interrupted = true; generation += 1; permitted = false; close(); return generation }
+    }
+    func isCurrent(_ ticket: Int) -> Bool { lock.withLock { generation == ticket } }
+    @discardableResult
+    func deliver(_ body: () -> Void) -> Bool {
+        lock.withLock {
+            guard permitted else { return false }
+            body()
+            return true
+        }
+    }
+}
 
-    func reset(meetingID: String) {
-        lock.lock()
-        self.meetingID = meetingID
-        lastScheduledSamples = 0
-        lock.unlock()
+
+/// The audio queue never crosses MainActor to find a child writer.
+private nonisolated final class MeetingTrackRoutingSink: @unchecked Sendable {
+    private let lock = NSLock()
+    private var inputs: [MeetingAudioSourceRouter.Source: MeetingCaptureTrackInput] = [:]
+
+    func attach(_ input: MeetingCaptureTrackInput?, source: MeetingAudioSourceRouter.Source) {
+        lock.withLock { inputs[source] = input }
     }
 
-    func shouldPublish(meetingID: String, samples: Int64) -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        guard self.meetingID == meetingID,
-              samples >= lastScheduledSamples + 4_000 else { return false }
-        lastScheduledSamples = samples
-        return true
+    func append(_ buffer: AVAudioPCMBuffer, source: MeetingAudioSourceRouter.Source) throws {
+        try lock.withLock { try inputs[source]?.append(buffer) }
+    }
+    func recordFailure(_ error: Error, source: MeetingAudioSourceRouter.Source) {
+        lock.withLock { inputs[source]?.recordFailure(error) }
     }
 
-    func invalidate() {
-        lock.lock()
-        meetingID = nil
-        lock.unlock()
+
+    func removeAll() { lock.withLock { inputs.removeAll() } }
+}
+
+private nonisolated final class MeetingMicrophoneRouteGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var active = true
+
+    func invalidate() { lock.withLock { active = false } }
+
+    func close(_ router: MeetingAudioSourceRouter) -> Bool {
+        lock.withLock {
+            guard active else { return false }
+            active = false
+            router.setEnabled(false, source: .microphone,
+                              hostTime: CMClockGetTime(CMClockGetHostTimeClock()).seconds)
+            return true
+        }
+    }
+}
+
+/// Preflight app audio is never retained or saved before the recording commits.
+nonisolated final class MeetingAppAudioInputSink: @unchecked Sendable {
+    private let lock = NSLock()
+    private var router: MeetingAudioSourceRouter?
+    private var applicationSource: MeetingAudioSourceRouter.Source = .appAudio
+    let microphoneConsent = MeetingMicrophoneConsentGate()
+    func attach(_ router: MeetingAudioSourceRouter?, source: MeetingAudioSourceRouter.Source = .appAudio) {
+        lock.withLock { self.router = router; applicationSource = source }
+    }
+    func enqueue(_ buffer: AVAudioPCMBuffer, hostTime: Double, source: MeetingAudioSourceRouter.Source) {
+        if source == .microphone {
+            microphoneConsent.deliver {
+                lock.withLock { router }?.enqueueOwned(buffer, source: source, hostTime: hostTime)
+            }
+        } else {
+            lock.withLock { router?.enqueueOwned(buffer, source: applicationSource, hostTime: hostTime) }
+        }
+    }
+    func setEnabled(_ enabled: Bool, hostTime: Double) {
+        lock.withLock { router?.setEnabled(enabled, source: applicationSource, hostTime: hostTime) }
+    }
+    @discardableResult
+    func revokeMicrophone() -> Int {
+        microphoneConsent.revoke {
+            lock.withLock { router }?.setEnabled(false, source: .microphone,
+                hostTime: CMClockGetTime(CMClockGetHostTimeClock()).seconds)
+        }
+    }
+    func stopMicrophoneDelivery() { microphoneConsent.revoke {} }
+    @discardableResult
+    func interruptMicrophone() -> Int {
+        microphoneConsent.interrupt {
+            lock.withLock { router }?.setEnabled(false, source: .microphone,
+                hostTime: CMClockGetTime(CMClockGetHostTimeClock()).seconds)
+        }
     }
 }
 
 @MainActor
 final class MeetingCaptureCoordinator: ObservableObject {
     @Published private(set) var status: MeetingStatus = .ready
-    @Published private(set) var provisionalText = ""
     @Published private(set) var elapsedMediaMs: Int64 = 0
     @Published private(set) var failure: String?
-    @Published private(set) var liveTranscriptEntries = [LiveTranscriptEntry]()
-    @Published private(set) var finalizedTranscript = ""
     @Published private(set) var recordedAudioSamples: Int64 = 0
     @Published private(set) var recordedAudioPartCount = 0
-    @Published private(set) var finalizationProgress = 0.0
     @Published private(set) var finalizationDetail = ""
-    @Published private(set) var liveTranscriptionWarning: String?
-    @Published private(set) var recoveredCapture: PendingMeetingCaptureRecovery?
+    @Published private(set) var liveTracks: [MeetingLiveCaptureTrack] = []
+    @Published private(set) var appAudioSources: [MeetingAppAudioSourceSnapshot] = []
+    enum LiveSpeakerPhase: Equatable {
+        case inactive, preparing, waitingForInference, analyzing, stopped
+    }
+    /// Snapshot at capture start; a settings change applies only to the next recording.
+    private(set) var recordingDiarizationEnabled = false
+    @Published private(set) var recoveredCaptures: [PendingMeetingCaptureRecovery] = []
 
-    private enum TerminalIntent { case stop, failure, cancel }
+    @Published private(set) var microphoneEnabled = true
+    @Published private(set) var appAudioState: MeetingAppAudioCapture.State = .disabled
+    @Published private(set) var microphoneRoutes = [MeetingMicrophoneRoute]()
+    @Published private(set) var selectedMicrophoneRouteID: String?
+    @Published private(set) var microphoneWarning: String?
+    @Published private(set) var microphoneAudioBufferCount: Int64 = 0
+    @Published private(set) var appAudioBufferCount: Int64 = 0
+    @Published private(set) var microphoneRMS = 0.0
+    @Published private(set) var appAudioRMS = 0.0
+    var appAudioAvailability: MeetingAppAudioCapture.Availability { MeetingAppAudioCapture.availability }
+    private var selectedAppAudioSourceDescription: String? { appAudioCapture?.selectedSourceDescription }
+    private var appAudioCapture: MeetingAppAudioCapture?
+    private var appAudioInputSink: MeetingAppAudioInputSink?
+    private var pickerMicrophoneApproval: Int?
+    @Published private(set) var usesSystemPickerMicrophone = false
+    private var requestedPickerMicrophone = false
+    private var microphoneTapInstalled = false
+    private var microphoneChangeGeneration = 0
+    private var changingMicrophone = false
+    private var starting = false
+    private var captureGeneration = UUID()
+    private var voiceProcessingRequested = false
+    private var preferredMicrophoneRouteID: String?
+    private var ownsRecordingAudioSession = false
+    private var microphoneRouteObserver: NSObjectProtocol?
+    private var microphoneInterruptionObserver: NSObjectProtocol?
+    private var microphoneRouteGate: MeetingMicrophoneRouteGate?
+    private var captureDiagnosticID = "not-started"
+    private var lastSourceDiagnosticSamples: Int64 = 0
+    #if targetEnvironment(macCatalyst)
+    private var catalystMicrophone: MeetingCatalystMicrophoneCapture?
+    private var activeCatalystMicrophoneID: String?
+    #endif
+
+    private static var supportsAppAudioAPI: Bool {
+        if #available(iOS 27.0, macCatalyst 18.2, *) { return true }
+        return false
+    }
+
+    private static var hostTime: Double {
+        CMClockGetTime(CMClockGetHostTimeClock()).seconds
+    }
+
+    private static var appAudioPreparationError: MeetingAppAudioCapture.CaptureError {
+        .unavailable(AppLanguage.localized(
+            "meeting.capture.appAudioPreparationStopped",
+            defaultValue: AppLanguage.current == .english
+                ? "App audio stopped during recording preparation. Select the source again."
+                : "녹음 준비 중 앱 오디오가 중지되었습니다. 오디오 소스를 다시 선택하세요.",
+            language: .current,
+            comment: "App audio was revoked or failed while preparing the recording."
+        ))
+    }
+
+    private enum TerminalIntent { case stop, cancel }
+    private struct AppSource {
+        let capture: MeetingAppAudioCapture
+        let sink: MeetingAppAudioInputSink
+        let source: MeetingAudioSourceRouter.Source
+        var trackID: String?
+    }
+    private var appSources: [String: AppSource] = [:]
+    private var addingAppSource = false
+    private var primaryAppSourceID: String?
 
     private let engine = AVAudioEngine()
     private var transcriptionSessionFactory: any MeetingTranscriptionSessionFactory
+    private let trackSink = MeetingTrackRoutingSink()
     private let terminationGate = MeetingCaptureTerminationGate<Void>()
-    private let progressGate = MeetingCaptureProgressGate()
-    private var transcriptionSession: (any MeetingTranscriptionSession)?
-    private var flacPartWriter: MeetingFLACPartWriter?
-    private var inputContinuation: AsyncStream<AnalyzerInput>.Continuation?
-    private var canonicalPipeline: MeetingCanonicalAudioPipeline?
-    private var transcriptionInputPipeline: MeetingTranscriptionInputPipeline?
-    private var transcriptionTask: Task<Void, Never>?
-    private var analysisTask: Task<Void, Never>?
+    private var canonicalPipeline: MeetingAudioSourceRouter?
+    private var tracks: [String: MeetingCaptureTrackSession] = [:]
+    private var trackOrder: [String] = []
+    private var activeSourceTracks: [MeetingAudioSourceRouter.Source: String] = [:]
+    private var sourceRetirements: [MeetingAudioSourceRouter.Source: Task<Void, Never>] = [:]
+    private var trackFinalizations: [String: Task<Void, Never>] = [:]
+    private var thermalObserver: NSObjectProtocol?
     private var activeMeetingID: String?
     private var activeLanguageTag = ""
     private var activeTimezoneIdentifier = ""
-    private var activeFileURL: URL?
-    private var inputFinished = false
     private var terminalIntent: TerminalIntent?
     private var terminalArtifact: MeetingCaptureArtifact?
     private var terminalError: Error?
-    private var liveTranscriptionError: Error?
     private(set) var reportableError: Error?
     private let logger = Logger(subsystem: "pieroot.todo", category: "MeetingCapture")
-    private var liveTranscriptReducer = LiveTranscriptReducer()
-    private var transcriptChunks: [TranscriptRangeKey: String] = [:]
 
     init(transcriptionSessionFactory: (any MeetingTranscriptionSessionFactory)? = nil) {
         self.transcriptionSessionFactory = transcriptionSessionFactory ?? DefaultMeetingTranscriptionSessionFactory()
@@ -163,38 +380,778 @@ final class MeetingCaptureCoordinator: ObservableObject {
         transcriptionSessionFactory = DefaultMeetingTranscriptionSessionFactory(snapshotProvider: provider)
     }
 
-    func start(meetingID: String, languageTag: String) async throws {
-        guard status == .ready || status == .cancelled || status == .failed else { throw CaptureError.invalidState }
+    func start(
+        meetingID: String, languageTag: String, microphoneEnabled: Bool = true,
+        appAudioEnabled: Bool = false, consentConfirmed: Bool = false
+    ) async throws {
+        guard !starting, status == .ready || status == .cancelled || status == .failed else { throw CaptureError.invalidState }
+        guard microphoneEnabled || appAudioEnabled else { throw CaptureError.noAudioSource }
+        starting = true
+        defer { starting = false }
+        // A failed picker must never clean up a previous recording's saved path.
+        resetCaptureReferences()
+        terminationGate.reset()
+        terminalIntent = nil
+        terminalError = nil
+        terminalArtifact = nil
+        captureGeneration = UUID()
+        let generation = captureGeneration
+        captureDiagnosticID = generation.uuidString
+        microphoneAudioBufferCount = 0
+        appAudioBufferCount = 0
+        microphoneRMS = 0
+        appAudioRMS = 0
+        lastSourceDiagnosticSamples = 0
+        logger.info("Audio capture session=\(self.captureDiagnosticID, privacy: .public) requested microphone=\(microphoneEnabled) appAudio=\(appAudioEnabled)")
+        self.microphoneEnabled = microphoneEnabled
+        microphoneWarning = nil
         reportableError = nil
-        guard await AVAudioApplication.requestRecordPermission() else { throw CaptureError.microphoneDenied }
-        let transcriptionSession = try await transcriptionSessionFactory.make(
-            languageTag: languageTag,
-            purpose: .live
-        )
-        let stream = AsyncStream<AnalyzerInput>.makeStream(bufferingPolicy: .bufferingOldest(256))
-        // Voice Processing I/O must be configured before reading the tap format.
-        let requestedVoiceProcessing = SettingsStore.shared.effectiveMeetingVoiceProcessingEnabled
-        try await configureSession(voiceProcessing: requestedVoiceProcessing)
-        let node = engine.inputNode
+        recordingDiarizationEnabled = false
+        let appSink = MeetingAppAudioInputSink()
+        let capture = makeAppAudioCapture(sink: appSink, generation: generation)
+        appAudioCapture = capture
+        appAudioInputSink = appSink
+        #if !targetEnvironment(macCatalyst)
+        usesSystemPickerMicrophone = appAudioEnabled
+        requestedPickerMicrophone = microphoneEnabled
+        capture.microphoneRequested = microphoneEnabled
+        monitorMicrophoneInterruptions(sink: appSink, generation: generation)
+        #endif
+        do {
+            // No writer, analyzer, microphone permission, or retained audio exists
+            // until the system picker has consented and the app stream has started.
+            if appAudioEnabled { try await capture.selectSourceAndWait(consentConfirmed: consentConfirmed) }
+            try Task.checkCancellation()
+            guard captureGeneration == generation else { throw CancellationError() }
+            if microphoneEnabled && !usesSystemPickerMicrophone {
+                let ticket = appSink.microphoneConsent.beginApproval()
+                guard await Self.requestMicrophonePermission() else { throw CaptureError.microphoneDenied }
+                appSink.microphoneConsent.approve(ticket, enabled: true)
+            }
+            try Task.checkCancellation()
+            guard captureGeneration == generation else { throw CancellationError() }
+            try await startPrepared(meetingID: meetingID, languageTag: languageTag,
+                                    microphoneEnabled: usesSystemPickerMicrophone ? appSink.microphoneConsent.isPermitted : microphoneEnabled,
+                                    appAudioEnabled: appAudioEnabled,
+                                    generation: generation, appSink: appSink)
+        } catch {
+            if terminalIntent != nil {
+                // Stop/cancel already owns cleanup. Startup unwinding must not
+                // discard a prefix being journaled by the winning stop request.
+                await terminationGate.run { [weak self] in await self?.performTerminalOperation() }
+                throw CancellationError()
+            }
+            appSink.attach(nil)
+            stopMicrophoneHardware()
+            await capture.stop()
+            await canonicalPipeline?.cancel()
+            await MeetingLiveSpeakerPrewarmer.shared.releaseUnused()
+            for track in tracks.values { await discardTrack(track) }
+            await deactivateRecordingSession()
+            resetCaptureReferences()
+            self.microphoneEnabled = false
+            status = error is CancellationError ? .cancelled : .failed
+            if !(error is CancellationError) {
+                failure = userFacingFailure(for: error, operation: "start")
+                logDiagnostic(error, operation: "start")
+            }
+            throw error
+        }
+    }
 
-        var voiceProcessingFallbackNotice: String?
-        var usingVoiceProcessing = false
-        if requestedVoiceProcessing {
+    private func startPrepared(
+        meetingID: String, languageTag: String, microphoneEnabled: Bool,
+        appAudioEnabled: Bool, generation: UUID, appSink: MeetingAppAudioInputSink
+    ) async throws {
+        voiceProcessingRequested = SettingsStore.shared.effectiveMeetingVoiceProcessingEnabled
+        recordingDiarizationEnabled = SettingsStore.shared.effectiveMeetingDiarizationEnabled
+        activeMeetingID = meetingID
+        activeLanguageTag = languageTag
+        activeTimezoneIdentifier = TimeZone.current.identifier
+        let microphoneSetup = microphoneEnabled && !usesSystemPickerMicrophone && appSink.microphoneConsent.isPermitted
+            ? try await prepareMicrophone() : nil
+        try Task.checkCancellation()
+        guard captureGeneration == generation else { throw CancellationError() }
+        if appAudioEnabled, appAudioState != .waitingForAudio && appAudioState != .receivingAudio {
+            throw Self.appAudioPreparationError
+        }
+        let callbackBridge = MeetingCaptureCallbackBridge(self)
+        let pipeline = try MeetingAudioSourceRouter(
+            consume: { [trackSink] source, buffer in try trackSink.append(buffer, source: source) },
+            failed: { [trackSink] source, error in
+                trackSink.recordFailure(error, source: source)
+                Task { @MainActor in
+                    guard let coordinator = callbackBridge.coordinator,
+                          coordinator.captureGeneration == generation else { return }
+                    await coordinator.handleSourceFailure(error, source: source)
+                }
+            }
+        )
+        canonicalPipeline = pipeline
+        if microphoneEnabled {
+            _ = try await createTrack(source: .microphone, kind: .microphone,
+                                      label: nil, startSample: 0)
+        }
+        if appAudioEnabled, let capture = appAudioCapture {
+            let track = try await createTrack(source: .appAudio, kind: capture.sourceKind,
+                                              label: capture.selectedSourceDescription, startSample: 0)
+            primaryAppSourceID = capture.sourceID
+            appSources[capture.sourceID] = AppSource(capture: capture, sink: appSink, source: .appAudio, trackID: track.meetingID)
+        }
+        if tracks.values.allSatisfy({ $0.timeline == nil }) {
+            await MeetingLiveSpeakerPrewarmer.shared.releaseUnused()
+        }
+        try Task.checkCancellation()
+        guard captureGeneration == generation else { throw CancellationError() }
+        if appAudioEnabled, appAudioState != .waitingForAudio && appAudioState != .receivingAudio {
+            throw Self.appAudioPreparationError
+        }
+        elapsedMediaMs = 0
+        recordedAudioSamples = 0
+        recordedAudioPartCount = 0
+        microphoneWarning = microphoneSetup?.notice
+        status = .recording
+        let startTime = Self.hostTime
+        let approved = appSink.microphoneConsent.isPermitted
+        self.microphoneEnabled = approved
+        pipeline.start(hostTime: startTime, microphoneEnabled: approved)
+        pipeline.setSelection(preferredMicrophoneRouteID, source: .microphone, hostTime: startTime)
+        if appAudioEnabled {
+            pipeline.setSelection(selectedAppAudioSourceDescription, source: .appAudio, hostTime: startTime)
+            pipeline.setEnabled(true, source: .appAudio, hostTime: startTime)
+        }
+        for (source, id) in activeSourceTracks {
+            if let offset = pipeline.sessionStartSample(for: source) { tracks[id]?.setStartSample(offset) }
+            if let track = tracks[id] { try journalActive(track) }
+        }
+        appSink.attach(pipeline)
+        if approved, let microphoneSetup {
+            let microphoneRequest = microphoneChangeGeneration
+            do {
+                try await startMicrophoneHardware(format: microphoneSetup.format, mixer: pipeline)
+            } catch {
+                // A source-level Off/interruption supersedes only this microphone
+                // start, not an independently approved application recording.
+                guard error is CancellationError, !Task.isCancelled,
+                      captureGeneration == generation, terminalIntent == nil,
+                      microphoneChangeGeneration != microphoneRequest || !appSink.microphoneConsent.isPermitted else {
+                    throw error
+                }
+            }
+        }
+        thermalObserver = NotificationCenter.default.addObserver(
+            forName: ProcessInfo.thermalStateDidChangeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                for track in self.tracks.values { await track.handleThermalPressure() }
+            }
+        }
+        publishTracks()
+        publishAppSources()
+        await refreshMicrophoneRoutes()
+    }
+
+    @discardableResult
+    private func createTrack(
+        source: MeetingAudioSourceRouter.Source, kind: MeetingAudioTrackKind,
+        label: String?, startSample: Int64
+    ) async throws -> MeetingCaptureTrackSession {
+        guard let groupID = activeMeetingID else { throw CaptureError.invalidState }
+        let generation = captureGeneration
+        let track = try MeetingCaptureTrackSession(sourceKind: kind, sourceLabel: label,
+            sessionStartSample: startSample, changed: { [weak self] in self?.publishTracks() })
+        tracks[track.meetingID] = track
+        trackOrder.append(track.meetingID)
+        await track.prepare(factory: transcriptionSessionFactory, languageTag: activeLanguageTag,
+                            diarizationEnabled: recordingDiarizationEnabled, groupID: groupID)
+        guard generation == captureGeneration, terminalIntent == nil, !Task.isCancelled else {
+            await discardTrack(track)
+            throw CancellationError()
+        }
+        activeSourceTracks[source] = track.meetingID
+        trackSink.attach(track.input, source: source)
+        publishTracks()
+        return track
+    }
+
+    private func journalActive(_ track: MeetingCaptureTrackSession) throws {
+        guard let parentMeetingID = activeMeetingID else { throw CaptureError.invalidState }
+        try MeetingCaptureRecoveryStore.markActive(
+            meetingID: track.meetingID, parentMeetingID: parentMeetingID, sourceKind: track.sourceKind,
+            sourceLabel: track.sourceLabel, sessionStartSample: track.sessionStartSample,
+            languageTag: activeLanguageTag, timezoneIdentifier: activeTimezoneIdentifier,
+            directoryURL: track.directoryURL)
+    }
+
+    private func publishTracks() {
+        liveTracks = trackOrder.compactMap { tracks[$0]?.snapshot }
+        recordedAudioSamples = liveTracks.reduce(Int64(0)) { $0 + $1.recordedAudioSamples }
+        recordedAudioPartCount = liveTracks.reduce(0) { $0 + $1.recordedAudioPartCount }
+        let end = liveTracks.map { $0.sessionStartSample + $0.recordedAudioSamples }.max() ?? 0
+        elapsedMediaMs = end * 1_000 / MeetingMediaTimeline.sampleRate
+        publishSourceDeliveryDiagnostics()
+    }
+
+    private func publishAppSources() {
+        appAudioSources = appSources.map { id, source in
+            MeetingAppAudioSourceSnapshot(id: id, meetingID: source.trackID,
+                sourceKind: source.capture.sourceKind, sourceLabel: source.capture.selectedSourceDescription,
+                state: source.capture.state)
+        }.sorted { $0.id < $1.id }
+    }
+
+    func transcriptionResult(for meetingID: String) throws -> MeetingResult {
+        guard let track = tracks[meetingID] else { throw CaptureError.invalidState }
+        return try track.provisionalResult.validated()
+    }
+
+    func transcriptionFailure(for meetingID: String) -> Error? { tracks[meetingID]?.transcriptionError }
+
+    func liveTimeline(for meetingID: String) -> MeetingLiveSpeakerTimeline? { tracks[meetingID]?.timeline }
+
+    private func makeAppAudioCapture(
+        sink: MeetingAppAudioInputSink, generation: UUID,
+        sourceID: String = UUID().uuidString.lowercased(), source: MeetingAudioSourceRouter.Source = .appAudio
+    ) -> MeetingAppAudioCapture {
+        MeetingAppAudioCapture(sourceID: sourceID,
+            receive: { buffer, hostTime, received in sink.enqueue(buffer, hostTime: hostTime, source: received) },
+            stateChanged: { [weak self] state in
+                guard let self, self.captureGeneration == generation else { return }
+                let isPrimary = self.primaryAppSourceID == nil || self.primaryAppSourceID == sourceID
+                if isPrimary { self.appAudioState = state }
+                if isPrimary, self.usesSystemPickerMicrophone {
+                    switch state {
+                    case .selecting:
+                        sink.revokeMicrophone()
+                        self.microphoneEnabled = false
+                        self.pickerMicrophoneApproval = sink.microphoneConsent.beginApproval()
+                    case .waitingForAudio:
+                        let approved = self.pickerMicrophoneApproval.map {
+                            sink.microphoneConsent.approve($0, enabled: self.requestedPickerMicrophone && self.appAudioCapture?.microphoneApproved == true)
+                        } ?? false
+                        self.microphoneEnabled = approved
+                        self.canonicalPipeline?.setEnabled(approved, source: .microphone, hostTime: Self.hostTime)
+                        if !approved, self.requestedPickerMicrophone {
+                            self.microphoneWarning = MeetingAppAudioCapture.message(
+                                "meeting.capture.source.microphoneOff",
+                                "Microphone is off in the system picker. Enable it there to record microphone audio.",
+                                "시스템 선택기에서 마이크가 꺼져 있습니다. 마이크 오디오를 녹음하려면 선택기에서 켜주세요.")
+                        }
+                    case .disabled, .unavailable:
+                        if self.appAudioCapture?.microphoneApproved != true {
+                            sink.revokeMicrophone()
+                            self.microphoneEnabled = false
+                            Task { @MainActor [weak self] in await self?.retireSource(.microphone, revoke: true) }
+                        }
+                    case .receivingAudio: break
+                    }
+                }
+                switch state {
+                case .disabled, .selecting, .unavailable:
+                    sink.setEnabled(false, hostTime: Self.hostTime)
+                case .waitingForAudio, .receivingAudio: break
+                }
+                self.publishAppSources()
+                if case .unavailable = state, self.activeSourceTracks[source] != nil, self.terminalIntent == nil {
+                    Task { @MainActor [weak self] in await self?.retireSource(source, revoke: true) }
+                }
+            },
+            microphoneFailed: { [weak self] reason in
+                guard let self, self.captureGeneration == generation else { return }
+                sink.revokeMicrophone()
+                self.microphoneEnabled = false
+                self.microphoneRMS = 0
+                self.microphoneWarning = reason
+                Task { @MainActor [weak self] in await self?.retireSource(.microphone, revoke: true) }
+            }
+        )
+    }
+
+    /// A source mute never changes a different source's admission or child identity.
+    func setAppAudioEnabled(_ enabled: Bool, consentConfirmed: Bool = false) async throws {
+        guard status == .recording || status == .paused, terminalIntent == nil else { throw CaptureError.invalidState }
+        if enabled {
+            guard consentConfirmed else { throw MeetingAppAudioCapture.CaptureError.consentRequired }
+            #if !targetEnvironment(macCatalyst)
+            if let id = primaryAppSourceID, let existing = appSources[id],
+               existing.capture.state == .disabled, existing.capture.microphoneApproved,
+               let router = canonicalPipeline {
+                do {
+                    if activeSourceTracks[existing.source] == nil {
+                        let track = try await createTrack(source: existing.source, kind: existing.capture.sourceKind,
+                            label: MeetingAppAudioCapture.systemSelectedContent, startSample: 0)
+                        router.setEnabled(true, source: existing.source, hostTime: Self.hostTime)
+                        track.setStartSample(router.sessionStartSample(for: existing.source) ?? 0)
+                        try journalActive(track)
+                        appSources[id]?.trackID = track.meetingID
+                    }
+                    router.setEnabled(true, source: existing.source, hostTime: Self.hostTime)
+                    existing.sink.attach(router, source: existing.source)
+                    try existing.capture.resumeAppAudio()
+                    publishTracks()
+                    publishAppSources()
+                    return
+                } catch {
+                    await retireSource(existing.source, revoke: true)
+                    throw error
+                }
+            }
+            #endif
+            if appSources.values.contains(where: { $0.capture.state == .waitingForAudio || $0.capture.state == .receivingAudio }) { return }
+            try await addAppAudioSource(consentConfirmed: consentConfirmed)
+        } else {
+            let revokeTime = Self.hostTime
+            for source in appSources.values {
+                source.sink.setEnabled(false, hostTime: revokeTime)
+                canonicalPipeline?.setEnabled(false, source: source.source, hostTime: revokeTime)
+            }
+            for id in Array(appSources.keys) { await stopAppAudioSource(id: id, revoke: true) }
+        }
+    }
+
+    func addAppAudioSource(consentConfirmed: Bool) async throws {
+        guard status == .recording || status == .paused, terminalIntent == nil,
+              !addingAppSource, let router = canonicalPipeline else { throw CaptureError.invalidState }
+        guard consentConfirmed else { throw MeetingAppAudioCapture.CaptureError.consentRequired }
+        let running = appSources.values.filter { $0.capture.state == .waitingForAudio || $0.capture.state == .receivingAudio }
+        guard running.count < 4, MeetingAppAudioCapture.supportsMultipleSources || running.isEmpty else {
+            throw CaptureError.invalidState
+        }
+        addingAppSource = true
+        defer { addingAppSource = false }
+        let generation = captureGeneration
+        let id = UUID().uuidString.lowercased()
+        let source = MeetingAudioSourceRouter.Source.application(id)
+        let sink = MeetingAppAudioInputSink()
+        let capture = makeAppAudioCapture(sink: sink, generation: generation, sourceID: id, source: source)
+        capture.microphoneRequested = false
+        appSources[id] = AppSource(capture: capture, sink: sink, source: source, trackID: nil)
+        publishAppSources()
+        do {
+            try await capture.selectSourceAndWait(consentConfirmed: consentConfirmed)
+            guard generation == captureGeneration, terminalIntent == nil else { throw CancellationError() }
+            let track = try await createTrack(source: source, kind: capture.sourceKind,
+                                              label: capture.selectedSourceDescription, startSample: 0)
+            guard capture.state == .waitingForAudio || capture.state == .receivingAudio else { throw Self.appAudioPreparationError }
+            router.setSelection(capture.selectedSourceDescription, source: source, hostTime: Self.hostTime)
+            router.setEnabled(true, source: source, hostTime: Self.hostTime)
+            track.setStartSample(router.sessionStartSample(for: source) ?? 0)
+            try journalActive(track)
+            appSources[id]?.trackID = track.meetingID
+            sink.attach(router, source: source)
+            if primaryAppSourceID == nil || appAudioCapture?.state == .disabled {
+                primaryAppSourceID = id
+                appAudioCapture = capture
+                appAudioState = capture.state
+            }
+            publishTracks()
+            publishAppSources()
+        } catch {
+            sink.attach(nil)
+            await capture.stop()
+            await retireSource(source, revoke: true)
+            appSources[id] = nil
+            publishAppSources()
+            throw error
+        }
+    }
+
+    func stopAppAudioSource(id: String) async {
+        await stopAppAudioSource(id: id, revoke: false)
+    }
+
+    private func stopAppAudioSource(id: String, revoke: Bool) async {
+        guard let existing = appSources[id] else { return }
+        if revoke { canonicalPipeline?.setEnabled(false, source: existing.source, hostTime: Self.hostTime) }
+        #if !targetEnvironment(macCatalyst)
+        if existing.capture.microphoneApproved, microphoneEnabled, usesSystemPickerMicrophone {
+            if !revoke { await retireSource(existing.source, revoke: false) }
+            existing.capture.disableAppAudioRetainingMicrophone()
+            publishAppSources()
+            return
+        }
+        #endif
+        await retireSource(existing.source, revoke: revoke)
+        existing.sink.attach(nil)
+        await existing.capture.stop()
+        appSources[id] = nil
+        if primaryAppSourceID == id {
+            primaryAppSourceID = nil
+            appAudioCapture = nil
+            appAudioState = .disabled
+        }
+        publishAppSources()
+    }
+
+
+    func refreshMicrophoneRoutes() async {
+        let snapshot = await MeetingAudioSessionController.shared.microphoneRoutes()
+        microphoneRoutes = snapshot.available
+        #if targetEnvironment(macCatalyst)
+        selectedMicrophoneRouteID = microphoneEnabled && (status == .recording || status == .paused)
+            ? activeCatalystMicrophoneID : preferredMicrophoneRouteID
+        #else
+        selectedMicrophoneRouteID = microphoneEnabled && (status == .recording || status == .paused)
+            ? snapshot.selectedID : preferredMicrophoneRouteID
+        #endif
+    }
+
+    private var canChooseInactiveMicrophone: Bool {
+        status == .ready || status == .cancelled || status == .failed
+            || ((status == .recording || status == .paused) && !microphoneEnabled && terminalIntent == nil)
+    }
+
+    /// nil restores system input selection. Inputs are microphones, not meeting apps.
+    func selectMicrophoneRoute(id: String?) async throws {
+        guard !usesSystemPickerMicrophone else { throw CaptureError.invalidState }
+        if canChooseInactiveMicrophone {
+            guard !starting, !changingMicrophone else { throw CaptureError.invalidState }
+            let snapshot = await MeetingAudioSessionController.shared.microphoneRoutes()
+            guard !starting, !changingMicrophone, canChooseInactiveMicrophone else { throw CaptureError.invalidState }
+            guard id == nil || snapshot.available.contains(where: { $0.id == id }) else {
+                throw MeetingAudioSessionController.RouteError.unavailable
+            }
+            preferredMicrophoneRouteID = id
+            selectedMicrophoneRouteID = id
+            microphoneRoutes = snapshot.available
+            canonicalPipeline?.setSelection(id, source: .microphone, hostTime: Self.hostTime)
+            return
+        }
+        guard !changingMicrophone, microphoneEnabled,
+              status == .recording || status == .paused, terminalIntent == nil,
+              let mixer = canonicalPipeline else { throw CaptureError.invalidState }
+        changingMicrophone = true
+        defer { changingMicrophone = false }
+        let generation = captureGeneration
+        microphoneChangeGeneration += 1
+        let request = microphoneChangeGeneration
+        mixer.setEnabled(false, source: .microphone, hostTime: Self.hostTime)
+        stopMicrophoneHardware()
+        let approval = appAudioInputSink?.microphoneConsent.beginApproval()
+        microphoneEnabled = false
+        await retireSource(.microphone, revoke: true)
+        do {
+            try await MeetingAudioSessionController.shared.selectMicrophoneRoute(id: id)
+            preferredMicrophoneRouteID = id
+            logger.info("Audio source session=\(self.captureDiagnosticID, privacy: .public) microphone route selected systemDefault=\(id == nil)")
+        } catch {
+            logDiagnostic(error, operation: "microphoneRouteSelection")
+            throw error
+        }
+        guard generation == captureGeneration, request == microphoneChangeGeneration,
+              terminalIntent == nil else { throw CancellationError() }
+        #if targetEnvironment(macCatalyst)
+        let format: AVAudioFormat? = nil // AVCaptureAudioDataOutput supplies its actual native format with each sample.
+        #else
+        let format = engine.inputNode.outputFormat(forBus: 0)
+        guard Self.isValidFormat(format) else { throw CaptureError.invalidAudioFormat }
+        #endif
+        try Task.checkCancellation()
+        guard let approval, appAudioInputSink?.microphoneConsent.approve(approval, enabled: true) == true else {
+            throw CancellationError()
+        }
+        try await startMicrophoneHardware(format: format, mixer: mixer)
+        await refreshMicrophoneRoutes()
+    }
+
+    /// Off closes the PCM gate before stopping hardware. App audio is unchanged.
+    func setMicrophoneEnabled(_ enabled: Bool, consentConfirmed: Bool = false) async throws {
+        guard status == .recording || status == .paused, terminalIntent == nil,
+              let mixer = canonicalPipeline else { throw CaptureError.invalidState }
+        if !enabled {
+            microphoneChangeGeneration += 1
+            requestedPickerMicrophone = false
+            appAudioCapture?.microphoneRequested = false
+            mixer.setEnabled(false, source: .microphone, hostTime: Self.hostTime)
+            appAudioInputSink?.revokeMicrophone()
+            appAudioCapture?.revokeMicrophone()
+            stopMicrophoneHardware()
+            microphoneEnabled = false
+            microphoneRMS = 0
+            await retireSource(.microphone, revoke: true)
+            #if !targetEnvironment(macCatalyst)
+            if usesSystemPickerMicrophone, appAudioState == .disabled {
+                await appAudioCapture?.stop()
+                usesSystemPickerMicrophone = false
+            }
+            #endif
+            logger.info("Audio source session=\(self.captureDiagnosticID, privacy: .public) microphone disabled")
+            return
+        }
+        guard !changingMicrophone else { throw CaptureError.invalidState }
+        guard !microphoneEnabled else { return }
+        #if !targetEnvironment(macCatalyst)
+        if usesSystemPickerMicrophone {
+            guard consentConfirmed else { throw MeetingAppAudioCapture.CaptureError.consentRequired }
+            // iOS shows an active broadcast sheet rather than a new selection
+            // while sharing. A fresh local microphone approval leaves app audio running.
+            requestedPickerMicrophone = false
+            appAudioCapture?.microphoneRequested = false
+            usesSystemPickerMicrophone = false
+        }
+        #endif
+        changingMicrophone = true
+        defer { changingMicrophone = false }
+        let generation = captureGeneration
+        appAudioInputSink?.microphoneConsent.clearInterruption()
+        microphoneChangeGeneration += 1
+        let request = microphoneChangeGeneration
+        let approval = appAudioInputSink?.microphoneConsent.beginApproval()
+        guard await Self.requestMicrophonePermission() else { throw CaptureError.microphoneDenied }
+        guard generation == captureGeneration, request == microphoneChangeGeneration,
+              terminalIntent == nil else { throw CancellationError() }
+        let setup = try await prepareMicrophone()
+        guard generation == captureGeneration, request == microphoneChangeGeneration,
+              terminalIntent == nil else { throw CancellationError() }
+        try Task.checkCancellation()
+        guard let approval, appAudioInputSink?.microphoneConsent.approve(approval, enabled: true) == true else {
+            throw CancellationError()
+        }
+        try await startMicrophoneHardware(format: setup.format, mixer: mixer)
+        if let notice = setup.notice { microphoneWarning = notice }
+        await refreshMicrophoneRoutes()
+    }
+
+    private func startMicrophoneHardware(format: AVAudioFormat?, mixer: MeetingAudioSourceRouter) async throws {
+        let generation = captureGeneration
+        let request = microphoneChangeGeneration
+        guard let consent = appAudioInputSink?.microphoneConsent,
+              consent.isPermitted, terminalIntent == nil else { throw CancellationError() }
+        do {
+            if !microphoneEnabled { await retireSource(.microphone, revoke: true) }
+            if let retiring = sourceRetirements[.microphone] { await retiring.value }
+            guard captureGeneration == generation, microphoneChangeGeneration == request,
+                  consent.isPermitted, terminalIntent == nil else { throw CancellationError() }
+            if activeSourceTracks[.microphone] == nil {
+                let track = try await createTrack(source: .microphone, kind: .microphone,
+                                                  label: nil, startSample: 0)
+                guard captureGeneration == generation, microphoneChangeGeneration == request,
+                      consent.isPermitted, terminalIntent == nil else {
+                    if activeSourceTracks[.microphone] == track.meetingID {
+                        await retireSource(.microphone, revoke: true)
+                    }
+                    throw CancellationError()
+                }
+                guard consent.deliver({ mixer.setEnabled(true, source: .microphone, hostTime: Self.hostTime) }) else {
+                    await retireSource(.microphone, revoke: true)
+                    throw CancellationError()
+                }
+                track.setStartSample(mixer.sessionStartSample(for: .microphone) ?? 0)
+                try journalActive(track)
+            }
+            #if targetEnvironment(macCatalyst)
+            let capture = MeetingCatalystMicrophoneCapture(
+                receive: { buffer, hostTime in
+                    consent.deliver { mixer.enqueueOwned(buffer, source: .microphone, hostTime: hostTime) }
+                },
+                failed: { [weak self] error in
+                    mixer.setEnabled(false, source: .microphone,
+                                     hostTime: CMClockGetTime(CMClockGetHostTimeClock()).seconds)
+                    Task { @MainActor in
+                        guard let self, self.captureGeneration == generation,
+                              self.microphoneChangeGeneration == request, self.terminalIntent == nil else { return }
+                        self.stopMicrophoneHardware()
+                        self.microphoneEnabled = false
+                        self.microphoneRMS = 0
+                        self.microphoneWarning = AppLanguage.localized(
+                            "meeting.capture.microphoneStopped",
+                            defaultValue: AppLanguage.current == .english
+                                ? "Microphone capture stopped. Check the selected input and enable it again."
+                                : "마이크 캡처가 중지되었습니다. 선택한 입력을 확인한 후 다시 켜주세요.",
+                            language: .current,
+                            comment: "Mac microphone disconnected or capture failed."
+                        )
+                        self.logDiagnostic(error, operation: "microphoneCapture")
+                        await self.retireSource(.microphone, revoke: true)
+                        await self.refreshMicrophoneRoutes()
+                    }
+                }
+            )
+            catalystMicrophone = capture
+            let deviceID = try await capture.start(deviceID: preferredMicrophoneRouteID, running: status == .recording)
+            guard captureGeneration == generation, microphoneChangeGeneration == request,
+                  consent.isPermitted, terminalIntent == nil else {
+                capture.stop()
+                throw CancellationError()
+            }
+            activeCatalystMicrophoneID = deviceID
+            guard consent.deliver({
+                mixer.setSelection(deviceID, source: .microphone, hostTime: Self.hostTime)
+                mixer.setEnabled(true, source: .microphone, hostTime: Self.hostTime)
+            }) else {
+                capture.stop()
+                throw CancellationError()
+            }
+            // Capture callbacks hold their hardware lock before consulting consent.
+            // Never acquire that lock while holding the consent lock.
+            if status == .recording { capture.activate() } else { capture.pause() }
+            #else
+            guard let format else { throw CaptureError.invalidAudioFormat }
+            guard !usesSystemPickerMicrophone else { throw CaptureError.invalidState }
+            guard captureGeneration == generation, microphoneChangeGeneration == request,
+                  consent.isPermitted, terminalIntent == nil else { throw CancellationError() }
+            installMicrophoneTap(format: format, mixer: mixer)
+            mixer.setSelection(AVAudioSession.sharedInstance().currentRoute.inputs.first?.uid,
+                               source: .microphone, hostTime: Self.hostTime)
+            guard consent.deliver({ mixer.setEnabled(true, source: .microphone, hostTime: Self.hostTime) }) else {
+                throw CancellationError()
+            }
+            engine.prepare()
+            if status == .recording { try engine.start() }
+            monitorMicrophoneRoute(mixer: mixer)
+            #endif
+            microphoneEnabled = true
+            microphoneWarning = nil
+            logger.info("Audio source session=\(self.captureDiagnosticID, privacy: .public) microphone enabled")
+        } catch {
+            if captureGeneration == generation, microphoneChangeGeneration == request {
+                mixer.setEnabled(false, source: .microphone, hostTime: Self.hostTime)
+                stopMicrophoneHardware()
+            }
+            if !(error is CancellationError) { logDiagnostic(error, operation: "microphoneEnable") }
+            throw error
+        }
+    }
+
+    private func installMicrophoneTap(format: AVAudioFormat, mixer: MeetingAudioSourceRouter) {
+        let consent = appAudioInputSink?.microphoneConsent
+        engine.inputNode.installTap(onBus: 0, bufferSize: 1_024, format: format) { buffer, time in
+            // Arrival time must never move samples across a privacy gate.
+            guard time.isHostTimeValid else { return }
+            consent?.deliver {
+                mixer.enqueue(buffer, source: .microphone, hostTime: AVAudioTime.seconds(forHostTime: time.hostTime))
+            }
+        }
+        microphoneTapInstalled = true
+    }
+
+    private func stopMicrophoneHardware() {
+        #if targetEnvironment(macCatalyst)
+        catalystMicrophone?.stop()
+        catalystMicrophone = nil
+        activeCatalystMicrophoneID = nil
+        #else
+        microphoneRouteGate?.invalidate()
+        microphoneRouteGate = nil
+        if let microphoneRouteObserver {
+            NotificationCenter.default.removeObserver(microphoneRouteObserver)
+            self.microphoneRouteObserver = nil
+        }
+        if microphoneTapInstalled {
+            engine.inputNode.removeTap(onBus: 0)
+            microphoneTapInstalled = false
+        }
+        engine.stop()
+        #endif
+    }
+
+    private func monitorMicrophoneInterruptions(sink: MeetingAppAudioInputSink, generation: UUID) {
+        if let microphoneInterruptionObserver { NotificationCenter.default.removeObserver(microphoneInterruptionObserver) }
+        microphoneInterruptionObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.interruptionNotification,
+            object: AVAudioSession.sharedInstance(), queue: nil
+        ) { [weak self] notification in
+            guard let value = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+                  AVAudioSession.InterruptionType(rawValue: value) == .began else { return }
+            // Revoke on the posting thread, including during permission/STT preparation.
+            // .ended and .shouldResume never reopen recording consent.
+            let wasRecordingMicrophone = sink.microphoneConsent.isPermitted
+            sink.interruptMicrophone()
+            guard let coordinator = self else { return }
+            Task { @MainActor in
+                guard coordinator.captureGeneration == generation, coordinator.terminalIntent == nil,
+                      sink.microphoneConsent.isInterrupted else { return }
+                let wasRequested = coordinator.requestedPickerMicrophone || coordinator.microphoneEnabled
+                coordinator.microphoneChangeGeneration += 1
+                coordinator.appAudioCapture?.revokeMicrophone()
+                coordinator.stopMicrophoneHardware()
+                coordinator.requestedPickerMicrophone = false
+                coordinator.appAudioCapture?.microphoneRequested = false
+                coordinator.microphoneEnabled = false
+                coordinator.microphoneRMS = 0
+                await coordinator.retireSource(.microphone, revoke: true)
+                if wasRecordingMicrophone || wasRequested {
+                    coordinator.microphoneWarning = MeetingAppAudioCapture.message(
+                        "meeting.capture.source.microphoneInterrupted",
+                        "Microphone capture was interrupted. Check the input and explicitly enable it again. App audio remains selected.",
+                        "마이크 캡처가 중단되었습니다. 입력을 확인한 후 직접 다시 켜주세요. 앱 오디오 선택은 유지됩니다.")
+                }
+            }
+        }
+    }
+
+    private func monitorMicrophoneRoute(mixer: MeetingAudioSourceRouter) {
+        let generation = captureGeneration
+        let request = microphoneChangeGeneration
+        let expectedInputID = AVAudioSession.sharedInstance().currentRoute.inputs.first?.uid
+        let expectedSampleRate = AVAudioSession.sharedInstance().sampleRate
+        let gate = MeetingMicrophoneRouteGate()
+        microphoneRouteGate = gate
+        microphoneRouteObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.routeChangeNotification,
+            object: AVAudioSession.sharedInstance(), queue: nil
+        ) { [weak self, weak mixer] _ in
+            let session = AVAudioSession.sharedInstance()
+            guard session.currentRoute.inputs.first?.uid != expectedInputID
+                    || session.sampleRate != expectedSampleRate else { return }
+            // Close on the notification thread, before a newly selected system
+            // input can leak through while MainActor is busy updating the UI.
+            guard let mixer, gate.close(mixer) else { return }
+            Task { @MainActor in
+                guard let self, self.captureGeneration == generation,
+                      self.microphoneChangeGeneration == request,
+                      self.terminalIntent == nil else { return }
+                self.stopMicrophoneHardware()
+                self.microphoneEnabled = false
+                self.microphoneRMS = 0
+                self.logger.notice("Audio source session=\(self.captureDiagnosticID, privacy: .public) microphone route changed; gate closed")
+                self.microphoneWarning = AppLanguage.localized(
+                    "meeting.capture.microphoneRouteChanged",
+                    defaultValue: AppLanguage.current == .english
+                        ? "The audio route changed. Check the microphone input and enable it again."
+                        : "오디오 경로가 변경되었습니다. 마이크 입력을 확인한 후 다시 켜주세요.",
+                    language: .current,
+                    comment: "Microphone capture stopped after an audio route change."
+                )
+                await self.retireSource(.microphone, revoke: true)
+                await self.refreshMicrophoneRoutes()
+            }
+        }
+    }
+
+    private func prepareMicrophone() async throws -> (format: AVAudioFormat?, notice: String?) {
+        #if targetEnvironment(macCatalyst)
+        // AVCaptureDeviceInput, not AVAudioSession's system route, selects the Mac microphone.
+        let notice = voiceProcessingRequested ? AppLanguage.localized(
+            "meeting.capture.macMicrophoneRaw",
+            defaultValue: AppLanguage.current == .english
+                ? "The selected Mac microphone uses native audio capture without voice noise reduction."
+                : "선택한 Mac 마이크는 음성 노이즈 감소 없이 기본 오디오로 캡처합니다.",
+            language: .current,
+            comment: "AVCapture microphone path does not provide AVAudioEngine voice processing."
+        ) : nil
+        return (nil, notice)
+        #else
+        try await configureSession(voiceProcessing: voiceProcessingRequested)
+        try await MeetingAudioSessionController.shared.selectMicrophoneRoute(id: preferredMicrophoneRouteID)
+        let node = engine.inputNode
+        var notice: String?
+        if voiceProcessingRequested {
+            var valid = false
             do {
                 try node.setVoiceProcessingEnabled(true)
                 engine.prepare()
-                usingVoiceProcessing = Self.isValidFormat(node.outputFormat(forBus: 0))
+                valid = Self.isValidFormat(node.outputFormat(forBus: 0))
             } catch {
                 logDiagnostic(error, operation: "voiceProcessing")
-                usingVoiceProcessing = false
             }
-            if !usingVoiceProcessing {
-                // Revert to the raw, minimally processed path so capture still
-                // works rather than crashing or recording nothing.
+            if !valid {
                 try? node.setVoiceProcessingEnabled(false)
                 try await configureSession(voiceProcessing: false)
+                try await MeetingAudioSessionController.shared.selectMicrophoneRoute(id: preferredMicrophoneRouteID)
                 engine.prepare()
-                voiceProcessingFallbackNotice = AppLanguage.localized(
+                notice = AppLanguage.localized(
                     "meeting.capture.voiceProcessingFallback",
                     defaultValue: AppLanguage.current == .english
                         ? "Voice noise reduction is unavailable; recording the raw input instead."
@@ -206,150 +1163,42 @@ final class MeetingCaptureCoordinator: ObservableObject {
         } else {
             try? node.setVoiceProcessingEnabled(false)
         }
-
         let format = node.outputFormat(forBus: 0)
         guard Self.isValidFormat(format) else { throw CaptureError.invalidAudioFormat }
-        guard let canonicalFormat = AVAudioFormat(
-            commonFormat: .pcmFormatInt16,
-            sampleRate: Double(MeetingMediaTimeline.sampleRate),
-            channels: 1,
-            interleaved: true
-        ) else {
-            throw CaptureError.invalidAudioFormat
-        }
-        let audioDirectory = AppDataContainer.activeMeetingAudioDirectory(meetingID: meetingID)
-        let writer = try MeetingFLACPartWriter(directory: audioDirectory)
-        let callbackBridge = MeetingCaptureCallbackBridge(self)
-        let transcriptionPipeline = try MeetingTranscriptionInputPipeline(
-            inputFormat: canonicalFormat,
-            outputFormat: transcriptionSession.inputFormat,
-            consume: { stream.continuation.yield($0) },
-            failed: { error in
-                Task { @MainActor in
-                    await callbackBridge.coordinator?.handleLiveTranscriptionFailure(error)
-                }
-            }
-        )
-        let pipeline = try MeetingCanonicalAudioPipeline(
-            inputFormat: format,
-            consume: { [progressGate] canonicalBuffer in
-                try writer.append(canonicalBuffer)
-                let samples = writer.totalSamples
-                let partCount = writer.completedParts.count + 1
-                transcriptionPipeline.enqueue(canonicalBuffer)
-                if progressGate.shouldPublish(meetingID: meetingID, samples: samples) {
-                    Task { @MainActor in
-                        callbackBridge.coordinator?.publishRecordedAudio(
-                            meetingID: meetingID,
-                            samples: samples,
-                            partCount: partCount
-                        )
-                    }
-                }
-            },
-            dropped: { error in
-                Task { @MainActor in
-                    await callbackBridge.coordinator?.handleCaptureFailure(error)
-                }
-            }
-        )
+        return (format, notice)
+        #endif
+    }
 
-        self.transcriptionSession = transcriptionSession
-        flacPartWriter = writer
-        inputContinuation = stream.continuation
-        terminationGate.reset()
-        terminalIntent = nil
-        terminalError = nil
-        terminalArtifact = nil
-        liveTranscriptionError = nil
-        liveTranscriptionWarning = nil
-        activeFileURL = audioDirectory
-        activeMeetingID = meetingID
-        activeLanguageTag = languageTag
-        activeTimezoneIdentifier = TimeZone.current.identifier
-        progressGate.reset(meetingID: meetingID)
-        self.canonicalPipeline = pipeline
-        transcriptionInputPipeline = transcriptionPipeline
-        inputFinished = false
-        transcriptChunks.removeAll(keepingCapacity: true)
-        liveTranscriptEntries = []
-        finalizedTranscript = ""
-        elapsedMediaMs = 0
-        liveTranscriptReducer.reset()
-        recordedAudioSamples = 0
-        recordedAudioPartCount = 0
-        liveTranscriptionWarning = voiceProcessingFallbackNotice
-        status = .recording
-
-        transcriptionTask = Task { [weak self, transcriptionSession] in
-            do {
-                for try await result in transcriptionSession.results {
-                    try Task.checkCancellation()
-                    await MainActor.run { self?.acceptTranscriptionResult(result) }
-                }
-            } catch {
-                let shouldCleanup = await MainActor.run { self?.recordLiveTranscriptionFailure(error) ?? false }
-                if shouldCleanup {
-                    Task { @MainActor [weak self] in
-                        await self?.stopLiveTranscription()
-                    }
-                }
-            }
-        }
-        analysisTask = Task { [weak self, transcriptionSession] in
-            do {
-                try await transcriptionSession.analyze(stream.stream)
-            } catch {
-                let shouldCleanup = await MainActor.run { self?.recordLiveTranscriptionFailure(error) ?? false }
-                if shouldCleanup {
-                    Task { @MainActor [weak self] in
-                        await self?.stopLiveTranscription()
-                    }
-                }
-            }
-        }
-
-        node.installTap(onBus: 0, bufferSize: 1_024, format: format) { buffer, _ in
-            pipeline.enqueueTapBuffer(buffer)
-        }
-        do {
-            engine.prepare()
-            try engine.start()
-        } catch {
-            node.removeTap(onBus: 0)
-            engine.stop()
-            await MeetingAudioSessionController.shared.deactivate()
-            inputContinuation?.finish()
-            await transcriptionPipeline.cancel()
-            await transcriptionSession.cancel()
-            transcriptionTask?.cancel()
-            analysisTask?.cancel()
-            await pipeline.cancel()
-            canonicalPipeline = nil
-            transcriptionInputPipeline = nil
-            self.transcriptionSession = nil
-            flacPartWriter = nil
-            inputContinuation = nil
-            if let activeFileURL { try? FileManager.default.removeItem(at: activeFileURL.deletingLastPathComponent()) }
-            self.activeFileURL = nil
-            activeMeetingID = nil
-            progressGate.invalidate()
-            status = .failed
-            failure = userFacingFailure(for: error, operation: "start")
-            logDiagnostic(error, operation: "start")
-            throw error
-        }
+    private static func requestMicrophonePermission() async -> Bool {
+        #if targetEnvironment(macCatalyst)
+        return await AVCaptureDevice.requestAccess(for: .audio)
+        #else
+        return await AVAudioApplication.requestRecordPermission()
+        #endif
     }
 
     func pause() {
         guard status == .recording else { return }
+        microphoneRMS = 0
+        appAudioRMS = 0
+        canonicalPipeline?.pause(hostTime: Self.hostTime)
+        #if targetEnvironment(macCatalyst)
+        catalystMicrophone?.pause()
+        #else
         engine.pause()
+        #endif
         status = .paused
     }
 
     func resume() throws {
         guard status == .paused else { throw CaptureError.invalidState }
-        try engine.start()
+        #if targetEnvironment(macCatalyst)
+        if microphoneEnabled { catalystMicrophone?.resume() }
+        #else
+        if microphoneEnabled, !usesSystemPickerMicrophone, microphoneTapInstalled,
+           appAudioInputSink?.microphoneConsent.isPermitted == true { try engine.start() }
+        #endif
+        canonicalPipeline?.resume(hostTime: Self.hostTime)
         status = .recording
     }
 
@@ -361,8 +1210,8 @@ final class MeetingCaptureCoordinator: ObservableObject {
         }
         if terminalIntent == nil {
             terminalIntent = .stop
+            canonicalPipeline?.pause(hostTime: Self.hostTime)
             status = .stopping
-            finalizationProgress = 0.1
             finalizationDetail = AppLanguage.localized(
                 "meeting.capture.finalization.audio",
                 defaultValue: AppLanguage.current == .english
@@ -381,70 +1230,16 @@ final class MeetingCaptureCoordinator: ObservableObject {
 
     func finalizeTranscript(timeout: Duration = .seconds(180)) async throws {
         guard status == .stopping else { throw CaptureError.invalidState }
-        finalizationProgress = 0.6
-        finalizationDetail = AppLanguage.localized(
-            "meeting.capture.finalization.transcript",
-            defaultValue: AppLanguage.current == .english
-                ? "Finalizing the transcript"
-                : "전사 결과를 확정하는 중",
-            language: .current,
-            comment: "Progress detail shown while finalizing a meeting transcript."
-        )
-        do {
-            try await transcriptionInputPipeline?.finish()
-        } catch {
-            await handleLiveTranscriptionFailure(error)
-        }
-        finishInputStream()
-        if let liveTranscriptionError {
-            await stopLiveTranscription()
-            clearTranscriptionReferences()
-            throw liveTranscriptionError
-        }
-        let analysis = analysisTask
-        let transcription = transcriptionTask
-        let session = transcriptionSession
-        let finished = await withTaskGroup(of: Bool.self) { group in
-            group.addTask {
-                await analysis?.value
-                await transcription?.value
-                return true
+        finalizationDetail = MeetingAppAudioCapture.message("meeting.capture.finalization.sources", "Finalizing source transcripts", "소스별 전사를 확정하는 중")
+        let pending = trackOrder.compactMap { tracks[$0] }
+        await withTaskGroup(of: Void.self) { group in
+            for track in pending {
+                group.addTask { await track.finalize(timeout: timeout) }
             }
-            group.addTask {
-                try? await Task.sleep(for: timeout)
-                await session?.cancel()
-                analysis?.cancel()
-                transcription?.cancel()
-                return false
-            }
-            let first = await group.next() ?? false
-            group.cancelAll()
-            return first
         }
-        clearTranscriptionReferences()
-        guard finished else {
-            finalizationDetail = AppLanguage.localized(
-                "meeting.capture.finalization.timeout",
-                defaultValue: AppLanguage.current == .english
-                    ? "Transcript finalization timed out. The original recording and provisional transcript were preserved."
-                    : "전사 확정이 시간 내에 끝나지 않았습니다. 원본 녹음과 임시 전사를 보존했습니다.",
-                language: .current,
-                comment: "Detail shown when transcript finalization times out while preserving recoverable meeting data."
-            )
-            let error = CaptureError.transcriptFinalizationTimeout
-            logDiagnostic(error, operation: "transcriptFinalizationTimeout")
-            throw error
-        }
-        finalizedTranscript = provisionalText
-        finalizationProgress = 0.9
-        finalizationDetail = AppLanguage.localized(
-            "meeting.capture.finalization.saving",
-            defaultValue: AppLanguage.current == .english
-                ? "Saving the meeting record"
-                : "회의 기록을 저장하는 중",
-            language: .current,
-            comment: "Progress detail shown while saving the finalized meeting record."
-        )
+        for task in trackFinalizations.values { await task.value }
+        publishTracks()
+        finalizationDetail = MeetingAppAudioCapture.message("meeting.capture.finalization.saving", "Saving the meeting records", "회의 기록을 저장하는 중")
         status = .finalizingTranscript
     }
 
@@ -455,184 +1250,217 @@ final class MeetingCaptureCoordinator: ObservableObject {
             return
         }
         terminalIntent = .cancel
+        canonicalPipeline?.pause(hostTime: Self.hostTime)
         await terminationGate.run { [weak self] in await self?.performTerminalOperation() }
-        transcriptChunks.removeAll(keepingCapacity: false)
-        liveTranscriptEntries = []
-        provisionalText = ""
-        finalizedTranscript = ""
-        liveTranscriptReducer.reset()
         status = .cancelled
+        recordingDiarizationEnabled = false
     }
 
-    private func handleCaptureFailure(_ error: Error) async {
-        guard terminalIntent == nil || {
-            if case .stop? = terminalIntent { return true }
-            return false
-        }() else { return }
-        if terminalError == nil { terminalError = error }
-        if terminalIntent == nil { terminalIntent = .failure }
-        logDiagnostic(error, operation: "capture")
-        await terminationGate.run { [weak self] in await self?.performTerminalOperation() }
-        failure = userFacingFailure(for: error, operation: "capture")
-        status = .failed
+    private func handleSourceFailure(_ error: Error, source: MeetingAudioSourceRouter.Source) async {
+        guard terminalIntent == nil else { return }
+        if let id = activeSourceTracks[source] { tracks[id]?.recordAudioFailure(error) }
+        logDiagnostic(error, operation: "sourceCapture")
+        failure = MeetingAppAudioCapture.message(
+            "meeting.capture.source.stopped",
+            "One audio source stopped. Other selected sources continue recording.",
+            "오디오 소스 하나가 중지되었습니다. 선택한 다른 소스의 녹음은 계속됩니다.")
+        if source == .microphone {
+            appAudioInputSink?.revokeMicrophone()
+            stopMicrophoneHardware()
+            microphoneEnabled = false
+            microphoneWarning = MeetingAppAudioCapture.message(
+                "meeting.capture.source.microphoneStopped",
+                "Microphone capture stopped. Other sources continue recording.",
+                "마이크 캡처가 중지되었습니다. 다른 소스의 녹음은 계속됩니다.")
+        } else if let id = appSources.first(where: { $0.value.source == source })?.key {
+            let entry = appSources[id]
+            entry?.sink.attach(nil)
+            await entry?.capture.stop()
+            appSources[id] = nil
+            publishAppSources()
+        }
+        await retireSource(source, revoke: true)
     }
+
+    /// A retire fence prevents an old callback/writer from reaching the next child.
+    private func retireSource(_ source: MeetingAudioSourceRouter.Source, revoke: Bool) async {
+        if let retiring = sourceRetirements[source] { await retiring.value; return }
+        guard let id = activeSourceTracks.removeValue(forKey: source), let track = tracks[id],
+              let router = canonicalPipeline else { return }
+        let closeTime = Self.hostTime
+        if revoke { router.setEnabled(false, source: source, hostTime: closeTime) }
+        else { router.close(source: source, hostTime: closeTime) }
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            var metadata: MeetingCaptureSourceMetadata?
+            do {
+                metadata = try await router.retire(source: source, hostTime: closeTime)
+            } catch { track.recordAudioFailure(error) }
+            self.trackSink.attach(nil, source: source)
+            do {
+                let artifact = try track.finishAudio(metadata: metadata)
+                if artifact.audioManifest.totalSamples > 0 {
+                    try self.journalStopped(track, artifact: artifact)
+                    self.trackFinalizations[id] = Task { await track.finalize(timeout: .seconds(180)) }
+                } else {
+                    await self.discardTrack(track)
+                    self.tracks[id] = nil
+                    self.trackOrder.removeAll { $0 == id }
+                }
+            } catch {
+                track.recordAudioFailure(error)
+                self.logDiagnostic(error, operation: "sourceAudioFinalization")
+                self.trackFinalizations[id] = Task { await track.cancel(removeAudio: false) }
+            }
+            self.publishTracks()
+        }
+        sourceRetirements[source] = task
+        await task.value
+        sourceRetirements[source] = nil
+    }
+
+    private func journalStopped(_ track: MeetingCaptureTrackSession, artifact: MeetingCaptureTrackArtifact) throws {
+        let recovery = try MeetingCaptureRecoveryStore.markStopped(
+            meetingID: track.meetingID, audioManifest: artifact.audioManifest,
+            provisionalResult: artifact.provisionalResult,
+            errorMessage: track.audioError.map { userFacingFailure(for: $0, operation: "sourceCapture") })
+        recoveredCaptures.removeAll { $0.meetingID == track.meetingID }
+        recoveredCaptures.append(recovery)
+    }
+    private func discardTrack(_ track: MeetingCaptureTrackSession) async {
+        await track.cancel(removeAudio: true)
+        try? MeetingCaptureRecoveryStore.remove(meetingID: track.meetingID)
+        try? FileManager.default.removeItem(at: track.directoryURL.deletingLastPathComponent())
+    }
+
 
     private func performTerminalOperation() async {
         guard let terminalIntent else { return }
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
+        captureGeneration = UUID()
+        let stopTime = Self.hostTime
+        // Freeze group admission before any async hardware stop. Accepted valid
+        // source tails drain into their own writers; no stop callback mutes them.
+        canonicalPipeline?.pause(hostTime: stopTime)
+        appAudioInputSink?.stopMicrophoneDelivery()
+        if let microphoneInterruptionObserver {
+            NotificationCenter.default.removeObserver(microphoneInterruptionObserver)
+            self.microphoneInterruptionObserver = nil
+        }
+        if let thermalObserver { NotificationCenter.default.removeObserver(thermalObserver) }
+        thermalObserver = nil
+        stopMicrophoneHardware()
+        for source in appSources.values { source.sink.attach(nil); await source.capture.stop() }
+        appAudioCapture = nil
+        appAudioState = .disabled
+        microphoneEnabled = false
+        microphoneRMS = 0
+        appAudioRMS = 0
+        for task in sourceRetirements.values { await task.value }
         switch terminalIntent {
         case .cancel:
             await canonicalPipeline?.cancel()
-            await stopLiveTranscription()
-            _ = try? flacPartWriter?.finish()
-            await MeetingAudioSessionController.shared.deactivate()
-            let directory = activeFileURL?.deletingLastPathComponent()
+            for track in tracks.values { await discardTrack(track) }
+            for task in trackFinalizations.values { await task.value }
+            await deactivateRecordingSession()
             resetCaptureReferences()
-            if let directory { try? FileManager.default.removeItem(at: directory) }
-        case .stop, .failure:
-            var canonicalError: Error?
-            do {
-                try await canonicalPipeline?.finish()
-            } catch {
-                canonicalError = error
-                logDiagnostic(error, operation: "canonicalFinalization")
+        case .stop:
+            do { try await canonicalPipeline?.finish(hostTime: stopTime) }
+            catch { terminalError = terminalError ?? error; logDiagnostic(error, operation: "sourceDrain") }
+            for (source, id) in activeSourceTracks {
+                guard let track = tracks[id] else { continue }
+                let metadata = await canonicalPipeline?.captureSourceMetadata(for: source)
+                do {
+                    let artifact = try track.finishAudio(metadata: metadata)
+                    if artifact.audioManifest.totalSamples > 0 {
+                        try journalStopped(track, artifact: artifact)
+                    } else {
+                        await discardTrack(track)
+                        tracks[id] = nil
+                        trackOrder.removeAll { $0 == id }
+                    }
+                } catch {
+                    track.recordAudioFailure(error)
+                    logDiagnostic(error, operation: "sourceAudioFinalization")
+                    trackFinalizations[id] = Task { await track.cancel(removeAudio: false) }
+                }
             }
             canonicalPipeline = nil
-            guard let writer = flacPartWriter,
-                  let directory = activeFileURL,
-                  let meetingID = activeMeetingID else {
-                terminalError = terminalError ?? CaptureError.invalidState
-                await MeetingAudioSessionController.shared.deactivate()
-                return
-            }
-            do {
-                _ = try writer.finish()
-                let parent = directory.deletingLastPathComponent().lastPathComponent
-                let manifest = writer.manifest(relativeDirectory: "\(parent)/\(directory.lastPathComponent)")
-                publishRecordedAudio(meetingID: meetingID, samples: writer.totalSamples, partCount: manifest.parts.count)
-                let recovery = PendingMeetingCaptureRecovery(
-                    meetingID: meetingID,
-                    languageTag: activeLanguageTag,
-                    timezoneIdentifier: activeTimezoneIdentifier,
-                    manifest: manifest,
-                    provisionalResult: MeetingProvisionalResultBuilder.make(
-                        meetingID: meetingID,
-                        entries: liveTranscriptEntries,
-                        elapsedMediaMs: elapsedMediaMs
-                    ),
-                    errorMessage: terminalError.map { userFacingFailure(for: $0, operation: "finalization") }
-                )
-                try MeetingCaptureRecoveryStore.write(recovery)
-                recoveredCapture = recovery
-                terminalArtifact = MeetingCaptureArtifact(directoryURL: directory, audioManifest: manifest)
-                flacPartWriter = nil
-                if let canonicalError { terminalError = terminalError ?? canonicalError }
-                if case .failure = terminalIntent { await stopLiveTranscription() }
-                await MeetingAudioSessionController.shared.deactivate()
-                progressGate.invalidate()
-                activeMeetingID = nil
-            } catch {
-                terminalError = error
-                logDiagnostic(error, operation: "audioFinalization")
-                await MeetingAudioSessionController.shared.deactivate()
-            }
+            activeSourceTracks.removeAll()
+            trackSink.removeAll()
+            let artifacts = trackOrder.compactMap { tracks[$0]?.artifact }.filter { $0.audioManifest.totalSamples > 0 }
+            if let meetingID = activeMeetingID, !artifacts.isEmpty {
+                terminalArtifact = MeetingCaptureArtifact(meetingID: meetingID, tracks: artifacts)
+            } else { terminalError = terminalError ?? CaptureError.noAudioSource }
+            await deactivateRecordingSession()
+            publishTracks()
+            publishAppSources()
         }
     }
 
-    private func recordLiveTranscriptionFailure(_ error: Error) -> Bool {
-        guard !(error is CancellationError) else { return false }
-        guard liveTranscriptionError == nil else { return false }
-        logDiagnostic(error, operation: "liveTranscription")
-        liveTranscriptionError = error
-        liveTranscriptionWarning = AppLanguage.localized(
-            "meeting.capture.transcription.warning",
-            defaultValue: AppLanguage.current == .english
-                ? "Live transcription stopped. The recording is still being saved, and you can transcribe it again from the saved audio after stopping."
-                : "실시간 전사가 중단됐습니다. 녹음은 계속 저장되며 종료 후 저장된 음성으로 다시 전사할 수 있습니다.",
-            language: .current,
-            comment: "Warning shown when live transcription stops but canonical audio capture continues."
-        )
-        return true
-    }
-
-    private func handleLiveTranscriptionFailure(_ error: Error) async {
-        guard recordLiveTranscriptionFailure(error) else { return }
-        await stopLiveTranscription()
-    }
-
-    private func stopLiveTranscription() async {
-        await transcriptionInputPipeline?.cancel()
-        finishInputStream()
-        await transcriptionSession?.cancel()
-        transcriptionTask?.cancel()
-        analysisTask?.cancel()
-        await transcriptionTask?.value
-        await analysisTask?.value
-    }
-
-    private func finishInputStream() {
-        guard !inputFinished else { return }
-        inputFinished = true
-        inputContinuation?.finish()
-    }
-
-    private func clearTranscriptionReferences() {
-        transcriptionInputPipeline = nil
-        inputContinuation = nil
-        transcriptionSession = nil
-        transcriptionTask = nil
-        analysisTask = nil
-    }
-
     private func resetCaptureReferences() {
+        appAudioInputSink?.revokeMicrophone()
+        appAudioInputSink?.attach(nil)
+        appAudioInputSink = nil
+        appAudioCapture = nil
+        appSources.removeAll()
+        primaryAppSourceID = nil
+        pickerMicrophoneApproval = nil
+        requestedPickerMicrophone = false
+        usesSystemPickerMicrophone = false
+        if let microphoneInterruptionObserver {
+            NotificationCenter.default.removeObserver(microphoneInterruptionObserver)
+            self.microphoneInterruptionObserver = nil
+        }
+        if let thermalObserver { NotificationCenter.default.removeObserver(thermalObserver) }
+        thermalObserver = nil
         canonicalPipeline = nil
-        flacPartWriter = nil
-        clearTranscriptionReferences()
-        activeFileURL = nil
+        trackSink.removeAll()
+        tracks.removeAll()
+        trackOrder.removeAll()
+        activeSourceTracks.removeAll()
+        sourceRetirements.removeAll()
+        trackFinalizations.removeAll()
+        liveTracks = []
+        appAudioSources = []
+        recoveredCaptures = []
         activeMeetingID = nil
-        progressGate.invalidate()
     }
 
-    private func acceptTranscriptionResult(_ result: MeetingTranscriptionResult) {
-        let replacement = TranscriptRangeKey(result.range)
-        let entry = LiveTranscriptEntry(
-            id: "\(replacement.startValue):\(replacement.startTimescale):\(replacement.durationValue):\(replacement.durationTimescale)",
-            startMs: Int64((replacement.startSeconds * 1_000).rounded(.down)),
-            endMs: Int64((replacement.endSeconds * 1_000).rounded(.down)),
-            text: String(result.text.characters),
-            speakerIDs: [],
-            confidence: result.confidence,
-            isFinal: result.isFinal
-        )
-        liveTranscriptReducer.replace(entry)
-        liveTranscriptEntries = liveTranscriptReducer.entries
-        provisionalText = liveTranscriptEntries.map(\.text).joined(separator: " ")
+    /// Only counters and a random capture-session token leave the audio path.
+    /// No PCM values, transcript, route UID, app/window name or absolute PTS.
+    private func publishSourceDeliveryDiagnostics(force: Bool = false) {
+        guard let mixer = canonicalPipeline else { return }
+        let delivered = mixer.deliveryMetrics()
+        let levels = mixer.sourceLevels()
+        microphoneRMS = microphoneEnabled && status == .recording ? levels.microphoneRMS : 0
+        appAudioRMS = status == .recording ? levels.appAudioRMS : 0
+        let firstDelivery = (microphoneAudioBufferCount == 0 && delivered.microphoneBuffers > 0)
+            || (appAudioBufferCount == 0 && delivered.appAudioBuffers > 0)
+        microphoneAudioBufferCount = delivered.microphoneBuffers
+        appAudioBufferCount = delivered.appAudioBuffers
+        guard force || firstDelivery || recordedAudioSamples >= lastSourceDiagnosticSamples + 80_000 else { return }
+        lastSourceDiagnosticSamples = recordedAudioSamples
+        let queue = mixer.metrics()
+        logger.info("Audio delivery session=\(self.captureDiagnosticID, privacy: .public) micBuffers=\(delivered.microphoneBuffers) appBuffers=\(delivered.appAudioBuffers) savedSamples=\(self.recordedAudioSamples) queueHighWater=\(queue.highWaterMark) queueCapacity=\(queue.capacity)")
     }
 
-    private func publishRecordedAudio(meetingID: String, samples: Int64, partCount: Int) {
-        guard activeMeetingID == meetingID,
-              samples > recordedAudioSamples else { return }
-        recordedAudioSamples = samples
-        recordedAudioPartCount = partCount
-        elapsedMediaMs = samples * 1_000 / MeetingMediaTimeline.sampleRate
-    }
 
     func acknowledgeRecoveredCapture(meetingID: String) {
-        guard recoveredCapture?.meetingID == meetingID else { return }
-        recoveredCapture = nil
+        recoveredCaptures.removeAll { $0.meetingID == meetingID }
     }
 
     func completeFinalization() {
-        finalizationProgress = 1
         finalizationDetail = ""
         status = .ready
     }
 
-    func failFinalization(_ error: Error) {
+    func failFinalization(_ error: Error) async {
+        // Initial persistence may fail before finalizeTranscript() releases the
+        // live model. Never leave its gate held for subsequent meetings/retries.
+        for track in tracks.values { await track.cancel(removeAudio: false) }
+        for task in trackFinalizations.values { await task.value }
         logDiagnostic(error, operation: "finalization")
         failure = userFacingFailure(for: error, operation: "finalization")
-        finalizationProgress = 0
         finalizationDetail = AppLanguage.localized(
             "meeting.capture.finalization.cleanupFailed",
             defaultValue: AppLanguage.current == .english
@@ -649,24 +1477,39 @@ final class MeetingCaptureCoordinator: ObservableObject {
         failure = message
     }
 
-    func reportFailure(_ error: Error) {
-        logDiagnostic(error, operation: "reported")
-        failure = userFacingFailure(for: error, operation: "reported")
+    func reportFailure(
+        _ error: Error,
+        message: String? = nil,
+        file: String = #fileID,
+        line: Int = #line,
+        function: String = #function
+    ) {
+        logDiagnostic(error, operation: "reported", file: file, line: line, function: function)
+        failure = message ?? userFacingFailure(for: error, operation: "reported")
     }
 
     func dismissFailure() {
         failure = nil
     }
-    private func logDiagnostic(_ error: Error, operation: String) {
+    private func logDiagnostic(
+        _ error: Error,
+        operation: String,
+        file: String = #fileID,
+        line: Int = #line,
+        function: String = #function
+    ) {
         reportableError = error
         DiagnosticRecorder.shared.record(
             error: error,
             component: "meeting.capture",
-            operation: operation
+            operation: "\(operation).session.\(captureDiagnosticID)",
+            file: file,
+            line: line,
+            function: function
         )
         let diagnostic = error as NSError
         logger.error(
-            "Capture failure operation=\(operation, privacy: .public) domain=\(diagnostic.domain, privacy: .public) code=\(diagnostic.code, privacy: .public) description=\(diagnostic.localizedDescription, privacy: .private)"
+            "Capture failure session=\(self.captureDiagnosticID, privacy: .public) operation=\(operation, privacy: .public) domain=\(diagnostic.domain, privacy: .public) code=\(diagnostic.code, privacy: .public)"
         )
     }
 
@@ -685,7 +1528,17 @@ final class MeetingCaptureCoordinator: ObservableObject {
     }
 
     private func configureSession(voiceProcessing: Bool) async throws {
-        try await MeetingAudioSessionController.shared.activateForRecording(voiceProcessing: voiceProcessing)
+        ownsRecordingAudioSession = true
+        try await MeetingAudioSessionController.shared.activateForRecording(
+            voiceProcessing: voiceProcessing,
+            coexistWithAppAudio: Self.supportsAppAudioAPI
+        )
+    }
+
+    private func deactivateRecordingSession() async {
+        guard ownsRecordingAudioSession else { return }
+        ownsRecordingAudioSession = false
+        await MeetingAudioSessionController.shared.deactivate()
     }
 
     private static func isValidFormat(_ format: AVAudioFormat) -> Bool {
@@ -693,7 +1546,7 @@ final class MeetingCaptureCoordinator: ObservableObject {
     }
 
     enum CaptureError: LocalizedError {
-        case microphoneDenied, unsupportedLanguage, invalidState, transcriptFinalizationTimeout, invalidAudioFormat
+        case microphoneDenied, unsupportedLanguage, invalidState, transcriptFinalizationTimeout, invalidAudioFormat, noAudioSource
 
         var errorDescription: String? {
             errorDescription(language: .current)
@@ -701,6 +1554,13 @@ final class MeetingCaptureCoordinator: ObservableObject {
 
         func errorDescription(language: AppLanguage) -> String {
             switch self {
+            case .noAudioSource:
+                return AppLanguage.localized(
+                    "error.meeting.capture.noAudioSource",
+                    defaultValue: language == .english ? "Enable the microphone or select app audio before recording." : "녹음 전에 마이크를 켜거나 앱 오디오를 선택하세요.",
+                    language: language,
+                    comment: "Recording requires at least one selected audio source."
+                )
             case .microphoneDenied:
                 return AppLanguage.localized(
                     "error.meeting.capture.microphoneDenied",

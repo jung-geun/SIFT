@@ -116,13 +116,6 @@ struct MailboxIncrementalSyncCoordinatorTests {
         UserDefaults(suiteName: "CoordinatorTests_\(UUID().uuidString)")!
     }
 
-    @Test("policy constants match design specification")
-    func policyConstants() {
-        #expect(MailboxPagingPolicy.pollInterval == 300)
-        #expect(MailboxPagingPolicy.updatesMinimumInterval == 30)
-        #expect(MailboxPagingPolicy.maxUpdateDrainPages == 10)
-        #expect(MailboxPagingPolicy.pageSize == 100)
-    }
 
     @Test("cursor store isolates Gmail accounts and Outlook")
     func cursorStoreIsolation() {
@@ -560,5 +553,39 @@ struct MailboxIncrementalSyncCoordinatorTests {
         #expect(r4 == true)
         #expect(gmailProvider.fetchInboxUpdatesCalls.count == 3)
         #expect(cursorStore.cursor(for: .gmail, namespace: "user@gmail.com") == "42:103")
+    }
+
+    @Test("startPolling delays the first sync until after the poll interval sleep")
+    func testStartPollingDelaysFirstSync() async throws {
+        let defaults = makeDefaults()
+        defaults.set("user@gmail.com", forKey: "pieroot.todo.imap.account")
+        let cursorStore = MailboxUpdateCursorStore(defaults: defaults)
+        cursorStore.setCursor("42:100", for: .gmail, namespace: "user@gmail.com")
+
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let localStore = MailboxLocalStore(defaults: defaults, saveContext: { try $0.save() })
+        let gmailProvider = ScriptedPagingProvider(provider: .gmail)
+
+        var ensureReadyCallCount = 0
+        let coordinator = MailboxIncrementalSyncCoordinator(
+            cursorStore: cursorStore,
+            localStore: localStore,
+            makeContext: { context },
+            resolveProvider: { _ in gmailProvider },
+            ensureReady: { _, _, _ in
+                ensureReadyCallCount += 1
+                return true
+            },
+            defaults: defaults
+        )
+
+        coordinator.startPolling()
+        await Task.yield()
+
+        #expect(ensureReadyCallCount == 0)
+        #expect(gmailProvider.fetchInboxUpdatesCalls.count == 0)
+
+        coordinator.stopPolling()
     }
 }

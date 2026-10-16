@@ -1,0 +1,38 @@
+/* Scoped to the public workflow explanation; standalone viewers keep their own styles. */
+.document-content a > img[src*="workflows/"] {
+  display: block;
+  width: 100%;
+  height: auto;
+  margin: 24px 0 12px;
+  border: 1px solid #dce1e9;
+  border-radius: 14px;
+  background: #f8fafc;
+}
+.workflow-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  margin: 12px 0 28px;
+  padding: 14px 16px;
+  border: 1px solid #dce1e9;
+  border-radius: 12px;
+  background: #f7f8fc;
+}
+.workflow-actions a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  font-size: 14px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.workflow-actions a:focus-visible,
+.document-content a:has(> img[src*="workflows/"]):focus-visible {
+  outline: 3px solid #5066d8;
+  outline-offset: 4px;
+  border-radius: 8px;
+}
+@media (max-width: 540px) {
+  .workflow-actions { gap: 6px 14px; padding: 10px 12px; }
+  .workflow-actions a { flex-basis: 100%; }
+}

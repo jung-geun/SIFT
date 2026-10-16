@@ -1,90 +1,276 @@
 {
-  "sourceLanguage" : "ko",
-  "strings" : {
-    "CFBundleDisplayName" : {
-      "comment" : "Application display name.",
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "SIFT: To-Do List"
+  "sourceLanguage": "ko",
+  "strings": {
+    "CFBundleDisplayName": {
+      "comment": "Bundle display name",
+      "extractionState": "extracted_with_value",
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "SIFT: To-Do List"
           }
         },
-        "ko" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "SIFT: To-Do List"
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "SIFT: To-Do List"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "SIFT: Lista de tareas"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "SIFT: To-Doリスト"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "SIFT：待办事项清单"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "SIFT : Liste de tâches"
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "SIFT: elenco attività"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "SIFT: Aufgabenliste"
           }
         }
       }
     },
-    "CFBundleName" : {
-      "comment" : "Bundle name",
-      "extractionState" : "extracted_with_value",
-      "localizations" : {
-        "ko" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "todo"
+    "CFBundleName": {
+      "comment": "Bundle name",
+      "extractionState": "extracted_with_value",
+      "localizations": {
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "todo"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "todo"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "todo"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "todo"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "todo"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "todo"
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "todo"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "todo"
           }
         }
       }
     },
-    "NSCalendarsFullAccessUsageDescription" : {
-      "comment" : "Reason the app requests full calendar access.",
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Calendar access is required to add to-do deadlines and read your schedule."
+    "NSCalendarsFullAccessUsageDescription": {
+      "comment": "Reason the app requests full calendar access.",
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Calendar access is required to add to-do deadlines and read your schedule."
           }
         },
-        "ko" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "할 일 마감을 캘린더에 등록하고 일정을 읽어오기 위해 캘린더 접근이 필요합니다."
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "할 일 마감을 캘린더에 등록하고 일정을 읽어오기 위해 캘린더 접근이 필요합니다."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Se necesita acceso al calendario para añadir los plazos de las tareas y consultar tu agenda."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "To-Doの期限をカレンダーに追加し、予定を読み込むために、カレンダーへのアクセスが必要です。"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "需要访问日历，以添加待办事项的截止时间并读取你的日程。"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "L’accès au calendrier est nécessaire pour y ajouter les échéances des tâches et consulter votre emploi du temps."
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "L'accesso al calendario è necessario per aggiungere le scadenze delle attività e leggere i tuoi impegni."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kalenderzugriff ist erforderlich, um Aufgabenfristen im Kalender einzutragen und deinen Zeitplan zu lesen."
           }
         }
       }
     },
-    "NSMicrophoneUsageDescription" : {
-      "comment" : "Reason the app requests microphone access.",
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Microphone access is required to record meetings and transcribe them on this device."
+    "NSMicrophoneUsageDescription": {
+      "comment": "Reason the app requests microphone access.",
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Microphone access is required to record meetings and transcribe them on this device."
           }
         },
-        "ko" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "회의를 녹음하고 기기에서 전사하려면 마이크 접근이 필요합니다."
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "회의를 녹음하고 기기에서 전사하려면 마이크 접근이 필요합니다."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Se necesita acceso al micrófono para grabar reuniones y transcribirlas en este dispositivo."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "会議を録音し、このデバイスで文字起こしするために、マイクへのアクセスが必要です。"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "需要访问麦克风，以录制会议并在此设备上转写。"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "L’accès au microphone est nécessaire pour enregistrer les réunions et les transcrire sur cet appareil."
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "L'accesso al microfono è necessario per registrare le riunioni e trascriverle su questo dispositivo."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mikrofonzugriff ist erforderlich, um Besprechungen aufzuzeichnen und auf diesem Gerät zu transkribieren."
           }
         }
       }
     },
-    "NSSpeechRecognitionUsageDescription" : {
-      "comment" : "Reason the app requests speech recognition access.",
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Speech recognition access is required to transcribe recorded meetings on this device."
+    "NSSpeechRecognitionUsageDescription": {
+      "comment": "Reason the app requests speech recognition access.",
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Speech recognition access is required to transcribe recorded meetings on this device."
           }
         },
-        "ko" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "녹음 중인 회의를 기기에서 전사하려면 음성 인식 접근이 필요합니다."
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "녹음 중인 회의를 기기에서 전사하려면 음성 인식 접근이 필요합니다."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Se necesita acceso al reconocimiento de voz para transcribir reuniones grabadas en este dispositivo."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "録音した会議をこのデバイスで文字起こしするために、音声認識へのアクセスが必要です。"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "需要使用语音识别，以在此设备上转写已录制的会议。"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "L’accès à la reconnaissance vocale est nécessaire pour transcrire les réunions enregistrées sur cet appareil."
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "L'accesso al riconoscimento vocale è necessario per trascrivere le riunioni registrate su questo dispositivo."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Zugriff auf die Spracherkennung ist erforderlich, um aufgezeichnete Besprechungen auf diesem Gerät zu transkribieren."
           }
         }
       }
     }
   },
-  "version" : "1.0"
+  "version": "1.0"
 }

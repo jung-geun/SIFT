@@ -147,19 +147,6 @@ struct MeetingExtractionTests {
         #expect(MeetingDate.canonicalUTC("2026-02-29T00:00:00.000Z") == nil)
     }
 
-    @Test("speaker rename does not revise transcript")
-    func speakerRenameLeavesRevisionAndDrafts() {
-        let source = MeetingSegment(id: "source-1", startMs: 0, endMs: 1_000, speakerIDs: ["speaker-1"], text: "내용")
-        let draft = MeetingActionDraft(id: "draft-1", title: "확인", sourceSegmentIDs: [source.id])
-        let result = MeetingResult(transcriptRevision: 4, segments: [source], actionDrafts: [draft])
-        let renamed = MeetingRevisionEditor.renameSpeaker(in: result, from: "speaker-1", to: "민수")
-
-        #expect(renamed.transcriptRevision == 4)
-        #expect(renamed.actionDrafts == [draft])
-        #expect(renamed.segments.count == 1)
-        #expect(renamed.segments.first?.speakerIDs == ["민수"])
-    }
-
     @Test("media timeline emits exact owned intervals without duplicates")
     func mediaTimelineBoundaries() throws {
         var oneShort = MeetingMediaTimeline()

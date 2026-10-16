@@ -8,13 +8,19 @@ struct MeetingAnalysisRoutingTests {
     private let keys = [
         SettingsStore.betaFoundationModelsEnabledKey,
         SettingsStore.betaOnDeviceModelEnabledKey,
-        SettingsStore.betaGeminiEnabledKey,
+        SettingsStore.betaOpenAIEnabledKey,
         SettingsStore.betaSelectedProviderKey
     ]
 
     private func reset() {
         keys.forEach { UserDefaults.standard.removeObject(forKey: $0) }
-        GeminiProviderService.deleteAPIKey()
+    }
+
+    private func disableAllProviders() {
+        UserDefaults.standard.set(false, forKey: SettingsStore.betaFoundationModelsEnabledKey)
+        UserDefaults.standard.set(false, forKey: SettingsStore.betaOnDeviceModelEnabledKey)
+        UserDefaults.standard.set(false, forKey: SettingsStore.betaOpenAIEnabledKey)
+        UserDefaults.standard.removeObject(forKey: SettingsStore.betaSelectedProviderKey)
     }
 
     private func result() -> MeetingResult {
@@ -26,6 +32,7 @@ struct MeetingAnalysisRoutingTests {
         try await AIProviderTestIsolation.shared.withLock {
             reset()
             defer { reset() }
+            disableAllProviders()
             let outcome = try await MeetingAnalysisEngine().analyze(
                 meetingID: "123e4567-e89b-12d3-a456-426614174000",
                 result: result(),
@@ -35,18 +42,21 @@ struct MeetingAnalysisRoutingTests {
         }
     }
 
-    @Test("Gemini without credentials preserves credential reason")
-    func missingGeminiCredentialReason() async throws {
+    @Test("remote priority selection keeps meeting analysis local")
+    func remoteSelectionUsesLocalMeetingRules() async throws {
         try await AIProviderTestIsolation.shared.withLock {
             reset()
             defer { reset() }
-            SettingsStore.shared.setBetaProvider(.gemini, enabled: true)
+            disableAllProviders()
+            SettingsStore.shared.setBetaProvider(.openAI, enabled: true)
             let outcome = try await MeetingAnalysisEngine().analyze(
                 meetingID: "123e4567-e89b-12d3-a456-426614174000",
                 result: result(),
                 language: .korean
             )
-            #expect(outcome.executionPath == .rules(.credentialMissing))
+            #expect(outcome.executionPath == .rules(.providerNotApplicable))
+            #expect(outcome.engineSource == .heuristic)
+            #expect(outcome.result.segments == result().segments)
         }
     }
 }

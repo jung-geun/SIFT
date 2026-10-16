@@ -17,6 +17,9 @@ nonisolated struct DiagnosticEvent: Codable, Equatable, Sendable {
     let error: DiagnosticErrorFrame?
     let underlyingErrors: [DiagnosticErrorFrame]
     let runtime: DiagnosticRuntimeState?
+    /// Feature settings at the error timestamp. Optional for pre-v3 archives.
+    let settings: [String: Bool]?
+
 }
 
 nonisolated struct DiagnosticReportArchive: Codable, Equatable, Sendable {
@@ -115,7 +118,8 @@ nonisolated final class DiagnosticReportStore {
                             userInfoKeys: []
                         ),
                         underlyingErrors: [],
-                        runtime: nil
+                        runtime: nil,
+                        settings: nil
                     )
                 },
                 metricPayloads: legacy.metricPayloads
@@ -282,7 +286,8 @@ nonisolated final class DiagnosticRecorder: @unchecked Sendable {
             source: DiagnosticSource(file: file, line: line, function: function),
             error: chain.root,
             underlyingErrors: chain.underlying,
-            runtime: DiagnosticEnvironment.runtimeState()
+            runtime: DiagnosticEnvironment.runtimeState(),
+            settings: DiagnosticEnvironment.settingsSnapshot()
         )
         let archive = store.append(
             event,
@@ -531,7 +536,7 @@ final class DiagnosticReportService: ObservableObject {
         }
         let device = DiagnosticEnvironment.deviceInfo()
         let app = DiagnosticEnvironment.appInfo()
-        let settings = DiagnosticEnvironment.settingsSnapshot()
+        let settings = scopedEvents[0].settings
         let logs = await recentLogsForReport()
         guard collectionEnabled else { return nil }
 
@@ -671,13 +676,15 @@ final class DiagnosticReportService: ObservableObject {
 }
 
 nonisolated struct UserDiagnosticReport: Codable {
-    static let currentVersion = 2
+    /// Version 4 includes settings captured at the error timestamp when the
+    /// event was recorded by the current app version.
+    static let currentVersion = 4
 
     let reportVersion: Int
     let generatedAt: Date
     let app: DiagnosticAppInfo
     let device: DiagnosticDeviceInfo
-    let settings: [String: Bool]
+    let settings: [String: Bool]?
     let events: [DiagnosticEvent]
     let metricPayloads: [String]
     let recentLogs: [DiagnosticLogEntry]

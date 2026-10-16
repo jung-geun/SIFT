@@ -2,6 +2,8 @@
   <div class="container footer-inner">
     <a class="brand footer-brand" href="{{ '/' | relative_url }}"><span>SIFT</span></a>
     <nav class="footer-links" aria-label="프로젝트, 도움말 및 정책">
+      <a href="{{ '/workflows.html' | relative_url }}"{% if page.url == '/workflows.html' %} aria-current="page"{% endif %}>작동 방식</a>
+      <a href="{{ '/media.html' | relative_url }}"{% if page.url == '/media.html' %} aria-current="page"{% endif %}>소개 이미지</a>
       <a href="{{ '/changes.html' | relative_url }}"{% if page.url == '/changes.html' %} aria-current="page"{% endif %}>변경사항</a>
       <a href="{{ '/outlook-imap-setup.html' | relative_url }}"{% if page.url == '/outlook-imap-setup.html' %} aria-current="page"{% endif %}>Outlook (레거시 IMAP)</a>
       <a href="{{ '/privacy-policy.html' | relative_url }}"{% if page.url == '/privacy-policy.html' %} aria-current="page"{% endif %}>개인정보 처리방침</a>

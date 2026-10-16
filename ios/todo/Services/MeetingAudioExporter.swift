@@ -2,12 +2,26 @@ import AVFoundation
 import Foundation
 import os
 
+nonisolated struct MeetingAudioTrackExport: Codable, Sendable {
+    let meetingID: String
+    let sourceKind: MeetingAudioTrackKind
+    let sourceLabel: String?
+    let sessionStartSample: Int64
+    let manifest: MeetingAudioManifest
+}
+
+private nonisolated struct MeetingAudioTrackArchive: Codable {
+    let schemaVersion: Int
+    let meetingID: String
+    let tracks: [MeetingAudioTrackExport]
+}
+
 /// Exports a meeting's original recording. Two shapes:
 /// - source archive: the untouched FLAC parts plus manifest.json, zipped, so a
 ///   recording remains recoverable outside the app;
 /// - merged audio: one overlap-free WAV rendered through the logical cursor
 ///   for convenient listening.
-enum MeetingAudioExporter {
+nonisolated enum MeetingAudioExporter {
     private static let logger = Logger(subsystem: "pieroot.todo", category: "MeetingAudioExport")
 
     private static func operationError(stage: String, error: Error) -> ExportError {
@@ -22,6 +36,96 @@ enum MeetingAudioExporter {
         )
         return .operation(stage, error)
     }
+    /// Archives separate original audio directories, never a mixed WAV. The
+    /// catalog's manifests resolve from the archive root with unique namespaces.
+    static func exportTrackArchive(
+        meetingID: String, tracks: [MeetingAudioTrackExport],
+        rootURL: URL = AppDataContainer.meetingDirectory()
+    ) throws -> URL {
+        do {
+            try MeetingCanonicalID.validateMeetingID(meetingID)
+            guard !tracks.isEmpty else { throw ExportError.format }
+            let root = rootURL.standardizedFileURL.resolvingSymlinksInPath()
+            let exports = try makeExportDirectory()
+            let staging = exports.appendingPathComponent("meeting-\(meetingID)-tracks", isDirectory: true)
+            try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true,
+                                                    attributes: [.protectionKey: FileProtectionType.complete])
+            defer { try? FileManager.default.removeItem(at: staging) }
+            var catalog = [MeetingAudioTrackExport]()
+            var ids = Set<String>()
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            for track in tracks {
+                try Task.checkCancellation()
+                try MeetingCanonicalID.validateMeetingID(track.meetingID)
+                guard track.meetingID != meetingID, ids.insert(track.meetingID).inserted,
+                      track.sessionStartSample >= 0,
+                      track.manifest.sampleRate == MeetingMediaTimeline.sampleRate,
+                      track.manifest.totalSamples > 0,
+                      track.manifest.totalSamples <= MeetingMediaTimeline.maximumSamples,
+                      track.sessionStartSample <= MeetingMediaTimeline.maximumSamples - track.manifest.totalSamples,
+                      !track.manifest.parts.isEmpty,
+                      track.manifest.parts.count <= MeetingMediaTimeline.maximumParts,
+                      track.manifest.relativeDirectory.hasPrefix("\(track.meetingID)/"),
+                      !track.manifest.relativeDirectory.split(separator: "/").contains("..") else {
+                    throw ExportError.format
+                }
+                let source = root.appendingPathComponent(track.manifest.relativeDirectory, isDirectory: true)
+                    .standardizedFileURL.resolvingSymlinksInPath()
+                guard source.path.hasPrefix(root.appendingPathComponent(track.meetingID).path + "/") else {
+                    throw ExportError.format
+                }
+                let relative = "tracks/\(track.manifest.relativeDirectory)"
+                let target = staging.appendingPathComponent(relative, isDirectory: true)
+                try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+                var ownedEnd: Int64 = 0
+                for (index, part) in track.manifest.parts.sorted(by: { $0.partIndex < $1.partIndex }).enumerated() {
+                    try Task.checkCancellation()
+                    guard part.partIndex == index, part.fileName == String(format: "part-%02d.flac", index),
+                          part.ownedStartSample == ownedEnd, part.ownedEndSample > ownedEnd,
+                          part.ownedEndSample <= track.manifest.totalSamples,
+                          part.partStartSample == max(0, ownedEnd - MeetingMediaTimeline.overlapSamples),
+                          part.ownedEndSample - ownedEnd <= MeetingMediaTimeline.ownedSamplesPerPart else {
+                        throw ExportError.format
+                    }
+                    let original = source.appendingPathComponent(part.fileName).resolvingSymlinksInPath()
+                    guard original.path.hasPrefix(source.path + "/") else { throw ExportError.format }
+                    let file = try AVAudioFile(forReading: original)
+                    guard file.processingFormat.sampleRate == Double(MeetingMediaTimeline.sampleRate),
+                          file.processingFormat.channelCount == 1,
+                          file.length >= part.ownedEndSample - part.partStartSample else { throw ExportError.format }
+                    ownedEnd = part.ownedEndSample
+                    try FileManager.default.copyItem(at: original, to: target.appendingPathComponent(part.fileName))
+                }
+                guard ownedEnd == track.manifest.totalSamples else { throw ExportError.format }
+                let manifest = MeetingAudioManifest(relativeDirectory: relative,
+                    sampleRate: track.manifest.sampleRate, totalSamples: track.manifest.totalSamples,
+                    parts: track.manifest.parts, captureSourceMetadata: track.manifest.captureSourceMetadata)
+                try encoder.encode(manifest).write(to: target.appendingPathComponent("manifest.json"))
+                catalog.append(MeetingAudioTrackExport(meetingID: track.meetingID, sourceKind: track.sourceKind,
+                    sourceLabel: track.sourceLabel, sessionStartSample: track.sessionStartSample, manifest: manifest))
+            }
+            try encoder.encode(MeetingAudioTrackArchive(schemaVersion: 1, meetingID: meetingID, tracks: catalog))
+                .write(to: staging.appendingPathComponent("meeting.json"))
+            var coordinatorError: NSError?
+            var copyError: Error?
+            let zip = exports.appendingPathComponent("meeting-\(meetingID)-tracks.zip")
+            NSFileCoordinator().coordinate(readingItemAt: staging, options: .forUploading, error: &coordinatorError) { zipped in
+                do { try FileManager.default.copyItem(at: zipped, to: zip) }
+                catch { copyError = error }
+            }
+            if let coordinatorError { throw coordinatorError }
+            if let copyError { throw copyError }
+            return zip
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as ExportError {
+            throw error
+        } catch {
+            throw operationError(stage: "sourceTracksArchive", error: error)
+        }
+    }
+
     static func exportSourceArchive(manifest: MeetingAudioManifest) throws -> URL {
         do {
             return try exportSourceArchiveImpl(manifest: manifest)

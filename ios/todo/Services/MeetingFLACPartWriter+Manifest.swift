@@ -1,7 +1,7 @@
 import Foundation
 
 extension MeetingFLACPartWriter {
-    func manifest(relativeDirectory: String) -> MeetingAudioManifest {
+    nonisolated func manifest(relativeDirectory: String) -> MeetingAudioManifest {
         MeetingAudioManifest(
             relativeDirectory: relativeDirectory,
             sampleRate: MeetingMediaTimeline.sampleRate,

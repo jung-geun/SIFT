@@ -6,56 +6,30 @@ import Testing
 @MainActor
 struct AIProviderAuthTests {
 
-    private func reset() {
-        UserDefaults.standard.removeObject(forKey: "selectedAIProvider")
-        UserDefaults.standard.removeObject(forKey: "selectedAIProvider.isLocal")
-        SettingsStore.setTestCloudValue(nil, forKey: "selectedAIProvider")
-        UserDefaults.standard.set(false, forKey: "pieroot.todo.iCloudSyncEnabled")
-        GeminiProviderService.deleteAPIKey()
-    }
-
-    @Test("지원하는 TODO 정렬 AI에 Gemini가 포함된다")
-    func supportedProvidersIncludeGemini() async {
+    @Test("공유 provider 선택은 로컬 전용 빌드에서도 저장값을 유지한다")
+    func sharedProviderSelectionRespectsCloudCapability() async {
         await AIProviderTestIsolation.shared.withLock {
-            reset()
-            #expect(PersonaAIProvider.allCases == [.foundationModels, .onDevice, .gemini])
-        }
-    }
-
-    @Test("알 수 없는 저장값은 AFM 요청으로 정규화된 RoutedIntelligenceEngine을 사용한다")
-    func factoryFallsBackForUnknownStoredProvider() async {
-        await AIProviderTestIsolation.shared.withLock {
-            reset()
-            defer { reset() }
-            UserDefaults.standard.set("legacy-cloud-provider", forKey: "selectedAIProvider")
-
-            let service = IntelligenceServiceFactory.makeService()
-            #expect(String(describing: type(of: service)).contains("RoutedIntelligenceEngine"))
-        }
-    }
-
-    @Test("Gemini 선택값도 RoutedIntelligenceEngine을 사용한다")
-    func factoryUsesRoutedEngineForGemini() async {
-        await AIProviderTestIsolation.shared.withLock {
-            reset()
-            defer { reset() }
-            UserDefaults.standard.set(PersonaAIProvider.gemini.rawValue, forKey: "selectedAIProvider")
-
-            let service = IntelligenceServiceFactory.makeService()
-            #expect(String(describing: type(of: service)).contains("RoutedIntelligenceEngine"))
-        }
-    }
-
-    @Test("공유 selectedAIProvider는 iCloud 값을 우선 읽는다")
-    func selectedProviderPrefersGlobalValueWhenKeyIsShared() async {
-        await AIProviderTestIsolation.shared.withLock {
-            reset()
-            defer { reset() }
-            UserDefaults.standard.set(PersonaAIProvider.gemini.rawValue, forKey: "selectedAIProvider")
+            let defaults = UserDefaults.standard
+            let keys = ["selectedAIProvider", "selectedAIProvider.isLocal", "pieroot.todo.testCloud.selectedAIProvider"]
+            let savedValues = keys.map { ($0, defaults.object(forKey: $0)) }
+            defer {
+                for (key, value) in savedValues {
+                    if let value {
+                        defaults.set(value, forKey: key)
+                    } else {
+                        defaults.removeObject(forKey: key)
+                    }
+                }
+            }
+            UserDefaults.standard.set(PersonaAIProvider.openAI.rawValue, forKey: "selectedAIProvider")
             UserDefaults.standard.set(false, forKey: "selectedAIProvider.isLocal")
             SettingsStore.setTestCloudValue(PersonaAIProvider.foundationModels.rawValue, forKey: "selectedAIProvider")
 
+            #if SIFT_LOCAL_ONLY
+            #expect(SettingsStore.selectedProvider() == .openAI)
+            #else
             #expect(SettingsStore.selectedProvider() == .foundationModels)
+            #endif
         }
     }
 }

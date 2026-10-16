@@ -71,23 +71,15 @@ enum FoundationModelsAvailability {
     ) -> String? {
         guard !isAvailable else { return nil }
         if isSimulator {
-            return language == .english
-                ? "Apple Foundation Models are disabled in the simulator. Check Apple Intelligence and Siri settings on a physical device."
-                : "시뮬레이터에서는 Apple Foundation Models를 비활성화합니다. 실기기에서 Apple Intelligence 및 Siri 설정을 확인하세요."
+            return AppLanguage.localized("error.foundationModels.availability.simulator", defaultValue: "Apple Foundation Models are disabled in the simulator. Check Apple Intelligence and Siri settings on a physical device.", language: language)
         }
         guard frameworkLinked, iOSMajorVersion >= 26 else {
-            return language == .english
-                ? "Apple Foundation Models require iOS 26 or later and a build linked with FoundationModels.framework."
-                : "Apple Foundation Models는 iOS 26 이상 및 FoundationModels.framework가 있는 빌드에서만 사용할 수 있습니다."
+            return AppLanguage.localized("error.foundationModels.availability.framework", defaultValue: "Apple Foundation Models require iOS 26 or later and a build linked with FoundationModels.framework.", language: language)
         }
         if iOSMajorVersion >= 27 {
-            return language == .english
-                ? "Apple Foundation Models require an English Siri language with Apple Intelligence enabled. Check Settings > Apple Intelligence & Siri."
-                : "Apple Foundation Models는 현재 Siri AI를 사용할 수 있는 영어권 Siri 언어 및 Apple Intelligence 활성화 환경에서만 사용할 수 있습니다. 설정 > Apple Intelligence 및 Siri에서 언어와 활성화 상태를 확인하세요."
+            return AppLanguage.localized("error.foundationModels.availability.siriLanguage", defaultValue: "Apple Foundation Models require an English Siri language with Apple Intelligence enabled. Check Settings > Apple Intelligence & Siri.", language: language)
         }
-        return language == .english
-            ? "Apple Foundation Models require Apple Intelligence to be available and enabled on this device. Check Settings > Apple Intelligence & Siri."
-            : "Apple Foundation Models는 Apple Intelligence를 사용할 수 있고 활성화된 기기에서만 사용할 수 있습니다. 설정 > Apple Intelligence 및 Siri에서 활성화 상태를 확인하세요."
+        return AppLanguage.localized("error.foundationModels.availability.disabled", defaultValue: "Apple Foundation Models require Apple Intelligence to be available and enabled on this device. Check Settings > Apple Intelligence & Siri.", language: language)
     }
 }
 
@@ -408,7 +400,7 @@ struct FoundationModelsService {
         now: Date,
         language: AppLanguage = .current
     ) async throws -> EmailExtraction? {
-        guard BetaFeaturePolicy().authorizes(.foundationModels, for: .standardAnalysis) else {
+        guard BetaFeaturePolicy().authorizes(.foundationModels, for: .emailAnalysis) else {
             throw IntelligenceRoutingError.backendUnavailable(
                 provider: .foundationModels,
                 reason: RuleFallbackReason.providerDisabled.rawValue
@@ -518,7 +510,7 @@ struct FoundationModelsService {
         body: String,
         language: AppLanguage = .current
     ) async throws -> EmailSummaryResult {
-        guard BetaFeaturePolicy().authorizes(.foundationModels, for: .standardAnalysis) else {
+        guard BetaFeaturePolicy().authorizes(.foundationModels, for: .emailAnalysis) else {
             throw IntelligenceRoutingError.backendUnavailable(
                 provider: .foundationModels,
                 reason: RuleFallbackReason.providerDisabled.rawValue
@@ -686,7 +678,7 @@ struct FoundationModelsService {
         language: AppLanguage,
         transcriptCharCap: Int = 6_000
     ) async throws -> ProviderMeetingExtraction {
-        guard BetaFeaturePolicy().authorizes(.foundationModels, for: .standardAnalysis) else {
+        guard BetaFeaturePolicy().authorizes(.foundationModels, for: .meetingAnalysis) else {
             throw IntelligenceRoutingError.backendUnavailable(
                 provider: .foundationModels,
                 reason: RuleFallbackReason.providerDisabled.rawValue
@@ -893,7 +885,7 @@ struct FoundationModelsService {
         now: Date,
         language: AppLanguage = .current
     ) async throws -> EmailTodoDraft {
-        guard BetaFeaturePolicy().authorizes(.foundationModels, for: .standardAnalysis) else {
+        guard BetaFeaturePolicy().authorizes(.foundationModels, for: .emailAnalysis) else {
             throw IntelligenceRoutingError.backendUnavailable(
                 provider: .foundationModels,
                 reason: RuleFallbackReason.providerDisabled.rawValue
@@ -1077,9 +1069,7 @@ struct FoundationModelsService {
             lines.append("• " + ps.joined(separator: " | "))
         }
         lines.append(
-            language == .english
-                ? "\nReturn the rankings array for these to-dos."
-                : "\n위 할 일들의 우선순위를 rankings 배열로 반환하세요."
+            "\nReturn the rankings array for these to-dos."
         )
         return lines.joined(separator: "\n")
     }
@@ -1099,15 +1089,11 @@ struct FoundationModelsService {
     }
 
     private func narrativeLanguageInstruction(_ language: AppLanguage) -> String {
-        language == .english
-            ? "Write every generated natural-language field in English. Do not translate or invent source facts."
-            : "생성하는 모든 자연어 필드는 한국어로 작성하세요. 입력에 없는 사실을 만들거나 과장하지 마세요."
+        "Write every generated natural-language field in \(language.outputLanguageName). Do not translate or invent source facts."
     }
 
     private func outputLanguageInstruction(_ language: AppLanguage) -> String {
-        language == .english
-            ? "Write every natural-language output field in English. Preserve source email content; do not translate it."
-            : "자연어 출력 필드는 모두 한국어로 작성하세요. 원문 이메일 내용은 번역하지 마세요."
+        "Write every natural-language output field in \(language.outputLanguageName). Preserve source email content; do not translate it."
     }
 }
 @available(iOS 26.0, *)

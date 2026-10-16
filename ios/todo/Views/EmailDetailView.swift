@@ -5,6 +5,7 @@ import SwiftData
 private struct MailConnectionValidation: Sendable {
     let isAuthenticated: Bool
     let hasStoredCredential: Bool
+    let failureMessage: String?
 }
 
 // 4. 이메일 연동
@@ -20,6 +21,8 @@ struct EmailDetailView: View {
     @State private var isConnectingOutlook = false
     @State private var isValidatingGmail = false
     @State private var isValidatingOutlook = false
+    @State private var gmailConnectionFailure: String?
+    @State private var outlookConnectionFailure: String?
     @State private var isFetchingEmails = false
     @State private var imapEmail = ""
     @State private var imapPassword = ""
@@ -60,18 +63,19 @@ struct EmailDetailView: View {
         backgroundEnabled: Bool
     ) async -> MailConnectionValidation {
         guard !account.isEmpty else {
-            return MailConnectionValidation(isAuthenticated: false, hasStoredCredential: false)
+            return MailConnectionValidation(isAuthenticated: false, hasStoredCredential: false, failureMessage: nil)
         }
         do {
-            try await GmailIMAPService.shared.authenticate(
+            try await GmailIMAPService.shared.validateConnection(
                 email: account,
                 backgroundEnabled: backgroundEnabled
             )
-            return MailConnectionValidation(isAuthenticated: true, hasStoredCredential: true)
+            return MailConnectionValidation(isAuthenticated: true, hasStoredCredential: true, failureMessage: nil)
         } catch {
             return MailConnectionValidation(
                 isAuthenticated: false,
-                hasStoredCredential: MailCredentialFailurePolicy.hasStoredCredential(after: error)
+                hasStoredCredential: MailCredentialFailurePolicy.hasStoredCredential(after: error),
+                failureMessage: mailErrorMessage(error)
             )
         }
     }
@@ -81,18 +85,19 @@ struct EmailDetailView: View {
         backgroundEnabled: Bool
     ) async -> MailConnectionValidation {
         guard !account.isEmpty else {
-            return MailConnectionValidation(isAuthenticated: false, hasStoredCredential: false)
+            return MailConnectionValidation(isAuthenticated: false, hasStoredCredential: false, failureMessage: nil)
         }
         do {
-            try await OutlookIMAPService.shared.authenticate(
+            try await OutlookIMAPService.shared.validateConnection(
                 email: account,
                 backgroundEnabled: backgroundEnabled
             )
-            return MailConnectionValidation(isAuthenticated: true, hasStoredCredential: true)
+            return MailConnectionValidation(isAuthenticated: true, hasStoredCredential: true, failureMessage: nil)
         } catch {
             return MailConnectionValidation(
                 isAuthenticated: false,
-                hasStoredCredential: MailCredentialFailurePolicy.hasStoredCredential(after: error)
+                hasStoredCredential: MailCredentialFailurePolicy.hasStoredCredential(after: error),
+                failureMessage: mailErrorMessage(error)
             )
         }
     }
@@ -118,13 +123,6 @@ struct EmailDetailView: View {
         nonmutating set { saveSetting(key: "pieroot.todo.emailRefreshHour", value: newValue) }
     }
 
-    private var canEnableGeminiEmailAnalysis: Bool {
-        SettingsStore.betaProviderEnabled(.gemini)
-            && SettingsStore.betaSelectedProvider() == .gemini
-            && GeminiProviderService.storedAPIKey != nil
-    }
-
-
     var body: some View {
         Form {
             Section {
@@ -149,49 +147,52 @@ struct EmailDetailView: View {
 
                 if !isGmailAuthenticated {
                     if isValidatingGmail {
-                        storedCredentialValidationPanel(provider: "Gmail")
+                        storedCredentialValidationPanel()
                     } else if hasGmailStoredCredential {
                         storedCredentialRetryPanel(
                             provider: "Gmail",
                             isConnecting: isConnectingGmail,
+                            failureMessage: gmailConnectionFailure,
                             retry: { Task { await reconnectGmail() } },
                             replace: { hasGmailStoredCredential = false }
                         )
                     } else {
-                        VStack(alignment: .leading, spacing: 10) {
-                            TextField("Gmail 이메일 주소", text: $imapEmail)
-                                .textInputAutocapitalization(.never)
-                                .autocorrectionDisabled()
-                                .keyboardType(.emailAddress)
-                            SecureField("Google App Password", text: $imapPassword)
-                                .textInputAutocapitalization(.never)
-                                .autocorrectionDisabled()
-                            Text("일반 Google 비밀번호가 아닌 App Password를 입력하세요. 저장 후 앱에서는 다시 표시하거나 복사할 수 없습니다.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            Toggle("자동 백그라운드 메일 불러오기", isOn: Binding(
-                                get: { imapBackgroundEnabled },
-                                set: { enabled in
-                                    if enabled {
-                                        showBackgroundWarning = true
+                        DisclosureGroup("Gmail IMAP 연결") {
+                            VStack(alignment: .leading, spacing: 10) {
+                                TextField("Gmail 이메일 주소", text: $imapEmail)
+                                    .textInputAutocapitalization(.never)
+                                    .autocorrectionDisabled()
+                                    .keyboardType(.emailAddress)
+                                SecureField("Google App Password", text: $imapPassword)
+                                    .textInputAutocapitalization(.never)
+                                    .autocorrectionDisabled()
+                                Text("일반 Google 비밀번호가 아닌 App Password를 입력하세요. 저장 후 앱에서는 다시 표시하거나 복사할 수 없습니다.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Toggle("자동 백그라운드 메일 불러오기", isOn: Binding(
+                                    get: { imapBackgroundEnabled },
+                                    set: { enabled in
+                                        if enabled {
+                                            showBackgroundWarning = true
+                                        } else {
+                                            imapBackgroundEnabled = false
+                                        }
+                                    }
+                                ))
+                                Button {
+                                    Task { await connectGmail() }
+                                } label: {
+                                    if isConnectingGmail {
+                                        HStack(spacing: 8) {
+                                            ProgressView().controlSize(.small)
+                                            Text("연결 중…")
+                                        }
                                     } else {
-                                        imapBackgroundEnabled = false
+                                        Label("Gmail IMAP 연결", systemImage: "plus.circle")
                                     }
                                 }
-                            ))
-                            Button {
-                                Task { await connectGmail() }
-                            } label: {
-                                if isConnectingGmail {
-                                    HStack(spacing: 8) {
-                                        ProgressView().controlSize(.small)
-                                        Text("연결 중…")
-                                    }
-                                } else {
-                                    Label("Gmail IMAP 연결", systemImage: "plus.circle")
-                                }
+                                .disabled(isConnectingGmail || imapEmail.isEmpty || imapPassword.isEmpty)
                             }
-                            .disabled(isConnectingGmail || imapEmail.isEmpty || imapPassword.isEmpty)
                         }
                     }
                 }
@@ -209,92 +210,95 @@ struct EmailDetailView: View {
 
                 if !isOutlookAuthenticated {
                     if isValidatingOutlook {
-                        storedCredentialValidationPanel(provider: "Outlook")
+                        storedCredentialValidationPanel()
                     } else if hasOutlookStoredCredential {
                         storedCredentialRetryPanel(
                             provider: "Outlook",
                             isConnecting: isConnectingOutlook,
+                            failureMessage: outlookConnectionFailure,
                             retry: { Task { await reconnectOutlook() } },
                             replace: { hasOutlookStoredCredential = false }
                         )
                     } else {
-                        VStack(alignment: .leading, spacing: 10) {
-                            TextField(
-                                AppLanguage.localized(
-                                    "mail.connection.outlook.emailPlaceholder",
-                                    defaultValue: "Outlook 이메일 주소",
-                                    language: .current,
-                                    comment: "Outlook email field placeholder"
-                                ),
-                                text: $outlookEmail
-                            )
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                            .keyboardType(.emailAddress)
-                            SecureField(
-                                AppLanguage.localized(
-                                    "mail.connection.outlook.passwordPlaceholder",
-                                    defaultValue: "Outlook App Password",
-                                    language: .current,
-                                    comment: "Outlook password field placeholder"
-                                ),
-                                text: $outlookPassword
-                            )
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                            Text(
-                                AppLanguage.localized(
-                                    "mail.connection.outlook.legacyNotice",
-                                    defaultValue: "Outlook IMAP may require an App Password and can be unavailable for some account policies.",
-                                    language: .current,
-                                    comment: "Outlook legacy connection notice"
-                                )
-                            )
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            Button {
-                                showOutlookHelp = true
-                            } label: {
-                                Label(
+                        DisclosureGroup("Outlook IMAP 연결") {
+                            VStack(alignment: .leading, spacing: 10) {
+                                TextField(
                                     AppLanguage.localized(
-                                        "mail.connection.outlook.helpButton",
-                                        defaultValue: "설정 가이드 보기",
+                                        "mail.connection.outlook.emailPlaceholder",
+                                        defaultValue: "Outlook 이메일 주소",
                                         language: .current,
-                                        comment: "Outlook setup help button"
+                                        comment: "Outlook email field placeholder"
                                     ),
-                                    systemImage: "questionmark.circle"
+                                    text: $outlookEmail
                                 )
-                                .font(.caption.weight(.semibold))
-                            }
-                            .buttonStyle(.plain)
-                            .foregroundStyle(AppTheme.accent)
-
-                            Button {
-                                Task { await connectOutlook() }
-                            } label: {
-                                if isConnectingOutlook {
-                                    HStack(spacing: 8) {
-                                        ProgressView().controlSize(.small)
-                                        Text(AppLanguage.localized(
-                                            "연결 중…",
-                                            defaultValue: "Connecting…",
-                                            language: .current,
-                                            comment: "Outlook IMAP connection progress."
-                                        ))
-                                    }
-                                } else {
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                                .keyboardType(.emailAddress)
+                                SecureField(
+                                    AppLanguage.localized(
+                                        "mail.connection.outlook.passwordPlaceholder",
+                                        defaultValue: "Outlook App Password",
+                                        language: .current,
+                                        comment: "Outlook password field placeholder"
+                                    ),
+                                    text: $outlookPassword
+                                )
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                                Text(
+                                    AppLanguage.localized(
+                                        "mail.connection.outlook.legacyNotice",
+                                        defaultValue: "Outlook IMAP may require an App Password and can be unavailable for some account policies.",
+                                        language: .current,
+                                        comment: "Outlook legacy connection notice"
+                                    )
+                                )
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                Button {
+                                    showOutlookHelp = true
+                                } label: {
                                     Label(
                                         AppLanguage.localized(
-                                            "Outlook IMAP 연결",
-                                            defaultValue: "Connect Outlook IMAP",
+                                            "mail.connection.outlook.helpButton",
+                                            defaultValue: "설정 가이드 보기",
                                             language: .current,
-                                            comment: "Outlook IMAP connection action."
+                                            comment: "Outlook setup help button"
                                         ),
-                                        systemImage: "plus.circle"
+                                        systemImage: "questionmark.circle"
                                     )
+                                    .font(.caption.weight(.semibold))
                                 }
+                                .buttonStyle(.plain)
+                                .foregroundStyle(AppTheme.accent)
+
+                                Button {
+                                    Task { await connectOutlook() }
+                                } label: {
+                                    if isConnectingOutlook {
+                                        HStack(spacing: 8) {
+                                            ProgressView().controlSize(.small)
+                                            Text(AppLanguage.localized(
+                                                "연결 중…",
+                                                defaultValue: "Connecting…",
+                                                language: .current,
+                                                comment: "Outlook IMAP connection progress."
+                                            ))
+                                        }
+                                    } else {
+                                        Label(
+                                            AppLanguage.localized(
+                                                "Outlook IMAP 연결",
+                                                defaultValue: "Connect Outlook IMAP",
+                                                language: .current,
+                                                comment: "Outlook IMAP connection action."
+                                            ),
+                                            systemImage: "plus.circle"
+                                        )
+                                    }
+                                }
+                                .disabled(isConnectingOutlook || outlookEmail.isEmpty || outlookPassword.isEmpty)
                             }
-                            .disabled(isConnectingOutlook || outlookEmail.isEmpty || outlookPassword.isEmpty)
                         }
                     }
                 }
@@ -302,59 +306,11 @@ struct EmailDetailView: View {
                 if isGmailAuthenticated {
                     VStack(alignment: .leading, spacing: 4) {
                         Toggle("메일 자동 분석", isOn: settingsBinding(key: "pieroot.todo.emailAutoAnalysisEnabled", defaultValue: true))
-                        scopeBadge(for: "pieroot.todo.emailAutoAnalysisEnabled", iCloudSyncEnabled: iCloudSyncEnabled)
-                    }
-                    if canEnableGeminiEmailAnalysis {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Toggle(
-                                AppLanguage.localized(
-                                    "mail.analysis.geminiConsent",
-                                    defaultValue: AppLanguage.current == .english
-                                        ? "Allow Gemini to summarize email bodies"
-                                        : "Gemini에 메일 본문 요약 허용",
-                                    language: .current,
-                                    comment: "Explicit opt-in for sending email bodies to Gemini."
-                                ),
-                                isOn: settingsBinding(
-                                    key: "pieroot.todo.providerEmailAnalysisEnabled",
-                                    defaultValue: false
-                                )
-                            )
-                            Text(
-                                AppLanguage.localized(
-                                    "mail.analysis.geminiConsentDetail",
-                                    defaultValue: AppLanguage.current == .english
-                                        ? "When enabled, the selected Gmail message body is sent to Gemini using your API key."
-                                        : "켜면 선택한 Gmail 메일 본문이 API 키로 Gemini에 전송됩니다.",
-                                    language: .current,
-                                    comment: "Explains the Gemini email-body sharing consent."
-                                )
-                            )
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            scopeBadge(
-                                for: "pieroot.todo.providerEmailAnalysisEnabled",
-                                iCloudSyncEnabled: iCloudSyncEnabled
-                            )
-                        }
                     }
                 }
 
                 if isAnyMailAuthenticated {
                     DisclosureGroup(isExpanded: $showEmailPeriod) {
-                        HStack {
-                            Label("마지막 동기화", systemImage: "clock.arrow.circlepath")
-                            Spacer()
-                            if lastEmailFetchTimestamp > 0 {
-                                Text(Date(timeIntervalSince1970: lastEmailFetchTimestamp), style: .relative)
-                                    .foregroundStyle(.secondary)
-                                    .font(.subheadline)
-                            } else {
-                                Text("없음")
-                                    .foregroundStyle(.secondary)
-                                    .font(.subheadline)
-                            }
-                        }
 
                         VStack(alignment: .leading, spacing: 4) {
                             Picker("자동 동기화 시각", selection: settingsBinding(key: "pieroot.todo.emailRefreshHour", defaultValue: 7) { _ in
@@ -365,7 +321,6 @@ struct EmailDetailView: View {
                                 }
                             }
                             .pickerStyle(.menu)
-                            scopeBadge(for: "pieroot.todo.emailRefreshHour", iCloudSyncEnabled: iCloudSyncEnabled)
                         }
 
                         VStack(alignment: .leading, spacing: 4) {
@@ -388,7 +343,6 @@ struct EmailDetailView: View {
                             )
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
-                            scopeBadge(for: EmailAnalysisLookbackPolicy.lookbackSettingKey, iCloudSyncEnabled: iCloudSyncEnabled)
                         }
                     } label: {
                         HStack {
@@ -413,33 +367,27 @@ struct EmailDetailView: View {
             } footer: {
                 Text(
                     isGmailAuthenticated
-                        ? "'메일 자동 분석'을 켜면 연결된 Gmail을 분석해 할 일 후보를 자동으로 정리합니다. 실행 시각은 기기 상태나 네트워크 상황에 따라 달라질 수 있습니다."
-                        : "연결된 메일 계정으로 수동 메일 확인 및 받은편지함 조회가 가능합니다."
+                        ? AppLanguage.localized("mail.connection.automaticFooter", defaultValue: "'메일 자동 분석'을 켜면 연결된 Gmail을 분석해 할 일 후보를 자동으로 정리합니다. 실행 시각은 기기 상태나 네트워크 상황에 따라 달라질 수 있습니다.", language: .current, comment: "Gmail automatic analysis settings explanation.")
+                        : AppLanguage.localized("mail.connection.manualFooter", defaultValue: "연결된 메일 계정으로 수동 메일 확인 및 받은편지함 조회가 가능합니다.", language: .current, comment: "Connected mail accounts support manual refresh and inbox access.")
                 )
             }
 
-            if isGmailAuthenticated {
+            if isGmailAuthenticated && !suppressedSendersList.isEmpty {
                 Section {
-                    if suppressedSendersList.isEmpty {
-                        Text("숨긴 발신자 없음")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                    } else {
-                        ForEach(suppressedSendersList, id: \.self) { sender in
-                            HStack {
-                                Label(sender, systemImage: "bell.slash")
-                                    .font(.subheadline)
-                                    .lineLimit(1)
-                                Spacer()
-                                Button("해제") {
-                                    EmailLearningStore.shared.unsuppress(sender)
-                                    suppressedSendersList = EmailLearningStore.shared.suppressedSenders()
-                                }
-                                .font(.caption)
-                                .buttonStyle(.bordered)
-                                .controlSize(.small)
-                                .tint(.orange)
+                    ForEach(suppressedSendersList, id: \.self) { sender in
+                        HStack {
+                            Label(sender, systemImage: "bell.slash")
+                                .font(.subheadline)
+                                .lineLimit(1)
+                            Spacer()
+                            Button("해제") {
+                                EmailLearningStore.shared.unsuppress(sender)
+                                suppressedSendersList = EmailLearningStore.shared.suppressedSenders()
                             }
+                            .font(.caption)
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .tint(.orange)
                         }
                     }
                 } header: {
@@ -474,12 +422,15 @@ struct EmailDetailView: View {
                 backgroundEnabled: outlookBackgroundEnabled
             )
             let (gmail, outlook) = await (gmailValidation, outlookValidation)
+            guard !Task.isCancelled else { return }
 
             isGmailAuthenticated = gmail.isAuthenticated
             hasGmailStoredCredential = gmail.hasStoredCredential
+            gmailConnectionFailure = gmail.failureMessage
             isValidatingGmail = false
             isOutlookAuthenticated = outlook.isAuthenticated
             hasOutlookStoredCredential = outlook.hasStoredCredential
+            outlookConnectionFailure = outlook.failureMessage
             isValidatingOutlook = false
             suppressedSendersList = EmailLearningStore.shared.suppressedSenders()
         }
@@ -527,9 +478,9 @@ struct EmailDetailView: View {
         let connection = isValidating
             ? AppLanguage.localized(
                 "mail.authentication.checking",
-                defaultValue: "인증 정보를 확인하는 중입니다…",
+                defaultValue: "연결·메일 조회 확인 중…",
                 language: .current,
-                comment: "Checking stored mail authentication."
+                comment: "Checking the IMAP connection and inbox message access."
             )
             : AppLanguage.localized(
                 connected ? "mail.account.connected" : "mail.account.disconnected",
@@ -579,16 +530,21 @@ struct EmailDetailView: View {
     private func storedCredentialRetryPanel(
         provider: String,
         isConnecting: Bool,
+        failureMessage: String?,
         retry: @escaping () -> Void,
         replace: @escaping () -> Void
     ) -> some View {
-        let english = AppLanguage.current == .english
         VStack(alignment: .leading, spacing: 10) {
-            Text(
-                english
-                    ? "A saved \(provider) App Password is available. The last connection attempt failed, but the password was not removed."
-                    : "저장된 \(provider) App Password가 있습니다. 마지막 연결 시도는 실패했지만 비밀번호는 삭제되지 않았습니다."
-            )
+            if let failureMessage {
+                Text(failureMessage)
+                    .font(.caption)
+                    .foregroundStyle(AppTheme.warning)
+            }
+            Text(String(format: AppLanguage.localized(
+                "mail.connection.savedPasswordRetained",
+                defaultValue: "저장된 %@ App Password가 있습니다. 마지막 연결 시도는 실패했지만 비밀번호는 삭제되지 않았습니다.",
+                language: .current, comment: "Failed connection retains the provider's saved password. %@ is the provider name."
+            ), provider))
             .font(.caption)
             .foregroundStyle(.secondary)
 
@@ -596,36 +552,36 @@ struct EmailDetailView: View {
                 if isConnecting {
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
-                        Text(english ? "Connecting…" : "연결 중…")
+                        Text(AppLanguage.localized("연결 중…", defaultValue: "Connecting…", language: .current))
                     }
                 } else {
-                    Label(english ? "Retry connection" : "다시 연결", systemImage: "arrow.clockwise")
+                    Label(AppLanguage.localized("mail.connection.retry", defaultValue: "Retry connection", language: .current, comment: "Retry with the saved mail password."), systemImage: "arrow.clockwise")
                 }
             }
             .disabled(isConnecting)
 
-            Button(english ? "Replace App Password" : "App Password 교체", action: replace)
+            Button(AppLanguage.localized("mail.connection.replacePassword", defaultValue: "Replace App Password", language: .current, comment: "Replace the saved mail app password."), action: replace)
                 .buttonStyle(.plain)
                 .foregroundStyle(AppTheme.accent)
         }
     }
 
-    private func storedCredentialValidationPanel(provider: String) -> some View {
-        let english = AppLanguage.current == .english
+    private func storedCredentialValidationPanel() -> some View {
         return HStack(spacing: 8) {
             ProgressView().controlSize(.small)
-            Text(
-                english
-                    ? "Checking the saved \(provider) App Password…"
-                    : "저장된 \(provider) App Password를 확인하는 중입니다…"
-            )
+            Text(AppLanguage.localized(
+                "mail.authentication.checking",
+                defaultValue: "연결·메일 조회 확인 중…",
+                language: .current,
+                comment: "Checking the IMAP connection and inbox message access."
+            ))
             .font(.caption)
             .foregroundStyle(.secondary)
         }
     }
 
     private func saveSetting<T>(key: String, value: T, onChange: ((T) -> Void)? = nil) {
-        let isLocal = !iCloudSyncEnabled || SettingsStore.shared.isLocal(key: key)
+        let isLocal = !SettingsStore.supportsICloud || !iCloudSyncEnabled || SettingsStore.shared.isLocal(key: key)
         if isLocal {
             SettingsStore.shared.setLocal(key, value: value)
         } else {
@@ -654,15 +610,13 @@ struct EmailDetailView: View {
         case 12:
             return AppLanguage.localized("mail.hour.noon", defaultValue: "정오 12:00", language: .current, comment: "Mail refresh hour.")
         default:
-            let periodKey = h < 12 ? "mail.hour.am" : "mail.hour.pm"
-            let periodFallback = h < 12 ? "오전" : "오후"
-            let period = AppLanguage.localized(periodKey, defaultValue: periodFallback, language: .current, comment: "Mail refresh hour period.")
-            let display = h <= 12 ? h : h - 12
+            let formatter = DateFormatter()
+            formatter.locale = AppLanguage.current.locale
+            formatter.setLocalizedDateFormatFromTemplate("j")
+            let calendar = Calendar(identifier: .gregorian)
+            let date = calendar.date(from: DateComponents(year: 2001, month: 1, day: 1, hour: h))!
             let clock = String(format: "%02d:00", h)
-            if AppLanguage.current == .english {
-                return "\(display) \(period) (\(clock))"
-            }
-            return "\(period) \(display)시 (\(clock))"
+            return "\(formatter.string(from: date)) (\(clock))"
         }
     }
 
@@ -713,16 +667,18 @@ struct EmailDetailView: View {
         isConnectingOutlook = true
         defer { isConnectingOutlook = false }
         do {
-            try await OutlookIMAPService.shared.authenticate(
+            try await OutlookIMAPService.shared.validateConnection(
                 email: outlookAccount,
                 backgroundEnabled: outlookBackgroundEnabled
             )
             isOutlookAuthenticated = true
             hasOutlookStoredCredential = true
+            outlookConnectionFailure = nil
             NotificationCenter.default.post(name: Notification.Name("pieroot.todo.outlookAuthChanged"), object: true)
         } catch {
             isOutlookAuthenticated = false
             hasOutlookStoredCredential = MailCredentialFailurePolicy.hasStoredCredential(after: error)
+            outlookConnectionFailure = mailErrorMessage(error)
             errorMessage = error.localizedDescription
             showError = true
         }
@@ -732,16 +688,18 @@ struct EmailDetailView: View {
         isConnectingGmail = true
         defer { isConnectingGmail = false }
         do {
-            try await GmailIMAPService.shared.authenticate(
+            try await GmailIMAPService.shared.validateConnection(
                 email: imapAccount,
                 backgroundEnabled: imapBackgroundEnabled
             )
             isGmailAuthenticated = true
             hasGmailStoredCredential = true
+            gmailConnectionFailure = nil
             NotificationCenter.default.post(name: .gmailAuthChanged, object: true)
         } catch {
             isGmailAuthenticated = false
             hasGmailStoredCredential = MailCredentialFailurePolicy.hasStoredCredential(after: error)
+            gmailConnectionFailure = mailErrorMessage(error)
             errorMessage = error.localizedDescription
             showError = true
         }
@@ -762,7 +720,7 @@ struct EmailDetailView: View {
             isOutlookAuthenticated = true
             hasOutlookStoredCredential = true
             NotificationCenter.default.post(name: Notification.Name("pieroot.todo.outlookAuthChanged"), object: true)
-            lastFetchMessage = "Outlook IMAP 연결됨"
+            lastFetchMessage = String(format: AppLanguage.localized("mail.connection.connectedProvider", defaultValue: "%@ connected", language: .current, comment: "Successful mail provider connection. %@ is Gmail IMAP or Outlook IMAP."), "Outlook IMAP")
         } catch {
             errorMessage = error.localizedDescription
             showError = true
@@ -782,7 +740,7 @@ struct EmailDetailView: View {
             isGmailAuthenticated = true
             hasGmailStoredCredential = true
             NotificationCenter.default.post(name: .gmailAuthChanged, object: true)
-            lastFetchMessage = "Gmail IMAP 연결됨"
+            lastFetchMessage = String(format: AppLanguage.localized("mail.connection.connectedProvider", defaultValue: "%@ connected", language: .current, comment: "Successful mail provider connection. %@ is Gmail IMAP or Outlook IMAP."), "Gmail IMAP")
         } catch {
             errorMessage = error.localizedDescription
             showError = true

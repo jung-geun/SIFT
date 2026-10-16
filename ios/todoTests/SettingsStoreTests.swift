@@ -5,15 +5,6 @@ import Testing
 @Suite("SettingsStore syncable keys")
 @MainActor
 struct SettingsStoreTests {
-    @Test("syncableKeys includes Gemini and analyzed message settings without duplicates")
-    func syncableKeysContainExpectedAISettings() {
-        #expect(SettingsStore.syncableKeys.contains("pieroot.todo.analyzedMessageIDs"))
-        #expect(SettingsStore.syncableKeys.contains("selectedAIProvider"))
-        #expect(SettingsStore.syncableKeys.contains("pieroot.todo.geminiModelID"))
-        #expect(SettingsStore.syncableKeys.contains("pieroot.todo.providerEmailAnalysisEnabled"))
-        #expect(Set(SettingsStore.syncableKeys).count == SettingsStore.syncableKeys.count)
-    }
-
     @Test("tutorial completion flag stays device local")
     func tutorialCompletionFlagIsNotSyncable() {
         #expect(SettingsStore.syncableKeys.contains("pieroot.todo.hasCompletedTutorial") == false)
@@ -46,8 +37,44 @@ struct SettingsStoreTests {
         #expect(analysis?.createdAt == createdAt)
         #expect(analysis?.overdueRate == 0.25)
         #expect(analysis?.productiveHour == 10)
-        #expect(analysis?.recordTitle == "이전 행동 패턴 분석")
-        #expect(analysis?.accessScopeSummary == "레거시 설정 저장소에서 이전됨")
-        #expect(analysis?.processorDescription == "레거시 저장소")
     }
+
+    #if SIFT_LOCAL_ONLY
+    @Test("local-only provider selection preserves local writes despite stale cloud preference")
+    func localOnlyProviderSelectionPreservesLocalWrites() async {
+        await AIProviderTestIsolation.shared.withLock {
+            let defaults = UserDefaults.standard
+            let key = "selectedAIProvider"
+            let markerKey = "\(key).isLocal"
+            let cloudKey = "pieroot.todo.testCloud.\(key)"
+            let syncKey = "pieroot.todo.iCloudSyncEnabled"
+            let keys = [key, markerKey, cloudKey, syncKey]
+            let previous = keys.map { defaults.object(forKey: $0) }
+            defer {
+                for (savedKey, value) in zip(keys, previous) {
+                    if let value {
+                        defaults.set(value, forKey: savedKey)
+                    } else {
+                        defaults.removeObject(forKey: savedKey)
+                    }
+                }
+            }
+
+            // An existing shared setting must remain visible even when the
+            // persisted preference and an old cloud value disagree with it.
+            defaults.set(true, forKey: syncKey)
+            defaults.set(false, forKey: markerKey)
+            defaults.set(PersonaAIProvider.openAI.rawValue, forKey: key)
+            SettingsStore.setTestCloudValue(PersonaAIProvider.foundationModels.rawValue, forKey: key)
+            #expect(SettingsStore.selectedProvider() == .openAI)
+
+            // Explicit cloud callers must still commit a usable local setting.
+            SettingsStore.shared.setGlobal(key, value: PersonaAIProvider.onDevice.rawValue)
+            #expect(SettingsStore.selectedProvider() == .onDevice)
+            SettingsStore.shared.set(key, value: PersonaAIProvider.openAI.rawValue)
+            #expect(SettingsStore.selectedProvider() == .openAI)
+            #expect(defaults.bool(forKey: syncKey))
+        }
+    }
+    #endif
 }

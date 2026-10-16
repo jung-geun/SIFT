@@ -23,6 +23,11 @@ final class AppDataContainer: ObservableObject {
 
     /// rebuild() 호출마다 1씩 증가 — Equatable 불가한 container 대신 onChange 트리거에 사용.
     @Published private(set) var rebuildID: Int = 0
+    var isPersistentStoreAvailable: Bool {
+        Self.usesInMemoryUITestStore
+            || !container.configurations.contains(where: \.isStoredInMemoryOnly)
+    }
+
 
     // MARK: - Init
 
@@ -73,20 +78,22 @@ final class AppDataContainer: ObservableObject {
     }
 
     private static func buildInMemoryContainer() -> ModelContainer {
-        let config = ModelConfiguration(schema: appSchema, isStoredInMemoryOnly: true)
+        let config = ModelConfiguration(schema: appSchema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)
         return try! ModelContainer(for: appSchema, configurations: [config])
     }
 
+    /// Preserve the requested store path even in local-only builds: disabling
+    /// CloudKit must not hide existing rows by switching to an empty local store.
     static func buildContainer(useICloud: Bool) -> ModelContainer {
         let schema = AppDataContainer.appSchema
         let config: ModelConfiguration
         if useICloud {
-            let bundleIdentifier = Bundle.main.bundleIdentifier ?? "pieroot.sift-todo"
-            let containerIdentifier = "iCloud.\(bundleIdentifier)"
             config = ModelConfiguration(
                 schema: schema,
                 url: getStoreURL(name: "icloud_v2.store"),
-                cloudKitDatabase: .private(containerIdentifier)
+                cloudKitDatabase: SettingsStore.supportsICloud
+                    ? .private("iCloud.\(Bundle.main.bundleIdentifier ?? "pieroot.sift-todo")")
+                    : .none
             )
         } else {
             config = ModelConfiguration(
@@ -102,27 +109,13 @@ final class AppDataContainer: ObservableObject {
             DiagnosticRecorder.shared.record(
                 error: error,
                 component: "storage.swiftdata",
-                operation: "containerInitRetry"
+                operation: "containerInitFallback"
             )
-            print("[SwiftData] 저장소 초기화 실패: \(error). 기존 파일 삭제 후 재시도.")
-            let configURL = config.url
-            try? FileManager.default.removeItem(at: configURL)
-            let shmURL = configURL.deletingPathExtension().appendingPathExtension("store-shm")
-            let walURL = configURL.deletingPathExtension().appendingPathExtension("store-wal")
-            try? FileManager.default.removeItem(at: shmURL)
-            try? FileManager.default.removeItem(at: walURL)
-            do {
-                return try ModelContainer(for: schema, configurations: [config])
-            } catch {
-                DiagnosticRecorder.shared.record(
-                    error: error,
-                    component: "storage.swiftdata",
-                    operation: "containerInitFallback"
-                )
-                print("[SwiftData] 재시도 실패: \(error). 메모리 전용 모드로 실행.")
-                let fallback = ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
-                return try! ModelContainer(for: schema, configurations: [fallback])
-            }
+            // A load error can mean a locked device, an incompatible schema, or
+            // damaged data. Never turn it into an irreversible empty-store reset.
+            print("[SwiftData] 저장소 초기화 실패: \(error). 원본 파일을 보존하고 복구 화면을 표시합니다.")
+            let fallback = ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)
+            return try! ModelContainer(for: schema, configurations: [fallback])
         }
     }
 
@@ -155,6 +148,14 @@ final class AppDataContainer: ObservableObject {
     /// iCloud 설정과 무관하게 항상 로컬(cloudKitDatabase: .none)로 고정되는 컨테이너.
     /// MailTabView 서브트리에만 주입 — 메인 appSchema에 EmailMessage 포함 금지.
     lazy var emailContainer: ModelContainer = {
+        if Self.usesInMemoryUITestStore {
+            let config = ModelConfiguration(
+                schema: Self.emailSchema,
+                isStoredInMemoryOnly: true,
+                cloudKitDatabase: .none
+            )
+            return try! ModelContainer(for: Self.emailSchema, configurations: [config])
+        }
         do {
             return try AppDataContainer.makeEmailContainer(
                 storeURL: AppDataContainer.emailStoreURL()
@@ -168,7 +169,8 @@ final class AppDataContainer: ObservableObject {
             print("[EmailContainer] 초기화 실패: \(error). 메모리 전용 모드로 실행.")
             let fallback = ModelConfiguration(
                 schema: AppDataContainer.emailSchema,
-                isStoredInMemoryOnly: true
+                isStoredInMemoryOnly: true,
+                cloudKitDatabase: .none
             )
             return try! ModelContainer(for: AppDataContainer.emailSchema, configurations: [fallback])
         }
@@ -224,6 +226,14 @@ final class AppDataContainer: ObservableObject {
     ])
 
     lazy var meetingContainer: ModelContainer = {
+        if Self.usesInMemoryUITestStore {
+            let config = ModelConfiguration(
+                schema: Self.meetingSchema,
+                isStoredInMemoryOnly: true,
+                cloudKitDatabase: .none
+            )
+            return try! ModelContainer(for: Self.meetingSchema, configurations: [config])
+        }
         let directory = AppDataContainer.meetingDirectory()
         AppDataContainer.excludeFromBackup(directory)
         AppDataContainer.setProtection(.complete, at: directory)
@@ -246,7 +256,8 @@ final class AppDataContainer: ObservableObject {
             print("[MeetingContainer] initialization failed: \(error). Falling back to memory-only storage.")
             let fallback = ModelConfiguration(
                 schema: AppDataContainer.meetingSchema,
-                isStoredInMemoryOnly: true
+                isStoredInMemoryOnly: true,
+                cloudKitDatabase: .none
             )
             return try! ModelContainer(for: AppDataContainer.meetingSchema, configurations: [fallback])
         }
@@ -272,7 +283,7 @@ final class AppDataContainer: ObservableObject {
         return directory
     }
 
-    static func finalizeMeetingAudio(at file: URL) {
+    nonisolated static func finalizeMeetingAudio(at file: URL) {
         setProtection(.complete, at: file)
     }
 
@@ -291,7 +302,7 @@ final class AppDataContainer: ObservableObject {
         try? path.setResourceValues(values)
     }
 
-    private static func setProtection(_ protection: FileProtectionType, at path: URL) {
+    private nonisolated static func setProtection(_ protection: FileProtectionType, at path: URL) {
         try? FileManager.default.setAttributes(
             [.protectionKey: protection],
             ofItemAtPath: path.path
@@ -357,6 +368,7 @@ final class AppDataContainer: ObservableObject {
     /// 로컬 데이터가 있고 iCloud 스토어가 없으면 깊은 복사 이관 실행.
     /// iCloud 첫 활성화 시 1회만 의미 있음 (이후엔 이미 icloud_v2.store 존재).
     static func migrateLocalToICloudIfNeeded() {
+        guard SettingsStore.supportsICloud else { return }
         let schema = AppDataContainer.appSchema
         let localV2URL = getStoreURL(name: "local_v2.store")
         let icloudV2URL = getStoreURL(name: "icloud_v2.store")

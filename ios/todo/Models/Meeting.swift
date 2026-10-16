@@ -13,9 +13,20 @@ enum MeetingProcessingMode: String, Codable, CaseIterable, Sendable {
 enum MeetingStatus: String, Codable, Sendable {
     case recording, paused, interrupted, stopping
     case finalizingTranscript, extractingActions, ready, failed, cancelled
-    /// Raw audio and the provisional transcript are saved; only the Speech
-    /// finalization step failed or timed out, so it can be retried.
+    /// Audio is saved; live Speech finalization failed or an imported file has
+    /// not committed its first offline transcript. The saved audio is retryable.
     case transcriptFinalizationFailed
+}
+
+/// Stable source IDs, never a localized label or a model-generated string.
+enum MeetingASRSource: String, Sendable {
+    case apple, offline
+    /// Audio is saved, but no ASR has committed a transcript yet.
+    case importedAudio
+}
+
+enum MeetingOfflineASRFailure: String, Sendable {
+    case modelUnavailable, transcriptionFailed
 }
 
 struct MeetingSegment: Codable, Hashable, Sendable, Identifiable {
@@ -27,10 +38,12 @@ struct MeetingSegment: Codable, Hashable, Sendable, Identifiable {
     var text: String
     var isFinal: Bool
     var confidence: Double?
+    /// Offsets address `text` in UTF-16 units. Legacy segments decode as nil.
+    var timedRuns: [MeetingTimedTextRun]?
 
     init(id: String = UUID().uuidString.lowercased(), lineageID: String? = nil,
          startMs: Int64, endMs: Int64, speakerIDs: [String] = [], text: String,
-         isFinal: Bool = true, confidence: Double? = nil) {
+         isFinal: Bool = true, confidence: Double? = nil, timedRuns: [MeetingTimedTextRun]? = nil) {
         self.id = id
         self.lineageID = lineageID
         self.startMs = startMs
@@ -39,15 +52,29 @@ struct MeetingSegment: Codable, Hashable, Sendable, Identifiable {
         self.text = text
         self.isFinal = isFinal
         self.confidence = confidence
+        self.timedRuns = timedRuns
     }
 
     var stableLineageID: String { lineageID ?? id }
 
     var isValid: Bool {
-        startMs >= 0 && endMs > startMs && id.isEmpty == false &&
-        lineageID.map { !$0.isEmpty } ?? true &&
-        speakerIDs == speakerIDs.sorted() &&
-        confidence.map { $0.isFinite && (0...1).contains($0) } ?? true
+        guard startMs >= 0, endMs > startMs, !id.isEmpty,
+              lineageID.map({ !$0.isEmpty }) ?? true,
+              speakerIDs == speakerIDs.sorted(),
+              confidence.map({ $0.isFinite && (0...1).contains($0) }) ?? true else { return false }
+        let textLength = text.utf16.count
+        var previousOffset = 0
+        var previousTime = startMs
+        for run in timedRuns ?? [] {
+            guard run.utf16Offset >= previousOffset, run.utf16Length > 0,
+                  run.utf16Offset <= textLength,
+                  run.utf16Length <= textLength - run.utf16Offset,
+                  run.startMs >= previousTime, run.endMs > run.startMs,
+                  run.endMs <= endMs else { return false }
+            previousOffset = run.utf16Offset + run.utf16Length
+            previousTime = run.endMs
+        }
+        return true
     }
 }
 
@@ -250,6 +277,17 @@ enum MeetingCanonicalID {
     static func digest(_ bytes: Data) -> String {
         SHA256.hash(data: bytes).prefix(16).map { String(format: "%02x", $0) }.joined()
     }
+
+    /// Distinct, deterministic child lineage for a speaker-turn split.
+    static func speakerTurnLineage(parentLineageID: String, startMs: Int64, endMs: Int64) -> String {
+        precondition(!parentLineageID.isEmpty)
+        validateCanonicalMilliseconds(startMs, endMs)
+        return digest(MeetingCanonicalJSON.object([
+            ("parentLineageId", .string(parentLineageID)),
+            ("startMs", .integer(startMs)),
+            ("endMs", .integer(endMs))
+        ]))
+    }
 }
 
 enum MeetingCanonicalJSON {
@@ -362,21 +400,20 @@ enum MeetingDate {
 // MARK: - Revision mechanics
 
 struct MeetingRevisionEditor: Sendable {
-    static func renameSpeaker(in result: MeetingResult, from oldID: String, to newID: String) -> MeetingResult {
-        var copy = result
-        copy.segments = copy.segments.map { segment in
-            var segment = segment
-            segment.speakerIDs = Array(Set(segment.speakerIDs.map { $0 == oldID ? newID : $0 })).sorted()
-            return segment
-        }
-        return copy
-    }
-
     static func editSegments(meetingID: String, in result: MeetingResult, segments: [MeetingSegment]) throws -> MeetingResult {
         guard segments != result.segments else { return result }
         let nextRevision = result.transcriptRevision + 1
+        let oldByLineage = Dictionary(result.segments.map { ($0.stableLineageID, $0) },
+                                      uniquingKeysWith: { first, _ in first })
         let normalized = segments.map { segment in
             let lineageID = segment.stableLineageID
+            let original = oldByLineage[lineageID]
+            // Existing lineages keep runs only while text and timing are unchanged;
+            // new lineages (speaker-turn splits) carry runs rebased onto their own text.
+            let preservedRuns = original.map {
+                $0.text == segment.text && $0.startMs == segment.startMs && $0.endMs == segment.endMs
+                    ? $0.timedRuns : nil
+            } ?? segment.timedRuns
             return MeetingSegment(
                 id: MeetingCanonicalID.replacementSegment(
                     meetingID: meetingID,
@@ -392,7 +429,8 @@ struct MeetingRevisionEditor: Sendable {
                 speakerIDs: segment.speakerIDs,
                 text: segment.text,
                 isFinal: segment.isFinal,
-                confidence: segment.confidence
+                confidence: segment.confidence,
+                timedRuns: preservedRuns
             )
         }.sorted { ($0.startMs, $0.endMs, $0.id) < ($1.startMs, $1.endMs, $1.id) }
         let copy = MeetingResult(
@@ -422,6 +460,9 @@ struct MeetingAudioManifest: nonisolated Codable, nonisolated Equatable, Sendabl
     let sampleRate: Int64
     let totalSamples: Int64
     let parts: [MeetingAudioPartManifest]
+    /// Canonical sample positions of independent source selection and gates.
+    /// Missing on legacy microphone-only recordings.
+    var captureSourceMetadata: MeetingCaptureSourceMetadata? = nil
 }
 
 // MARK: - Local SwiftData record (never included in appSchema)
@@ -429,6 +470,13 @@ struct MeetingAudioManifest: nonisolated Codable, nonisolated Equatable, Sendabl
 @Model
 final class MeetingRecord {
     var meetingID: String = ""
+    /// Source tracks have unique record IDs; the parent owns grouping only.
+    /// Legacy records remain standalone and retain their existing manifest.
+    var parentMeetingID: String? = nil
+    var audioTrackIDs: [String] = []
+    var audioTrackKindRaw: String? = nil
+    var audioTrackSourceLabel: String? = nil
+    var audioTrackStartSample: Int64 = 0
     var createdAt: Date = Date()
     var updatedAt: Date = Date()
     var modeRaw: String = MeetingProcessingMode.onDevice.rawValue
@@ -441,6 +489,19 @@ final class MeetingRecord {
     /// whenever a new transcription base is established so inline proofread
     /// provenance never compares against a stale transcription.
     var rawResultData: Data?
+    /// Immutable Apple Speech baseline across offline retranscriptions. Legacy
+    /// rows may not have this snapshot until their next Apple finalization.
+    var appleRawResultData: Data?
+    var asrSourceRaw: String = MeetingASRSource.apple.rawValue
+    /// Pinned local model revision (nil for Apple Speech), and SDK-detected
+    /// language codes in encounter order; not inferred from the UI language.
+    var asrModelRevision: String?
+    var asrDetectedLanguages: [String] = []
+    /// Safe, non-transcript failure code. A failed offline attempt leaves the
+    /// current transcript and its status intact.
+    var offlineASRFailureRaw: String?
+    /// Versioned, optional annotations; the existing result/raw-result JSON remains unchanged.
+    var diarizationData: Data?
     /// Stable raw source ID that last committed the correction ("검수") pass:
     /// "apple-intelligence", "qwen", or "user-vocabulary". Empty when the
     /// current transcript is a raw base or has been edited by the user. Legacy
@@ -452,6 +513,9 @@ final class MeetingRecord {
     var retentionUntil: Date?
     var confirmedTodoIDs: [String] = []
     var disclosureVersionID: String = ""
+    /// Files-app provenance: basename only, never an external path or bookmark.
+    /// Preserved when offline ASR replaces the initially empty transcript base.
+    var importedAudioFileName: String? = nil
 
     init(meetingID: String = UUID().uuidString.lowercased(), mode: MeetingProcessingMode = .onDevice,
          languageTag: String = "en-US", timezoneIdentifier: String = "UTC") {
@@ -464,6 +528,16 @@ final class MeetingRecord {
 
     var mode: MeetingProcessingMode { MeetingProcessingMode(rawValue: modeRaw) ?? .onDevice }
     var status: MeetingStatus { MeetingStatus(rawValue: statusRaw) ?? .failed }
+    var isAudioTrackGroup: Bool { !audioTrackIDs.isEmpty }
+    var audioTrackKind: MeetingAudioTrackKind? {
+        audioTrackKindRaw.flatMap(MeetingAudioTrackKind.init(rawValue:))
+    }
+    var audioTrackDisplayName: String {
+        let kind = audioTrackKind ?? .legacyMixed
+        guard let label = audioTrackSourceLabel?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !label.isEmpty else { return kind.displayName() }
+        return "\(kind.displayName()) · \(label)"
+    }
     func refinementEngineDisplayName(language: AppLanguage) -> String {
         let stored = refinementEngineLabel.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !stored.isEmpty else { return "" }
@@ -492,6 +566,29 @@ final class MeetingRecord {
         guard let rawResultData else { return nil }
         return try? JSONDecoder().decode(MeetingResult.self, from: rawResultData)
     }
+    var appleRawResult: MeetingResult? {
+        guard let appleRawResultData else { return nil }
+        return try? JSONDecoder().decode(MeetingResult.self, from: appleRawResultData)
+    }
+    var asrSource: MeetingASRSource { MeetingASRSource(rawValue: asrSourceRaw) ?? .apple }
+    var offlineASRFailure: MeetingOfflineASRFailure? {
+        offlineASRFailureRaw.flatMap(MeetingOfflineASRFailure.init(rawValue:))
+    }
+    var diarization: MeetingDiarizationPayload? {
+        guard let diarizationData,
+              let payload = try? JSONDecoder().decode(MeetingDiarizationPayload.self, from: diarizationData),
+              payload.schemaVersion == MeetingDiarizationPayload.currentSchemaVersion else { return nil }
+        return payload
+    }
+
+    func update(diarization: MeetingDiarizationPayload?) throws {
+        guard let diarization else {
+            diarizationData = nil
+            return
+        }
+        guard let manifest = audioManifest else { throw MeetingDiarizationError.invalidTimeline }
+        diarizationData = try JSONEncoder().encode(diarization.validated(totalSamples: manifest.totalSamples))
+    }
 
     func update(result: MeetingResult, status: MeetingStatus = .ready) throws {
         resultData = try JSONEncoder().encode(result.validated())
@@ -507,15 +604,37 @@ final class MeetingRecord {
         rawResultData = try JSONEncoder().encode(result.validated())
     }
 
-    func replaceTranscriptionBase(_ result: MeetingResult, status: MeetingStatus) throws {
+    func replaceTranscriptionBase(
+        _ result: MeetingResult, status: MeetingStatus,
+        source: MeetingASRSource = .apple,
+        modelRevision: String? = nil, detectedLanguages: [String] = []
+    ) throws {
         try update(result: result, status: status)
         try snapshotRawBase(result)
+        if source == .apple { appleRawResultData = rawResultData }
+        asrSourceRaw = source.rawValue
+        asrModelRevision = modelRevision
+        asrDetectedLanguages = detectedLanguages
+        offlineASRFailureRaw = nil
         refinementEngineLabel = ""
+        refinementFallbackReasonRaw = nil
     }
 
     struct PersistenceSnapshot: Equatable {
+        let parentMeetingID: String?
+        let audioTrackIDs: [String]
+        let audioTrackKindRaw: String?
+        let audioTrackSourceLabel: String?
+        let audioTrackStartSample: Int64
+        let importedAudioFileName: String?
         let resultData: Data
         let rawResultData: Data?
+        let diarizationData: Data?
+        let appleRawResultData: Data?
+        let asrSourceRaw: String
+        let offlineASRFailureRaw: String?
+        let asrModelRevision: String?
+        let asrDetectedLanguages: [String]
         let transcriptRevision: Int
         let statusRaw: String
         let refinementEngineLabel: String
@@ -526,8 +645,20 @@ final class MeetingRecord {
 
     func persistenceSnapshot() -> PersistenceSnapshot {
         PersistenceSnapshot(
+            parentMeetingID: parentMeetingID,
+            audioTrackIDs: audioTrackIDs,
+            audioTrackKindRaw: audioTrackKindRaw,
+            audioTrackSourceLabel: audioTrackSourceLabel,
+            audioTrackStartSample: audioTrackStartSample,
+            importedAudioFileName: importedAudioFileName,
             resultData: resultData,
             rawResultData: rawResultData,
+            diarizationData: diarizationData,
+            appleRawResultData: appleRawResultData,
+            asrSourceRaw: asrSourceRaw,
+            offlineASRFailureRaw: offlineASRFailureRaw,
+            asrModelRevision: asrModelRevision,
+            asrDetectedLanguages: asrDetectedLanguages,
             transcriptRevision: transcriptRevision,
             statusRaw: statusRaw,
             refinementEngineLabel: refinementEngineLabel,
@@ -538,8 +669,20 @@ final class MeetingRecord {
     }
 
     func restore(_ snapshot: PersistenceSnapshot) {
+        parentMeetingID = snapshot.parentMeetingID
+        audioTrackIDs = snapshot.audioTrackIDs
+        audioTrackKindRaw = snapshot.audioTrackKindRaw
+        audioTrackSourceLabel = snapshot.audioTrackSourceLabel
+        audioTrackStartSample = snapshot.audioTrackStartSample
+        importedAudioFileName = snapshot.importedAudioFileName
         resultData = snapshot.resultData
         rawResultData = snapshot.rawResultData
+        appleRawResultData = snapshot.appleRawResultData
+        asrSourceRaw = snapshot.asrSourceRaw
+        offlineASRFailureRaw = snapshot.offlineASRFailureRaw
+        asrModelRevision = snapshot.asrModelRevision
+        asrDetectedLanguages = snapshot.asrDetectedLanguages
+        diarizationData = snapshot.diarizationData
         transcriptRevision = snapshot.transcriptRevision
         statusRaw = snapshot.statusRaw
         refinementEngineLabel = snapshot.refinementEngineLabel

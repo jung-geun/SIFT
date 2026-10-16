@@ -124,14 +124,12 @@ struct EmailMessageProviderTests {
             let testCloudKey = "pieroot.todo.testCloud.\(key)"
             let iCloudKey = "pieroot.todo.iCloudSyncEnabled"
             let local = UserDefaults.standard
-            let global = NSUbiquitousKeyValueStore.default
             let savedLocal: [(String, Any?)] = [
                 (key, local.object(forKey: key)),
                 (markerKey, local.object(forKey: markerKey)),
                 (iCloudKey, local.object(forKey: iCloudKey)),
                 (testCloudKey, local.object(forKey: testCloudKey))
             ]
-            let savedGlobal = global.object(forKey: key)
             defer {
                 for (savedKey, value) in savedLocal {
                     if let value {
@@ -140,12 +138,6 @@ struct EmailMessageProviderTests {
                         local.removeObject(forKey: savedKey)
                     }
                 }
-                if let savedGlobal {
-                    global.set(savedGlobal, forKey: key)
-                } else {
-                    global.removeObject(forKey: key)
-                }
-                global.synchronize()
             }
 
             local.set(false, forKey: iCloudKey)
@@ -155,18 +147,19 @@ struct EmailMessageProviderTests {
 
             local.set(5, forKey: key)
             local.set(true, forKey: markerKey)
-            global.set(Int64(20), forKey: key)
-            global.synchronize()
+            SettingsStore.setTestCloudValue(Int64(20), forKey: key)
             #expect(EmailAnalysisLookbackPolicy.storedLookbackDays() == 5)
 
             local.set(7, forKey: key)
             local.set(false, forKey: markerKey)
-            local.set(Int64(12), forKey: testCloudKey)
-            global.synchronize()
+            SettingsStore.setTestCloudValue(Int64(12), forKey: key)
+            #if SIFT_LOCAL_ONLY
+            #expect(EmailAnalysisLookbackPolicy.storedLookbackDays() == 7)
+            #else
             #expect(EmailAnalysisLookbackPolicy.storedLookbackDays() == 12)
+            #endif
 
-            local.removeObject(forKey: testCloudKey)
-            global.synchronize()
+            SettingsStore.setTestCloudValue(nil, forKey: key)
             local.set(9, forKey: key)
             #expect(EmailAnalysisLookbackPolicy.storedLookbackDays() == 9)
 
@@ -204,6 +197,33 @@ struct EmailMessageProviderTests {
             )
             #expect(emails.filter(\.isInInbox).count == displayCount)
         }
+    }
+
+    @Test("Laya 설치 후 이미 요약된 메일도 한 번 분류하고 아니오 결과는 유지한다")
+    func analyzedInboxMailWithoutVerdictGetsClassifiedOnce() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let email = EmailMessage(
+            id: "classified-later",
+            subject: "프로젝트 검토",
+            body: "검토 후 답장해 주세요.",
+            receivedAt: now,
+            isInInbox: true
+        )
+        email.analysisState = .analyzed
+        email.analysisVersion = EmailAnalysisContract.summaryContractVersion
+
+        #expect(mailboxAnalysisCandidates(from: [email], lookbackDays: 7, now: now).isEmpty)
+        #expect(mailboxAnalysisCandidates(
+            from: [email], lookbackDays: 7, now: now, includeUnclassified: true
+        ).count == 1)
+        email.analysisTodoCandidate = false
+        #expect(mailboxAnalysisCandidates(
+            from: [email], lookbackDays: 7, now: now, includeUnclassified: true
+        ).isEmpty)
+        email.analysisVersion -= 1
+        #expect(mailboxAnalysisCandidates(
+            from: [email], lookbackDays: 7, now: now
+        ).count == 1)
     }
 
 }

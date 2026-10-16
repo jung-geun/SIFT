@@ -5,11 +5,22 @@ import SwiftData
 @MainActor
 final class SettingsStore: ObservableObject {
     static let shared = SettingsStore()
+
+    /// Build capability, independent of the user's persisted sync preference.
+    #if SIFT_LOCAL_ONLY
+    nonisolated static let supportsICloud = false
+    #else
+    nonisolated static let supportsICloud = true
+    #endif
+
+    /// Effective sync policy for cloud operations and synchronizable credentials.
+    /// Keep the raw preference intact so local-only builds retain store selection.
+    nonisolated static var isICloudSyncEnabled: Bool {
+        supportsICloud && UserDefaults.standard.bool(forKey: "pieroot.todo.iCloudSyncEnabled")
+    }
     static let syncableKeys: [String] = [
         "pieroot.todo.onDeviceLLMEnabled",
         "selectedAIProvider",
-        "pieroot.todo.geminiModelID",
-        "pieroot.todo.providerEmailAnalysisEnabled",
         "pieroot.todo.emailAutoAnalysisEnabled",
         "pieroot.todo.emailRefreshHour",
         EmailAnalysisLookbackPolicy.lookbackSettingKey,
@@ -27,8 +38,11 @@ final class SettingsStore: ObservableObject {
     static let betaFeaturesKey = "pieroot.todo.betaFeaturesEnabled"
     nonisolated static let betaFoundationModelsEnabledKey = "pieroot.todo.beta.foundationModelsEnabled"
     nonisolated static let betaOnDeviceModelEnabledKey = "pieroot.todo.beta.onDeviceModelEnabled"
-    nonisolated static let betaGeminiEnabledKey = "pieroot.todo.beta.geminiEnabled"
+    nonisolated static let betaOpenAIEnabledKey = "pieroot.todo.beta.openAIEnabled"
     nonisolated static let betaMeetingVoiceProcessingEnabledKey = "pieroot.todo.beta.meetingVoiceProcessingEnabled"
+    nonisolated static let betaMeetingDiarizationEnabledKey = "pieroot.todo.beta.meetingDiarizationEnabled"
+    nonisolated static let betaLayaEnabledKey = "pieroot.todo.beta.layaEnabled"
+    nonisolated static let betaMeetingAdvancedTranscriptionEnabledKey = "pieroot.todo.beta.meetingAdvancedTranscriptionEnabled"
     nonisolated static let betaSelectedProviderKey = "pieroot.todo.beta.selectedProvider"
     nonisolated static let betaLegacySelectionMigratedKey = "pieroot.todo.beta.legacySelectionMigrated.v1"
 
@@ -37,7 +51,8 @@ final class SettingsStore: ObservableObject {
         switch provider {
         case .foundationModels: key = betaFoundationModelsEnabledKey
         case .onDevice: key = betaOnDeviceModelEnabledKey
-        case .gemini: key = betaGeminiEnabledKey
+        case .openAI: key = betaOpenAIEnabledKey
+        case .laya: key = betaLayaEnabledKey
         }
         let defaults = UserDefaults.standard
         if provider == .foundationModels, defaults.object(forKey: key) == nil {
@@ -50,7 +65,8 @@ final class SettingsStore: ObservableObject {
         BetaProviderAccess(
             foundationModelsEnabled: betaProviderEnabled(.foundationModels),
             onDeviceEnabled: betaProviderEnabled(.onDevice),
-            geminiEnabled: betaProviderEnabled(.gemini),
+            openAIEnabled: betaProviderEnabled(.openAI),
+            layaEnabled: betaProviderEnabled(.laya),
             meetingVoiceProcessingEnabled: UserDefaults.standard.bool(
                 forKey: betaMeetingVoiceProcessingEnabledKey
             )
@@ -70,9 +86,13 @@ final class SettingsStore: ObservableObject {
         switch provider {
         case .foundationModels: key = Self.betaFoundationModelsEnabledKey
         case .onDevice: key = Self.betaOnDeviceModelEnabledKey
-        case .gemini: key = Self.betaGeminiEnabledKey
+        case .openAI: key = Self.betaOpenAIEnabledKey
+        case .laya: key = Self.betaLayaEnabledKey
         }
         local.set(enabled, forKey: key)
+        if provider == .openAI, !enabled {
+            OpenAIRequestRegistry.shared.cancel(generation: OpenAIConnection.shared.sessionGeneration)
+        }
         normalizeBetaSelectedProvider()
         objectWillChange.send()
     }
@@ -104,7 +124,7 @@ final class SettingsStore: ObservableObject {
             return
         }
 
-        let preferred = [PersonaAIProvider.foundationModels, .onDevice, .gemini]
+        let preferred = [PersonaAIProvider.foundationModels, .onDevice, .openAI, .laya]
             .first(where: access.isEnabled)
         setBetaSelectedProvider(preferred)
     }
@@ -113,8 +133,11 @@ final class SettingsStore: ObservableObject {
         [
             Self.betaFoundationModelsEnabledKey,
             Self.betaOnDeviceModelEnabledKey,
-            Self.betaGeminiEnabledKey,
+            Self.betaOpenAIEnabledKey,
             Self.betaMeetingVoiceProcessingEnabledKey,
+            Self.betaMeetingDiarizationEnabledKey,
+            Self.betaMeetingAdvancedTranscriptionEnabledKey,
+            Self.betaLayaEnabledKey,
             Self.betaSelectedProviderKey,
             Self.betaLegacySelectionMigratedKey
         ].forEach(local.removeObject(forKey:))
@@ -124,7 +147,7 @@ final class SettingsStore: ObservableObject {
     func seedLegacyAISettingsForUITest() {
         local.set(true, forKey: Self.betaFeaturesKey)
         local.set(true, forKey: "pieroot.todo.onDeviceLLMEnabled")
-        local.set(PersonaAIProvider.gemini.rawValue, forKey: "selectedAIProvider")
+        local.set("gemini", forKey: "selectedAIProvider")
         objectWillChange.send()
     }
     #endif
@@ -170,6 +193,32 @@ final class SettingsStore: ObservableObject {
         Self.betaProviderAccess().meetingVoiceProcessingEnabled
     }
 
+    /// Device-local speaker diarization opt-in. Default off; never synced to iCloud.
+    /// Enabling this setting does not install or download a model.
+    var meetingDiarizationEnabled: Bool {
+        get { local.bool(forKey: Self.betaMeetingDiarizationEnabledKey) }
+        set {
+            local.set(newValue, forKey: Self.betaMeetingDiarizationEnabledKey)
+            objectWillChange.send()
+        }
+    }
+
+    /// Permission to use diarization, independent of AI provider selection.
+    /// Callers must also require an installed local speaker model before processing.
+    var effectiveMeetingDiarizationEnabled: Bool {
+        meetingDiarizationEnabled
+    }
+
+    /// Device-local opt-in for saved-audio Whisper transcription after Apple
+    /// live results are persisted. Installing a model does not enable it.
+    var meetingAdvancedTranscriptionEnabled: Bool {
+        get { local.bool(forKey: Self.betaMeetingAdvancedTranscriptionEnabledKey) }
+        set {
+            local.set(newValue, forKey: Self.betaMeetingAdvancedTranscriptionEnabledKey)
+            objectWillChange.send()
+        }
+    }
+
     static let meetingAutoRefineKey = "pieroot.todo.meetingAutoRefineEnabled"
 
     /// After a recording finalizes or is re-transcribed, run the AFM transcript
@@ -191,6 +240,7 @@ final class SettingsStore: ObservableObject {
 
     private let local = UserDefaults.standard
     private let global: NSUbiquitousKeyValueStore? = {
+        guard SettingsStore.supportsICloud else { return nil }
         #if DEBUG
         if SettingsStore.isTestProcess { return nil }
         #endif
@@ -218,7 +268,7 @@ final class SettingsStore: ObservableObject {
             return trimmed.isEmpty ? defaultValue : trimmed
         }
 
-        if local.bool(forKey: "\(key).isLocal") {
+        if !supportsICloud || local.bool(forKey: "\(key).isLocal") {
             return PersonaAIProvider(rawValue: normalize(local.string(forKey: key))) ?? .foundationModels
         }
 
@@ -241,7 +291,7 @@ final class SettingsStore: ObservableObject {
         let local = UserDefaults.standard
         let rawValue: Int
 
-        if local.bool(forKey: "\(key).isLocal") {
+        if !supportsICloud || local.bool(forKey: "\(key).isLocal") {
             rawValue = (local.object(forKey: key) as? NSNumber)?.intValue
                 ?? EmailAnalysisLookbackPolicy.defaultLookbackDays
         } else {
@@ -277,9 +327,9 @@ final class SettingsStore: ObservableObject {
             fastTags: fastTags,
             overdueRate: overdueRate,
             productiveHour: productiveHour,
-            recordTitle: "이전 행동 패턴 분석",
-            accessScopeSummary: "레거시 설정 저장소에서 이전됨",
-            processorDescription: "레거시 저장소"
+            recordTitle: AppLanguage.localized("memory.legacy.title", defaultValue: "Previous Behavior Pattern Analysis", language: AppLanguage.current),
+            accessScopeSummary: AppLanguage.localized("memory.legacy.scope", defaultValue: "Migrated from legacy settings storage", language: AppLanguage.current),
+            processorDescription: AppLanguage.localized("memory.legacy.processor", defaultValue: "Legacy Storage", language: AppLanguage.current)
         )
         analysis.createdAt = createdAt
         return analysis
@@ -433,8 +483,12 @@ final class SettingsStore: ObservableObject {
         }
     }
 
-    /// 설정값 글로벌(iCloud) 저장 (로컬 모드 해제 및 iCloud 동기화 후 UserDefaults 로컬 캐싱)
+    /// 설정값 글로벌(iCloud) 저장. 미지원 빌드에서는 로컬 저장으로 전환한다.
     func setGlobal<T>(_ key: String, value: T) {
+        guard Self.supportsICloud else {
+            setLocal(key, value: value)
+            return
+        }
         local.set(false, forKey: "\(key).isLocal")
 
         if let val = value as? Bool {
@@ -464,8 +518,7 @@ final class SettingsStore: ObservableObject {
 
     /// 설정값 저장 (iCloud 활성화 여부 및 개별 로컬 설정에 따라 자동 결정)
     func set<T>(_ key: String, value: T) {
-        let useICloud = local.bool(forKey: "pieroot.todo.iCloudSyncEnabled")
-        if useICloud && !isLocal(key: key) {
+        if Self.isICloudSyncEnabled && !isLocal(key: key) {
             setGlobal(key, value: value)
         } else {
             setLocal(key, value: value)
@@ -474,6 +527,7 @@ final class SettingsStore: ObservableObject {
 
     /// 그동안 로컬 UserDefaults에만 저장되어 있던 설정들을 iCloud로 모두 업로드합니다.
     func uploadLocalSettingsToCloud() {
+        guard Self.supportsICloud else { return }
         for key in Self.syncableKeys {
             // 로컬 모드가 아닌 경우에만 클라우드에 업로드
             if !isLocal(key: key) {

@@ -117,7 +117,8 @@ struct MailAnalysisSyncGate: Equatable {
 func mailboxAnalysisCandidates(
     from emails: [EmailMessage],
     lookbackDays: Int,
-    now: Date = Date()
+    now: Date = Date(),
+    includeUnclassified: Bool = false
 ) -> [EmailMessage] {
     let cutoff = EmailAnalysisLookbackPolicy.cutoff(
         now: now,
@@ -126,7 +127,9 @@ func mailboxAnalysisCandidates(
     return emails.filter {
         $0.isInInbox
             && $0.receivedAt >= cutoff
-            && $0.analysisState != .analyzed
+            && ($0.analysisState != .analyzed
+                || $0.analysisVersion != EmailAnalysisContract.summaryContractVersion
+                || (includeUnclassified && $0.analysisTodoCandidate == nil))
     }
 }
 
@@ -332,9 +335,9 @@ struct MailboxStartupPresentation: Equatable {
     let storedCredentialProviders: Set<MailProvider>
 
     var visibleProviders: Set<MailProvider> {
-        cachedProviders
-            .intersection(storedCredentialProviders)
+        storedCredentialProviders
             .union(authenticatedProviders)
+            .union(cachedProviders.intersection(storedCredentialProviders))
     }
 
     var showsMailbox: Bool {
@@ -471,6 +474,7 @@ struct MailTrashUndoQueue {
 
 struct MailTabView: View {
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.appTutorialState) private var tutorial
     @Query(
         filter: #Predicate<EmailMessage> { $0.isInInbox == true },
@@ -493,7 +497,7 @@ struct MailTabView: View {
     @State private var showError = false
     @State private var analysisProgress: MailAnalysisProgress?
     @State private var mailAnalysisSyncGate = MailAnalysisSyncGate()
-    @State private var autoRegisteringEmailID: String?
+    @State private var registeringEmail: MailDetailSelection?
     @State private var retryLoadMoreByProvider: [MailProvider: Bool] = [:]
 
     @State private var pendingTrashQueue = MailTrashUndoQueue()
@@ -581,9 +585,13 @@ struct MailTabView: View {
     }
 
     var analysisCandidateEmails: [EmailMessage] {
-        mailboxAnalysisCandidates(
+        let laya = LayaDecisionService.shared
+        let canClassify = BetaFeaturePolicy().authorizes(.laya, for: .layaModelManagement)
+            && laya.isCapable && laya.isModelInstalled
+        return mailboxAnalysisCandidates(
             from: validCachedInboxEmails,
-            lookbackDays: EmailAnalysisLookbackPolicy.storedLookbackDays()
+            lookbackDays: EmailAnalysisLookbackPolicy.storedLookbackDays(),
+            includeUnclassified: canClassify
         )
     }
 
@@ -630,7 +638,8 @@ struct MailTabView: View {
                 }
             }
             .navigationTitle("메일")
-            .navigationBarTitleDisplayMode(.large)
+            .navigationBarTitleDisplayMode(horizontalSizeClass == .regular ? .inline : .large)
+            .disableNavigationBarMinimization()
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button {
@@ -688,12 +697,23 @@ struct MailTabView: View {
                 MailDetailSelectionView(selection: selection)
                     .modelContainer(modelContext.container)
             }
+            .sheet(item: $registeringEmail) { selection in
+                MailRegisterSelectionView(selection: selection)
+                    .environment(\.modelContext, modelContext)
+            }
             .sheet(isPresented: $showCategoryGuide) {
                 MailCategoryGuideView()
                     .presentationDetents([.medium])
             }
             .sheet(isPresented: $showEmailSettingsSheet, onDismiss: {
-                Task { await refreshAuthenticationState() }
+                Task {
+                    storedCredentialProviders = MailboxCachedProviderAccess.current().storedCredentialProviders
+                    if let provider = selectedProvider {
+                        await validateAndUpdateAuthState(for: provider)
+                        guard selectedProvider == provider else { return }
+                        await refreshSelectedMailbox(showSuccess: false)
+                    }
+                }
             }) {
                 NavigationStack {
                     EmailDetailView()
@@ -706,10 +726,12 @@ struct MailTabView: View {
             }
             .task {
                 storedCredentialProviders = MailboxCachedProviderAccess.current().storedCredentialProviders
+                authenticationState = .resolved
                 reconcileSelectedProviderForCurrentState()
-                await refreshAuthenticationState()
                 try? MailboxLocalStore.live.replayPendingMutations(in: modelContext)
-                if selectedProvider != nil && authenticationState == .resolved {
+                if let provider = selectedProvider {
+                    await validateAndUpdateAuthState(for: provider)
+                    guard selectedProvider == provider else { return }
                     await refreshSelectedMailbox(showSuccess: false)
                 }
             }
@@ -825,7 +847,7 @@ struct MailTabView: View {
             }
         } label: {
             Label(
-                selectedProvider.map(providerDisplayName) ?? "메일",
+                selectedProvider.map(providerDisplayName) ?? AppLanguage.localized("search.scope.mail", defaultValue: "메일", language: .current),
                 systemImage: "line.3.horizontal.decrease.circle"
             )
             .font(.caption.weight(.semibold))
@@ -885,7 +907,11 @@ struct MailTabView: View {
         let hasLoaded = viewState.pagingState(for: provider).hasLoadedInitialPage
         viewState.selectedProvider = provider
         if !hasLoaded {
-            Task { await refreshSelectedMailbox(showSuccess: false) }
+            Task {
+                await validateAndUpdateAuthState(for: provider)
+                guard selectedProvider == provider else { return }
+                await refreshSelectedMailbox(showSuccess: false)
+            }
         }
     }
 
@@ -956,16 +982,13 @@ struct MailTabView: View {
                     }
                     .buttonStyle(.plain)
                     .swipeActions(edge: .leading, allowsFullSwipe: true) {
-                        if autoRegisteringEmailID == email.localListID {
-                            ProgressView().controlSize(.mini)
-                        } else {
-                            Button {
-                                Task { await autoRegisterTodo(from: email) }
-                            } label: {
-                                Label("할일 등록", systemImage: "checkmark.circle.fill")
-                            }
-                            .tint(AppTheme.success)
+                        Button {
+                            registeringEmail = MailDetailSelection(email)
+                        } label: {
+                            Label(MailRegisterSheet.saveActionTitle, systemImage: "checkmark.circle.fill")
                         }
+                        .tint(AppTheme.success)
+                        .accessibilityIdentifier("mail.row.saveTodo")
                     }
                     .onAppear {
                         guard Self.shouldTriggerTopSync(
@@ -1049,9 +1072,9 @@ struct MailTabView: View {
             ProgressView()
             Text(AppLanguage.localized(
                 "mail.authentication.checking",
-                defaultValue: "인증 정보를 확인하는 중입니다…",
+                defaultValue: "연결·메일 조회 확인 중…",
                 language: .current,
-                comment: "Checking authentication status."
+                comment: "Checking the IMAP connection and inbox message access."
             ))
             .font(.subheadline)
             .foregroundStyle(.secondary)
@@ -1060,7 +1083,7 @@ struct MailTabView: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel(AppLanguage.localized(
             "mail.authentication.checking.accessibility",
-            defaultValue: "메일 인증 정보를 확인하는 중",
+            defaultValue: "IMAP 연결과 메일 조회 확인 중",
             language: .current,
             comment: "Checking mail authentication accessibility label."
         ))
@@ -1073,9 +1096,9 @@ struct MailTabView: View {
                 .controlSize(.small)
             Text(AppLanguage.localized(
                 "mail.authentication.checking",
-                defaultValue: "인증 정보를 확인하는 중입니다…",
+                defaultValue: "연결·메일 조회 확인 중…",
                 language: .current,
-                comment: "Checking authentication status."
+                comment: "Checking the IMAP connection and inbox message access."
             ))
             .font(.footnote)
             .foregroundStyle(.secondary)
@@ -1087,7 +1110,7 @@ struct MailTabView: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel(AppLanguage.localized(
             "mail.authentication.checking.accessibility",
-            defaultValue: "메일 인증 정보를 확인하는 중",
+            defaultValue: "IMAP 연결과 메일 조회 확인 중",
             language: .current,
             comment: "Checking mail authentication accessibility label."
         ))
@@ -1315,79 +1338,6 @@ struct MailTabView: View {
         try? await EmailMessageAnalysisService.shared.analyze(email, context: modelContext)
     }
 
-    @MainActor
-    private func autoRegisterTodo(from email: EmailMessage) async {
-        guard autoRegisteringEmailID == nil else { return }
-        autoRegisteringEmailID = email.localListID
-        defer { autoRegisteringEmailID = nil }
-
-        let appContext = ModelContext(AppDataContainer.shared.container)
-        let targetSourceRef = email.todoSourceRef
-        let existingPredicate = #Predicate { (todo: Todo) in
-            todo.sourceRef == targetSourceRef
-        }
-        let existing = (
-            try? appContext.fetch(FetchDescriptor<Todo>(predicate: existingPredicate))
-        ) ?? []
-        guard existing.isEmpty else {
-            alertTitle = AppLanguage.localized("mail.todo.alreadyRegistered.title", defaultValue: "Already Registered", language: .current, comment: "Already registered mail alert.")
-            errorMessage = AppLanguage.localized("mail.todo.alreadyRegistered.message", defaultValue: "This email is already registered as a To-Do.", language: .current, comment: "Already registered mail alert.")
-            showError = true
-            return
-        }
-
-        if email.body.isEmpty && email.htmlBody == nil {
-            do {
-                let content = try await pagingProvider(for: email.provider)
-                    .fetchMessageContent(messageID: email.providerMessageID)
-                try MailboxLocalStore.live.updateContent(
-                    content,
-                    for: email,
-                    in: modelContext
-                )
-            } catch {
-                alertTitle = AppLanguage.localized("mail.todo.registerFailed", defaultValue: "To-Do Registration Failed", language: .current, comment: "Mail to-do registration error.")
-                errorMessage = error.localizedDescription
-                showError = true
-                return
-            }
-        }
-
-        let synthetic = GmailMessage(
-            id: email.todoSourceRef,
-            threadID: email.threadID,
-            messageID: "",
-            subject: email.subject,
-            from: email.from,
-            snippet: email.snippet,
-            body: email.body,
-            htmlBody: email.htmlBody,
-            receivedAt: email.receivedAt,
-            labelIds: email.labelIDs,
-            isBulk: false,
-            provider: email.provider,
-            providerMessageID: email.providerMessageID,
-            sourceAccountNamespace: email.sourceAccountNamespace
-        )
-        let todo = await EmailService.shared.makeManualTodo(from: synthetic)
-
-        do {
-            appContext.insert(todo)
-            TaskBehaviorRecorder.recordCreation(of: todo, actor: .user, in: appContext)
-            try appContext.save()
-            _ = CalendarService.shared.applyAutoRegistration(for: todo)
-            try appContext.save()
-            EmailLearningStore.shared.recordAnalyzed(messageIDs: [email.todoSourceRef])
-            alertTitle = AppLanguage.localized("mail.todo.registered.title", defaultValue: "To-Do Registered", language: .current, comment: "Mail to-do registration success.")
-            errorMessage = AppLanguage.localized("mail.todo.registered.message", defaultValue: "A To-Do was registered from the email summary.", language: .current, comment: "Mail to-do registration success.")
-            showError = true
-        } catch {
-            alertTitle = AppLanguage.localized("mail.todo.registerFailed", defaultValue: "To-Do Registration Failed", language: .current, comment: "Mail to-do registration error.")
-            errorMessage = error.localizedDescription
-            showError = true
-        }
-    }
-
     private func deleteEmails(at offsets: IndexSet) {
         let targets = offsets.compactMap {
             selectedEmails.indices.contains($0) ? selectedEmails[$0] : nil
@@ -1493,7 +1443,7 @@ struct MailTabView: View {
             return MailSessionValidation(isAuthenticated: false, hasStoredCredential: false)
         }
         do {
-            try await GmailIMAPService.shared.authenticate(
+            try await GmailIMAPService.shared.validateConnection(
                 email: account,
                 backgroundEnabled: backgroundEnabled
             )
@@ -1514,7 +1464,7 @@ struct MailTabView: View {
             return MailSessionValidation(isAuthenticated: false, hasStoredCredential: false)
         }
         do {
-            try await OutlookIMAPService.shared.authenticate(
+            try await OutlookIMAPService.shared.validateConnection(
                 email: account,
                 backgroundEnabled: backgroundEnabled
             )
@@ -1528,38 +1478,47 @@ struct MailTabView: View {
     }
 
     @MainActor
-    private func refreshAuthenticationState() async {
+    private func validateAndUpdateAuthState(for provider: MailProvider) async {
         #if DEBUG
         if MailUITestFixture.isEnabled {
             isGmailAuthenticated = true
             isOutlookAuthenticated = true
             storedCredentialProviders = [.gmail, .outlook]
-            viewState.reconcileAuthenticatedProviders(authenticatedProviders)
             authenticationState = .resolved
             reconcileSelectedProviderForCurrentState()
             return
         }
         #endif
-        let gmailAccount = UserDefaults.standard.string(forKey: "pieroot.todo.imap.account") ?? ""
-        let outlookAccount = UserDefaults.standard.string(forKey: "pieroot.todo.outlook.account") ?? ""
-        async let gmailValidation = Self.validateGmailSession(
-            account: gmailAccount,
-            backgroundEnabled: UserDefaults.standard.bool(forKey: "pieroot.todo.imap.backgroundEnabled")
-        )
-        async let outlookValidation = Self.validateOutlookSession(
-            account: outlookAccount,
-            backgroundEnabled: UserDefaults.standard.bool(forKey: "pieroot.todo.outlook.backgroundEnabled")
-        )
-        let (gmailValidationResult, outlookValidationResult) = await (gmailValidation, outlookValidation)
-        isGmailAuthenticated = gmailValidationResult.isAuthenticated
-        isOutlookAuthenticated = outlookValidationResult.isAuthenticated
-        storedCredentialProviders = Set([
-            gmailValidationResult.hasStoredCredential ? .gmail : nil,
-            outlookValidationResult.hasStoredCredential ? .outlook : nil
-        ].compactMap { $0 })
-        viewState.reconcileAuthenticatedProviders(authenticatedProviders)
+        switch provider {
+        case .gmail:
+            let account = UserDefaults.standard.string(forKey: "pieroot.todo.imap.account") ?? ""
+            let bg = UserDefaults.standard.bool(forKey: "pieroot.todo.imap.backgroundEnabled")
+            let validation = await Self.validateGmailSession(account: account, backgroundEnabled: bg)
+            isGmailAuthenticated = validation.isAuthenticated
+            if validation.hasStoredCredential {
+                storedCredentialProviders.insert(.gmail)
+            } else {
+                storedCredentialProviders.remove(.gmail)
+            }
+        case .outlook:
+            let account = UserDefaults.standard.string(forKey: "pieroot.todo.outlook.account") ?? ""
+            let bg = UserDefaults.standard.bool(forKey: "pieroot.todo.outlook.backgroundEnabled")
+            let validation = await Self.validateOutlookSession(account: account, backgroundEnabled: bg)
+            isOutlookAuthenticated = validation.isAuthenticated
+            if validation.hasStoredCredential {
+                storedCredentialProviders.insert(.outlook)
+            } else {
+                storedCredentialProviders.remove(.outlook)
+            }
+        }
         authenticationState = .resolved
         reconcileSelectedProviderForCurrentState()
+    }
+
+    @MainActor
+    private func refreshAuthenticationState() async {
+        await validateAndUpdateAuthState(for: .gmail)
+        await validateAndUpdateAuthState(for: .outlook)
     }
 
     @MainActor
@@ -1653,6 +1612,19 @@ struct MailMessageRow: View {
                 .font(.body)
                 .fontWeight(email.isRead ? .regular : .medium)
                 .lineLimit(1)
+            if email.analysisTodoCandidate == true {
+                Label(
+                    AppLanguage.localized(
+                        "mail.analysis.layaCandidate",
+                        defaultValue: "할 일 후보 · Laya",
+                        language: .current,
+                        comment: "Laya recommends reviewing this email as a to-do; no automatic save."
+                    ),
+                    systemImage: "checkmark.circle"
+                )
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(AppTheme.accent)
+            }
             Text(email.snippet)
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -1695,37 +1667,100 @@ struct MailMessageRow: View {
 
 // MARK: - MailRegisterSheet
 
-/// 메일에서 할일 + 캘린더 일정을 동시 등록하는 프리필 확인 시트.
+/// 스와이프에서 연 등록 시트가 동기화 중 병합·삭제된 행을 붙잡지 않도록
+/// `MailDetailSelectionView`와 같은 방식으로 라이브 쿼리에서 메일을 다시 찾는다.
+struct MailRegisterSelectionView: View {
+    let selection: MailDetailSelection
+    @Environment(\.dismiss) private var dismiss
+    @Query private var candidates: [EmailMessage]
+
+    init(selection: MailDetailSelection) {
+        self.selection = selection
+        _candidates = selection.liveQuery
+    }
+
+    var body: some View {
+        if let email = MailDetailSelection.resolve(candidates, matching: selection.key) {
+            MailRegisterSheet(email: email)
+        } else {
+            Color.clear
+                .task(id: selection.id) {
+                    dismiss()
+                }
+        }
+    }
+}
+
+/// 메일을 확인한 뒤 할 일로 저장하는 검토 시트.
+/// - 제목·메모: 사용 가능한 Apple Intelligence로 초안을 만들고, 아니면 로컬 규칙으로 대체한다.
+/// - 기한: 메일 본문에서 규칙 기반으로 찾은 날짜만 제안하고, 사용자가 확인·수정한다.
+///   찾지 못하면 기한을 꺼 둔 채 기한 없는 할 일로 저장한다(임의 날짜를 만들지 않는다).
+/// - 캘린더: 이 시트는 사용자가 켠 경우에만, 기한이 있고 캘린더 접근이 허용된 때 즉시 일정을 만든다.
+///   (기한 있는 할 일을 나중에 자동 등록하는 전역 동기화 정책은 별개다.)
+///   Todo를 먼저 저장하고 일정을 나중에 만들어 Todo 저장 실패 시 고아 일정이 생기지 않게 한다.
 ///
 /// ⚠️ 프라이버시 보장:
-/// - Gmail 본문은 온디바이스에서만 분석.
-/// - Todo는 AppDataContainer.shared.container(main)에 저장, 절대 CloudKit emailContainer에 넣지 않음.
-/// - 자동 추출은 `EmailService.makeManualTodo(from:)` 기반으로 동일한 메타데이터 경로 사용.
+/// - 메일 본문은 온디바이스 규칙 기반으로만 분석한다.
+/// - Todo는 AppDataContainer.shared.container(main)에 저장, 절대 emailContainer에 넣지 않음.
+/// - 초안은 `EmailService.makeManualTodo(from:)` 기반으로 동일한 메타데이터 경로 사용.
 struct MailRegisterSheet: View {
     let email: EmailMessage
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
 
-    @State private var title: String = ""
-    @State private var dueDate: Date = Date()
-    @State private var isAllDay: Bool = false
-    @State private var notes: String = ""
-    @State private var calendarID: String = ""
-    @State private var sourceRef: String = ""
-    @State private var sourceMessageID: String = ""
-    @State private var sourceThreadID: String = ""
-    @State private var sourceSender: String = ""
-    @State private var sourceSenderEmail: String = ""
+    @State private var title = ""
+    @State private var notes = ""
+    @State private var hasDueDate = false
+    @State private var dueDate = Date()
+    @State private var isAllDay = true
+    @State private var isDueDateSuggested = false
+    @State private var deadlineEvidence = ""
+    @State private var addToCalendar = false
+    @State private var isCalendarAuthorized = false
+    @State private var isRequestingCalendarAccess = false
+    @State private var calendarAccessDenied = false
+    @State private var calendarID = ""
     @State private var calendarSources: [CalendarService.CalendarSourceGroup] = []
+    @State private var sourceMessageID = ""
+    @State private var sourceThreadID = ""
+    @State private var sourceSender = ""
+    @State private var sourceSenderEmail = ""
     @State private var isAnalyzing = true
+    @State private var isDuplicate = false
     @State private var errorMessage: String?
+    @State private var calendarWarning: String?
 
     private let cal = Calendar.current
+
+    /// 메일 상세·목록 스와이프·시트 제목이 공유하는 단일 행동 문구.
+    static var saveActionTitle: String {
+        localized("mail.register.action", ko: "할 일로 저장", en: "Save as To-Do")
+    }
+
+    static func localized(_ key: String, ko: String, en: String) -> String {
+        AppLanguage.localized(
+            key,
+            defaultValue: AppLanguage.current == .english ? en : ko,
+            language: .current,
+            comment: "Mail to-do review sheet."
+        )
+    }
+
+    private var sourceRef: String { email.todoSourceRef }
+
+    private var canSave: Bool {
+        !isAnalyzing
+            && !isDuplicate
+            && !isRequestingCalendarAccess
+            && !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 
     var body: some View {
         NavigationStack {
             Form {
+                sourceSection
+
                 if isAnalyzing {
                     Section {
                         HStack(spacing: 10) {
@@ -1735,75 +1770,274 @@ struct MailRegisterSheet: View {
                                 .font(.subheadline)
                         }
                     }
-                }
-
-                Section("제목") {
-                    TextField("제목", text: $title)
-                }
-
-                Section("완료 기한") {
-                    Toggle("종일", isOn: $isAllDay)
-                    DatePicker(
-                        "날짜",
-                        selection: $dueDate,
-                        displayedComponents: isAllDay ? [.date] : [.date, .hourAndMinute]
-                    )
-                }
-
-                Section("메모") {
-                    TextEditor(text: $notes)
-                        .frame(minHeight: 80)
-                        .font(.footnote)
-                }
-
-                if !calendarSources.isEmpty {
-                    Section("캘린더") {
-                        Picker("캘린더 선택", selection: $calendarID) {
-                            ForEach(calendarSources) { source in
-                                ForEach(source.calendars) { info in
-                                    calendarLabel(info).tag(info.id)
-                                }
-                            }
-                        }
-                        .pickerStyle(.menu)
+                } else if isDuplicate {
+                    Section {
+                        Label(
+                            Self.localized("mail.register.duplicate", ko: "이미 등록된 메일입니다.", en: "This email is already registered."),
+                            systemImage: "checkmark.circle"
+                        )
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("mail.register.duplicate")
+                    }
+                } else {
+                    taskSection
+                    deadlineSection
+                    if hasDueDate {
+                        calendarSection
+                    }
+                    Section("메모") {
+                        TextEditor(text: $notes)
+                            .frame(minHeight: 80)
+                            .font(.footnote)
+                            .accessibilityIdentifier("mail.register.notes")
                     }
                 }
 
-                if let err = errorMessage {
+                if let errorMessage {
                     Section {
-                        Label(err, systemImage: "exclamationmark.triangle")
-                            .font(.caption).foregroundStyle(AppTheme.destructive)
+                        Label(errorMessage, systemImage: "exclamationmark.triangle")
+                            .font(.caption)
+                            .foregroundStyle(AppTheme.destructive)
                     }
                 }
             }
-            .navigationTitle("할일 & 일정 등록")
+            .navigationTitle(Self.saveActionTitle)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("취소") { dismiss() }
+                        .accessibilityIdentifier("mail.register.cancel")
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("등록") { register() }
+                    Button("저장") { save() }
                         .fontWeight(.semibold)
-                        .disabled(title.trimmingCharacters(in: .whitespaces).isEmpty || isAnalyzing)
+                        .disabled(!canSave)
+                        .accessibilityIdentifier("mail.register.save")
                 }
+            }
+            .onChange(of: hasDueDate) { _, isOn in
+                if !isOn { addToCalendar = false }
+            }
+            .alert(
+                Self.localized("mail.register.savedTitle", ko: "할 일을 저장했어요", en: "To-Do Saved"),
+                isPresented: Binding(
+                    get: { calendarWarning != nil },
+                    set: { if !$0 { calendarWarning = nil } }
+                )
+            ) {
+                Button("확인") { dismiss() }
+            } message: {
+                Text(calendarWarning ?? "")
             }
         }
         .task {
-            await analyzeAndPrefill()
-            calendarSources = CalendarService.shared.availableCalendars()
-            let defaultID = CalendarService.shared.defaultCalendarID
-            calendarID = defaultID.isEmpty
-                ? (calendarSources.first?.calendars.first?.id ?? "")
-                : defaultID
+            await prepare()
         }
+    }
+
+    // MARK: Sections
+
+    private var sourceSection: some View {
+        Section {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(email.subject.isEmpty ? Self.localized("(제목 없음)", ko: "(제목 없음)", en: "(No Title)") : email.subject)
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(2)
+                Text(sourceLine)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .accessibilityElement(children: .combine)
+        } header: {
+            Label(
+                Self.localized("mail.register.sourceHeader", ko: "원본 메일", en: "Source Email"),
+                systemImage: "envelope"
+            )
+        }
+    }
+
+    private var sourceLine: String {
+        let analyzer = EmailContentAnalyzer()
+        let sender = sourceSender.isEmpty ? analyzer.parseSender(from: email.from) : sourceSender
+        let received = email.receivedAt.formatted(
+            .dateTime.month(.abbreviated).day().hour().minute().locale(AppLanguage.current.locale)
+        )
+        return [sender.isEmpty ? email.from : sender, received]
+            .filter { !$0.isEmpty }
+            .joined(separator: " · ")
+    }
+
+    private var taskSection: some View {
+        Section {
+            TextField(
+                Self.localized("mail.register.titlePlaceholder", ko: "할 일 제목", en: "To-do title"),
+                text: $title,
+                axis: .vertical
+            )
+            .font(.body.weight(.medium))
+            .accessibilityIdentifier("mail.register.title")
+        } header: {
+            Text(Self.localized("mail.register.taskHeader", ko: "할 일", en: "To-Do"))
+        }
+    }
+
+    private var deadlineSection: some View {
+        Section {
+            Toggle(isOn: $hasDueDate.animation()) {
+                Text(Self.localized("mail.register.deadlineToggle", ko: "마감 설정", en: "Set Deadline"))
+            }
+            .accessibilityIdentifier("mail.register.deadlineToggle")
+
+            if hasDueDate {
+                Toggle("종일", isOn: $isAllDay)
+                    .accessibilityIdentifier("mail.register.allDay")
+                DatePicker(
+                    "날짜",
+                    selection: $dueDate,
+                    displayedComponents: isAllDay ? [.date] : [.date, .hourAndMinute]
+                )
+                .accessibilityIdentifier("mail.register.deadlinePicker")
+            }
+        } header: {
+            Text("마감")
+        } footer: {
+            if let footer = deadlineFooter {
+                Text(footer)
+            }
+        }
+    }
+
+    private var deadlineFooter: String? {
+        switch (isDueDateSuggested, hasDueDate) {
+        case (true, true):
+            let prompt = Self.localized(
+                "mail.register.deadlineSuggested",
+                ko: "메일에서 찾은 기한이에요. 맞는지 확인해 주세요.",
+                en: "This deadline was found in the email. Please check it."
+            )
+            return deadlineEvidence.isEmpty ? prompt : "\(prompt)\n“\(deadlineEvidence)”"
+        case (true, false):
+            return Self.localized(
+                "mail.register.deadlineOff",
+                ko: "기한 없이 저장돼요.",
+                en: "It will be saved without a deadline."
+            )
+        case (false, false):
+            return Self.localized(
+                "mail.register.deadlineNotFound",
+                ko: "메일에서 기한을 찾지 못했어요. 기한 없이 저장돼요.",
+                en: "No deadline was found in the email. It will be saved without one."
+            )
+        case (false, true):
+            return nil
+        }
+    }
+
+    private var calendarSection: some View {
+        Section {
+            Toggle(isOn: calendarToggleBinding) {
+                Label(
+                    Self.localized("mail.register.calendarToggle", ko: "지금 캘린더에도 추가", en: "Add to Calendar Now"),
+                    systemImage: "calendar.badge.plus"
+                )
+            }
+            .disabled(isRequestingCalendarAccess)
+            .accessibilityIdentifier("mail.register.calendarToggle")
+
+            if addToCalendar && isCalendarAuthorized && !calendarSources.isEmpty {
+                Picker("캘린더 선택", selection: $calendarID) {
+                    ForEach(calendarSources) { source in
+                        ForEach(source.calendars) { info in
+                            calendarLabel(info).tag(info.id)
+                        }
+                    }
+                }
+                .pickerStyle(.menu)
+                .accessibilityIdentifier("mail.register.calendarPicker")
+            }
+        } footer: {
+            Text(
+                calendarAccessDenied
+                    ? Self.localized(
+                        "mail.register.calendarDenied",
+                        ko: "캘린더 접근 권한이 없어 일정은 만들 수 없어요. 할 일은 그대로 저장돼요.",
+                        en: "Calendar access is off, so no event can be added. The to-do will still be saved."
+                    )
+                    : Self.localized(
+                        "mail.register.calendarLaterSync",
+                        ko: "마감이 있으면 나중에 캘린더 동기화 과정에서 자동 등록될 수 있어요.",
+                        en: "To-dos with deadlines may also be added during a later calendar sync."
+                    )
+            )
+        }
+    }
+
+    private var calendarToggleBinding: Binding<Bool> {
+        Binding(
+            get: { addToCalendar },
+            set: { isOn in
+                guard isOn else {
+                    addToCalendar = false
+                    return
+                }
+                Task { await enableCalendar() }
+            }
+        )
+    }
+
+    // MARK: Loading
+
+    @MainActor
+    private func prepare() async {
+        let service = CalendarService.shared
+        service.restoreAuthorizationIfGranted()
+        isCalendarAuthorized = service.isAuthorized
+        if isCalendarAuthorized { loadCalendars() }
+
+        if isAlreadyRegistered(in: ModelContext(AppDataContainer.shared.container)) {
+            isDuplicate = true
+            isAnalyzing = false
+            return
+        }
+        await analyzeAndPrefill()
+    }
+
+    /// 사용자가 캘린더 추가를 켤 때만 권한을 확인·요청한다. 거부돼도 할 일 저장은 막지 않는다.
+    @MainActor
+    private func enableCalendar() async {
+        let service = CalendarService.shared
+        service.restoreAuthorizationIfGranted()
+        if !service.isAuthorized {
+            isRequestingCalendarAccess = true
+            let granted = await service.requestAccess()
+            isRequestingCalendarAccess = false
+            guard granted else {
+                isCalendarAuthorized = false
+                calendarAccessDenied = true
+                addToCalendar = false
+                return
+            }
+        }
+        isCalendarAuthorized = true
+        calendarAccessDenied = false
+        loadCalendars()
+        addToCalendar = hasDueDate
+    }
+
+    private func loadCalendars() {
+        calendarSources = CalendarService.shared.availableCalendars()
+        let ids = Set(calendarSources.flatMap { $0.calendars.map(\.id) })
+        guard !ids.contains(calendarID) else { return }
+        let defaultID = CalendarService.shared.defaultCalendarID
+        calendarID = ids.contains(defaultID)
+            ? defaultID
+            : (calendarSources.first?.calendars.first?.id ?? "")
     }
 
     @MainActor
     private func analyzeAndPrefill() async {
-        var syntheticThreadID = email.threadID
-        let syntheticMessageID = ""
-        if email.body.isEmpty || email.htmlBody == nil {
+        if email.body.isEmpty && email.htmlBody == nil {
             do {
                 let provider = MailboxProviderRegistry.provider(for: email.provider)
                 let content = try await provider.fetchMessageContent(messageID: email.providerMessageID)
@@ -1812,16 +2046,25 @@ struct MailRegisterSheet: View {
                     for: email,
                     in: modelContext
                 )
-                syntheticThreadID = email.threadID
             } catch {
-                errorMessage = error.localizedDescription
+                guard !Task.isCancelled else { return }
+                DiagnosticRecorder.shared.record(
+                    error: error,
+                    component: "mail.register",
+                    operation: "fetchMessageContent"
+                )
+                errorMessage = Self.localized(
+                    "mail.register.bodyLoadFailed",
+                    ko: "메일 전체 본문을 불러오지 못해 미리보기로 초안을 만들었어요.",
+                    en: "The full email couldn't be loaded, so the draft uses the preview."
+                )
             }
         }
 
         let synthetic = GmailMessage(
-            id: email.todoSourceRef,
-            threadID: syntheticThreadID,
-            messageID: syntheticMessageID,
+            id: sourceRef,
+            threadID: email.threadID,
+            messageID: "",
             subject: email.subject,
             from: email.from,
             snippet: email.snippet,
@@ -1835,59 +2078,115 @@ struct MailRegisterSheet: View {
             sourceAccountNamespace: email.sourceAccountNamespace
         )
 
-        let draftTodo = await EmailService.shared.makeManualTodo(from: synthetic, allowFoundationModels: false)
-        let analyzed = EmailContentAnalyzer().analyze(synthetic, now: Date())
+        let draftTodo = await EmailService.shared.makeManualTodo(from: synthetic, allowFoundationModels: true)
+        guard !Task.isCancelled else { return }
+        let extracted = EmailContentAnalyzer().analyze(synthetic, now: Date())
 
         title = draftTodo.title
         notes = draftTodo.notes
-        sourceRef = draftTodo.sourceRef
         sourceMessageID = draftTodo.sourceMessageID
         sourceThreadID = draftTodo.sourceThreadID
-        sourceSender = draftTodo.sourceSender
-        sourceSenderEmail = draftTodo.sourceSenderEmail
+        let analyzer = EmailContentAnalyzer()
+        sourceSender = analyzer.parseSender(from: email.from)
+        sourceSenderEmail = analyzer.parseSenderEmail(from: email.from)
 
-        if let parsedDueDate = draftTodo.dueDate {
-            dueDate = parsedDueDate
-            isAllDay = isManualTodoAllDay(parsedDueDate)
-        } else if let extracted = analyzed {
+        // 메일에서 실제로 찾은 날짜만 제안한다. 없으면 기한을 끈 채로 둔다.
+        if let extracted {
             dueDate = extracted.dueDate
             isAllDay = extracted.isAllDay
+            deadlineEvidence = extracted.deadlineSentence
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            isDueDateSuggested = true
         } else {
-            dueDate = email.receivedAt.addingTimeInterval(86_400)
+            // 사용자가 직접 마감을 켤 때 보이는 시작값일 뿐, 저장 값으로 쓰지 않는다.
+            dueDate = endOfDay(Date())
             isAllDay = true
+            isDueDateSuggested = false
         }
-
+        hasDueDate = isDueDateSuggested
         isAnalyzing = false
     }
 
-    private func register() {
-        let cleanTitle = title.trimmingCharacters(in: .whitespaces)
-        guard !cleanTitle.isEmpty else { return }
+    // MARK: Saving
 
-        let appContext = ModelContext(AppDataContainer.shared.container)
-        let ref = sourceRef.isEmpty ? email.todoSourceRef : sourceRef
-        let existingDescriptor = FetchDescriptor<Todo>(
+    private func isAlreadyRegistered(in context: ModelContext) -> Bool {
+        let ref = sourceRef
+        let descriptor = FetchDescriptor<Todo>(
             predicate: #Predicate { $0.sourceRef == ref }
         )
-        let existing = (try? appContext.fetch(existingDescriptor)) ?? []
+        return ((try? context.fetchCount(descriptor)) ?? 0) > 0
+    }
 
-        guard existing.isEmpty else {
-            errorMessage = AppLanguage.localized("mail.register.duplicate", defaultValue: "This email is already registered.", language: .current, comment: "Mail registration duplicate error.")
+    /// 저장 순서: 중복 확인 → Todo 저장 → (선택 시) 일정 생성 → 일정 연결 저장.
+    /// Todo 저장이 실패하면 일정은 만들지 않는다. 연결 저장이 실패해도 일정은 지우지 않는다:
+    /// Todo가 이미 저장됐으므로 캘린더 동기화가 메일 URL로 일정을 다시 연결한다.
+    private func save() {
+        let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanTitle.isEmpty else { return }
+        errorMessage = nil
+
+        let appContext = ModelContext(AppDataContainer.shared.container)
+        guard !isAlreadyRegistered(in: appContext) else {
+            isDuplicate = true
+            return
+        }
+
+        let savedDueDate: Date? = hasDueDate
+            ? (isAllDay ? endOfDay(dueDate) : dueDate)
+            : nil
+        let ref = sourceRef
+        let analyzer = EmailContentAnalyzer()
+        let todo = Todo(
+            title: cleanTitle,
+            notes: notes,
+            dueDate: savedDueDate,
+            source: .email,
+            sourceRef: ref
+        )
+        todo.sourceAccountNamespace = email.sourceAccountNamespace
+        todo.sourceSender = sourceSender.isEmpty ? analyzer.parseSender(from: email.from) : sourceSender
+        todo.sourceSenderEmail = sourceSenderEmail.isEmpty ? analyzer.parseSenderEmail(from: email.from) : sourceSenderEmail
+        todo.sourceMessageID = sourceMessageID
+        todo.sourceThreadID = sourceThreadID
+
+        do {
+            appContext.insert(todo)
+            TaskBehaviorRecorder.recordCreation(of: todo, actor: .user, in: appContext)
+            try appContext.save()
+        } catch {
+            DiagnosticRecorder.shared.record(
+                error: error,
+                component: "mail.register",
+                operation: "saveTodo"
+            )
+            errorMessage = Self.localized(
+                "mail.todo.registerFailed",
+                ko: "할 일 등록 실패",
+                en: "To-Do Registration Failed"
+            )
+            return
+        }
+        EmailLearningStore.shared.recordAnalyzed(messageIDs: [ref])
+
+        let service = CalendarService.shared
+        guard addToCalendar, let savedDueDate, isCalendarAuthorized, service.isAuthorized else {
+            dismiss()
             return
         }
 
         let eventStart: Date
         let eventEnd: Date
         if isAllDay {
-            eventStart = cal.startOfDay(for: dueDate)
-            eventEnd   = cal.date(byAdding: .day, value: 1, to: eventStart) ?? eventStart.addingTimeInterval(86_400)
+            eventStart = cal.startOfDay(for: savedDueDate)
+            eventEnd = cal.date(byAdding: .day, value: 1, to: eventStart) ?? eventStart.addingTimeInterval(86_400)
         } else {
-            eventStart = dueDate
-            eventEnd   = dueDate.addingTimeInterval(3_600)
+            eventStart = savedDueDate
+            eventEnd = savedDueDate.addingTimeInterval(3_600)
         }
 
+        let eventID: String
         do {
-            let eventID = try CalendarService.shared.createEventFromEmail(
+            eventID = try service.createEventFromEmail(
                 title: cleanTitle,
                 start: eventStart,
                 end: eventEnd,
@@ -1897,33 +2196,44 @@ struct MailRegisterSheet: View {
                 sourceRef: ref,
                 calendarID: calendarID.isEmpty ? nil : calendarID
             )
-
-            let todo = Todo(
-                title: cleanTitle,
-                notes: notes,
-                dueDate: dueDate,
-                source: .email,
-                sourceRef: ref
+        } catch {
+            DiagnosticRecorder.shared.record(
+                error: error,
+                component: "mail.register",
+                operation: "createEventFromEmail"
             )
-            todo.sourceAccountNamespace = email.sourceAccountNamespace
-            todo.sourceSender = sourceSender.isEmpty ? EmailContentAnalyzer().parseSender(from: email.from) : sourceSender
-            todo.sourceSenderEmail = sourceSenderEmail.isEmpty ? EmailContentAnalyzer().parseSenderEmail(from: email.from) : sourceSenderEmail
-            todo.sourceMessageID = sourceMessageID
-            todo.sourceThreadID = sourceThreadID
-            if !eventID.isEmpty { todo.calendarEventID = eventID }
-            appContext.insert(todo)
-            TaskBehaviorRecorder.recordCreation(of: todo, actor: .user, in: appContext)
+            calendarWarning = calendarFailureMessage
+            return
+        }
+
+        todo.calendarEventID = eventID.isEmpty ? nil : eventID
+        do {
             try appContext.save()
             dismiss()
         } catch {
-            errorMessage = error.localizedDescription
-            return
+            DiagnosticRecorder.shared.record(
+                error: error,
+                component: "mail.register",
+                operation: "linkCalendarEvent"
+            )
+            calendarWarning = Self.localized(
+                "mail.register.calendarLinkPending",
+                ko: "할 일과 일정은 저장했어요. 둘의 연결은 다음 캘린더 동기화 때 맞춰져요.",
+                en: "The to-do and event were saved. They'll be linked during the next calendar sync."
+            )
         }
     }
 
-    private func isManualTodoAllDay(_ date: Date) -> Bool {
-        let components = cal.dateComponents([.hour, .minute, .second], from: date)
-        return components.hour == 23 && components.minute == 59 && (components.second ?? 0) == 0
+    private var calendarFailureMessage: String {
+        Self.localized(
+            "mail.register.calendarFailed",
+            ko: "할 일은 저장했지만 캘린더 일정을 추가하지 못했어요.",
+            en: "The to-do was saved, but the calendar event couldn't be added."
+        )
+    }
+
+    private func endOfDay(_ date: Date) -> Date {
+        cal.date(bySettingHour: 23, minute: 59, second: 0, of: date) ?? date
     }
 
     @ViewBuilder

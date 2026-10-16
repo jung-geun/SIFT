@@ -279,6 +279,7 @@ struct todoApp: App {
     /// 선택된 탭 (lastUsed 복원용).
     @AppStorage("pieroot.todo.selectedTab") private var selectedTab = 0
     @AppStorage("pieroot.todo.hasOnboarded") private var hasOnboarded = false
+    @AppStorage("pieroot.todo.hasReviewedPermissions") private var hasReviewedPermissions = false
     @AppStorage("pieroot.todo.hasCompletedTutorial") private var hasCompletedTutorial = false
 
     /// 시작 화면 정책: "lastUsed"(마지막 화면) | "fixed"(고정 탭)
@@ -332,6 +333,70 @@ struct todoApp: App {
         }
     }
 
+    // MARK: - 캘린더 할 일 중복 제거 (기기 간 동기화 불일치 복구)
+
+    static func deduplicateCalendarTodos(context: ModelContext) {
+        do {
+            let descriptor = FetchDescriptor<Todo>()
+            let allTodos = try context.fetch(descriptor)
+            let todos = allTodos.filter { $0.todoSource == .calendar }
+            guard todos.count > 1 else { return }
+
+            var seenKeys: [String: Todo] = [:]
+            var duplicatesToDelete: [Todo] = []
+
+            for todo in todos {
+                let timeKey: String
+                if let due = todo.dueDate {
+                    timeKey = String(Int(due.timeIntervalSince1970 / 60))
+                } else {
+                    timeKey = "nodue"
+                }
+
+                let primaryKey: String
+                if !todo.calendarEventExternalID.isEmpty {
+                    primaryKey = "ext:\(todo.calendarEventExternalID)#\(timeKey)"
+                } else {
+                    primaryKey = "title:\(todo.title.trimmingCharacters(in: .whitespaces))#\(timeKey)"
+                }
+
+                if let existing = seenKeys[primaryKey] {
+                    let keepExisting: Bool
+                    if existing.isCompleted && !todo.isCompleted {
+                        keepExisting = true
+                    } else if !existing.isCompleted && todo.isCompleted {
+                        keepExisting = false
+                    } else if existing.triage == TodoTriage.todo && todo.triage == TodoTriage.review {
+                        keepExisting = true
+                    } else if existing.triage == TodoTriage.review && todo.triage == TodoTriage.todo {
+                        keepExisting = false
+                    } else {
+                        keepExisting = existing.createdAt <= todo.createdAt
+                    }
+
+                    if keepExisting {
+                        duplicatesToDelete.append(todo)
+                    } else {
+                        duplicatesToDelete.append(existing)
+                        seenKeys[primaryKey] = todo
+                    }
+                } else {
+                    seenKeys[primaryKey] = todo
+                }
+            }
+
+            if !duplicatesToDelete.isEmpty {
+                print("[Deduplication] \(duplicatesToDelete.count)개의 중복 캘린더 할 일을 정리합니다.")
+                for dup in duplicatesToDelete {
+                    context.delete(dup)
+                }
+                try context.save()
+            }
+        } catch {
+            print("[Deduplication] 캘린더 할 일 중복 제거 중 오류: \(error)")
+        }
+    }
+
     // MARK: - Init
 
     init() {
@@ -344,6 +409,10 @@ struct todoApp: App {
             SettingsStore.shared.seedLegacyAISettingsForUITest()
         }
         #endif
+        do { try RemovedProviderCleanup.run() }
+        catch {
+            DiagnosticRecorder.shared.record(error: error, component: "security.keychain", operation: "removedProviderCleanup")
+        }
         SettingsStore.shared.migrateLegacyBetaSelectedProviderIfNeeded()
         SettingsStore.shared.normalizeBetaSelectedProvider()
         if #available(iOS 17.0, *) {
@@ -353,6 +422,7 @@ struct todoApp: App {
         _appData = StateObject(wrappedValue: container)
         #if DEBUG
         MailUITestFixture.seedIfNeeded(into: container.emailContainer)
+        MeetingSourceTrackSmokeFixture.seedIfNeeded(into: container.meetingContainer)
         #endif
         let service = UserVocabularyService(modelContainer: container.meetingContainer)
         let queue = VocabularyEnrichmentQueue(service: service)
@@ -384,6 +454,13 @@ struct todoApp: App {
 
     var body: some Scene {
         WindowGroup {
+            if appData.isPersistentStoreAvailable {
+            if !hasOnboarded && !hasReviewedPermissions {
+                FirstLaunchPermissionsView {
+                    hasReviewedPermissions = true
+                }
+                .environment(\.locale, appLanguage.locale)
+            } else {
             // 캘린더 탭(tag 1) 재탭 시 오늘로 이동하는 커스텀 바인딩
             let tabBinding = Binding<Int>(
                 get: { tabVisibility.clamped(selectedTab) },
@@ -419,6 +496,7 @@ struct todoApp: App {
                     .tabItem { Label("회의", systemImage: "person.2.wave.2") }
                     .tag(AppTabID.meeting.rawValue)
             }
+            .disableTabBarMinimization()
             .environment(\.locale, appLanguage.locale)
             .tint(AppTheme.accent)
             .environmentObject(syncMonitor)
@@ -428,11 +506,14 @@ struct todoApp: App {
             .onAppear {
                 mailAccessPolicy = MailboxCachedProviderAccess.current()
                 SettingsStore.shared.migrateLegacyMemoryKeysIntoSwiftDataIfNeeded()
-                NSUbiquitousKeyValueStore.default.synchronize()
+                if SettingsStore.supportsICloud {
+                    NSUbiquitousKeyValueStore.default.synchronize()
+                }
 
                 let ctx = appData.container.mainContext
                 appDelegate.modelContext = ctx
                 todoApp.deduplicatePersonas(context: ctx)
+                todoApp.deduplicateCalendarTodos(context: ctx)
 
                 CalendarService.shared.restoreAuthorizationIfGranted()
                 unexpectedTerminationRecovery.enterForeground()
@@ -450,7 +531,7 @@ struct todoApp: App {
                 scheduleEmailRefresh()
 
                 // 어느 탭이든 앱 실행 시 iCloud 동기화 시작
-                if iCloudSyncEnabled {
+                if SettingsStore.supportsICloud && iCloudSyncEnabled {
                     syncMonitor.startObserving(initialCount: 0)
                 }
 
@@ -467,7 +548,7 @@ struct todoApp: App {
                 Task {
                     // iCloud 동기화가 진행 중이면 완료 후 캘린더 동기화
                     // (iCloud에 먼저 도착한 캘린더 이벤트를 Todo 없는 신규로 오인하는 경쟁 조건 방지)
-                    if iCloudSyncEnabled { await syncMonitor.waitForCompletion() }
+                    if SettingsStore.supportsICloud && iCloudSyncEnabled { await syncMonitor.waitForCompletion() }
                     await CalendarService.shared.syncCalendarWithTodos(context: ctx)
                     await CalendarService.shared.cleanupOldCompletedTodos(context: ctx)
                 }
@@ -476,11 +557,12 @@ struct todoApp: App {
                 // 컨테이너 재건(iCloud 동적 전환) 후 AppDelegate 컨텍스트 갱신
                 appDelegate.modelContext = appData.container.mainContext
                 todoApp.deduplicatePersonas(context: appData.container.mainContext)
+                todoApp.deduplicateCalendarTodos(context: appData.container.mainContext)
             }
             .onReceive(NotificationCenter.default.publisher(for: .EKEventStoreChanged)) { _ in
                 if let ctx = appDelegate.modelContext {
                     Task {
-                        if iCloudSyncEnabled { await syncMonitor.waitForCompletion() }
+                        if SettingsStore.supportsICloud && iCloudSyncEnabled { await syncMonitor.waitForCompletion() }
                         await CalendarService.shared.syncCalendarWithTodos(context: ctx)
                     }
                 }
@@ -514,6 +596,9 @@ struct todoApp: App {
             .onReceive(NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)) { _ in
                 unexpectedTerminationRecovery.enterBackground()
             }
+            .onReceive(NotificationCenter.default.publisher(for: UIApplication.willTerminateNotification)) { _ in
+                unexpectedTerminationRecovery.enterInactive()
+            }
             .onChange(of: scenePhase) { _, newPhase in
                 switch newPhase {
                 case .active:
@@ -521,7 +606,7 @@ struct todoApp: App {
                     unexpectedTerminationRecovery.enterForeground()
                     mailAccessPolicy = MailboxCachedProviderAccess.current()
                     // 포그라운드 전환 시에도 동기화 시작 (탭 무관)
-                    if iCloudSyncEnabled {
+                    if SettingsStore.supportsICloud && iCloudSyncEnabled {
                         syncMonitor.startObserving(initialCount: 0)
                     }
                     Task {
@@ -541,7 +626,7 @@ struct todoApp: App {
                             await CalendarService.shared.runWeeklyImportIfDue(context: ctx)
                         }
                         Task {
-                            if iCloudSyncEnabled { await syncMonitor.waitForCompletion() }
+                            if SettingsStore.supportsICloud && iCloudSyncEnabled { await syncMonitor.waitForCompletion() }
                             await CalendarService.shared.syncCalendarWithTodos(context: ctx)
                             await CalendarService.shared.cleanupOldCompletedTodos(context: ctx)
                         }
@@ -558,6 +643,9 @@ struct todoApp: App {
                     OnDeviceLLMService.shared.unloadModel(reason: .background)
                     MailboxIncrementalSyncCoordinator.shared.stopPolling()
                 case .inactive:
+                    // Inactive is a normal user or system interruption, not
+                    // evidence of an active-session crash.
+                    unexpectedTerminationRecovery.enterInactive()
                     DiagnosticEnvironment.setAppState("inactive")
                     MailboxIncrementalSyncCoordinator.shared.stopPolling()
                 default:
@@ -578,6 +666,21 @@ struct todoApp: App {
                         operation: "unexpectedForegroundTermination",
                         showsCloseButton: true
                     )
+                }
+            }
+            }
+            } else {
+                ContentUnavailableView {
+                    Label(
+                        AppLanguage.localized("app.storage.unavailable", defaultValue: "Storage unavailable", language: appLanguage, comment: "Startup persistent storage failure title."),
+                        systemImage: "externaldrive.badge.exclamationmark"
+                    )
+                } description: {
+                    Text(AppLanguage.localized("app.storage.preserved", defaultValue: "Your original data has been preserved. Unlock the device and try again. No changes will be saved until storage is available.", language: appLanguage, comment: "Startup failure message; original user data is unchanged."))
+                } actions: {
+                    Button(AppLanguage.localized("action.retry", defaultValue: "Try again", language: appLanguage)) {
+                        appData.rebuild(useICloud: iCloudSyncEnabled)
+                    }
                 }
             }
         }

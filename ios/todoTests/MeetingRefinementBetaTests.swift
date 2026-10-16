@@ -8,12 +8,19 @@ struct MeetingRefinementBetaTests {
     private let betaKeys = [
         SettingsStore.betaFoundationModelsEnabledKey,
         SettingsStore.betaOnDeviceModelEnabledKey,
-        SettingsStore.betaGeminiEnabledKey,
+        SettingsStore.betaOpenAIEnabledKey,
         SettingsStore.betaSelectedProviderKey
     ]
 
     private func resetBeta() {
         betaKeys.forEach { UserDefaults.standard.removeObject(forKey: $0) }
+    }
+
+    private func disableAllProviders() {
+        UserDefaults.standard.set(false, forKey: SettingsStore.betaFoundationModelsEnabledKey)
+        UserDefaults.standard.set(false, forKey: SettingsStore.betaOnDeviceModelEnabledKey)
+        UserDefaults.standard.set(false, forKey: SettingsStore.betaOpenAIEnabledKey)
+        UserDefaults.standard.removeObject(forKey: SettingsStore.betaSelectedProviderKey)
     }
 
     private func result() -> MeetingResult {
@@ -44,11 +51,12 @@ struct MeetingRefinementBetaTests {
         }
     }
 
-    @Test("off/off and Gemini-only keep the transcript unchanged with policy reason")
+    @Test("off/off and OpenAI-only keep the transcript unchanged with policy reason")
     func noLocalProviderUsesPolicyReason() async throws {
         await AIProviderTestIsolation.shared.withLock {
             resetBeta()
             defer { resetBeta() }
+            disableAllProviders()
             let engine = MeetingRefinementEngine()
             let off = try? await engine.refine(
                 meetingID: "123e4567-e89b-12d3-a456-426614174000",
@@ -59,15 +67,15 @@ struct MeetingRefinementBetaTests {
             )
             #expect(off?.executionPath == .rules(.noEligibleProvider))
 
-            SettingsStore.shared.setBetaProvider(.gemini, enabled: true)
-            let geminiOnly = try? await engine.refine(
+            SettingsStore.shared.setBetaProvider(.openAI, enabled: true)
+            let openAIOnly = try? await engine.refine(
                 meetingID: "123e4567-e89b-12d3-a456-426614174000",
                 result: result(),
                 vocabulary: .empty,
                 language: .korean,
                 allowModelLoad: false
             )
-            #expect(geminiOnly?.executionPath == .rules(.noEligibleProvider))
+            #expect(openAIOnly?.executionPath == .rules(.noEligibleProvider))
         }
     }
 
