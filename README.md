@@ -37,6 +37,10 @@ SIFT는 **기기 내 분석을 기본으로 하는 할 일 관리 앱**입니다
 
 일반 사용자에게는 확대가 필요한 개발 도표 대신 바로 읽을 수 있는 사용 순서를 제공합니다. [소개 이미지·규격](docs/media.md), [이미지 묶음 ZIP](docs/assets/media/sift-media-kit.zip), [편집 가능한 도표 원본](docs/assets/workflows/overview.workflow.json)과 생성·검증 자료는 저장소 내부 제작용이며 공개 사이트 빌드에서 제외합니다.
 
+[![현재 SIFT 1.0.11 QA 앱의 합성 할 일 예시 화면](docs/assets/media/ko/web-preview.png)](https://sift.pieroot.xyz/#screens)
+
+소개 이미지는 2026-10-21 현재 앱 소스로 다시 촬영했습니다. 한국어·영어 iPhone/iPad 화면에 합성 예시 데이터만 사용하며, 현재 공개 앱 1.0.10·App Store 이미지 업로드·심사 승인과 구분합니다.
+
 ## 할 일을 다루는 방식
 
 ### 직접 입력하고 실제 마감부터 확인
