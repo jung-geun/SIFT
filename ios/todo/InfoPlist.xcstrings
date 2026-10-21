@@ -1,276 +1,382 @@
 {
-  "sourceLanguage": "ko",
-  "strings": {
-    "CFBundleDisplayName": {
-      "comment": "Bundle display name",
-      "extractionState": "extracted_with_value",
-      "localizations": {
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "SIFT: To-Do List"
+  "sourceLanguage" : "ko",
+  "strings" : {
+    "CFBundleDisplayName" : {
+      "comment" : "Bundle display name",
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SIFT: Aufgabenliste"
           }
         },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "SIFT: To-Do List"
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SIFT: To-Do List"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "SIFT: Lista de tareas"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SIFT: Lista de tareas"
           }
         },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "SIFT: To-Doリスト"
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SIFT : Liste de tâches"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "SIFT：待办事项清单"
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SIFT: elenco attività"
           }
         },
-        "fr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "SIFT : Liste de tâches"
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SIFT: To-Doリスト"
           }
         },
-        "it": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "SIFT: elenco attività"
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SIFT: To-Do List"
           }
         },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "SIFT: Aufgabenliste"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SIFT：待办事项清单"
           }
         }
       }
     },
-    "CFBundleName": {
-      "comment": "Bundle name",
-      "extractionState": "extracted_with_value",
-      "localizations": {
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "todo"
+    "CFBundleName" : {
+      "comment" : "Bundle name",
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "todo"
           }
         },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "todo"
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "todo"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "todo"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "todo"
           }
         },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "todo"
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "todo"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "todo"
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "todo"
           }
         },
-        "fr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "todo"
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "todo"
           }
         },
-        "it": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "todo"
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "todo"
           }
         },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "todo"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "todo"
           }
         }
       }
     },
-    "NSCalendarsFullAccessUsageDescription": {
-      "comment": "Reason the app requests full calendar access.",
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Calendar access is required to add to-do deadlines and read your schedule."
+    "NSCalendarsFullAccessUsageDescription" : {
+      "comment" : "Reason the app requests full calendar access.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Kalenderzugriff ist erforderlich, um Aufgabenfristen im Kalender einzutragen und deinen Zeitplan zu lesen."
           }
         },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "할 일 마감을 캘린더에 등록하고 일정을 읽어오기 위해 캘린더 접근이 필요합니다."
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Calendar access is required to add to-do deadlines and read your schedule."
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Se necesita acceso al calendario para añadir los plazos de las tareas y consultar tu agenda."
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Se necesita acceso al calendario para añadir los plazos de las tareas y consultar tu agenda."
           }
         },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "To-Doの期限をカレンダーに追加し、予定を読み込むために、カレンダーへのアクセスが必要です。"
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "L’accès au calendrier est nécessaire pour y ajouter les échéances des tâches et consulter votre emploi du temps."
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "需要访问日历，以添加待办事项的截止时间并读取你的日程。"
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "L'accesso al calendario è necessario per aggiungere le scadenze delle attività e leggere i tuoi impegni."
           }
         },
-        "fr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "L’accès au calendrier est nécessaire pour y ajouter les échéances des tâches et consulter votre emploi du temps."
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "To-Doの期限をカレンダーに追加し、予定を読み込むために、カレンダーへのアクセスが必要です。"
           }
         },
-        "it": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "L'accesso al calendario è necessario per aggiungere le scadenze delle attività e leggere i tuoi impegni."
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "할 일 마감을 캘린더에 등록하고 일정을 읽어오기 위해 캘린더 접근이 필요합니다."
           }
         },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Kalenderzugriff ist erforderlich, um Aufgabenfristen im Kalender einzutragen und deinen Zeitplan zu lesen."
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "需要访问日历，以添加待办事项的截止时间并读取你的日程。"
           }
         }
       }
     },
-    "NSMicrophoneUsageDescription": {
-      "comment": "Reason the app requests microphone access.",
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Microphone access is required to record meetings and transcribe them on this device."
+    "NSHealthShareUsageDescription" : {
+      "comment" : "Read-only HealthKit access; workout and medication categories and sources require separate approval.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mit deiner Erlaubnis liest SIFT den jüngsten Trainings- und Medikamentenverlauf, um auf diesem Gerät Routinen vorzuschlagen. Jede Kategorie und jede Quelle erfordert deine Zustimmung; es werden keine Gesundheitsdaten geschrieben."
           }
         },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "회의를 녹음하고 기기에서 전사하려면 마이크 접근이 필요합니다."
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "With your permission, SIFT reads recent workout and medication history to suggest routines on this device. Each category and source requires your approval; no health data is written."
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Se necesita acceso al micrófono para grabar reuniones y transcribirlas en este dispositivo."
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Con tu permiso, SIFT lee el historial reciente de entrenamientos y medicamentos para sugerir rutinas en este dispositivo. Cada categoría y origen requiere tu aprobación; no se escribe ningún dato de salud."
           }
         },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "会議を録音し、このデバイスで文字起こしするために、マイクへのアクセスが必要です。"
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Avec votre permission, SIFT lit l’historique récent d’entraînements et de médicaments pour suggérer des routines sur cet appareil. Chaque catégorie et chaque source nécessitent votre approbation ; aucune donnée de santé n’est écrite."
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "需要访问麦克风，以录制会议并在此设备上转写。"
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Con il tuo permesso, SIFT legge la cronologia recente di allenamenti e farmaci per suggerire routine su questo dispositivo. Ogni categoria e origine richiede la tua approvazione; non viene scritto alcun dato sanitario."
           }
         },
-        "fr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "L’accès au microphone est nécessaire pour enregistrer les réunions et les transcrire sur cet appareil."
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SIFTは、許可を得たうえで最近のワークアウトと服薬の履歴を読み取り、このデバイス上でルーティンを提案します。カテゴリとデータ提供元ごとに承認が必要です。健康データの書き込みは行いません。"
           }
         },
-        "it": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "L'accesso al microfono è necessario per registrare le riunioni e trascriverle su questo dispositivo."
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "동의하시면 SIFT가 최근 운동·복약 기록을 읽어 이 기기에서 루틴을 제안합니다. 각 항목과 출처는 별도로 승인해야 하며, 건강 데이터는 기록하지 않습니다."
           }
         },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Mikrofonzugriff ist erforderlich, um Besprechungen aufzuzeichnen und auf diesem Gerät zu transkribieren."
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "经你许可，SIFT 会读取近期的体能训练和用药历史记录，以在本设备上提供日常计划建议。每个类别和每个来源都需要你的批准；不会写入任何健康数据。"
           }
         }
       }
     },
-    "NSSpeechRecognitionUsageDescription": {
-      "comment": "Reason the app requests speech recognition access.",
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Speech recognition access is required to transcribe recorded meetings on this device."
+    "NSHealthUpdateUsageDescription" : {
+      "comment" : "Required by HealthKit validation. SIFT requests read-only access and never writes Health data.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SIFT schreibt oder ändert niemals Daten in Health. Es liest nur den Trainings- und Medikamentenverlauf, den du verbindest."
           }
         },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "녹음 중인 회의를 기기에서 전사하려면 음성 인식 접근이 필요합니다."
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SIFT never writes or changes data in Health. It only reads the workout and medication history you choose to connect."
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Se necesita acceso al reconocimiento de voz para transcribir reuniones grabadas en este dispositivo."
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SIFT nunca escribe ni modifica datos en Salud. Solo lee el historial de entrenamientos y medicamentos que decides conectar."
           }
         },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "録音した会議をこのデバイスで文字起こしするために、音声認識へのアクセスが必要です。"
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SIFT n’écrit ni ne modifie jamais de données dans Santé. L’app lit uniquement l’historique d’entraînements et de médicaments que vous choisissez de connecter."
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "需要使用语音识别，以在此设备上转写已录制的会议。"
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SIFT non scrive né modifica mai dati in Salute. Legge solo la cronologia di allenamenti e farmaci che scegli di collegare."
           }
         },
-        "fr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "L’accès à la reconnaissance vocale est nécessaire pour transcrire les réunions enregistrées sur cet appareil."
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SIFTはヘルスケアのデータを書き込んだり変更したりしません。連携を選んだワークアウトと服薬の履歴を読み取るだけです。"
           }
         },
-        "it": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "L'accesso al riconoscimento vocale è necessario per trascrivere le riunioni registrate su questo dispositivo."
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SIFT는 건강 앱에 데이터를 기록하거나 변경하지 않습니다. 사용자가 연결한 운동·복약 기록을 읽기만 합니다."
           }
         },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Zugriff auf die Spracherkennung ist erforderlich, um aufgezeichnete Besprechungen auf diesem Gerät zu transkribieren."
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SIFT 从不在“健康”中写入或更改数据，只读取你选择连接的体能训练和用药历史记录。"
+          }
+        }
+      }
+    },
+    "NSMicrophoneUsageDescription" : {
+      "comment" : "Reason the app requests microphone access.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mikrofonzugriff ist erforderlich, um Besprechungen aufzuzeichnen und auf diesem Gerät zu transkribieren."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Microphone access is required to record meetings and transcribe them on this device."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Se necesita acceso al micrófono para grabar reuniones y transcribirlas en este dispositivo."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "L’accès au microphone est nécessaire pour enregistrer les réunions et les transcrire sur cet appareil."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "L'accesso al microfono è necessario per registrare le riunioni e trascriverle su questo dispositivo."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "会議を録音し、このデバイスで文字起こしするために、マイクへのアクセスが必要です。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "회의를 녹음하고 기기에서 전사하려면 마이크 접근이 필요합니다."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "需要访问麦克风，以录制会议并在此设备上转写。"
+          }
+        }
+      }
+    },
+    "NSSpeechRecognitionUsageDescription" : {
+      "comment" : "Reason the app requests speech recognition access.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Zugriff auf die Spracherkennung ist erforderlich, um aufgezeichnete Besprechungen auf diesem Gerät zu transkribieren."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Speech recognition access is required to transcribe recorded meetings on this device."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Se necesita acceso al reconocimiento de voz para transcribir reuniones grabadas en este dispositivo."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "L’accès à la reconnaissance vocale est nécessaire pour transcrire les réunions enregistrées sur cet appareil."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "L'accesso al riconoscimento vocale è necessario per trascrivere le riunioni registrate su questo dispositivo."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "録音した会議をこのデバイスで文字起こしするために、音声認識へのアクセスが必要です。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "녹음 중인 회의를 기기에서 전사하려면 음성 인식 접근이 필요합니다."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "需要使用语音识别，以在此设备上转写已录制的会议。"
           }
         }
       }
     }
   },
-  "version": "1.0"
+  "version" : "1.0"
 }

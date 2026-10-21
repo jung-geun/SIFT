@@ -1,5 +1,7 @@
 package xyz.pieroot.sift
 
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -166,6 +168,82 @@ class SiftCoreLogicTest {
         assertTrue(result.summary.isNotBlank())
         assertEquals(calendar.get(Calendar.HOUR_OF_DAY), result.productiveHour)
         assertEquals(nowMillis, result.createdAt)
+    }
+
+    @Test
+    fun cloudSnapshot_excludesMailAndDeviceBindings() {
+        val email = TodoItem(id = "email", source = TodoSource.EMAIL, title = "private subject")
+        val legacyMail = TodoItem(id = "legacy", sourceMessageId = "private-message")
+        val threadMail = TodoItem(id = "thread", sourceThreadId = "private-thread")
+        val senderMail = TodoItem(id = "sender", sourceSenderEmail = "private@example.com")
+        val manual = TodoItem(id = "manual", calendarEventId = 42L)
+        val local = SiftSnapshot(
+            mail = MailFeatureState(gmailConnected = true, suppressedSenders = listOf("private@example.com")),
+            todos = listOf(email, legacyMail, threadMail, senderMail, manual),
+        )
+
+        val cloud = local.forCloudSync()
+
+        assertEquals(listOf("manual"), cloud.todos.map { it.id })
+        assertNull(cloud.todos.single().calendarEventId)
+        assertEquals(MailFeatureState(), cloud.mail)
+        assertEquals(42L, local.todos.last().calendarEventId)
+    }
+
+    @Test
+    fun cloudRestore_preservesLocalMailAndNewerEditsWithoutTrustingRemoteMail() {
+        val localMail = TodoItem(id = "mail", source = TodoSource.EMAIL, title = "local private")
+        val localEdit = TodoItem(id = "edited", title = "newer local", updatedAt = 20L, calendarEventId = 11L)
+        val localOnly = TodoItem(id = "local-only")
+        val local = SiftSnapshot(
+            settings = AppSettings(cloudSyncMode = CloudSyncMode.LOCAL),
+            mail = MailFeatureState(gmailConnected = true),
+            todos = listOf(localMail, localEdit, localOnly),
+        )
+        val remote = SiftSnapshot(
+            settings = AppSettings(cloudSyncMode = CloudSyncMode.FIREBASE),
+            todos = listOf(
+                TodoItem(id = "mail", title = "remote collision", updatedAt = Long.MAX_VALUE),
+                TodoItem(id = "edited", title = "older remote", updatedAt = 10L, calendarEventId = 99L),
+                TodoItem(id = "remote-only", calendarEventId = 123L),
+                TodoItem(id = "remote-mail", source = TodoSource.EMAIL),
+                TodoItem(id = "remote-legacy-mail", sourceSenderEmail = "secret@example.com"),
+            ),
+        )
+
+        val restored = mergeCloudSnapshot(local, remote)
+
+        assertEquals(setOf("mail", "edited", "local-only", "remote-only"), restored.todos.map { it.id }.toSet())
+        assertEquals(localMail, restored.todos.single { it.id == "mail" })
+        assertEquals(localEdit, restored.todos.single { it.id == "edited" })
+        assertNull(restored.todos.single { it.id == "remote-only" }.calendarEventId)
+        assertEquals(local.mail, restored.mail)
+        assertEquals(CloudSyncMode.LOCAL, restored.settings.cloudSyncMode)
+    }
+
+    @Test
+    fun cloudRestore_usesNewerRemoteTodoButNeverItsCalendarLink() {
+        val local = SiftSnapshot(todos = listOf(TodoItem(id = "shared", title = "old", updatedAt = 1L, calendarEventId = 17L)))
+        val remote = SiftSnapshot(todos = listOf(TodoItem(id = "shared", title = "new", updatedAt = 2L, calendarEventId = 88L)))
+
+        val restored = mergeCloudSnapshot(local, remote)
+
+        assertEquals("new", restored.todos.single().title)
+        assertEquals(17L, restored.todos.single().calendarEventId)
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun cloudRestore_rejectsForeignSnapshotInsteadOfDefaultingAwayState() {
+        decodeAndroidCloudSnapshot(Json { ignoreUnknownKeys = true }, """{"exportedAt":"2026-10-10T00:00:00Z","personas":[],"todos":[],"audits":[],"analyses":[]}""")
+    }
+
+    @Test
+    fun cloudRestore_acceptsCurrentAndroidSnapshotWithUnknownFutureFields() {
+        val json = Json { encodeDefaults = true; ignoreUnknownKeys = true }
+        val snapshot = SiftSnapshot(persona = PersonaProfile(descriptionText = "persona"), todos = listOf(TodoItem(id = "restored")))
+        val raw = json.encodeToString(snapshot).dropLast(1) + ",\"futureField\":true}"
+
+        assertEquals(snapshot, decodeAndroidCloudSnapshot(json, raw))
     }
 
 }

@@ -1,0 +1,15 @@
+# Reviewed false positives, bound to immutable commit + file + rule + line.
+# New findings (including future commits at these paths) remain blocking.
+# Re-review exact identities if either historical commit is rewritten.
+
+# RFC 6455 sample Sec-WebSocket-Key nonce, not an authentication credential.
+f1c44dece0427990c349802ac72230d381456d05:backend/meeting-api/scripts/security-smoke.ts:generic-api-key:68
+f1c44dece0427990c349802ac72230d381456d05:backend/meeting-api/test/auth.test.ts:generic-api-key:134
+
+# Typed MLX model-state slot identifiers checked by missing-state tests.
+739e67b3080e38a641c233e664d30d5f7c935cd4:ios/Vendor/mlx-swift-lm/Tests/MLXLMTests/Qwen35ContinuationTests.swift:generic-api-key:162
+739e67b3080e38a641c233e664d30d5f7c935cd4:ios/Vendor/mlx-swift-lm/Tests/MLXLMTests/Qwen35ContinuationTests.swift:generic-api-key:249
+739e67b3080e38a641c233e664d30d5f7c935cd4:ios/Vendor/mlx-swift-lm/Tests/MLXLMTests/Qwen3VLContinuationTests.swift:generic-api-key:266
+
+# Public Swift release OpenPGP fingerprint used by gpg --recv-keys/verification.
+739e67b3080e38a641c233e664d30d5f7c935cd4:ios/Vendor/mlx-swift/.github/workflows/pull_request.yml:generic-api-key:207

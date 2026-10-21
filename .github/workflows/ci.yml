@@ -3,12 +3,11 @@
 # ⚠️ 주의: 이 프로젝트는 SPM(Package.swift) 이 아닌 Xcode 프로젝트이므로
 #           `swift build` / `swift test` 대신 `xcodebuild` 를 사용합니다.
 #
-# ⚠️ Xcode 버전 경고: deployment target = iOS 26.5, Xcode 26.5 빌드 필요.
-#   GitHub 호스티드 러너(macos-15)에 Xcode 26.5 가 없으면 빌드가 실패할 수 있습니다.
-#   러너에 Xcode 26.5 가 추가되는 시점에 자동으로 통과됩니다.
+# 앱과 테스트의 최소 SDK를 지원하는 최신 Xcode와 Simulator가 필요합니다.
+# 빌드 출력을 formatter에 파이프하지 않아 실패 종료 코드를 그대로 보존합니다.
 #
-# Tier 2 FM 스모크 테스트(FMSmokeTests)는 시뮬레이터에 Apple Intelligence 가 없어
-# `guard FoundationModelsService.isAvailable else { return }` 에서 자동 skip 됩니다(정상).
+# FMSmokeTests의 기본 회귀 검사는 주입한 런타임으로 어댑터 계약을 검증합니다.
+# 실제 Foundation Models 생성 품질·안전 정책 스모크는 별도 수동 실행 근거로 기록합니다.
 
 name: CI
 
@@ -20,12 +19,12 @@ on:
 
 jobs:
   build-test:
-    runs-on: macos-15
+    runs-on: xcode-27
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Select Xcode (latest stable)
+      - name: Select stable Xcode 27
         uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: latest-stable
@@ -33,33 +32,28 @@ jobs:
       - name: Print Xcode version
         run: xcodebuild -version
 
+      - name: Install Metal compiler component
+        run: xcodebuild -downloadComponent MetalToolchain
+
       - name: Verify Package.resolved integrity
         run: sh ci_scripts/ci_pre_xcodebuild.sh
 
-      - name: Build
+      - name: Build and test deterministic unit suite
         run: |
-          xcodebuild build \
-            -project ios/todo.xcodeproj \
-            -scheme todo \
-            -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
-            CODE_SIGNING_ALLOWED=NO \
-            | xcpretty || xcodebuild build \
-            -project ios/todo.xcodeproj \
-            -scheme todo \
-            -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
-            CODE_SIGNING_ALLOWED=NO
-
-      - name: Test (Tier 1 파서; FM 스모크 자동 skip)
-        run: |
+          set -euo pipefail
+          DEVICE_ID=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"]; runtimes=sorted((r for r in d if ".iOS-" in r),key=lambda r:tuple(map(int,r.rsplit("iOS-",1)[1].split("-"))),reverse=True); print(next(v["udid"] for r in runtimes for v in d[r] if v["name"].startswith("iPhone") and v["isAvailable"]))')
           xcodebuild test \
             -project ios/todo.xcodeproj \
-            -scheme todo \
-            -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
+            -scheme todo-QA \
+            -destination "platform=iOS Simulator,id=$DEVICE_ID" \
             -only-testing:todoTests \
-            CODE_SIGNING_ALLOWED=NO \
-            | xcpretty || xcodebuild test \
-            -project ios/todo.xcodeproj \
-            -scheme todo \
-            -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
-            -only-testing:todoTests \
+            -resultBundlePath "$RUNNER_TEMP/unit-tests.xcresult" \
             CODE_SIGNING_ALLOWED=NO
+
+      - name: Preserve build and test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-results
+          path: ${{ runner.temp }}/unit-tests.xcresult
+          if-no-files-found: warn

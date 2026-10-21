@@ -563,13 +563,13 @@ struct MeetingDiarizationPipelineTests {
     @Test("live timeline rejects another session and numbers speakers by first appearance")
     func liveTimelineSessionFence() {
         let session = UUID()
-        var timeline = MeetingLiveSpeakerTimeline(sessionID: session)
+        var timeline = MeetingLiveSpeakerTimeline(meetingID: "source", sessionID: session)
         let foreign = MeetingDiarizationUpdate(
             sessionID: UUID(), closedIntervals: [interval("X", 0, 500)], openIntervals: [], coveredThroughSample: 8_000
         )
         let acceptedForeign = timeline.apply(foreign)
         #expect(!acceptedForeign)
-        #expect(timeline == MeetingLiveSpeakerTimeline(sessionID: session))
+        #expect(timeline == MeetingLiveSpeakerTimeline(meetingID: "source", sessionID: session))
 
         let acceptedFirst = timeline.apply(MeetingDiarizationUpdate(
             sessionID: session, closedIntervals: [interval("B", 300, 600)], openIntervals: [interval("A", 700, 900)],
@@ -597,7 +597,7 @@ struct MeetingDiarizationPipelineTests {
             isFinal: true
         ))
         let session = UUID()
-        var timeline = MeetingLiveSpeakerTimeline(sessionID: session)
+        var timeline = MeetingLiveSpeakerTimeline(meetingID: "source", sessionID: session)
         var builder = MeetingLiveTranscriptRowBuilder()
 
         let unlabeled = builder.rows(for: reducer.entries, timeline: timeline)

@@ -4,6 +4,13 @@ import android.content.Context
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.async
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -15,6 +22,7 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
 import java.io.File
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
@@ -213,6 +221,40 @@ data class SiftSnapshot(
     val todos: List<TodoItem> = emptyList(),
 )
 
+// Mail-derived content and provider/device identities never leave this device in a snapshot.
+internal fun TodoItem.isMailOrigin(): Boolean = source == TodoSource.EMAIL ||
+    sourceMessageId.isNotBlank() || sourceThreadId.isNotBlank() || sourceSenderEmail.isNotBlank()
+
+internal fun SiftSnapshot.forCloudSync(): SiftSnapshot = copy(
+    mail = MailFeatureState(),
+    todos = todos.filterNot { it.isMailOrigin() }.map { it.copy(calendarEventId = null) },
+)
+
+internal fun decodeAndroidCloudSnapshot(json: Json, raw: String): SiftSnapshot {
+    val fields = json.parseToJsonElement(raw).jsonObject
+    require(fields.keys.containsAll(listOf("onboardingComplete", "persona", "settings", "todos"))) {
+        "현재 Android 버전에서 복원할 수 없는 스냅샷 형식입니다."
+    }
+    return json.decodeFromString<SiftSnapshot>(raw)
+}
+
+internal fun mergeCloudSnapshot(local: SiftSnapshot, remote: SiftSnapshot): SiftSnapshot {
+    val safeRemote = remote.forCloudSync().normalizedMemorySnapshot()
+    val mergedTodos = local.todos.associateByTo(linkedMapOf()) { it.id }
+    for (incoming in safeRemote.todos) {
+        val existing = mergedTodos[incoming.id]
+        if (existing?.isMailOrigin() == true) continue
+        if (existing == null || incoming.updatedAt > existing.updatedAt) {
+            mergedTodos[incoming.id] = incoming.copy(calendarEventId = existing?.calendarEventId)
+        }
+    }
+    return safeRemote.copy(
+        settings = safeRemote.settings.copy(cloudSyncMode = local.settings.cloudSyncMode),
+        mail = local.mail,
+        todos = mergedTodos.values.sortedByDescending { it.createdAt },
+    )
+}
+
 internal fun normalizedMemoryHistory(memory: MemoryInsight?, memoryHistory: List<MemoryInsight>): List<MemoryInsight> {
     val source = if (memoryHistory.isNotEmpty()) memoryHistory else listOfNotNull(memory)
     return source
@@ -322,7 +364,14 @@ data class TodoDraft(
     val triage: TodoTriage,
 )
 
-class SiftStore(context: Context) {
+class SiftStore private constructor(context: Context) {
+    companion object {
+        @Volatile private var instance: SiftStore? = null
+
+        fun get(context: Context): SiftStore = instance ?: synchronized(this) {
+            instance ?: SiftStore(context.applicationContext).also { instance = it }
+        }
+    }
     private val appContext = context.applicationContext
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private val json = Json {
@@ -332,6 +381,12 @@ class SiftStore(context: Context) {
     }
     private val stateFile = File(appContext.filesDir, "sift_state.json")
     private val persistenceMutex = Mutex()
+    private var cloudSyncJob: Job? = null
+    private var cloudSyncGeneration = 0L
+    private var cloudAccountId = FirebaseSyncService.signedInAccountId(appContext)
+    private var signOutJob: Deferred<Unit>? = null
+    var isSigningOut by mutableStateOf(false)
+        private set
 
     var snapshot by mutableStateOf(loadSnapshot())
         private set
@@ -403,20 +458,19 @@ class SiftStore(context: Context) {
         copy(settings = settings.copy(providerEmailAnalysisEnabled = enabled))
     }
 
-    fun setEmailRefreshHour(hour: Int) = mutate {
-        copy(settings = settings.copy(emailRefreshHour = hour.coerceIn(0, 23)))
-    }
-
-    fun setEmailLookbackDays(days: Int) = mutate {
-        copy(settings = settings.copy(emailLookbackDays = days.coerceIn(1, 30)))
-    }
-
     fun setCloudSyncMode(mode: CloudSyncMode) = mutate {
+        if (mode != snapshot.settings.cloudSyncMode) cancelCloudSync()
         driveSyncState = driveSyncState.copy(mode = mode)
         copy(settings = settings.copy(cloudSyncMode = mode))
     }
 
     fun refreshDriveSyncState() {
+        val accountId = FirebaseSyncService.signedInAccountId(appContext)
+        if (accountId != cloudAccountId) {
+            cancelCloudSync()
+            cloudAccountId = accountId
+            driveSyncState = driveSyncState.copy(lastSyncedAt = null, lastError = null)
+        }
         driveSyncState = driveSyncState.copy(
             configured = FirebaseSyncService.isConfigured(appContext),
             mode = snapshot.settings.cloudSyncMode,
@@ -425,52 +479,93 @@ class SiftStore(context: Context) {
         )
     }
 
-    suspend fun syncWithDriveNow(passphrase: String): Result<String> {
-        val current = snapshot
-        driveSyncState = driveSyncState.copy(isSyncing = true, lastError = null)
-        return runCatching {
-            val result = FirebaseSyncService.uploadSnapshot(appContext, json.encodeToString(current), passphrase)
-            driveSyncState = driveSyncState.copy(
-                configured = true,
-                mode = current.settings.cloudSyncMode,
-                signedInEmail = result.email,
-                lastSyncedAt = result.syncedAt,
-                isSyncing = false,
-                lastError = null,
-            )
-            "Firebase에 동기화했습니다."
-        }.onFailure { error ->
-            driveSyncState = driveSyncState.copy(
-                isSyncing = false,
-                lastError = error.message ?: "Firebase 동기화에 실패했습니다.",
-            )
-        }
+    fun cancelCloudSync() {
+        cloudSyncGeneration += 1
+        cloudSyncJob?.cancel()
+        cloudSyncJob = null
+        driveSyncState = driveSyncState.copy(isSyncing = false)
     }
 
-    suspend fun restoreFromDrive(passphrase: String): Result<String> {
+    suspend fun signOutGoogleAccount() {
+        val pending = signOutJob
+        if (pending?.isActive == true) {
+            pending.await()
+            return
+        }
+        // Disconnect belongs to the application, not the screen that requested it.
+        val operation = scope.async(start = CoroutineStart.UNDISPATCHED) {
+            isSigningOut = true
+            cancelCloudSync()
+            driveSyncState = driveSyncState.copy(signedInEmail = null)
+            try {
+                FirebaseSyncService.signOut(appContext)
+                setCloudSyncMode(CloudSyncMode.LOCAL)
+            } finally {
+                isSigningOut = false
+                refreshDriveSyncState()
+                refreshMailAvailability()
+            }
+        }
+        signOutJob = operation
+        operation.await()
+    }
+
+    suspend fun syncWithDriveNow(passphrase: String): Result<String> = runCloudSync(passphrase, restore = false)
+
+    suspend fun restoreFromDrive(passphrase: String): Result<String> = runCloudSync(passphrase, restore = true)
+
+    private suspend fun runCloudSync(passphrase: String, restore: Boolean): Result<String> {
+        if (isSigningOut) return Result.failure(IllegalStateException("Google 계정 연결을 해제하는 중입니다."))
+        if (driveSyncState.isSyncing) return Result.failure(IllegalStateException("동기화가 이미 진행 중입니다."))
+        val accountId = FirebaseSyncService.signedInAccountId(appContext)
+            ?: return Result.failure(IllegalStateException("Google 계정이 연결되지 않았습니다."))
+        val generation = ++cloudSyncGeneration
+        cloudSyncJob = currentCoroutineContext()[Job]
         driveSyncState = driveSyncState.copy(isSyncing = true, lastError = null)
-        return runCatching {
-            val raw = FirebaseSyncService.downloadSnapshot(appContext, passphrase)
-                ?: error("Firebase에 저장된 SIFT 스냅샷이 없습니다.")
-            val remote = json.decodeFromString<SiftSnapshot>(raw).normalizedMemorySnapshot()
-            snapshot = remote.copy(
-                settings = remote.settings.copy(cloudSyncMode = snapshot.settings.cloudSyncMode)
-            )
-            persist()
+        return try {
+            val syncedAt: Long
+            if (restore) {
+                val raw = FirebaseSyncService.downloadSnapshot(appContext, passphrase)
+                    ?: error("Firebase에 저장된 SIFT 스냅샷이 없습니다.")
+                val remote = decodeAndroidCloudSnapshot(json, raw)
+                currentCoroutineContext().ensureActive()
+                checkCloudAccount(accountId, generation)
+                snapshot = mergeCloudSnapshot(snapshot, remote)
+                persist()
+                syncedAt = System.currentTimeMillis()
+            } else {
+                val current = snapshot.forCloudSync()
+                val result = FirebaseSyncService.uploadSnapshot(appContext, json.encodeToString(current), passphrase)
+                currentCoroutineContext().ensureActive()
+                checkCloudAccount(accountId, generation)
+                syncedAt = result.syncedAt
+            }
             driveSyncState = driveSyncState.copy(
                 configured = true,
                 mode = snapshot.settings.cloudSyncMode,
                 signedInEmail = FirebaseSyncService.signedInEmail(appContext),
-                lastSyncedAt = System.currentTimeMillis(),
-                isSyncing = false,
+                lastSyncedAt = syncedAt,
                 lastError = null,
             )
-            "Firebase에서 데이터를 복원했습니다."
-        }.onFailure { error ->
-            driveSyncState = driveSyncState.copy(
-                isSyncing = false,
-                lastError = error.message ?: "Firebase 복원에 실패했습니다.",
-            )
+            Result.success(if (restore) "Firebase에서 데이터를 복원했습니다." else "Firebase에 동기화했습니다.")
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            if (generation == cloudSyncGeneration) {
+                driveSyncState = driveSyncState.copy(lastError = error.message ?: "Firebase 동기화에 실패했습니다.")
+            }
+            Result.failure(error)
+        } finally {
+            if (generation == cloudSyncGeneration) {
+                cloudSyncJob = null
+                driveSyncState = driveSyncState.copy(isSyncing = false)
+            }
+        }
+    }
+
+    private fun checkCloudAccount(accountId: String, generation: Long) {
+        if (generation != cloudSyncGeneration || accountId != FirebaseSyncService.signedInAccountId(appContext)) {
+            throw CancellationException("Google 계정이 변경되어 동기화를 취소했습니다.")
         }
     }
 
@@ -601,7 +696,10 @@ class SiftStore(context: Context) {
     }
 
     fun saveImportedCalendarTodo(event: DeviceCalendarEvent): TodoItem {
-        val existing = snapshot.todos.firstOrNull { it.source == TodoSource.CALENDAR && it.sourceRef == event.stableRef }
+        val existing = snapshot.todos.firstOrNull {
+            it.source == TodoSource.CALENDAR && (it.sourceRef == event.stableRef ||
+                (event.isRecurring && it.sourceRef == "calendar:${event.id}" && it.dueAt == event.startMillis))
+        }
         val todo = TodoItem(
             id = existing?.id ?: UUID.randomUUID().toString(),
             title = event.title.ifBlank { "캘린더 일정" },
@@ -625,7 +723,7 @@ class SiftStore(context: Context) {
             source = TodoSource.CALENDAR,
             sourceRef = event.stableRef,
             sourceSender = event.calendarName,
-            triage = TodoTriage.REVIEW,
+            triage = existing?.triage ?: TodoTriage.REVIEW,
             tags = existing?.tags ?: listOf("calendar"),
             calendarEventId = event.id,
             aiRecommendedTime = existing?.aiRecommendedTime,
@@ -740,10 +838,16 @@ class SiftStore(context: Context) {
 
     fun resetTutorial() = mutate { copy(onboardingComplete = false) }
 
-    fun markMailOAuthBlocked() = mutate {
+    fun refreshMailAvailability() = mutate {
         copy(
             mail = mail.copy(
-                lastSyncMessage = "Android Gmail/Outlook OAuth client 등록이 아직 없어 메일 동기화는 비활성화되었습니다.",
+                gmailConnected = AndroidGmailService.signedInEmail(appContext) != null,
+                outlookConnected = false,
+                lastSyncMessage = if (AndroidGmailService.isConfigured(appContext)) {
+                    "Gmail은 읽기 전용 최근 메일 미리보기를 지원합니다. Outlook 및 자동 메일 분석은 사용할 수 없습니다."
+                } else {
+                    "Android Gmail OAuth client와 SHA-1 등록이 없어 메일 미리보기를 시작할 수 없습니다."
+                },
             )
         )
     }
@@ -849,8 +953,9 @@ class SiftStore(context: Context) {
     private fun persist() {
         val current = snapshot
         scope.launch {
-            withContext(Dispatchers.IO) {
-                persistenceMutex.withLock {
+            // Acquire on Main before dispatching IO so older snapshots cannot overtake newer ones.
+            persistenceMutex.withLock {
+                withContext(Dispatchers.IO) {
                     val temporaryFile = File(stateFile.parentFile, "${stateFile.name}.tmp")
                     temporaryFile.outputStream().use { stream ->
                         stream.write(json.encodeToString(current).toByteArray())

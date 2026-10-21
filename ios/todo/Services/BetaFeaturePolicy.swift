@@ -27,7 +27,16 @@ nonisolated enum BetaProvider: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+/// Only these providers have an explicit activation preference. Platform AFM
+/// availability and installed general-purpose local models need no second opt-in.
+nonisolated enum BetaProviderOptIn: Equatable, Sendable {
+    case openAI
+    case laya
+}
+
 nonisolated struct BetaProviderAccess: Equatable, Sendable {
+    // Injected access can constrain providers in runtime tests; persisted local
+    // provider preferences never override platform/model readiness.
     let foundationModelsEnabled: Bool
     let onDeviceEnabled: Bool
     let openAIEnabled: Bool
@@ -49,6 +58,37 @@ nonisolated struct BetaProviderAccess: Equatable, Sendable {
         case .openAI: openAIEnabled
         case .laya: layaEnabled
         }
+    }
+}
+
+/// Readiness is separate from opt-in so installation and account management stay accessible.
+nonisolated struct BetaProviderReadiness: Equatable, Sendable {
+    let foundationModelsAvailable: Bool
+    let onDeviceModelUsable: Bool
+    let openAIAccountConnected: Bool
+    let openAIPlanPermitted: Bool
+    let layaModelUsable: Bool
+
+    func isReady(_ provider: PersonaAIProvider) -> Bool {
+        switch provider {
+        case .foundationModels: foundationModelsAvailable
+        case .onDevice: onDeviceModelUsable
+        case .openAI: openAIAccountConnected && openAIPlanPermitted
+        case .laya: layaModelUsable
+        }
+    }
+
+    func selectableProviders(access: BetaProviderAccess) -> [PersonaAIProvider] {
+        PersonaAIProvider.allCases.filter { access.isEnabled($0) && isReady($0) }
+    }
+
+    func normalizedSelection(_ selected: PersonaAIProvider?, access: BetaProviderAccess) -> PersonaAIProvider? {
+        if let selected, access.isEnabled(selected), isReady(selected) {
+            return selected
+        }
+        // Never opt a user into remote analysis merely because an account becomes ready.
+        return [PersonaAIProvider.foundationModels, .onDevice, .laya]
+            .first { access.isEnabled($0) && isReady($0) }
     }
 }
 
@@ -120,7 +160,7 @@ nonisolated enum ProviderRoutingDecision: Equatable, Sendable {
 
 nonisolated struct BetaFeaturePolicy: Sendable {
     typealias AccessReader = @Sendable () -> BetaProviderAccess
-    typealias SelectionReader = @Sendable () -> PersonaAIProvider?
+    typealias SelectionReader = @MainActor @Sendable () -> PersonaAIProvider?
 
     private let accessReader: AccessReader
     private let selectionReader: SelectionReader
@@ -133,6 +173,7 @@ nonisolated struct BetaFeaturePolicy: Sendable {
         self.selectionReader = selectionReader
     }
 
+    @MainActor
     func routingDecision(for use: ProviderUse) -> ProviderRoutingDecision {
         let access = accessReader()
 
@@ -171,6 +212,7 @@ nonisolated struct BetaFeaturePolicy: Sendable {
         }
     }
 
+    @MainActor
     func authorizes(_ provider: PersonaAIProvider, for use: ProviderUse) -> Bool {
         switch routingDecision(for: use) {
         case .rules:

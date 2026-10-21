@@ -128,6 +128,7 @@ final class LayaDecisionService: ObservableObject {
                 )
                 // Verify complete staging payload before touching installation directory
                 try await Self.verifyDirectory(stagingDirectory, expectedFiles: expectedFiles)
+                try Task.checkCancellation()
 
                 let backupDirectory = installRoot.appendingPathComponent(".old-\(UUID().uuidString)")
                 if FileManager.default.fileExists(atPath: installDirectory.path) {
@@ -144,6 +145,7 @@ final class LayaDecisionService: ObservableObject {
                 }
                 verifiedInstall = true
             }
+            try Task.checkCancellation()
             isModelInstalled = true
         } catch is CancellationError {
             isModelInstalled = false

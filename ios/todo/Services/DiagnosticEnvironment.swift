@@ -1,4 +1,5 @@
 import Foundation
+import StoreKit
 import UIKit
 import Darwin
 import os
@@ -272,15 +273,20 @@ enum DiagnosticEnvironment {
         }
     }
 
-    nonisolated static func installSource() -> String {
+    nonisolated static func installSource() async -> String {
         #if targetEnvironment(simulator)
         return "simulator"
         #elseif DEBUG
         return "development"
         #else
-        switch Bundle.main.appStoreReceiptURL?.lastPathComponent {
-        case "sandboxReceipt": return "testFlight"
-        case "receipt": return "appStore"
+        // Do not refresh receipts or prompt for authentication just to prepare
+        // diagnostics. Unavailable or unverified StoreKit metadata stays unknown.
+        guard let result = try? await AppTransaction.shared,
+              case .verified(let transaction) = result else { return "unknown" }
+        switch transaction.environment {
+        case .sandbox: return "testFlight"
+        case .production: return "appStore"
+        case .xcode: return "development"
         default: return "unknown"
         }
         #endif
@@ -319,13 +325,13 @@ enum DiagnosticEnvironment {
         return TimeInterval(bootTime.tv_sec) + TimeInterval(bootTime.tv_usec) / 1_000_000
     }
 
-    nonisolated static func appInfo() -> DiagnosticAppInfo {
+    nonisolated static func appInfo() async -> DiagnosticAppInfo {
         let version = bundleVersion()
         return DiagnosticAppInfo(
             version: version.version,
             build: version.build,
             bundleIdentifier: Bundle.main.bundleIdentifier ?? "unknown",
-            installSource: installSource(),
+            installSource: await installSource(),
             appLanguage: AppLanguage.current.rawValue,
             selectedAIProvider: SettingsStore.selectedProvider().rawValue,
             processUptimeSeconds: Date().timeIntervalSince(processStart)
@@ -406,14 +412,10 @@ enum DiagnosticEnvironment {
             "imapBackgroundEnabled": defaults.bool(forKey: "pieroot.todo.imap.backgroundEnabled"),
             "outlookBackgroundEnabled": defaults.bool(forKey: "pieroot.todo.outlook.backgroundEnabled"),
             "calendarAutoRegister": defaults.bool(forKey: "pieroot.todo.calendarAutoRegister"),
-            "onDeviceLLMEnabled": defaults.bool(forKey: "pieroot.todo.onDeviceLLMEnabled"),
-            "betaFeaturesEnabled": defaults.bool(forKey: "pieroot.todo.betaFeaturesEnabled"),
-            "betaFoundationModelsEnabled": defaults.bool(forKey: "pieroot.todo.beta.foundationModelsEnabled"),
-            "betaOnDeviceModelEnabled": defaults.bool(forKey: "pieroot.todo.beta.onDeviceModelEnabled"),
             "betaOpenAIEnabled": defaults.bool(forKey: SettingsStore.betaOpenAIEnabledKey),
             "betaMeetingVoiceProcessingEnabled": defaults.bool(forKey: "pieroot.todo.beta.meetingVoiceProcessingEnabled"),
-            "meetingVoiceProcessingEnabled": defaults.bool(forKey: "pieroot.todo.meetingVoiceProcessingEnabled"),
-            "meetingAutoRefineEnabled": defaults.bool(forKey: "pieroot.todo.meetingAutoRefineEnabled"),
+            "meetingAutoRefineEnabled": defaults.object(forKey: SettingsStore.meetingAutoRefineKey) == nil
+                || defaults.bool(forKey: SettingsStore.meetingAutoRefineKey),
             "hasOnboarded": defaults.bool(forKey: "pieroot.todo.hasOnboarded"),
             "hasCompletedTutorial": defaults.bool(forKey: "pieroot.todo.hasCompletedTutorial"),
             "gmailAccountLinked": !gmailAccount.isEmpty,

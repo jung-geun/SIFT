@@ -1,5 +1,6 @@
 import SwiftUI
 import SwiftData
+import EventKit
 
 struct AddTodoView: View {
     @Environment(\.modelContext) private var modelContext
@@ -7,6 +8,8 @@ struct AddTodoView: View {
     @Environment(\.appTutorialState) private var tutorial
     @Environment(\.userVocabulary) private var userVocabulary
     @Environment(\.verticalSizeClass) private var verticalSizeClass
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Query(sort: \Persona.updatedAt, order: .reverse) private var personas: [Persona]
 
     // MARK: - State
@@ -39,30 +42,35 @@ struct AddTodoView: View {
 
     var body: some View {
         NavigationStack {
+            ScrollViewReader { scrollProxy in
+            AppTutorialObserving {
             Form {
                 // 제목 (필수)
                 Section {
                     TextField("제목 (필수)", text: $title)
                         .accessibilityIdentifier("todo.add.titleField")
                         .focused($focusedField, equals: .title)
-                        .font(.body)
+                        .font(.headline)
                         .appTutorialGlow(tutorial?.currentStep == .addTodoTitle)
+                        .appTutorialAnchor(screen: .addTodo, steps: [.addTodoTitle], above: true)
+                        .id(AppTutorialStep.addTodoTitle)
                     TextField("메모 (선택)", text: $notes, axis: .vertical)
                         .accessibilityIdentifier("todo.add.notesField")
                         .focused($focusedField, equals: .notes)
                         .lineLimit(2...5)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
+                        .font(.body)
                         .appTutorialGlow(tutorial?.currentStep == .addTodoTitle)
                 }
 
                 // 마감 일정
                 Section("마감 일정") {
-                    Toggle(isOn: $hasDueDate.animation()) {
+                    Toggle(isOn: $hasDueDate.animation(AppTheme.motion(reduceMotion: reduceMotion))) {
                         Label("마감 시각 설정", systemImage: "calendar.badge.clock")
                     }
                     .appTutorialGlow(tutorial?.currentStep == .addTodoDueDate)
                     .accessibilityIdentifier("todo.add.dueDateToggle")
+                    .appTutorialAnchor(screen: .addTodo, steps: [.addTodoDueDate], above: true)
+                    .id(AppTutorialStep.addTodoDueDate)
 
                     if hasDueDate {
                         DatePicker(
@@ -84,43 +92,46 @@ struct AddTodoView: View {
                                 AppLanguage.localized("todo.add.calendarNow", defaultValue: "지금 캘린더에 등록", language: .current, comment: "Create an event immediately for the new task."),
                                 isOn: $registerToCalendar
                             )
-                            if registerToCalendar, !calendarSources.isEmpty {
+                            if registerToCalendar {
                                 Picker("캘린더", selection: $selectedCalendarID) {
+                                    if !calendarSources.flatMap(\.calendars).contains(where: { $0.id == selectedCalendarID }) {
+                                        Text((selectedCalendarID.isEmpty ? CalendarError.destinationNotSelected : CalendarError.destinationUnavailable).localizedDescription)
+                                            .tag(selectedCalendarID)
+                                    }
                                     ForEach(calendarSources) { source in
                                         ForEach(source.calendars) { calInfo in
-                                            Text(calInfo.title).tag(calInfo.id)
+                                            Text("\(calInfo.sourceTitle) · \(calInfo.title)").tag(calInfo.id)
                                         }
                                     }
                                 }
                                 .pickerStyle(.menu)
                             }
-                            Text(AppLanguage.localized("todo.add.calendarSyncNote", defaultValue: "마감이 있으면 나중에 캘린더 동기화 과정에서 자동 등록될 수 있습니다.", language: .current, comment: "A separate calendar sync may later create an event for a due task."))
+                            Text(AppLanguage.localized("todo.add.calendarSyncNote", defaultValue: "자동 캘린더 등록에 동의한 경우에만, 출처 필터에 맞는 진행중 할 일이 나중에 자동 등록됩니다.", language: .current, comment: "Automatic calendar export requires opt-in and an eligible source."))
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
 
-                        Text("우선순위 (선택)")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            HStack(spacing: 8) {
+                        VStack(alignment: .leading, spacing: AppTheme.Spacing.compact) {
+                            Text("우선순위 (선택)")
+                                .font(.headline)
+                            // Keep each tutorial option directly reachable, including tap-to-clear.
+                            VStack(spacing: 0) {
                                 Button {
                                     selectedPriority = nil
                                     tutorial?.handleAddTodoPriorityReviewed()
                                 } label: {
-                                    Text("자동")
-                                        .font(.subheadline)
-                                        .padding(.horizontal, 12)
-                                        .padding(.vertical, 6)
-                                        .background(
-                                            selectedPriority == nil
-                                                ? Color.accentColor.opacity(0.15)
-                                                : Color.secondary.opacity(0.08),
-                                            in: Capsule()
-                                        )
-                                        .foregroundStyle(selectedPriority == nil ? Color.accentColor : Color.secondary)
+                                    HStack {
+                                        Text("자동")
+                                        Spacer(minLength: AppTheme.Spacing.item)
+                                        if selectedPriority == nil {
+                                            Image(systemName: "checkmark")
+                                                .accessibilityHidden(true)
+                                        }
+                                    }
+                                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                                    .contentShape(Rectangle())
                                 }
-                                .buttonStyle(.plain)
+                                .accessibilityAddTraits(selectedPriority == nil ? .isSelected : [])
                                 .accessibilityIdentifier("todo.add.priority.automatic")
 
                                 ForEach(TodoPriority.allCases, id: \.rawValue) { priority in
@@ -128,30 +139,33 @@ struct AddTodoView: View {
                                         selectedPriority = (selectedPriority == priority) ? nil : priority
                                         tutorial?.handleAddTodoPriorityReviewed()
                                     } label: {
-                                        Text(priority.label)
-                                            .font(.subheadline)
-                                            .padding(.horizontal, 12)
-                                            .padding(.vertical, 6)
-                                            .background(
-                                                selectedPriority == priority
-                                                    ? Color.accentColor.opacity(0.15)
-                                                    : Color.secondary.opacity(0.08),
-                                                in: Capsule()
-                                            )
-                                            .foregroundStyle(selectedPriority == priority ? Color.accentColor : Color.secondary)
+                                        HStack {
+                                            Text(priority.label)
+                                            Spacer(minLength: AppTheme.Spacing.item)
+                                            if selectedPriority == priority {
+                                                Image(systemName: "checkmark")
+                                                    .accessibilityHidden(true)
+                                            }
+                                        }
+                                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                                        .contentShape(Rectangle())
                                     }
-                                    .buttonStyle(.plain)
+                                    .accessibilityAddTraits(selectedPriority == priority ? .isSelected : [])
                                     .accessibilityIdentifier("todo.add.priority.\(priority.rawValue)")
                                 }
                             }
-                            .padding(.vertical, 2)
+                            .font(.body)
+                            .foregroundStyle(.primary)
+                            .buttonStyle(.borderless)
                         }
+                        .padding(.vertical, AppTheme.Spacing.compact)
                         .appTutorialGlow(tutorial?.currentStep == .addTodoPriority)
+                        .appTutorialAnchor(screen: .addTodo, steps: [.addTodoPriority], above: true)
+                        .id(AppTutorialStep.addTodoPriority)
 
                         if hasDueDate {
                             Text("알림")
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
+                                .font(.headline)
                             ForEach(NotificationService.presetOffsets, id: \.offset) { preset in
                                 Toggle(isOn: Binding(
                                     get: { selectedReminderPresets.contains(preset.offset) },
@@ -161,22 +175,22 @@ struct AddTodoView: View {
                                     }
                                 )) {
                                     Text(preset.label)
-                                        .font(.subheadline)
+                                        .font(.body)
                                 }
                                 .accessibilityIdentifier("todo.add.reminder.\(Int(preset.offset))")
                             }
                         }
 
-                        VStack(alignment: .leading, spacing: 6) {
+                        VStack(alignment: .leading, spacing: AppTheme.Spacing.item) {
                             Text("태그 (쉼표로 구분)")
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
+                                .font(.headline)
                             TextField("예: 업무, 마감, 학습", text: $tagsText)
                                 .accessibilityIdentifier("todo.add.tagsField")
                                 .focused($focusedField, equals: .tags)
-                                .font(.subheadline)
+                                .font(.body)
                                 .autocorrectionDisabled()
                         }
+                        .padding(.vertical, AppTheme.Spacing.compact)
                     } label: {
                         Label(
                             AppLanguage.localized(
@@ -191,35 +205,38 @@ struct AddTodoView: View {
                     }
                 }
             }
+            .appFormStyle()
+            .font(.body)
             .accessibilityIdentifier("todo.add.form")
             .scrollDismissesKeyboard(.interactively)
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if let tutorial {
+                    AppTutorialTipHost(tutorial: tutorial, screen: .addTodo)
+                }
+            }
             // The Form must own this inset so its scrollable viewport excludes Save,
             // including when the keyboard reduces the navigation content's safe area.
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 VStack(spacing: 8) {
-                    if tutorial?.isActive != true && verticalSizeClass != .compact {
+                    if !usesRoomyEditor && tutorial?.isActive != true && verticalSizeClass != .compact {
                         Button {
                             Task { await addTodo() }
                         } label: {
                             Text(AppLanguage.localized("todo.add.saveAction", defaultValue: "할 일 저장", language: .current, comment: "Primary action to save a manually entered to-do."))
                                 .font(.headline)
-                                .foregroundStyle(.white)
+                                .frame(minHeight: 44)
                                 .frame(maxWidth: .infinity)
                                 .fixedSize(horizontal: false, vertical: true)
-                                .padding(.vertical, 14)
-                                .background(AppTheme.accent, in: RoundedRectangle(cornerRadius: 14))
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+                        .buttonBorderShape(.roundedRectangle(radius: AppTheme.controlRadius))
                         .disabled(!canSave)
-                        .opacity(canSave ? 1 : 0.5)
                         .accessibilityIdentifier("todo.add.saveButton")
                         .padding(.horizontal, 20)
                         .padding(.vertical, 8)
                         .frame(maxWidth: .infinity)
                         .background(.bar)
-                    }
-                    if let tutorial {
-                        AppTutorialTipHost(tutorial: tutorial, screen: .addTodo)
                     }
                 }
             }
@@ -230,12 +247,12 @@ struct AddTodoView: View {
                     Button("취소") { dismiss() }
                         .accessibilityIdentifier("todo.add.cancelButton")
                 }
-                if tutorial?.isActive == true || verticalSizeClass == .compact {
+                if usesRoomyEditor || tutorial?.isActive == true || verticalSizeClass == .compact {
                     ToolbarItem(placement: .confirmationAction) {
                         Button {
                             Task { await addTodo() }
                         } label: {
-                            Text("추가")
+                            Text(usesRoomyEditor ? LocalizedStringKey("저장") : LocalizedStringKey("추가"))
                                 .fontWeight(.semibold)
                                 .appTutorialGlow(tutorial?.currentStep == .addTodoSave)
                         }
@@ -268,20 +285,25 @@ struct AddTodoView: View {
                 tutorial?.handleAddTodoDueDateEnabled(newValue)
                 if tutorial?.currentStep == .addTodoPriority { showMoreOptions = true }
             }
-            .onChange(of: tutorial?.currentStep) { _, newStep in
-                if newStep == .addTodoPriority { showMoreOptions = true }
+            .task(id: tutorial?.currentStep) {
+                guard let step = tutorial?.currentStep else { return }
+                if step == .addTodoPriority || step == .addTodoSave { focusedField = nil }
+                if step == .addTodoPriority { showMoreOptions = true }
+                guard [.addTodoTitle, .addTodoDueDate, .addTodoPriority].contains(step) else { return }
+                await Task.yield()
+                guard !Task.isCancelled else { return }
+                scrollProxy.scrollTo(step, anchor: .top)
             }
             .task {
-                calendarSources = CalendarService.shared.availableCalendars()
-                // 기본 캘린더 설정값 → 없으면 첫 번째 캘린더
-                let defaultID = CalendarService.shared.defaultCalendarID
-                if !defaultID.isEmpty {
-                    selectedCalendarID = defaultID
-                } else {
-                    selectedCalendarID = calendarSources.first?.calendars.first?.id ?? ""
-                }
+                calendarSources = CalendarService.shared.availableCalendars(writableOnly: true)
+                selectedCalendarID = CalendarService.shared.preferredDefaultCalendar?.calendarIdentifier
+                    ?? CalendarService.shared.defaultCalendarID
+            }
+            }
             }
         }
+        .modifier(AddTodoEditorPresentation(isRoomy: usesRoomyEditor))
+        .interactiveDismissDisabled(isSaving)
         .alert(
             AppLanguage.localized("todo.add.saveError.title", defaultValue: "저장 실패", language: .current, comment: "Manual to-do save failure title."),
             isPresented: $showSaveError
@@ -301,6 +323,14 @@ struct AddTodoView: View {
     }
 
     // MARK: - Action
+
+    private var usesRoomyEditor: Bool {
+        #if targetEnvironment(macCatalyst)
+        true
+        #else
+        horizontalSizeClass == .regular
+        #endif
+    }
 
     private var canSave: Bool {
         !isSaving && !hasSaved && !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -367,9 +397,7 @@ struct AddTodoView: View {
                     showCalendarError = true
                 }
             } catch {
-                if let eventID = todo.calendarEventID {
-                    _ = try? CalendarService.shared.removeEvent(eventID: eventID)
-                }
+                _ = try? CalendarService.shared.removeTodoEvent(for: todo)
                 modelContext.rollback()
                 DiagnosticRecorder.shared.record(error: error, component: "todo.add", operation: "calendar")
                 showCalendarError = true
@@ -390,6 +418,21 @@ struct AddTodoView: View {
         Task { await QuickSortService.analyzeOnAdd(todo, persona: ctx, context: modelContext) }
 
         if !showCalendarError { dismiss() }
+    }
+}
+
+private struct AddTodoEditorPresentation: ViewModifier {
+    let isRoomy: Bool
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if isRoomy {
+            content
+                .frame(idealWidth: 640, maxWidth: 640, idealHeight: 680, maxHeight: 680)
+                .presentationSizing(.fitted)
+        } else {
+            content
+        }
     }
 }
 

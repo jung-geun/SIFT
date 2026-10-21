@@ -4,8 +4,8 @@ import CloudKit
 import UserNotifications
 import BackgroundTasks
 import EventKit
-import TipKit
 import OSLog
+import Combine
 
 
 // MARK: - BGTask 식별자
@@ -47,9 +47,33 @@ private final class BGTaskCompletionGate: @unchecked Sendable {
 
 // MARK: - App Delegate
 
-class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
+class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterDelegate {
     var modelContext: ModelContext?
     private var emailRefreshTask: Task<Void, Never>?
+
+    #if targetEnvironment(macCatalyst)
+    override func buildMenu(with builder: any UIMenuBuilder) {
+        super.buildMenu(with: builder)
+        guard builder.system == UIMenuSystem.main else { return }
+
+        let command = UIKeyCommand(
+            title: AppLanguage.localized("settings.title", defaultValue: "설정", language: .current) + "…",
+            action: #selector(openAppSettings(_:)),
+            input: ",",
+            modifierFlags: .command
+        )
+        let menu = UIMenu(title: "", identifier: .preferences, options: .displayInline, children: [command])
+        if builder.menu(for: .preferences) != nil {
+            builder.replace(menu: .preferences, with: menu)
+        } else {
+            builder.insertSibling(menu, afterMenu: .about)
+        }
+    }
+
+    @objc private func openAppSettings(_ sender: UIKeyCommand) {
+        NotificationCenter.default.post(name: .settingsRequested, object: nil)
+    }
+    #endif
 
     func application(
         _ application: UIApplication,
@@ -267,9 +291,8 @@ struct todoApp: App {
     /// iCloud 동기화 설정 키.
     static let iCloudSyncKey = "pieroot.todo.iCloudSyncEnabled"
 
-    /// swappable 컨테이너 홀더 — iCloud 동기화 전환 시 재시작 없이 교체.
-    /// init() 에서 AppDataContainer.shared 싱글턴이 설정되므로
-    /// 서비스 레이어(MemoryService 등)도 AppDataContainer.shared.container로 접근 가능.
+    /// Canonical local storage; retrying persistence can replace the container,
+    /// while iCloud preference changes never switch the visible data set.
     @StateObject private var appData: AppDataContainer
 
     /// iCloud 동기화 모니터 — 앱 레벨로 승격하여 어느 탭에서든 알림 수신.
@@ -288,11 +311,16 @@ struct todoApp: App {
     /// 고정 탭 인덱스 (launchBehavior == "fixed" 일 때 사용)
     @AppStorage("pieroot.todo.launchTab") private var launchTab = 0
     @AppStorage("pieroot.todo.iCloudSyncEnabled") private var iCloudSyncEnabled = false
+    @AppStorage(UserCloudSyncPolicy.consentKey) private var fullCloudConsentVersion = 0
     @StateObject private var tutorial = AppTutorialState()
     @StateObject private var appUpdate = AppUpdateService()
     @State private var tabVisibility = AppTabVisibility(calendarVisible: false, mailVisible: false)
     @State private var mailAccessPolicy = MailboxCachedProviderAccess.current()
     @State private var appLanguage = AppLanguage.current
+    #if !targetEnvironment(macCatalyst)
+    @State private var showSettings = false
+    @State private var replayTutorialAfterSettingsDismiss = false
+    #endif
     private let vocabularyDependencies: UserVocabularyDependencies
     private let vocabularyEnrichmentQueue: VocabularyEnrichmentQueue
     private var uiTestShowsAllTabs: Bool {
@@ -346,6 +374,19 @@ struct todoApp: App {
             var duplicatesToDelete: [Todo] = []
 
             for todo in todos {
+                // A shared UID is not a shared task across distinct calendars.
+                // Unknown unlinked legacy rows lack evidence for safe deletion.
+                let sourceKind: String
+                let sourceIdentity: String
+                if !todo.calendarSourceID.isEmpty {
+                    sourceKind = "calendar"
+                    sourceIdentity = todo.calendarSourceID
+                } else if let localID = todo.calendarEventID, !localID.isEmpty {
+                    sourceKind = "event"
+                    sourceIdentity = localID
+                } else {
+                    continue
+                }
                 let timeKey: String
                 if let due = todo.dueDate {
                     timeKey = String(Int(due.timeIntervalSince1970 / 60))
@@ -355,9 +396,9 @@ struct todoApp: App {
 
                 let primaryKey: String
                 if !todo.calendarEventExternalID.isEmpty {
-                    primaryKey = "ext:\(todo.calendarEventExternalID)#\(timeKey)"
+                    primaryKey = "\(sourceKind):\(sourceIdentity)#ext:\(todo.calendarEventExternalID)#\(timeKey)"
                 } else {
-                    primaryKey = "title:\(todo.title.trimmingCharacters(in: .whitespaces))#\(timeKey)"
+                    primaryKey = "\(sourceKind):\(sourceIdentity)#title:\(todo.title.trimmingCharacters(in: .whitespaces))#\(timeKey)"
                 }
 
                 if let existing = seenKeys[primaryKey] {
@@ -409,15 +450,15 @@ struct todoApp: App {
             SettingsStore.shared.seedLegacyAISettingsForUITest()
         }
         #endif
+        OpenAIRegionalAvailability.shared.start(onRestriction: {
+            OpenAIConnection.shared.suspendForRegionalRestriction()
+        })
         do { try RemovedProviderCleanup.run() }
         catch {
             DiagnosticRecorder.shared.record(error: error, component: "security.keychain", operation: "removedProviderCleanup")
         }
         SettingsStore.shared.migrateLegacyBetaSelectedProviderIfNeeded()
         SettingsStore.shared.normalizeBetaSelectedProvider()
-        if #available(iOS 17.0, *) {
-            try? Tips.configure()
-        }
         let container = AppDataContainer()
         _appData = StateObject(wrappedValue: container)
         #if DEBUG
@@ -425,6 +466,7 @@ struct todoApp: App {
         MeetingSourceTrackSmokeFixture.seedIfNeeded(into: container.meetingContainer)
         #endif
         let service = UserVocabularyService(modelContainer: container.meetingContainer)
+        FullCloudSyncService.shared.configure(vocabulary: service)
         let queue = VocabularyEnrichmentQueue(service: service)
         vocabularyEnrichmentQueue = queue
         vocabularyDependencies = UserVocabularyDependencies(
@@ -444,7 +486,10 @@ struct todoApp: App {
             globalSearchAppContainer: appData.container,
             globalSearchEmailContainer: appData.emailContainer,
             globalSearchMeetingContainer: appData.meetingContainer,
-            globalSearchMailAccess: searchMailAccess
+            globalSearchMailAccess: searchMailAccess,
+            isAdPlacementEligible: hasOnboarded && hasCompletedTutorial
+                && !tutorial.isActive && scenePhase == .active
+                && tabVisibility.clamped(selectedTab) == AppTabID.todo.rawValue
         )
         .tabItem { Label("할 일", systemImage: "checklist") }
         .tag(AppTabID.todo.rawValue)
@@ -497,18 +542,39 @@ struct todoApp: App {
                     .tag(AppTabID.meeting.rawValue)
             }
             .disableTabBarMinimization()
+            #if targetEnvironment(macCatalyst)
+            .modifier(CatalystSettingsPresenter())
+            #else
+            .sheet(isPresented: $showSettings, onDismiss: {
+                guard replayTutorialAfterSettingsDismiss else { return }
+                replayTutorialAfterSettingsDismiss = false
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(name: .appTutorialRequested, object: nil)
+                }
+            }) {
+                NavigationStack { PersonaSettingsView() }
+            }
+            #endif
             .environment(\.locale, appLanguage.locale)
+            .appScreenStyle()
             .tint(AppTheme.accent)
             .environmentObject(syncMonitor)
             .environmentObject(appUpdate)
             .environment(\.appTutorialState, tutorial)
             .environment(\.userVocabulary, vocabularyDependencies)
+            .task(id: scenePhase) {
+                guard scenePhase == .active else {
+                    HealthRoutineStore.shared.cancelRefresh()
+                    return
+                }
+                // No permission prompt here: only explicitly connected categories are queried.
+                await HealthRoutineStore.shared.refresh(context: appData.container.mainContext)
+            }
             .onAppear {
+                OpenAIConnection.shared.refreshCredentials()
+                FullCloudSyncService.shared.enterForeground()
                 mailAccessPolicy = MailboxCachedProviderAccess.current()
                 SettingsStore.shared.migrateLegacyMemoryKeysIntoSwiftDataIfNeeded()
-                if SettingsStore.supportsICloud {
-                    NSUbiquitousKeyValueStore.default.synchronize()
-                }
 
                 let ctx = appData.container.mainContext
                 appDelegate.modelContext = ctx
@@ -543,28 +609,39 @@ struct todoApp: App {
                     MailboxIncrementalSyncCoordinator.shared.startPolling()
                 }
                 Task {
+                    if UserCloudSyncPolicy.isRequested, !(await syncMonitor.waitForCompletion()) { return }
                     await CalendarService.shared.runWeeklyImportIfDue(context: ctx)
                 }
                 Task {
                     // iCloud 동기화가 진행 중이면 완료 후 캘린더 동기화
                     // (iCloud에 먼저 도착한 캘린더 이벤트를 Todo 없는 신규로 오인하는 경쟁 조건 방지)
-                    if SettingsStore.supportsICloud && iCloudSyncEnabled { await syncMonitor.waitForCompletion() }
+                    if UserCloudSyncPolicy.isRequested, !(await syncMonitor.waitForCompletion()) { return }
                     await CalendarService.shared.syncCalendarWithTodos(context: ctx)
                     await CalendarService.shared.cleanupOldCompletedTodos(context: ctx)
                 }
             }
             .onChange(of: appData.rebuildID) { _, _ in
-                // 컨테이너 재건(iCloud 동적 전환) 후 AppDelegate 컨텍스트 갱신
+                // Refresh the delegate after a successful local persistence retry.
                 appDelegate.modelContext = appData.container.mainContext
                 todoApp.deduplicatePersonas(context: appData.container.mainContext)
                 todoApp.deduplicateCalendarTodos(context: appData.container.mainContext)
             }
-            .onReceive(NotificationCenter.default.publisher(for: .EKEventStoreChanged)) { _ in
+            .onReceive(NotificationCenter.default.publisher(for: .EKEventStoreChanged)
+                .debounce(for: .milliseconds(150), scheduler: RunLoop.main)) { _ in
                 if let ctx = appDelegate.modelContext {
                     Task {
-                        if SettingsStore.supportsICloud && iCloudSyncEnabled { await syncMonitor.waitForCompletion() }
+                        if UserCloudSyncPolicy.isRequested, !(await syncMonitor.waitForCompletion()) { return }
                         await CalendarService.shared.syncCalendarWithTodos(context: ctx)
                     }
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .calendarTaskAnalysisSourcesChanged)) { _ in
+                Task {
+                    if UserCloudSyncPolicy.isRequested, !(await syncMonitor.waitForCompletion()) { return }
+                    guard let ctx = appDelegate.modelContext else { return }
+                    // Apply source consent immediately, without the weekly cooldown
+                    // or the outbound export side effects of a full two-way sync.
+                    await CalendarService.shared.syncCalendarTodos(context: ctx)
                 }
             }
             .onReceive(NotificationCenter.default.publisher(for: .gmailAuthChanged)) { _ in
@@ -588,20 +665,51 @@ struct todoApp: App {
             }
             .onReceive(NotificationCenter.default.publisher(for: AppLanguage.didChangeNotification)) { _ in
                 appLanguage = AppLanguage.current
+                #if targetEnvironment(macCatalyst)
+                UIMenuSystem.main.setNeedsRebuild()
+                #endif
             }
+            #if !targetEnvironment(macCatalyst)
+            .onReceive(NotificationCenter.default.publisher(for: .settingsRequested)) { _ in
+                showSettings = true
+            }
+            #endif
             .onReceive(NotificationCenter.default.publisher(for: .settingsDismissRequested)) { _ in
+                #if !targetEnvironment(macCatalyst)
+                replayTutorialAfterSettingsDismiss = true
+                showSettings = false
+                #endif
                 Task { await refreshTabVisibility() }
                 mailAccessPolicy = MailboxCachedProviderAccess.current()
             }
+            .onReceive(NotificationCenter.default.publisher(for: UserCloudSyncPolicy.didRestoreNotification)) { _ in
+                OpenAIConnection.shared.refreshCredentials()
+                mailAccessPolicy = MailboxCachedProviderAccess.current()
+                Task { await refreshTabVisibility() }
+            }
             .onReceive(NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)) { _ in
                 unexpectedTerminationRecovery.enterBackground()
+                FullCloudSyncService.shared.enterBackground()
             }
             .onReceive(NotificationCenter.default.publisher(for: UIApplication.willTerminateNotification)) { _ in
                 unexpectedTerminationRecovery.enterInactive()
             }
+            .onChange(of: iCloudSyncEnabled && fullCloudConsentVersion == UserCloudSyncPolicy.consentVersion) { _, _ in
+                OpenAIConnection.shared.refreshCredentials()
+                if UserCloudSyncPolicy.isRequested {
+                    FullCloudSyncService.shared.enterForeground()
+                    syncMonitor.startObserving(initialCount: 0)
+                } else {
+                    FullCloudSyncService.shared.stop()
+                    syncMonitor.stopObserving()
+                }
+            }
             .onChange(of: scenePhase) { _, newPhase in
                 switch newPhase {
                 case .active:
+                    Task { await OpenAIRegionalAvailability.shared.refresh() }
+                    OpenAIConnection.shared.refreshCredentials()
+                    FullCloudSyncService.shared.enterForeground()
                     DiagnosticEnvironment.setAppState("active")
                     unexpectedTerminationRecovery.enterForeground()
                     mailAccessPolicy = MailboxCachedProviderAccess.current()
@@ -623,10 +731,11 @@ struct todoApp: App {
                             }
                         }
                         Task {
+                            if UserCloudSyncPolicy.isRequested, !(await syncMonitor.waitForCompletion()) { return }
                             await CalendarService.shared.runWeeklyImportIfDue(context: ctx)
                         }
                         Task {
-                            if SettingsStore.supportsICloud && iCloudSyncEnabled { await syncMonitor.waitForCompletion() }
+                            if UserCloudSyncPolicy.isRequested, !(await syncMonitor.waitForCompletion()) { return }
                             await CalendarService.shared.syncCalendarWithTodos(context: ctx)
                             await CalendarService.shared.cleanupOldCompletedTodos(context: ctx)
                         }
@@ -639,6 +748,7 @@ struct todoApp: App {
                     // expensive MLX teardown. A suspend watchdog must not be shown
                     // as an unexpected *foreground* termination next launch.
                     unexpectedTerminationRecovery.enterBackground()
+                    FullCloudSyncService.shared.enterBackground()
                     DiagnosticEnvironment.setAppState("background")
                     OnDeviceLLMService.shared.unloadModel(reason: .background)
                     MailboxIncrementalSyncCoordinator.shared.stopPolling()
@@ -668,6 +778,8 @@ struct todoApp: App {
                     )
                 }
             }
+            // Keep labels leading and controls trailing, including in Catalyst forms and sheets.
+            .toggleStyle(.switch)
             }
             } else {
                 ContentUnavailableView {
@@ -679,25 +791,34 @@ struct todoApp: App {
                     Text(AppLanguage.localized("app.storage.preserved", defaultValue: "Your original data has been preserved. Unlock the device and try again. No changes will be saved until storage is available.", language: appLanguage, comment: "Startup failure message; original user data is unchanged."))
                 } actions: {
                     Button(AppLanguage.localized("action.retry", defaultValue: "Try again", language: appLanguage)) {
-                        appData.rebuild(useICloud: iCloudSyncEnabled)
+                        appData.rebuild()
                     }
                 }
             }
         }
         .modelContainer(appData.container)
-
-        // macOS Settings 창 (Mac Catalyst / native Mac 대응)
-        #if os(macOS)
-        Settings {
-            NavigationStack {
-                PersonaSettingsView()
-            }
-            .modelContainer(appData.container)
-            .environmentObject(appUpdate)
-            .environment(\.appTutorialState, tutorial)
+        #if targetEnvironment(macCatalyst)
+        WindowGroup(
+            Text(AppLanguage.localized("settings.title", defaultValue: "설정", language: appLanguage)),
+            id: CatalystSettingsWindowID.sceneID,
+            for: CatalystSettingsWindowID.self
+        ) { _ in
+            CatalystSettingsWindowContent()
+                .modelContainer(appData.container)
+                .appScreenStyle()
+                .tint(AppTheme.accent)
+                .toggleStyle(.switch)
+                .environmentObject(syncMonitor)
+                .environmentObject(appUpdate)
+                .environment(\.appTutorialState, tutorial)
+                .environment(\.userVocabulary, vocabularyDependencies)
+        } defaultValue: {
+            .settings
         }
         #endif
+
     }
+
 
     @MainActor
     private func refreshTabVisibility() async {

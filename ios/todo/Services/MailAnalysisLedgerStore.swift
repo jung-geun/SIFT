@@ -4,16 +4,43 @@ import CryptoKit
 
 nonisolated enum MailAnalysisLedgerKeyStore {
     private static let service = "pieroot.todo.mail-analysis-ledger"
+    private static let family = HMACIdentityKeyFamily(service: service, primaryAccount: "hmac-key-v1")
 
-    static func key() -> SymmetricKey {
-        if let encoded = KeychainStore.get(service: service, account: "key"),
-           let data = Data(base64Encoded: encoded),
-           data.count == 32 {
-            return SymmetricKey(data: data)
+    /// Callers must propagate failure and stop ingestion rather than change identity.
+    static func key() throws -> SymmetricKey {
+        try keysChecked()[0]
+    }
+
+    /// Includes original keys from other installations for provenance matching.
+    static func keysChecked() throws -> [SymmetricKey] {
+        try family.keys(createIfMissing: true, legacyKeys: legacyKeys).map { SymmetricKey(data: $0) }
+    }
+
+    /// Synchronous integration point for KeychainStore.applySyncPolicy().
+    /// Opt-out is a no-op: no remote deletion or identity rotation.
+    static func applyFullSyncPolicy() throws {
+        try family.applyFullSyncPolicy(legacyKeys: legacyKeys)
+    }
+
+    private static func legacyKeys(authorization: HMACIdentityKeyFamily.Authorization) throws -> [Data] {
+        var keys: [Data] = []
+        func append(_ encoded: Data) throws {
+            guard let data = Data(base64Encoded: encoded), data.count == 32 else {
+                throw VocabularyServiceError.invalidKey
+            }
+            if !keys.contains(data) { keys.append(data) }
         }
-        let data = Data((0..<32).map { _ in UInt8.random(in: 0...255) })
-        KeychainStore.set(service: service, account: "key", value: data.base64EncodedString())
-        return SymmetricKey(data: data)
+        // Read explicit scopes: SynchronizableAny could restore a cloud-only
+        // legacy identity without full-policy consent.
+        if let local = try KeychainStore.getDeviceOnly(service: service, account: "key") { try append(local) }
+        if authorization.isEnabled {
+            try authorization.requireCurrent()
+            let portable = try KeychainStore.getSynchronizable(service: service, account: "key")
+            try authorization.requireCurrent()
+            if let portable { try append(portable) }
+        }
+        // Never rewrite either legacy item or change its synchronization class.
+        return keys
     }
 }
 
@@ -29,6 +56,18 @@ final class MailAnalysisLedgerStore {
 
     init(container: ModelContainer? = nil) {
         context = ModelContext(container ?? AppDataContainer.shared.container)
+    }
+
+    func preferredFingerprint(in candidates: [MailAnalysisFingerprint], revision: Int, now: Date = Date()) throws -> MailAnalysisFingerprint {
+        guard let primary = candidates.first else { throw VocabularyServiceError.invalidKey }
+        let records = try context.fetch(FetchDescriptor<MailAnalysisLedgerRecord>())
+        if let leased = candidates.first(where: { candidate in
+            records.contains { $0.fingerprintData == candidate.digest && ($0.leaseExpiresAt ?? .distantPast) > now }
+        }) { return leased }
+        if let analyzed = candidates.first(where: { candidate in
+            records.contains { $0.fingerprintData == candidate.digest && $0.stateRawValue == MailAnalysisLeaseState.analyzed.rawValue && $0.revision >= revision }
+        }) { return analyzed }
+        return candidates.first { candidate in records.contains { $0.fingerprintData == candidate.digest } } ?? primary
     }
 
     func claim(

@@ -100,6 +100,48 @@ nonisolated final class MeetingCaptureSourceGate: @unchecked Sendable {
     }
 }
 
+/// Muting a lane changes delivery, not the SDK's registered output topology.
+/// Revocation is terminal, including when a delayed start completes afterward.
+nonisolated struct MeetingAppAudioDeliveryState {
+    private var started = false
+    private(set) var enabled = true
+    private var revoked = false
+    private(set) var ticket = 0
+    var acceptsSamples: Bool { started && enabled && !revoked }
+    mutating func activate() { if !revoked { started = true } }
+    func acceptsSamples(for ticket: Int) -> Bool { acceptsSamples && self.ticket == ticket }
+    mutating func setEnabled(_ enabled: Bool) {
+        guard !revoked, !enabled || self.enabled != enabled else { return }
+        ticket += 1
+        self.enabled = enabled
+    }
+    mutating func enable(ifCurrent ticket: Int) {
+        if self.ticket == ticket { setEnabled(true) }
+    }
+    mutating func revoke() { ticket += 1; revoked = true }
+}
+
+/// One raw start must settle before one stop. The shutdown task owns the SDK
+/// outputs/delegate until stop completes, even if the source owner goes away.
+@MainActor
+final class MeetingAppAudioStreamLifecycle {
+    var startup: Task<Void, Error>?
+    private var shutdown: Task<Void, Never>?
+
+    func stop(operation: @escaping @MainActor () async -> Void) -> Task<Void, Never> {
+        if let shutdown { return shutdown }
+        let startup = startup
+        self.startup = nil
+        let task = Task { @MainActor in
+            // The start owner reports its error; teardown still has to run.
+            if let startup { _ = await startup.result }
+            await operation()
+        }
+        shutdown = task
+        return task
+    }
+}
+
 /// On iOS 27 an audio-only SCStream can have no synchronizationClock even
 /// while its PCM PTS is already in the host-clock domain. Do not discard that
 /// source; reject unrelated clock domains rather than guessing an offset.
@@ -117,8 +159,8 @@ nonisolated enum MeetingAppAudioTimestamp {
     }
 }
 
-/// Captures only audio. iOS keeps a minimal screen output for background
-/// delivery and immediately discards its pixels; no video or clip is saved.
+/// Captures only audio. Every stream has a minimal screen discard output;
+/// no pixels leave that callback and no video or clip is persisted.
 @MainActor
 final class MeetingAppAudioCapture {
     nonisolated enum State: Equatable, Sendable {
@@ -351,10 +393,8 @@ private final class ScreenCaptureSession: AppAudioCaptureSession {
     private let microphoneWanted: Bool
     private let delivery = MeetingCaptureSourceGate()
     private let sampleQueue = DispatchQueue(label: "pieroot.todo.meeting.appAudio")
-    #if !targetEnvironment(macCatalyst)
     private let screenQueue = DispatchQueue(label: "pieroot.todo.meeting.screenDiscard")
-    private var screenOutput: DiscardedScreenOutput?
-    #endif
+    private var registeredOutputs: [(any SCStreamOutput, SCStreamOutputType)] = []
     private var observer: AppAudioPickerObserver?
     private var stream: SCStream?
     private var delegate: AppAudioStreamDelegate?
@@ -365,8 +405,7 @@ private final class ScreenCaptureSession: AppAudioCaptureSession {
     private let sourceID: String
     private var pickerReserved = false
     private var microphoneApproved = false
-    private var stopTask: Task<Void, Never>?
-    private var startTask: Task<Void, Error>?
+    private let lifecycle = MeetingAppAudioStreamLifecycle()
 
     init(sourceID: String, receive: @escaping MeetingAppAudioCapture.Receive, microphoneWanted: Bool,
          microphoneFailed: @escaping @MainActor (String) -> Void,
@@ -449,11 +488,13 @@ private final class ScreenCaptureSession: AppAudioCaptureSession {
         config.capturesAudio = true
         config.sampleRate = 48_000
         config.channelCount = 2
-        #if !targetEnvironment(macCatalyst)
-        // Full-display background capture requires a screen output. Never retain
-        // pixels: the picker authorizes the display, but this feature stores audio only.
+        // A screen stream still delivers video even when only audio is stored.
+        // Register its discard output on Catalyst too; use a tiny surface.
         config.width = 64
         config.height = 64
+        #if targetEnvironment(macCatalyst)
+        config.minimumFrameInterval = CMTime(value: 1, timescale: 1)
+        config.queueDepth = 3
         #endif
         config.excludesCurrentProcessAudio = true
         #if targetEnvironment(macCatalyst)
@@ -467,10 +508,10 @@ private final class ScreenCaptureSession: AppAudioCaptureSession {
                 DiagnosticRecorder.shared.record(error: failure, component: "meeting.capture", operation: "appAudioSample")
                 await self?.fail(MeetingAppAudioCapture.message("meeting.appAudio.error.decodeFailed", "App audio could not be decoded or synchronized. Select the source again.", "앱 오디오를 디코딩하거나 동기화할 수 없습니다. 소스를 다시 선택하세요."), ticket: ticket)
             }
-        } firstAudio: { [weak self] in
+        } firstAudio: { [weak self] output, laneTicket in
             guard let owner = self else { return }
             Task { @MainActor in
-                guard owner.delivery.isCurrent(ticket) else { return }
+                guard owner.delivery.isCurrent(ticket), output.acceptsSamples(for: laneTicket) else { return }
                 owner.change(Change(state: .receivingAudio, description: owner.description,
                                     sourceKind: owner.sourceKind, microphoneApproved: owner.microphoneApproved))
             }
@@ -482,7 +523,7 @@ private final class ScreenCaptureSession: AppAudioCaptureSession {
                 owner.revokeMicrophone()
                 owner.microphoneFailed(MeetingAppAudioCapture.message("meeting.appAudio.error.microphoneStopped", "Microphone capture stopped. Enable it again using the system picker.", "마이크 캡처가 중지되었습니다. 시스템 선택기를 사용하여 다시 켜주세요."))
             }
-        }, firstAudio: {}) : nil
+        }, firstAudio: { _, _ in }) : nil
         let delegate = AppAudioStreamDelegate(revoke: { [delivery] in _ = delivery.replace(); sink.revoke(); micSink?.revoke() }) { [weak self] error in
             Self.recordSystemFailure(error, operation: "appAudioStreamStopped")
             Task { @MainActor [weak self] in
@@ -505,17 +546,19 @@ private final class ScreenCaptureSession: AppAudioCaptureSession {
         var stage = "appAudioOutputRegistration"
         do {
             try candidate.addStreamOutput(sink, type: .audio, sampleHandlerQueue: sampleQueue)
-            #if !targetEnvironment(macCatalyst)
+            registeredOutputs.append((sink, .audio))
             let screenSink = DiscardedScreenOutput()
             try candidate.addStreamOutput(screenSink, type: .screen, sampleHandlerQueue: screenQueue)
-            screenOutput = screenSink
-            #endif
-            if let micSink { try candidate.addStreamOutput(micSink, type: .microphone, sampleHandlerQueue: sampleQueue) }
+            registeredOutputs.append((screenSink, .screen))
+            if let micSink {
+                try candidate.addStreamOutput(micSink, type: .microphone, sampleHandlerQueue: sampleQueue)
+                registeredOutputs.append((micSink, .microphone))
+            }
             stage = "appAudioStreamStart"
             // Own only the raw SDK operation. Shutdown can await it without
             // waiting on this enclosing method, which may itself await failure cleanup.
             let startup = Task { @MainActor in try await candidate.startCapture() }
-            startTask = startup
+            lifecycle.startup = startup
             try await startup.value
             guard delivery.isCurrent(ticket), observer.hasSelection, stream === candidate else {
                 sink.revoke()
@@ -549,44 +592,17 @@ private final class ScreenCaptureSession: AppAudioCaptureSession {
 
     func revokeMicrophone() {
         microphoneApproved = false
+        // Keep registration stable; revocation closes delivery synchronously.
         microphoneOutput?.revoke()
-        if let microphoneOutput, let stream {
-            try? stream.removeStreamOutput(microphoneOutput, type: .microphone)
-        }
-        microphoneOutput = nil
     }
     func disableAppAudio() {
-        output?.revoke()
-        if let output, let stream {
-            try? stream.removeStreamOutput(output, type: .audio)
-        }
-        output = nil
+        output?.setEnabled(false)
     }
     func resumeAppAudio() throws {
-        guard let stream, output == nil, microphoneApproved else {
+        guard stream != nil, let output, microphoneApproved else {
             throw MeetingAppAudioCapture.CaptureError.unavailable(MeetingAppAudioCapture.message("meeting.appAudio.error.sharingEnded", "Screen sharing has ended.", "화면 공유가 종료되었습니다."))
         }
-        let ticket = delivery.currentTicket()
-        let sink = AppAudioOutput(source: .appAudio, receive: { [receive, delivery] buffer, time, source in
-            delivery.deliver(ticket) { receive(buffer, time, source) }
-        }, failure: { [weak self] failure in
-            DiagnosticRecorder.shared.record(error: failure, component: "meeting.capture", operation: "appAudioSample")
-            Task { @MainActor [weak self] in
-                guard let self, self.delivery.isCurrent(ticket) else { return }
-                self.disableAppAudio()
-                self.change(Change(state: .unavailable(MeetingAppAudioCapture.message("meeting.appAudio.error.audioStopped", "App audio stopped; turn it off and on to retry.", "앱 오디오가 중단되었습니다. 껐다가 다시 켜서 시도하세요.")),
-                                   description: nil, microphoneApproved: self.microphoneApproved))
-            }
-        }, firstAudio: { [weak self] in
-            Task { @MainActor [weak self] in
-                guard let self, self.delivery.isCurrent(ticket) else { return }
-                self.change(Change(state: .receivingAudio, description: self.description,
-                                   sourceKind: self.sourceKind, microphoneApproved: self.microphoneApproved))
-            }
-        })
-        try stream.addStreamOutput(sink, type: .audio, sampleHandlerQueue: sampleQueue)
-        output = sink
-        sampleQueue.async { sink.activate() }
+        output.resume(on: sampleQueue)
     }
 
 
@@ -603,17 +619,15 @@ private final class ScreenCaptureSession: AppAudioCaptureSession {
     }
 
     private func beginStop() -> Task<Void, Never> {
-        if let stopTask { return stopTask }
         let previous = stream
-        let startup = startTask
-        startTask = nil
+        // Keep every registered sink and delegate strongly owned through stop.
+        let sinks = registeredOutputs
+        registeredOutputs.removeAll()
+        let previousDelegate = delegate
         stream = nil
         output = nil
         microphoneOutput = nil
         delegate = nil
-        #if !targetEnvironment(macCatalyst)
-        screenOutput = nil
-        #endif
         description = nil
         let picker = SCContentSharingPicker.shared
         if let observer {
@@ -624,19 +638,27 @@ private final class ScreenCaptureSession: AppAudioCaptureSession {
         let reserved = pickerReserved
         pickerReserved = false
         let sourceID = sourceID
-        let task = Task { @MainActor in
-            // A pending start may succeed after cancellation. Stop only after
-            // its raw operation settles, then release the capacity reservation.
-            if let startup { _ = try? await startup.value }
-            if let previous { try? await previous.stopCapture() }
+        return lifecycle.stop {
+            if let previous {
+                do {
+                    try await previous.stopCapture()
+                    // Only successful registrations are removed, after start
+                    // and stop settle; no live output topology changes.
+                    for (sink, type) in sinks {
+                        do { try previous.removeStreamOutput(sink, type: type) }
+                        catch { Self.recordSystemFailure(error, operation: "appAudioOutputRemoval") }
+                    }
+                } catch {
+                    Self.recordSystemFailure(error, operation: "appAudioStreamStop")
+                }
+            }
             if reserved {
                 // Keep the slot until the real stream has stopped. Concurrent
                 // stop calls share this task and cannot free capacity early.
                 picker.isActive = !MeetingAppAudioPickerSessions.shared.release(sourceID)
             }
+            withExtendedLifetime(previousDelegate) {}
         }
-        stopTask = task
-        return task
     }
 }
 
@@ -702,14 +724,13 @@ private nonisolated final class AppAudioStreamDelegate: NSObject, SCStreamDelega
 @available(iOS 27.0, macCatalyst 18.2, *)
 private nonisolated final class DiscardedScreenOutput: NSObject, SCStreamOutput, @unchecked Sendable {
     func stream(_ stream: SCStream, didOutputSampleBuffer sample: CMSampleBuffer, of type: SCStreamOutputType) {
-        // The screen-capture background mode needs a registered display output.
+        // SCStream's screen lane is registered for the entire capture lifetime.
         // No frame data enters the audio pipeline or persistent storage.
     }
 }
 
 @available(iOS 27.0, macCatalyst 18.2, *)
 private nonisolated final class AppAudioOutput: NSObject, SCStreamOutput, @unchecked Sendable {
-    private enum Phase { case pending, live, revoked }
     enum Failure: Int, Error, Sendable {
         case invalidPCMDescription = 1
         case unsupportedPCMFormat
@@ -718,54 +739,82 @@ private nonisolated final class AppAudioOutput: NSObject, SCStreamOutput, @unche
         case timestampDomain
     }
     private let lock = NSLock()
-    private var phase: Phase = .pending
+    private var delivery = MeetingAppAudioDeliveryState()
     private var reportedAudio = false
     private var cachedASBD: AudioStreamBasicDescription?
     private var cachedFormat: AVAudioFormat?
     private let receive: MeetingAppAudioCapture.Receive
     private let source: MeetingAudioSourceRouter.Source
     private let failure: @Sendable (Failure) -> Void
-    private let firstAudio: @Sendable () -> Void
+    private let firstAudio: @Sendable (AppAudioOutput, Int) -> Void
 
     init(source: MeetingAudioSourceRouter.Source, receive: @escaping MeetingAppAudioCapture.Receive,
          failure: @escaping @Sendable (Failure) -> Void,
-         firstAudio: @escaping @Sendable () -> Void) {
+         firstAudio: @escaping @Sendable (AppAudioOutput, Int) -> Void) {
         self.source = source
         self.receive = receive
         self.failure = failure
         self.firstAudio = firstAudio
     }
 
+    func acceptsSamples(for ticket: Int) -> Bool {
+        lock.withLock { delivery.acceptsSamples(for: ticket) }
+    }
+
     func revoke() {
         lock.lock()
-        phase = .revoked
+        delivery.revoke()
         lock.unlock()
+    }
+
+    func setEnabled(_ enabled: Bool) {
+        lock.lock()
+        delivery.setEnabled(enabled)
+        if !enabled { reportedAudio = false }
+        lock.unlock()
+    }
+
+    func resume(on queue: DispatchQueue) {
+        lock.lock()
+        let ticket = delivery.ticket
+        lock.unlock()
+        // Drain samples queued while muted before opening this lane. A later
+        // disable/revoke invalidates this command even if it has not run yet.
+        queue.async { [self] in
+            lock.lock()
+            delivery.enable(ifCurrent: ticket)
+            lock.unlock()
+        }
     }
 
     // Called on the serial sample queue after startCapture has completed successfully.
     func activate() {
         lock.lock()
-        if phase == .pending { phase = .live }
+        delivery.activate()
         lock.unlock()
     }
 
-    private func abort(_ reason: Failure) {
-        revoke()
-        failure(reason)
+    private func abort(_ reason: Failure, ticket: Int) {
+        lock.lock()
+        let report = delivery.acceptsSamples(for: ticket)
+        if report { delivery.revoke() }
+        lock.unlock()
+        if report { failure(reason) }
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sample: CMSampleBuffer, of type: SCStreamOutputType) {
         let expectedType: SCStreamOutputType = source == .microphone ? .microphone : .audio
         guard type == expectedType, CMSampleBufferIsValid(sample), CMSampleBufferDataIsReady(sample) else { return }
         lock.lock()
-        let accepting = phase == .live
+        let accepting = delivery.acceptsSamples
+        let ticket = delivery.ticket
         lock.unlock()
         guard accepting else { return }
         guard let description = CMSampleBufferGetFormatDescription(sample),
               let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(description)?.pointee,
               asbd.mFormatID == kAudioFormatLinearPCM,
               asbd.mSampleRate > 0,
-              (1...8).contains(Int(asbd.mChannelsPerFrame)) else { abort(.invalidPCMDescription); return }
+              (1...8).contains(Int(asbd.mChannelsPerFrame)) else { abort(.invalidPCMDescription, ticket: ticket); return }
         guard let frames = Int32(exactly: CMSampleBufferGetNumSamples(sample)), frames > 0 else { return }
         let format: AVAudioFormat
         if let cachedASBD, cachedASBD.mSampleRate == asbd.mSampleRate,
@@ -778,25 +827,25 @@ private nonisolated final class AppAudioOutput: NSObject, SCStreamOutput, @unche
             format = cachedFormat
         } else {
             var source = asbd
-            guard let made = AVAudioFormat(streamDescription: &source) else { abort(.unsupportedPCMFormat); return }
+            guard let made = AVAudioFormat(streamDescription: &source) else { abort(.unsupportedPCMFormat, ticket: ticket); return }
             cachedASBD = asbd
             cachedFormat = made
             format = made
         }
-        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames)) else { abort(.bufferAllocation); return }
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames)) else { abort(.bufferAllocation, ticket: ticket); return }
         buffer.frameLength = AVAudioFrameCount(frames)
         let status = CMSampleBufferCopyPCMDataIntoAudioBufferList(
             sample, at: 0, frameCount: frames, into: buffer.mutableAudioBufferList
         )
-        guard status == noErr else { abort(.pcmCopy); return }
+        guard status == noErr else { abort(.pcmCopy, ticket: ticket); return }
         guard let time = MeetingAppAudioTimestamp.hostTime(
             CMSampleBufferGetPresentationTimeStamp(sample),
             sourceClock: stream.synchronizationClock,
             hostClock: CMClockGetHostTimeClock()
-        ) else { abort(.timestampDomain); return }
+        ) else { abort(.timestampDomain, ticket: ticket); return }
         lock.lock()
-        if phase == .live {
-            if !reportedAudio { reportedAudio = true; firstAudio() }
+        if delivery.acceptsSamples(for: ticket) {
+            if !reportedAudio { reportedAudio = true; firstAudio(self, ticket) }
             receive(buffer, time, source)
         }
         lock.unlock()

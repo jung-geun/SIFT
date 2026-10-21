@@ -17,11 +17,12 @@ struct GlobalSearchResultsView: View {
     var body: some View {
         VStack(spacing: 0) {
             scopeFilterChips
-                .padding(.vertical, 8)
-                .background(Color(uiColor: .systemGroupedBackground))
+                .padding(.vertical, AppTheme.Spacing.item)
+                .background(AppTheme.canvas)
 
             contentArea
         }
+        .appScreenStyle()
         .onChange(of: searchText) { _, _ in
             scheduleSearch()
         }
@@ -61,6 +62,7 @@ struct GlobalSearchResultsView: View {
             }
             .padding(.horizontal)
         }
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     private func scopeChip(
@@ -78,13 +80,16 @@ struct GlobalSearchResultsView: View {
             Text(title)
                 .font(.subheadline.weight(isSelected ? .semibold : .regular))
                 .padding(.horizontal, 14)
-                .padding(.vertical, 6)
-                .background(isSelected ? AppTheme.accent : Color(uiColor: .secondarySystemGroupedBackground))
-                .foregroundStyle(isSelected ? .white : .primary)
-                .clipShape(Capsule())
+                .frame(minHeight: 44)
+                .background(
+                    isSelected ? AppTheme.neutralFill : AppTheme.surface,
+                    in: RoundedRectangle(cornerRadius: AppTheme.controlRadius, style: .continuous)
+                )
+                .foregroundStyle(.primary)
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier(accessibilityID)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 
     @ViewBuilder
@@ -101,7 +106,7 @@ struct GlobalSearchResultsView: View {
                 Spacer()
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color(uiColor: .systemGroupedBackground))
+            .background(AppTheme.canvas)
         } else if trimmed.isEmpty {
             VStack(spacing: 8) {
                 Spacer()
@@ -114,7 +119,7 @@ struct GlobalSearchResultsView: View {
                 Spacer()
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color(uiColor: .systemGroupedBackground))
+            .background(AppTheme.canvas)
         } else if results.isEmpty {
             VStack(spacing: 8) {
                 Spacer()
@@ -131,7 +136,7 @@ struct GlobalSearchResultsView: View {
                 Spacer()
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color(uiColor: .systemGroupedBackground))
+            .background(AppTheme.canvas)
         } else {
             List {
                 if let selectedSource {
@@ -162,7 +167,7 @@ struct GlobalSearchResultsView: View {
                     }
                 }
             }
-            .listStyle(.insetGrouped)
+            .appListStyle()
             .refreshable {
                 await loadCorpusAndSearch()
             }
@@ -181,11 +186,11 @@ struct GlobalSearchResultsView: View {
     }
 
     private func resultRow(_ result: GlobalSearchResult) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: AppTheme.Spacing.compact) {
             HStack {
                 Text(result.title)
                     .font(.body.weight(.medium))
-                    .lineLimit(1)
+                    .lineLimit(2)
                 Spacer()
                 Text(result.date, style: .date)
                     .font(.caption)
@@ -194,12 +199,12 @@ struct GlobalSearchResultsView: View {
 
             if !result.subtitle.isEmpty {
                 Text(result.subtitle)
-                    .font(.caption)
+                    .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
             }
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, AppTheme.Spacing.compact)
     }
 
     @ViewBuilder

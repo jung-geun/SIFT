@@ -3,4 +3,5 @@
     <include domain="file" path="." />
     <exclude domain="file" path="meetings" />
     <exclude domain="file" path="sift_state.json" />
+    <exclude domain="file" path="sift_state.json.tmp" />
 </full-backup-content>

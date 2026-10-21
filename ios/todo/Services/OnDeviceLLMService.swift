@@ -33,8 +33,12 @@ final class OnDeviceLLMService: ObservableObject {
     static let shared = OnDeviceLLMService()
 
     @Published var isModelLoaded = false
-    @Published var isLoading = false
-    @Published var isDeleting = false
+    @Published var isLoading = false {
+        didSet { if !isLoading { cachedModelSnapshot = nil } }
+    }
+    @Published var isDeleting = false {
+        didSet { cachedModelSnapshot = nil }
+    }
     @Published var loadError: String?
     @Published var downloadProgress: Double = 0
     @Published var downloadInterrupted = false
@@ -143,9 +147,12 @@ final class OnDeviceLLMService: ObservableObject {
     }
 
     private let runtime: (any OnDeviceModelRuntime)?
+    private let policy: BetaFeaturePolicy
+    private var cachedModelSnapshot: (modelID: String, snapshot: OnDeviceModelCacheSnapshot)?
     private var container: ModelContainer?
     /// 실제 로드된 모델 ID — 삭제 시 정확한 캐시 경로 계산에 사용.
     private var loadedModelID: String?
+    var loadedModelIdentifier: String? { isModelLoaded ? loadedModelID : nil }
 
     // MARK: - 수명주기 옵저버 상태
     /// 백그라운드 진입 알림 관찰 토큰 (앱 수명 동안 유지)
@@ -165,9 +172,29 @@ final class OnDeviceLLMService: ObservableObject {
         Self.physicalMemoryGiB >= Self.minCapableMemoryGiB
     }
 
-    /// HuggingFace 캐시 디렉터리에 현재 선택 모델 파일이 있는지 확인.
-    var isModelCachedOnDisk: Bool {
-        !cacheDirectories(for: modelID).isEmpty
+    /// Only a complete snapshot is eligible for local loading, not an interrupted cache directory.
+    var isModelCachedOnDisk: Bool { isModelCachedOnDisk(for: modelID) }
+
+    func isModelCachedOnDisk(for selectedID: String) -> Bool {
+        guard !isDeleting else { return false }
+        if let cachedModelSnapshot, cachedModelSnapshot.modelID == selectedID,
+           cachedModelSnapshot.snapshot.isUsable {
+            return true
+        }
+        cachedModelSnapshot = nil
+        guard !isLoading else { return false }
+        for root in cacheDirectories(for: selectedID) {
+            // The downloader below resolves the service's default revision to snapshots/main.
+            let directory = root.appendingPathComponent("snapshots/main")
+            if let snapshot = OnDeviceModelCacheSnapshot(
+                directory: directory,
+                requiresTokenizerConfiguration: usesNativeChatTemplate(selectedID)
+            ) {
+                cachedModelSnapshot = (selectedID, snapshot)
+                return true
+            }
+        }
+        return false
     }
 
     /// 현재 선택값과 무관하게 기기에 설치된 HuggingFace 모델 캐시를 모두 찾는다.
@@ -256,8 +283,9 @@ final class OnDeviceLLMService: ObservableObject {
         return false
         #endif
     }
-    init(runtime: (any OnDeviceModelRuntime)? = nil) {
+    init(runtime: (any OnDeviceModelRuntime)? = nil, policy: BetaFeaturePolicy = BetaFeaturePolicy()) {
         self.runtime = runtime
+        self.policy = policy
         // 임계값 실측 검증용 진단 로그 — physicalMemory 보고값으로 6GB/4GB 판정 확인.
         print(String(format: "[OnDeviceLLM] 물리 메모리 %.2f GiB · isCapable=%@ · availableModels=%d",
                      Self.physicalMemoryGiB, isCapable ? "true" : "false", Self.availableModels.count))
@@ -265,7 +293,22 @@ final class OnDeviceLLMService: ObservableObject {
     }
 
     func loadModelIfNeeded(use: ProviderUse) async {
-        guard BetaFeaturePolicy().authorizes(.onDevice, for: use), isCapable, !isLoading else { return }
+        await loadModel(id: modelID, use: use)
+    }
+
+    /// Choosing a download target is not choosing an inference model. Commit the
+    /// active model preference only after installation and loading have succeeded.
+    func installModel(id: String) async {
+        guard Self.availableModels.contains(where: { $0.id == id }) else { return }
+        await loadModel(id: id, use: .modelManagement)
+        if loadedModelIdentifier == id {
+            UserDefaults.standard.set(id, forKey: "pieroot.todo.onDeviceModelID")
+            objectWillChange.send()
+        }
+    }
+
+    private func loadModel(id selectedID: String, use: ProviderUse) async {
+        guard policy.authorizes(.onDevice, for: use), isCapable, !isLoading else { return }
         if let runtime {
             isLoading = true
             loadError = nil
@@ -274,7 +317,7 @@ final class OnDeviceLLMService: ObservableObject {
             defer { isLoading = false }
             do {
                 try await runtime.load()
-                loadedModelID = modelID
+                loadedModelID = selectedID
                 isModelLoaded = true
                 downloadProgress = 1
             } catch is CancellationError {
@@ -285,15 +328,15 @@ final class OnDeviceLLMService: ObservableObject {
             return
         }
         if isModelLoaded {
-            guard loadedModelID != modelID else { return }
+            guard loadedModelID != selectedID else { return }
             unloadModel(reason: .manual)
         }
-        let task = Task<Void, Never> { [weak self] in await self?.performLoad() }
+        let task = Task<Void, Never> { [weak self] in await self?.performLoad(idToLoad: selectedID) }
         loadingTask = task
         await task.value
     }
 
-    private func performLoad() async {
+    private func performLoad(idToLoad: String) async {
         isLoading = true
         loadError = nil
         downloadInterrupted = false
@@ -308,7 +351,6 @@ final class OnDeviceLLMService: ObservableObject {
         }
         do {
             try Task.checkCancellation()
-            let idToLoad = modelID
             // 로드 직전 실측 가용 메모리 확인 — 경계 기기에서 OOM 크래시 대신 명확한 에러로 폴백.
             // 모델 가중치(sizeMB)를 램에 올릴 여유 + 안전 마진(512MB)이 없으면 로드하지 않는다.
             let modelSizeMB = Self.modelCatalog.first { $0.id == idToLoad }?.sizeMB ?? 1400
@@ -349,6 +391,7 @@ final class OnDeviceLLMService: ObservableObject {
     }
 
     func unloadModel(reason: UnloadReason = .manual) {
+        let hadNativeModel = container != nil
         lastUnloadReason = reason
         if generationTask != nil {
             print("[OnDeviceLLM] ⚠️ 진행 중인 generate 취소 — 사유: \(reason.rawValue)")
@@ -362,16 +405,15 @@ final class OnDeviceLLMService: ObservableObject {
         idleTimer = nil
         container = nil
         isModelLoaded = false
-        MLX.Memory.cacheLimit = 0
+        if hadNativeModel { MLX.Memory.cacheLimit = 0 }
     }
 
     // MARK: - Lifecycle Observers
 
     /// 백그라운드 진입 / 메모리 경고 시 모델 자동 언로드 등록.
     ///
-    /// willResignActive(didEnterBackground보다 먼저 발생)에서 in-flight 로딩·generate()를
-    /// 즉시 취소한 뒤 언로드한다. didEnterBackground는 이미 GPU 접근이 차단된 후라
-    /// Metal crash 방지에 충분하지 않다.
+    /// 실제 백그라운드 전환에서 로딩·추론을 취소하고 소유한 모델을 해제한다.
+    /// 로드한 네이티브 모델이 없으면 MLX 캐시에 접근해 Metal을 새로 초기화하지 않는다.
     private func setupLifecycleObservers() {
         // didEnterBackground: 앱이 실제로 백그라운드로 전환될 때만 취소+언로드.
         // willResignActive는 알림 배너·Dynamic Island 오버레이·FaceID 등 순간적
@@ -470,7 +512,7 @@ final class OnDeviceLLMService: ObservableObject {
         contextLength: Int = 8192,
         use: ProviderUse
     ) async throws -> String {
-        guard BetaFeaturePolicy().authorizes(.onDevice, for: use) else {
+        guard policy.authorizes(.onDevice, for: use) else {
             throw IntelligenceRoutingError.backendUnavailable(
                 provider: .onDevice,
                 reason: RuleFallbackReason.providerDisabled.rawValue
@@ -1181,13 +1223,19 @@ final class OnDeviceLLMService: ObservableObject {
     var isModelCachedOnDisk: Bool { false }
     var installedModels: [InstalledModel] { [] }
     private let runtime: (any OnDeviceModelRuntime)?
-    init(runtime: (any OnDeviceModelRuntime)? = nil) {
+    private let policy: BetaFeaturePolicy
+    private var loadedModelID: String?
+    var loadedModelIdentifier: String? { isModelLoaded ? loadedModelID : nil }
+    init(runtime: (any OnDeviceModelRuntime)? = nil, policy: BetaFeaturePolicy = BetaFeaturePolicy()) {
         self.runtime = runtime
+        self.policy = policy
     }
     func loadModelIfNeeded(use: ProviderUse) async {
-        guard BetaFeaturePolicy().authorizes(.onDevice, for: use), let runtime else { return }
+        guard policy.authorizes(.onDevice, for: use), let runtime else { return }
+        let selectedID = modelID
         do {
             try await runtime.load()
+            loadedModelID = selectedID
             isModelLoaded = true
         } catch {
             loadError = error.localizedDescription
@@ -1206,7 +1254,7 @@ final class OnDeviceLLMService: ObservableObject {
         contextLength: Int = 8192,
         use: ProviderUse
     ) async throws -> String {
-        guard BetaFeaturePolicy().authorizes(.onDevice, for: use) else {
+        guard policy.authorizes(.onDevice, for: use) else {
             throw IntelligenceRoutingError.backendUnavailable(
                 provider: .onDevice,
                 reason: RuleFallbackReason.providerDisabled.rawValue
@@ -1241,3 +1289,61 @@ final class OnDeviceLLMService: ObservableObject {
 }
 
 #endif
+
+/// A cheap file-stat check after reading the small shard index once. Never reads weight or tokenizer payloads.
+nonisolated struct OnDeviceModelCacheSnapshot {
+    private let requiredFiles: [URL]
+    private let indexURL: URL
+    private let indexSize: Int?
+    private let indexModificationDate: Date?
+
+    init?(directory: URL, requiresTokenizerConfiguration: Bool) {
+        var files = ["config.json", "tokenizer.json"].map { directory.appendingPathComponent($0) }
+        if requiresTokenizerConfiguration {
+            files.append(directory.appendingPathComponent("tokenizer_config.json"))
+        }
+        let index = directory.appendingPathComponent("model.safetensors.index.json")
+        let indexValues = Self.values(of: index)
+        if FileManager.default.fileExists(atPath: index.path) {
+            guard let data = try? Data(contentsOf: index),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let weights = json["weight_map"] as? [String: String], !weights.isEmpty else { return nil }
+            for name in Set(weights.values) {
+                guard !name.hasPrefix("/"), !name.split(separator: "/").contains(".."),
+                      name.hasSuffix(".safetensors") else { return nil }
+                files.append(directory.appendingPathComponent(name))
+            }
+            files.append(index)
+        } else {
+            // The MLX loader accepts standalone safetensors filenames, not only model.safetensors.
+            guard let entries = try? FileManager.default.contentsOfDirectory(
+                at: directory, includingPropertiesForKeys: nil
+            ) else { return nil }
+            let weights = entries.filter { $0.pathExtension == "safetensors" }
+            // A lone shard from an interrupted multi-file export is not a standalone model.
+            guard weights.count == 1, !weights[0].lastPathComponent.contains("-of-") else { return nil }
+            files.append(weights[0])
+        }
+        self.requiredFiles = files
+        self.indexURL = index
+        self.indexSize = indexValues?.fileSize
+        self.indexModificationDate = indexValues?.contentModificationDate
+        guard isUsable else { return nil }
+    }
+
+    var isUsable: Bool {
+        let currentIndex = Self.values(of: indexURL)
+        guard currentIndex?.fileSize == indexSize,
+              currentIndex?.contentModificationDate == indexModificationDate else { return false }
+        return requiredFiles.allSatisfy { file in
+            guard let values = Self.values(of: file) else { return false }
+            return values.isRegularFile == true && (values.fileSize ?? 0) > 0
+        }
+    }
+
+    private static func values(of url: URL) -> URLResourceValues? {
+        var freshURL = url
+        freshURL.removeAllCachedResourceValues()
+        return try? freshURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey])
+    }
+}

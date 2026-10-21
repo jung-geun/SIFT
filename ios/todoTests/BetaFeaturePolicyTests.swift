@@ -5,14 +5,13 @@ import Testing
 @Suite("Beta provider policy")
 @MainActor
 struct BetaFeaturePolicyTests {
-    @Test("legacy provider settings do not override the default AFM provider")
+    @Test("legacy provider settings cannot change ready local routing")
     func legacySettingsRemainInert() async {
         await AIProviderTestIsolation.shared.withLock {
             let defaults = UserDefaults.standard
             let betaKeys = [
-                SettingsStore.betaFoundationModelsEnabledKey,
-                SettingsStore.betaOnDeviceModelEnabledKey,
                 SettingsStore.betaOpenAIEnabledKey,
+                SettingsStore.betaLayaEnabledKey,
                 SettingsStore.betaMeetingVoiceProcessingEnabledKey,
                 SettingsStore.betaSelectedProviderKey,
                 SettingsStore.betaLegacySelectionMigratedKey
@@ -26,6 +25,7 @@ struct BetaFeaturePolicyTests {
             defer {
                 (betaKeys + legacyKeys).forEach(defaults.removeObject(forKey:))
             }
+            let expected = SettingsStore.betaSelectedProvider()
 
             defaults.set(true, forKey: SettingsStore.betaFeaturesKey)
             defaults.set(true, forKey: "pieroot.todo.onDeviceLLMEnabled")
@@ -33,10 +33,12 @@ struct BetaFeaturePolicyTests {
 
             let policy = BetaFeaturePolicy()
             #expect(SettingsStore.betaProviderAccess().foundationModelsEnabled)
-            #expect(SettingsStore.betaSelectedProvider() == .foundationModels)
-            #expect(policy.routingDecision(for: .standardAnalysis) == .providers([.foundationModels]))
-            #expect(policy.routingDecision(for: .transcriptRefinement) == .providers([.foundationModels]))
-            #expect(policy.authorizes(.foundationModels, for: .standardAnalysis))
+            #expect(SettingsStore.betaSelectedProvider() == expected)
+            #expect(policy.routingDecision(for: .standardAnalysis) == expected.map {
+                ProviderRoutingDecision.providers([$0])
+            } ?? .rules(.providerDisabled))
+            #expect(policy.routingDecision(for: .transcriptRefinement) == .providers([.foundationModels, .onDevice]))
+            #expect(policy.authorizes(.foundationModels, for: .standardAnalysis) == (expected == .foundationModels))
         }
     }
 
@@ -98,115 +100,102 @@ struct BetaFeaturePolicyTests {
         }
     }
 
-    @Test("beta keys are local and selection is corrected after disabling provider")
-    func betaSettingsAreLocalAndCorrectSelection() async {
-        await AIProviderTestIsolation.shared.withLock {
-            let defaults = UserDefaults.standard
-            let keys = [
-                SettingsStore.betaFoundationModelsEnabledKey,
-                SettingsStore.betaOnDeviceModelEnabledKey,
-                SettingsStore.betaOpenAIEnabledKey,
-                SettingsStore.betaMeetingVoiceProcessingEnabledKey,
-                SettingsStore.betaSelectedProviderKey,
-                SettingsStore.betaLegacySelectionMigratedKey
-            ]
-            keys.forEach(defaults.removeObject(forKey:))
-            defer { keys.forEach(defaults.removeObject(forKey:)) }
 
-            #expect(Set(keys).isDisjoint(with: Set(SettingsStore.syncableKeys)))
-            #expect(SettingsStore.betaProviderAccess().foundationModelsEnabled)
-            #expect(SettingsStore.betaSelectedProvider() == .foundationModels)
-
-            SettingsStore.shared.setBetaProvider(.openAI, enabled: true)
-            #expect(SettingsStore.betaSelectedProvider() == .foundationModels)
-            #expect(SettingsStore.betaProviderEnabled(.openAI))
-
-            SettingsStore.shared.setBetaProvider(.foundationModels, enabled: true)
-            #expect(SettingsStore.betaSelectedProvider() == .foundationModels)
-
-            SettingsStore.shared.setBetaProvider(.foundationModels, enabled: false)
-            #expect(SettingsStore.betaSelectedProvider() == .openAI)
-
-            SettingsStore.shared.setBetaProvider(.openAI, enabled: false)
-            #expect(SettingsStore.betaSelectedProvider() == nil)
-        }
-
+    private var allProvidersEnabled: BetaProviderAccess {
+        BetaProviderAccess(
+            foundationModelsEnabled: true, onDeviceEnabled: true, openAIEnabled: true,
+            layaEnabled: true, meetingVoiceProcessingEnabled: false
+        )
     }
 
-    @Test("enabling the on-device model does not replace AFM without direct selection")
-    func onDeviceEnableKeepsAFMSelected() async {
-        await AIProviderTestIsolation.shared.withLock {
-            let defaults = UserDefaults.standard
-            let keys = [
-                SettingsStore.betaFoundationModelsEnabledKey,
-                SettingsStore.betaOnDeviceModelEnabledKey,
-                SettingsStore.betaSelectedProviderKey,
-                SettingsStore.betaLegacySelectionMigratedKey
-            ]
-            keys.forEach(defaults.removeObject(forKey:))
-            defer { keys.forEach(defaults.removeObject(forKey:)) }
-
-            SettingsStore.shared.setBetaProvider(.onDevice, enabled: true)
-            #expect(SettingsStore.betaSelectedProvider() == .foundationModels)
-
-            SettingsStore.shared.setBetaSelectedProvider(.onDevice)
-            #expect(SettingsStore.betaSelectedProvider() == .onDevice)
-        }
+    private func readiness(
+        afm: Bool = false, downloaded: Bool = false, connected: Bool = false,
+        plan: Bool = false, laya: Bool = false
+    ) -> BetaProviderReadiness {
+        BetaProviderReadiness(
+            foundationModelsAvailable: afm, onDeviceModelUsable: downloaded,
+            openAIAccountConnected: connected, openAIPlanPermitted: plan,
+            layaModelUsable: laya
+        )
     }
-    @Test("legacy migration sets default AFM when selection is absent and preserves valid onDevice selection")
-    func legacyMigrationSetsDefaultAFMAndPreservesValidOnDevice() async {
-        await AIProviderTestIsolation.shared.withLock {
-            let defaults = UserDefaults.standard
-            let keys = [
-                SettingsStore.betaFoundationModelsEnabledKey,
-                SettingsStore.betaOnDeviceModelEnabledKey,
-                SettingsStore.betaSelectedProviderKey,
-                SettingsStore.betaLegacySelectionMigratedKey
-            ]
-            keys.forEach(defaults.removeObject(forKey:))
-            defer { keys.forEach(defaults.removeObject(forKey:)) }
 
-            // Case A: Absent selection defaults to AFM
-            SettingsStore.shared.migrateLegacyBetaSelectedProviderIfNeeded()
-            SettingsStore.shared.normalizeBetaSelectedProvider()
-            #expect(SettingsStore.betaSelectedProvider() == .foundationModels)
-            #expect(defaults.bool(forKey: SettingsStore.betaLegacySelectionMigratedKey))
-
-            // Case B: Existing valid onDevice selection is preserved non-destructively
-            keys.forEach(defaults.removeObject(forKey:))
-            defaults.set(PersonaAIProvider.onDevice.rawValue, forKey: SettingsStore.betaSelectedProviderKey)
-            defaults.set(true, forKey: SettingsStore.betaOnDeviceModelEnabledKey)
-            SettingsStore.shared.migrateLegacyBetaSelectedProviderIfNeeded()
-            SettingsStore.shared.normalizeBetaSelectedProvider()
-            #expect(SettingsStore.betaSelectedProvider() == .onDevice)
-            #expect(defaults.bool(forKey: SettingsStore.betaLegacySelectionMigratedKey))
+    @Test("OpenAI selection requires opt-in, an active account, and plan permission", arguments: [false, true])
+    func openAIReadinessRequiresEveryPermission(enabled: Bool) {
+        let access = BetaProviderAccess(
+            foundationModelsEnabled: false, onDeviceEnabled: false, openAIEnabled: enabled,
+            layaEnabled: false, meetingVoiceProcessingEnabled: false
+        )
+        for connected in [false, true] {
+            for plan in [false, true] {
+                let state = readiness(connected: connected, plan: plan)
+                let permitted = enabled && connected && plan
+                #expect(state.selectableProviders(access: access) == (permitted ? [.openAI] : []))
+                #expect(state.normalizedSelection(.openAI, access: access) == (permitted ? .openAI : nil))
+            }
         }
     }
 
-    @Test("explicit on-device selection persists across migration and normalization calls")
-    func explicitOnDeviceSelectionPersistsAcrossMigrationAndNormalization() async {
-        await AIProviderTestIsolation.shared.withLock {
-            let defaults = UserDefaults.standard
-            let keys = [
-                SettingsStore.betaFoundationModelsEnabledKey,
-                SettingsStore.betaOnDeviceModelEnabledKey,
-                SettingsStore.betaSelectedProviderKey,
-                SettingsStore.betaLegacySelectionMigratedKey
-            ]
-            keys.forEach(defaults.removeObject(forKey:))
-            defer { keys.forEach(defaults.removeObject(forKey:)) }
+    @Test("Local providers require usable models and AFM follows availability", arguments: [false, true])
+    func localReadinessIsSeparateFromOptIn(usable: Bool) {
+        let state = readiness(afm: usable, downloaded: usable, laya: usable)
+        #expect(state.selectableProviders(access: allProvidersEnabled)
+            == (usable ? [.foundationModels, .onDevice, .laya] : []))
+        #expect(state.selectableProviders(access: .disabled).isEmpty)
 
-            SettingsStore.shared.migrateLegacyBetaSelectedProviderIfNeeded()
-            #expect(defaults.bool(forKey: SettingsStore.betaLegacySelectionMigratedKey))
+        let access = allProvidersEnabled
+        let policy = BetaFeaturePolicy(accessReader: { access }, selectionReader: { nil })
+        // Missing model assets must not block installing or managing them.
+        #expect(policy.authorizes(.onDevice, for: .modelManagement))
+        #expect(policy.authorizes(.laya, for: .layaModelManagement))
+    }
 
-            SettingsStore.shared.setBetaProvider(.onDevice, enabled: true)
-            SettingsStore.shared.setBetaSelectedProvider(.onDevice)
-            #expect(SettingsStore.betaSelectedProvider() == .onDevice)
+    @Test("Readiness never automatically selects OpenAI, but preserves explicit permitted selection")
+    func remoteReadinessDoesNotSelectRemoteProvider() {
+        let state = readiness(connected: true, plan: true)
+        #expect(state.selectableProviders(access: allProvidersEnabled) == [.openAI])
+        #expect(state.normalizedSelection(nil, access: allProvidersEnabled) == nil)
+        #expect(state.normalizedSelection(.onDevice, access: allProvidersEnabled) == nil)
+        #expect(state.normalizedSelection(.openAI, access: allProvidersEnabled) == .openAI)
+    }
 
-            SettingsStore.shared.migrateLegacyBetaSelectedProviderIfNeeded()
-            SettingsStore.shared.normalizeBetaSelectedProvider()
-            #expect(SettingsStore.betaSelectedProvider() == .onDevice)
-        }
+    @Test("Disconnect, plan loss, and local model removal normalize to a ready local provider or none")
+    func staleSelectionUsesConservativeFallback() {
+        #expect(readiness(afm: true).normalizedSelection(.openAI, access: allProvidersEnabled) == .foundationModels)
+        #expect(readiness(downloaded: true, connected: true).normalizedSelection(.openAI, access: allProvidersEnabled) == .onDevice)
+        #expect(readiness(laya: true).normalizedSelection(.onDevice, access: allProvidersEnabled) == .laya)
+        #expect(readiness(downloaded: true).normalizedSelection(.laya, access: allProvidersEnabled) == .onDevice)
+        #expect(readiness().normalizedSelection(.laya, access: allProvidersEnabled) == nil)
+        #expect(readiness().normalizedSelection(.onDevice, access: allProvidersEnabled) == nil)
+        #expect(readiness(plan: true).normalizedSelection(.openAI, access: allProvidersEnabled) == nil)
+    }
+
+    @Test("A ready explicit local selection survives normalization without preferring AFM")
+    func normalizationPreservesReadySelection() {
+        let state = readiness(afm: true, downloaded: true, laya: true)
+        #expect(state.normalizedSelection(.onDevice, access: allProvidersEnabled) == .onDevice)
+        #expect(state.normalizedSelection(.laya, access: allProvidersEnabled) == .laya)
+        #expect(state.normalizedSelection(nil, access: allProvidersEnabled) == .foundationModels)
+    }
+
+    @Test("Existing policy reads readiness changes without being recreated")
+    func connectionChangesRefreshSelectionAndRuntimeRouting() {
+        let access = allProvidersEnabled
+        let state = ProviderReadinessState(readiness: readiness(afm: true))
+        let policy = BetaFeaturePolicy(
+            accessReader: { access },
+            selectionReader: { state.readiness.normalizedSelection(state.selected, access: access) }
+        )
+        #expect(!state.readiness.selectableProviders(access: access).contains(.openAI))
+        state.readiness = readiness(afm: true, connected: true, plan: true)
+        #expect(state.readiness.selectableProviders(access: access).contains(.openAI))
+        #expect(policy.routingDecision(for: .standardAnalysis) == .providers([.foundationModels]))
+        state.selected = .openAI
+        #expect(policy.routingDecision(for: .standardAnalysis) == .providers([.openAI]))
+        state.readiness = readiness(afm: true)
+        #expect(!state.readiness.selectableProviders(access: access).contains(.openAI))
+        #expect(policy.routingDecision(for: .standardAnalysis) == .providers([.foundationModels]))
+        state.readiness = readiness()
+        #expect(policy.routingDecision(for: .standardAnalysis) == .rules(.providerDisabled))
     }
 
 
@@ -253,7 +242,7 @@ struct BetaFeaturePolicyTests {
         #expect(disabledPolicy.routingDecision(for: .layaModelManagement) == .rules(.providerDisabled))
     }
 
-    @Test("메일 요약은 Laya 우선순위 선택과 독립적으로 AFM 동의를 따른다")
+    @Test("메일 요약은 Laya 우선순위 선택과 독립적으로 AFM을 사용한다")
     func emailAnalysisKeepsAFMSeparateFromLayaSelection() {
         let both = BetaProviderAccess(
             foundationModelsEnabled: true,
@@ -290,5 +279,15 @@ struct BetaFeaturePolicyTests {
         )
         #expect(policy.routingDecision(for: .standardAnalysis) == .providers([selection]))
         #expect(policy.routingDecision(for: .meetingAnalysis) == .rules(.providerNotApplicable))
+    }
+}
+
+@MainActor
+private final class ProviderReadinessState {
+    var readiness: BetaProviderReadiness
+    var selected: PersonaAIProvider?
+
+    init(readiness: BetaProviderReadiness) {
+        self.readiness = readiness
     }
 }

@@ -11,36 +11,6 @@ enum TodoSource: String, Codable, Sendable {
     case meeting  = "meeting"
 }
 
-/// 캘린더 이벤트의 소유·생성 경로. 이벤트 URL 마커와 함께 저장해 재설치 후에도
-/// 외부 캘린더 import와 SIFT가 만든 일정을 구분한다.
-enum CalendarEventOrigin: String, Codable, Sendable, Equatable {
-    case externalCalendar = "externalCalendar"
-    case siftManual = "siftManual"
-    case siftEmail = "siftEmail"
-    case siftMeeting = "siftMeeting"
-    case siftRecommendation = "siftRecommendation"
-
-    static func inferred(from todo: Todo) -> CalendarEventOrigin {
-        // AI가 imported calendar Todo를 분석했더라도, 외부 이벤트의 소유권을
-        // SIFT 추천 일정으로 바꾸면 안 된다.
-        if todo.todoSource == .calendar {
-            return .externalCalendar
-        }
-        if todo.aiRecommendedTime != nil {
-            return .siftRecommendation
-        }
-        switch todo.todoSource {
-        case .calendar: return .externalCalendar
-        case .email: return .siftEmail
-        case .meeting: return .siftMeeting
-        case .manual: return .siftManual
-        }
-    }
-
-    var isSiftManaged: Bool {
-        self != .externalCalendar
-    }
-}
 
 /// 이메일 메일 triage 결과 — 메인 할 일 vs 참고함
 enum TodoTriage: String, Codable, Sendable {
@@ -164,6 +134,9 @@ final class Todo {
     /// EKEvent.calendarItemExternalIdentifier — iCloud 동기화 후에도 변하지 않는 안정 식별자.
     /// eventIdentifier는 기기마다 다르지만 externalIdentifier는 동일 → 다른 기기에서 중복 등록 방지.
     var calendarEventExternalID: String = ""
+    /// Last observed EventKit calendar identifier for pending import suggestions.
+    /// Device-local source selection never changes an approved task's eligibility.
+    var calendarSourceID: String = ""
     /// CalendarEventOrigin.rawValue. 빈 값은 이전 버전 데이터이며 source로 안전하게 추론한다.
     var calendarEventOrigin: String = ""
     /// 캘린더 동기화가 마지막으로 Todo에 반영한 EKEvent 제목.
@@ -257,10 +230,15 @@ final class Todo {
 
     /// Retain the privacy boundary even when a restored row's source enum is stale.
     var hasLocalOnlySourceContent: Bool {
-        todoSource == .email || todoSource == .meeting
+        isHealthRelated || todoSource == .email || todoSource == .meeting
             || !sourceMessageID.isEmpty || !sourceThreadID.isEmpty
             || !sourceSenderEmail.isEmpty || !sourceAccountNamespace.isEmpty
     }
+    var isHealthRelated: Bool {
+        sourceRef.lowercased().hasPrefix("health:")
+            || CalendarEventOrigin(rawValue: calendarEventOrigin) == .siftHealth
+    }
+
 
 
     var manualPriorityEnum: TodoPriority? {
@@ -314,7 +292,7 @@ final class Todo {
         priorityReason        = result.reason
         aiEngine              = result.engine.rawValue
         aiDetail              = result.detail
-        aiNeedsNotification   = result.needsNotification
+        aiNeedsNotification   = result.needsNotification && !isHealthRelated
         aiRecommendedTime     = result.recommendedTime
         aiPersonaFit          = result.personaFit
         aiRequestedProvider   = result.requestedProviderRawValue
@@ -328,7 +306,8 @@ enum TodoPriorityScope {
     }
     @discardableResult
     static func apply(_ result: PriorityResult, in candidates: [Todo]) -> Todo? {
-        guard let todo = candidates.first(where: { $0.id == result.todoID }) else { return nil }
+        guard let todo = candidates.first(where: { $0.id == result.todoID }),
+              todo.isEligibleForAutomaticPriority else { return nil }
         todo.apply(result)
         return todo
     }

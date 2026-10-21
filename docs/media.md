@@ -11,7 +11,7 @@ image: /assets/media/en/social-preview.png
 
 할 일을 기록하고, 마감을 확인하고, 날짜별로 살펴보는 화면. **실행한 앱의 네이티브 캡처**에 SIFT의 색과 짧은 설명을 더했습니다. 앱 UI를 이미지 생성 모델로 그리거나, 실행하지 않은 AI 분석 결과를 합성하지 않았습니다.
 
-> **1.0.11 (9) · 심사 중 · 예시 데이터** — 2026년 10월 21일 현재 소스에서 다시 실행·촬영한 iPhone·iPad QA 화면입니다. 화면에 보이는 할 일은 소개용 샘플이며 실제 개인·메일·회의 데이터가 아닙니다. 현재 공개 앱 1.0.10과 구분하며, 심사 승인이나 이 이미지의 App Store 업로드 완료를 뜻하지 않습니다. 여기서 제공하는 것은 **정적 스크린샷과 미리보기 이미지**이며, Apple의 동영상 형식인 **App Preview**가 아닙니다. [이 버전의 변경사항](changes.html#version-1-0-11-9)을 먼저 확인하세요.
+> **1.0.11 (10) · 배포 후보 · 예시 데이터** — 2026년 10월 22일 현재 소스에서 광고 없는 테스트 모드로 다시 실행·촬영한 iPhone·iPad QA 화면입니다. 화면의 할 일은 소개용 샘플이며 실제 개인·메일·회의 데이터가 아닙니다. 공개 앱·심사 승인·이 이미지의 App Store 업로드 완료와 구분합니다. 여기서 제공하는 것은 **정적 스크린샷과 미리보기 이미지**이며, Apple의 동영상 형식인 **App Preview**가 아닙니다. [최신 변경사항](changes.html)을 확인하세요.
 
 [전체 이미지 ZIP 다운로드](assets/media/sift-media-kit.zip) · [파일 크기·언어·출처 명세](assets/media/manifest.json) · [네이티브 캡처 출처](assets/media/captures/manifest.json)
 
@@ -76,6 +76,30 @@ swift scripts/render_store_assets.swift docs/assets/media/captures docs/assets/m
 ```
 
 입력은 `promo-{iphone|ipad}-{ko|en}-{01-tasks|02-capture|03-calendar|04-languages}.png` 이름의 네이티브 캡처입니다. 현재 캡처 원본은 [전체 ZIP](assets/media/sift-media-kit.zip)의 `captures` 폴더에도 포함됩니다. iPad 캡처는 가로 픽셀 방향으로 정렬하고 EXIF 방향 정보를 upright로 정규화했습니다. 화면 내용은 수정하거나 잘라내지 않았으며, 변환 전 첨부와 배포 파일의 SHA-256은 캡처 명세로 구별합니다. 실제 앱 화면이 변경되면 새로 실행·촬영한 캡처로 교체한 뒤 렌더링하세요. 캡처 입력에 개인정보가 없는지 확인해야 합니다.
+
+### 광고 없는 소개 화면을 촬영할 때
+
+광고를 이미지에서 지우지 않습니다. **테스트 빌드에서만** `-sift-test-ad-free` 실행 인수를 전달해, 앱이 처음 표시되기 전부터 광고 요청과 배너 배치를 끈 상태로 다시 촬영합니다. 이 인수는 `DEBUG || SIFT_QA`에서만 동작하며 일반 배포 빌드에서는 무시됩니다. 공개 설정이나 구매 화면이 아니며, 유료 광고 제거 기능이 제공된다는 뜻도 아닙니다. 이 인수가 없는 QA 빌드는 기존처럼 Google 공식 테스트 광고를 표시합니다.
+
+촬영은 개인 계정이 없는 격리 iPhone·iPad Simulator에서 합니다. 기존 UI 테스트의 `SIFTUITestCase`와 `-ui-test-in-memory-store`를 사용하고, 임시 캡처 테스트에서 실제 추가·저장 UI로 소개용 할 일 3개를 입력합니다. 앱 본체에 소개 데이터 주입 기능을 추가하지 않습니다. 한국어·영어 각각 할 일 목록, 새 할 일 초안, 캘린더, 언어 선택 메뉴를 열어 `XCUIScreen.main.screenshot()` 첨부를 남기면 총 16장입니다. iPhone은 세로, iPad는 가로로 촬영하고, 캘린더 권한은 해당 격리 QA 앱에만 허용합니다.
+
+```sh
+# 아래 UDID는 촬영용 격리 Simulator의 ID로 바꾸세요.
+xcrun simctl privacy "$UDID" grant calendar-full pieroot.sift-todo.qa
+xcrun simctl status_bar "$UDID" override --time '9:41' \
+  --dataNetwork wifi --wifiMode active --wifiBars 3 \
+  --batteryState charged --batteryLevel 100
+
+# 임시 캡처 테스트가 포함된 Debug-QA 빌드를 준비한 뒤 각 기기에서 실행합니다.
+xcodebuild test-without-building -project ios/todo.xcodeproj -scheme todo-QA \
+  -destination "platform=iOS Simulator,id=$UDID" \
+  -parallel-testing-enabled NO -only-testing:todoUITests/PagesCaptureUITests \
+  -resultBundlePath "$RESULT_BUNDLE"
+xcrun xcresulttool export attachments --path "$RESULT_BUNDLE" \
+  --output-path "$EXPORTED_ATTACHMENTS"
+```
+
+테스트 실행 인수에 `-sift-test-ad-free`가 포함되었는지와 원본 첨부에 광고가 없는지를 먼저 확인합니다. 첨부의 EXIF 방향만 upright로 정규화하고 전체 픽셀을 유지한 RGB PNG로 저장합니다. 이전 배너 영역을 덮어쓰거나 광고를 잘라내는 편집은 하지 않습니다. 16장 모두 새 원본으로 교체한 다음 위 렌더러로 소개 이미지 20장을 만들고, 홈페이지 WebP 4장과 ZIP도 함께 다시 생성합니다. 두 명세의 크기·SHA-256·원본 첨부 해시·실행 결과 번들·QA 바이너리 해시를 갱신하고, 촬영 후 임시 테스트 파일은 제거합니다.
 
 SIFT 아이콘은 저장소의 앱 아이콘을 그대로 사용했습니다. Apple의 기기·서비스 명칭은 Apple Inc.의 상표이며 이 자료가 Apple의 보증을 뜻하지 않습니다.
 

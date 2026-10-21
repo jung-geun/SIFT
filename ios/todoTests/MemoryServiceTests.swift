@@ -55,6 +55,118 @@ struct MemoryServiceTests {
         return event
     }
 
+    @Test("health provenance is excluded before live, audit, and event snapshots lose it")
+    func healthEvidenceDoesNotChangeOrdinaryAnalysis() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let now = Date(timeIntervalSince1970: 1_783_684_800)
+        let createdAt = now.addingTimeInterval(-2 * 24 * 3600)
+        let completedAt = now.addingTimeInterval(-24 * 3600)
+        let ordinary = (0..<5).map { index in
+            completedTodo(
+                title: "Ordinary \(index)",
+                createdAt: createdAt,
+                completedAt: completedAt,
+                dueDate: completedAt.addingTimeInterval(3600),
+                tags: ["ordinary"]
+            )
+        }
+        // A health-like substring must not exclude ordinary task learning.
+        ordinary[0].sourceRef = "message-health:ordinary"
+        let ordinaryAudit = TaskAuditEvent(from: Todo(title: "Ordinary deleted"))
+        ordinaryAudit.createdAt = createdAt
+        ordinaryAudit.deletedAt = completedAt
+        let ordinaryEvent = TaskBehaviorEvent(
+            todo: ordinary[0], type: .created, actor: .user, occurredAt: createdAt
+        )
+        ordinaryEvent.afterDueDate = ordinary[0].dueDate
+        let health = (0..<8).map { index in
+            let todo = completedTodo(
+                title: "Private health title \(index)",
+                createdAt: now.addingTimeInterval(-30 * 24 * 3600),
+                completedAt: now.addingTimeInterval(-3600),
+                dueDate: createdAt,
+                tags: ["private-health-tag"]
+            )
+            if index.isMultiple(of: 2) {
+                todo.sourceRef = "HeAlTh:workout:\(index)"
+            } else {
+                // Restored/calendar-linked health provenance must also survive
+                // an absent or stale sourceRef.
+                todo.calendarEventOrigin = "siftHealth"
+            }
+            if index >= 5 {
+                todo.isCompleted = false
+                todo.completedAt = nil
+            }
+            return todo
+        }
+        // Synthetic inputs exercise the collection guard too; production must
+        // never persist these rows in the first place.
+        let healthAudits = health.map { todo in
+            let audit = TaskAuditEvent(from: todo)
+            audit.deletedAt = now.addingTimeInterval(-1800)
+            return audit
+        }
+        let healthEvents = health.flatMap { todo in
+            [TaskBehaviorEventType.created, .completionChanged, .dueDateChanged, .priorityChanged, .deleted].map { kind in
+                let event = TaskBehaviorEvent(
+                    todo: todo, type: kind, actor: .user,
+                    occurredAt: now.addingTimeInterval(-1800)
+                )
+                event.beforeCompletion = false
+                event.afterCompletion = true
+                event.beforeDueDate = createdAt
+                event.afterDueDate = now
+                event.beforeManualPriority = nil
+                event.afterManualPriority = TodoPriority.critical.rawValue
+                return event
+            }
+        }
+        let baselineContext = BehaviorAnalysisContextBuilder.make(
+            todos: ordinary, auditEvents: [ordinaryAudit], behaviorEvents: [ordinaryEvent],
+            now: now, calendar: calendar
+        )
+        let mixedContext = BehaviorAnalysisContextBuilder.make(
+            todos: ordinary + health,
+            auditEvents: [ordinaryAudit] + healthAudits,
+            behaviorEvents: [ordinaryEvent] + healthEvents,
+            now: now, calendar: calendar
+        )
+
+        #expect(mixedContext.todos == baselineContext.todos)
+        #expect(mixedContext.events == baselineContext.events)
+        #expect(mixedContext.todos.count == ordinary.count + 1)
+        #expect(mixedContext.events.count == 1)
+        let baseline = MemoryService.computeAnalysis(context: baselineContext, language: .english)
+        let mixed = MemoryService.computeAnalysis(context: mixedContext, language: .english)
+        #expect(mixed.behaviorProfile == baseline.behaviorProfile)
+        #expect(mixed.summary == baseline.summary)
+        #expect(mixed.insights == baseline.insights)
+        #expect(mixed.fastTags == baseline.fastTags)
+        #expect(mixed.fastTags.contains("ordinary"))
+        #expect(mixed.overdueRate == baseline.overdueRate)
+        #expect(mixed.productiveHour == baseline.productiveHour)
+        #expect(mixed.analyzedCompletedCount == baseline.analyzedCompletedCount)
+        #expect(mixed.accessScopeSummary == baseline.accessScopeSummary)
+
+        let healthOnlyContext = BehaviorAnalysisContextBuilder.make(
+            todos: health, auditEvents: healthAudits, behaviorEvents: healthEvents,
+            now: now, calendar: calendar
+        )
+        #expect(healthOnlyContext.todos.isEmpty)
+        #expect(healthOnlyContext.events.isEmpty)
+        let healthOnly = MemoryService.computeAnalysis(context: healthOnlyContext, language: .english)
+        let empty = MemoryService.computeAnalysis(todos: [], now: now, calendar: calendar, language: .english)
+        #expect(healthOnly.behaviorProfile == empty.behaviorProfile)
+        #expect(healthOnly.summary == empty.summary)
+        #expect(healthOnly.insights == empty.insights)
+        #expect(healthOnly.fastTags.isEmpty)
+        #expect(healthOnly.productiveHour == nil)
+        #expect(healthOnly.analyzedCompletedCount == 0)
+        #expect(healthOnly.accessScopeSummary == empty.accessScopeSummary)
+    }
+
     @Test("current state and every user deletion snapshot use separate denominators")
     func separatesCurrentAndDeletionSnapshotDenominators() {
         let now = makeDate(day: 10, hour: 12)

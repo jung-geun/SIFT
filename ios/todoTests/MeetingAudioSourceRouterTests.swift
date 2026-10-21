@@ -26,6 +26,35 @@ private final class RouterClock: @unchecked Sendable {
     func now() -> Double { lock.withLock { value } }
     func set(_ value: Double) { lock.withLock { self.value = value } }
 }
+
+/// Hands a synchronous worker callback to one async test waiter without blocking
+/// a cooperative executor thread. Finishing the stream bounds a missing callback.
+private struct RouterCallbackHandoff: Sendable {
+    private let stream: AsyncStream<Void>
+    private let continuation: AsyncStream<Void>.Continuation
+
+    init() {
+        let handoff = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        stream = handoff.stream
+        continuation = handoff.continuation
+    }
+
+    func signal() {
+        continuation.yield(())
+        continuation.finish()
+    }
+
+    func wait() async -> Bool {
+        let continuation = continuation
+        let timeout = Task {
+            do { try await Task.sleep(for: .seconds(2)) } catch { return }
+            continuation.finish()
+        }
+        defer { timeout.cancel() }
+        for await _ in stream { return true }
+        return false
+    }
+}
 private func routerPCM(_ samples: [Int16], rate: Double = 16_000) throws -> AVAudioPCMBuffer {
     let format = try #require(AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: rate, channels: 1, interleaved: true))
     let buffer = try #require(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(samples.count)))
@@ -213,7 +242,7 @@ struct MeetingAudioSourceRouterTests {
     @Test("close followed by retirement drains queued valid prefix before release and retired disable cannot recreate it")
     func closeThenRetirePreservesPrefix() async throws {
         let sink = RouterSamples()
-        let entered = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+        let entered = RouterCallbackHandoff(), release = DispatchSemaphore(value: 0)
         let router = try Router(automaticallyRenders: false, consume: { source, buffer in
             sink.append(source, buffer)
             if source == .microphone && sink.samples().count == 320 { entered.signal(); release.wait() }
@@ -221,7 +250,7 @@ struct MeetingAudioSourceRouterTests {
         defer { release.signal() }
         router.start(hostTime: 100, microphoneEnabled: true)
         let rendering = Task.detached { await router.render(hostTime: 100.22) }
-        let enteredInTime = await Task.detached { entered.wait(timeout: .now() + 2) == .success }.value
+        let enteredInTime = await entered.wait()
         try #require(enteredInTime)
         // This source's conversion and close both wait behind microphone consume.
         router.setEnabled(true, source: .appAudio, hostTime: 100.02)
@@ -273,7 +302,7 @@ struct MeetingAudioSourceRouterTests {
     @Test("pause during one source callback shares the committed group endpoint with every track")
     func pauseDuringDelivery() async throws {
         let sink = RouterSamples()
-        let entered = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+        let entered = RouterCallbackHandoff(), release = DispatchSemaphore(value: 0)
         let router = try Router(automaticallyRenders: false, consume: { source, buffer in
             sink.append(source, buffer)
             if source == .microphone && sink.samples().count == 320 { entered.signal(); release.wait() }
@@ -284,7 +313,7 @@ struct MeetingAudioSourceRouterTests {
         router.enqueue(try routerPCM(13, count: 640), source: .microphone, hostTime: 100)
         router.enqueue(try routerPCM(29, count: 640), source: .appAudio, hostTime: 100)
         let rendering = Task.detached { await router.render(hostTime: 100.24) }
-        let enteredInTime = await Task.detached { entered.wait(timeout: .now() + 2) == .success }.value
+        let enteredInTime = await entered.wait()
         try #require(enteredInTime)
         router.pause(hostTime: 100.01)
         release.signal()
@@ -489,7 +518,7 @@ struct MeetingAudioSourceRouterTests {
     @Test("raw work waiting behind consumption is revoked without affecting another source")
     func queuedRawRevocation() async throws {
         let sink = RouterSamples()
-        let entered = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+        let entered = RouterCallbackHandoff(), release = DispatchSemaphore(value: 0)
         let router = try Router(automaticallyRenders: false, consume: { source, buffer in
             sink.append(source, buffer)
             if source == .microphone && sink.samples().count == 320 { entered.signal(); release.wait() }
@@ -498,7 +527,7 @@ struct MeetingAudioSourceRouterTests {
         router.start(hostTime: 100, microphoneEnabled: true)
         router.setEnabled(true, source: .appAudio, hostTime: 100)
         let rendering = Task.detached { await router.render(hostTime: 100.22) }
-        let enteredInTime = await Task.detached { entered.wait(timeout: .now() + 2) == .success }.value
+        let enteredInTime = await entered.wait()
         try #require(enteredInTime)
         router.enqueue(try routerPCM(37, count: 320), source: .microphone, hostTime: 100.02)
         router.enqueue(try routerPCM(8, count: 320), source: .appAudio, hostTime: 100.02)
@@ -516,7 +545,7 @@ struct MeetingAudioSourceRouterTests {
     @Test("raw backlog has a hard capacity and source-local overflow fails once")
     func boundedRawBacklog() async throws {
         let sink = RouterSamples()
-        let entered = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+        let entered = RouterCallbackHandoff(), release = DispatchSemaphore(value: 0)
         let router = try Router(maximumQueuedBuffers: 1, automaticallyRenders: false, consume: { source, buffer in
             sink.append(source, buffer)
             if source == .microphone && sink.samples().count == 320 { entered.signal(); release.wait() }
@@ -524,7 +553,7 @@ struct MeetingAudioSourceRouterTests {
         defer { release.signal() }
         router.start(hostTime: 100, microphoneEnabled: true)
         let rendering = Task.detached { await router.render(hostTime: 100.22) }
-        let enteredInTime = await Task.detached { entered.wait(timeout: .now() + 2) == .success }.value
+        let enteredInTime = await entered.wait()
         try #require(enteredInTime)
         router.enqueue(try routerPCM(37, count: 320), source: .microphone, hostTime: 100.02)
         router.enqueue(try routerPCM(38, count: 320), source: .microphone, hostTime: 100.04)

@@ -388,6 +388,12 @@ struct GmailServiceTests {
                 service: "pieroot.todo.gmail",
                 account: account
             )
+            // Each fixture starts as a fresh installation, not the previous
+            // fixture's explicit sign-out. Migration itself cannot lift a fence.
+            do {
+                try KeychainStore.deleteDeviceOnly(service: "pieroot.todo.gmail.portability-state.v1", account: account)
+            } catch { Issue.record(error) }
+            UserDefaults.standard.removeObject(forKey: "pieroot.todo.gmail.revoked.v1.\(account)")
         }
         let defaults = UserDefaults.standard
         let settingKeys = [
@@ -405,11 +411,18 @@ struct GmailServiceTests {
     }
 
     private func seedGmailTokens(scopeVersion: String? = "gmail.modify.openid.v2") {
-        KeychainStore.set(service: "pieroot.todo.gmail", account: "access_token", value: "valid-access")
-        KeychainStore.set(service: "pieroot.todo.gmail", account: "refresh_token", value: "valid-refresh")
+        seedGmailToken(account: "access_token", value: "valid-access")
+        seedGmailToken(account: "refresh_token", value: "valid-refresh")
         if let scopeVersion {
-            KeychainStore.set(service: "pieroot.todo.gmail", account: "scope_version", value: scopeVersion)
+            seedGmailToken(account: "scope_version", value: scopeVersion)
         }
+    }
+
+    private func seedGmailToken(account: String, value: String) {
+        // A fresh authorized fixture, not an OAuth refresh or legacy migration,
+        // may replace the preceding test's durable local sign-out fence.
+        do { try KeychainStore.setGmailAfterExplicitSignIn(account: account, value: value) }
+        catch { Issue.record(error) }
     }
 
     private func storedTokenFields() throws -> [String: Any] {
@@ -1400,10 +1413,10 @@ struct GmailServiceTests {
                 resetSharedState()
                 sut.session = .shared
             }
-            KeychainStore.set(service: "pieroot.todo.gmail", account: "access_token", value: "valid_token")
-            KeychainStore.set(service: "pieroot.todo.gmail", account: "scope_version", value: "gmail.modify.openid.v2")
+            seedGmailToken(account: "access_token", value: "valid_token")
+            seedGmailToken(account: "scope_version", value: "gmail.modify.openid.v2")
             let expiry = String(Date().addingTimeInterval(3600).timeIntervalSince1970)
-            KeychainStore.set(service: "pieroot.todo.gmail", account: "access_token_expires_at", value: expiry)
+            seedGmailToken(account: "access_token_expires_at", value: expiry)
 
             MockURLProtocol.requestHandler = { request in
                 let url = try #require(request.url)
@@ -1544,7 +1557,7 @@ struct GmailServiceTests {
             resetSharedState()
             defer { resetSharedState() }
             seedGmailTokens()
-            KeychainStore.set(service: "pieroot.todo.gmail", account: "id_token", value: "previous-account-id")
+            seedGmailToken(account: "id_token", value: "previous-account-id")
             #expect(sut.isAuthenticated)
             installSuccessfulOAuth()
             MockURLProtocol.requestHandler = { request in
@@ -1600,8 +1613,8 @@ struct GmailServiceTests {
             resetSharedState()
             defer { resetSharedState() }
             seedGmailTokens()
-            KeychainStore.set(service: "pieroot.todo.gmail", account: "refresh_token", value: "value+with&delimiters=ok")
-            KeychainStore.set(service: "pieroot.todo.gmail", account: "id_token", value: "existing-id")
+            seedGmailToken(account: "refresh_token", value: "value+with&delimiters=ok")
+            seedGmailToken(account: "id_token", value: "existing-id")
             MockURLProtocol.requestHandler = { request in
                 if request.url?.host == "oauth2.googleapis.com" {
                     let form = String(decoding: try #require(request.httpBody), as: UTF8.self)
@@ -1649,8 +1662,8 @@ struct GmailServiceTests {
     }
 
     @Test("signOut during token refresh cannot restore credentials")
-    func testSignOutCancelsActiveRefreshAndPreventsTokenResurrection() async throws {
-        try await withIsolatedProviderState {
+    func testSignOutCancelsActiveRefreshAndPreventsTokenResurrection() async {
+        await withIsolatedProviderState {
             resetSharedState()
             defer { resetSharedState() }
             seedGmailTokens()
@@ -1722,7 +1735,7 @@ struct GmailServiceTests {
             resetSharedState()
             defer { resetSharedState() }
             seedGmailTokens()
-            KeychainStore.set(service: "pieroot.todo.gmail", account: "access_token_expires_at", value: String(Date().addingTimeInterval(3600).timeIntervalSince1970))
+            seedGmailToken(account: "access_token_expires_at", value: String(Date().addingTimeInterval(3600).timeIntervalSince1970))
             for status in [401, 403, 429, 500] {
                 MockURLProtocol.requestHandler = { request in
                     (HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!, Data())
@@ -1743,7 +1756,7 @@ struct GmailServiceTests {
             resetSharedState()
             defer { resetSharedState() }
             seedGmailTokens()
-            KeychainStore.set(service: "pieroot.todo.gmail", account: "access_token_expires_at", value: String(Date().addingTimeInterval(3600).timeIntervalSince1970))
+            seedGmailToken(account: "access_token_expires_at", value: String(Date().addingTimeInterval(3600).timeIntervalSince1970))
             let probe = GmailMailboxRequestProbe()
             MockURLProtocol.requestHandler = { request in
                 let url = try #require(request.url)
@@ -1772,7 +1785,7 @@ struct GmailServiceTests {
             resetSharedState()
             defer { resetSharedState() }
             seedGmailTokens()
-            KeychainStore.set(service: "pieroot.todo.gmail", account: "access_token_expires_at", value: String(Date().addingTimeInterval(3600).timeIntervalSince1970))
+            seedGmailToken(account: "access_token_expires_at", value: String(Date().addingTimeInterval(3600).timeIntervalSince1970))
             MockURLProtocol.requestHandler = { request in
                 (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(#"{"messages":[],"nextPageToken":""}"#.utf8))
             }
@@ -1791,7 +1804,7 @@ struct GmailServiceTests {
             resetSharedState()
             defer { resetSharedState() }
             seedGmailTokens()
-            KeychainStore.set(service: "pieroot.todo.gmail", account: "access_token_expires_at", value: String(Date().addingTimeInterval(3600).timeIntervalSince1970))
+            seedGmailToken(account: "access_token_expires_at", value: String(Date().addingTimeInterval(3600).timeIntervalSince1970))
             let payload: [String: Any] = [
                 "id": "native-id", "threadId": "thread-id", "labelIds": ["INBOX"], "internalDate": "1800000000000",
                 "payload": ["mimeType": "multipart/mixed", "headers": [
@@ -1828,7 +1841,7 @@ struct GmailServiceTests {
             resetSharedState()
             defer { resetSharedState() }
             seedGmailTokens()
-            KeychainStore.set(service: "pieroot.todo.gmail", account: "access_token_expires_at", value: String(Date().addingTimeInterval(3600).timeIntervalSince1970))
+            seedGmailToken(account: "access_token_expires_at", value: String(Date().addingTimeInterval(3600).timeIntervalSince1970))
             var paths: [String] = []
             MockURLProtocol.requestHandler = { request in
                 paths.append(request.url!.path)
@@ -1868,7 +1881,7 @@ struct GmailServiceTests {
             resetSharedState()
             defer { resetSharedState() }
             seedGmailTokens()
-            KeychainStore.set(service: "pieroot.todo.gmail", account: "access_token", value: "")
+            seedGmailToken(account: "access_token", value: "")
             #expect(!sut.isAuthenticated)
         }
     }

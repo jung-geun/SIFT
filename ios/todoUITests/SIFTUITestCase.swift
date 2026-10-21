@@ -45,6 +45,7 @@ class SIFTUITestCase: XCTestCase {
     }
 
     let app = XCUIApplication()
+    private var isRecordingIssue = false
 
     override func setUpWithError() throws {
         continueAfterFailure = false
@@ -59,11 +60,18 @@ class SIFTUITestCase: XCTestCase {
     }
 
     override func record(_ issue: XCTIssue) {
-        let attachment = XCTAttachment(screenshot: app.screenshot())
+        guard !isRecordingIssue else {
+            super.record(issue)
+            return
+        }
+        isRecordingIssue = true
+        defer { isRecordingIssue = false }
+        // Record the original failure even if the application has already died.
+        super.record(issue)
+        let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
         attachment.name = "Failure - \(name)"
         attachment.lifetime = .keepAlways
         add(attachment)
-        super.record(issue)
     }
 
     override func tearDownWithError() throws {
@@ -83,6 +91,9 @@ class SIFTUITestCase: XCTestCase {
             "-ui-test-in-memory-store",
             "-ui-test-suppress-crash-prompt"
         ]
+        if !configuration.additionalArguments.contains("-sift-test-storefront") {
+            arguments.append(contentsOf: ["-sift-test-storefront", "KOR"])
+        }
         if configuration.setsLanguageOverride {
             arguments.append(contentsOf: [
                 "-pieroot.todo.appLanguageOverride", configuration.language.rawValue

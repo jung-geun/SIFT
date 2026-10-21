@@ -1,6 +1,6 @@
 import Foundation
 
-struct MeetingMediaPart: Codable, Equatable, Sendable {
+nonisolated struct MeetingMediaPart: Codable, Equatable, Sendable {
     let index: Int
     let partStartSample: Int64
     let ownedStartSample: Int64

@@ -5,6 +5,7 @@ import SwiftData
 struct PersonaDetailView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.appTutorialState) private var tutorial
+    @ObservedObject private var regionalAvailability = OpenAIRegionalAvailability.shared
     @Query(sort: \Persona.updatedAt, order: .reverse) private var personas: [Persona]
     @Query private var todos: [Todo]
     @Query private var auditEvents: [TaskAuditEvent]
@@ -36,28 +37,18 @@ struct PersonaDetailView: View {
                         }
                     } else {
                         if !types.isEmpty {
-                            ScrollView(.horizontal, showsIndicators: false) {
-                                HStack(spacing: 8) {
-                                    ForEach(types, id: \.rawValue) { type in
-                                        HStack(spacing: 6) {
-                                            Image(systemName: type.systemImage)
-                                            Text(type.displayName)
-                                        }
-                                        .font(.subheadline.bold())
-                                        .padding(.horizontal, 12)
-                                        .padding(.vertical, 6)
-                                        .background(Color.accentColor.opacity(0.12), in: Capsule())
-                                        .foregroundStyle(Color.accentColor)
-                                    }
+                            VStack(alignment: .leading, spacing: AppTheme.Spacing.compact) {
+                                ForEach(types, id: \.rawValue) { type in
+                                    Label(type.displayName, systemImage: type.systemImage)
+                                        .foregroundStyle(.secondary)
+                                        .fixedSize(horizontal: false, vertical: true)
                                 }
-                                .padding(.vertical, 2)
                             }
                         }
                         if !desc.isEmpty {
                             Text(desc)
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
-                                .padding(.vertical, 2)
+                                .font(.body)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                     }
                     
@@ -86,17 +77,20 @@ struct PersonaDetailView: View {
                     }
                     .buttonStyle(.borderless)
                     .disabled(isGenerating)
-                    Button(AppLanguage.localized("memory.analysis.advancedRequest", defaultValue: "Re-request with gpt-6.1-sol", language: .current, comment: "Explicit advanced persona analysis request.")) {
-                        showAdvancedRequest = true
+                    if regionalAvailability.isAvailable {
+                        Button(AppLanguage.localized("memory.analysis.advancedRequest", defaultValue: "Re-request with gpt-6.1-sol", language: .current, comment: "Explicit advanced persona analysis request.")) {
+                            showAdvancedRequest = true
+                        }
+                        .disabled(isGenerating)
+                        .accessibilityIdentifier("persona.advancedRequest")
                     }
-                    .disabled(isGenerating)
-                    .accessibilityIdentifier("persona.advancedRequest")
                     if isGenerating {
                         Button(AppLanguage.localized("memory.analysis.cancelRequest", defaultValue: "Cancel request", language: .current, comment: "Cancel persona analysis request."), role: .cancel) { generationTask?.cancel() }
                     }
                     
                     
-                    if let result = generationResult {
+                    if let result = generationResult,
+                       regionalAvailability.isAvailable || !result.processorDescription.hasPrefix("OpenAI") {
                         generationResultCard(
                             result,
                             existingDescription: desc,
@@ -113,20 +107,16 @@ struct PersonaDetailView: View {
             }
             OpenAIConsentSection(scope: .persona)
         }
+        .appFormStyle()
         .navigationTitle("나의 페르소나")
         .navigationBarTitleDisplayMode(.inline)
         .task {
             // 중복된 페르소나 정리
             todoApp.deduplicatePersonas(context: modelContext)
             
-            // iCloud 활성화 시 CloudKit 동기화 도착을 최대 3초 대기한 뒤 Persona 생성
-            let useICloud = SettingsStore.isICloudSyncEnabled
-            if personas.isEmpty && useICloud {
-                for _ in 0..<30 {
-                    try? await Task.sleep(for: .milliseconds(100))
-                    if !personas.isEmpty { break }
-                }
-            }
+            if UserCloudSyncPolicy.isRequested,
+               !(await FullCloudSyncService.shared.waitForInitialRestore()) { return }
+            guard !Task.isCancelled else { return }
             if personas.isEmpty {
                 let p = Persona()
                 modelContext.insert(p)
@@ -136,7 +126,16 @@ struct PersonaDetailView: View {
             generationTask?.cancel()
             tutorial?.handlePersonaDetailClosed()
         }
-        .safeAreaInset(edge: .bottom, spacing: 12) {
+        .onChange(of: regionalAvailability.isAvailable) { _, available in
+            guard !available else { return }
+            showAdvancedRequest = false
+            if generationResult?.processorDescription.hasPrefix("OpenAI") == true {
+                generationResult = nil
+            }
+            showError = false
+            errorMessage = nil
+        }
+        .safeAreaInset(edge: .top, spacing: 0) {
             if let tutorial {
                 AppTutorialTipHost(tutorial: tutorial, screen: .personaDetail)
             }
@@ -161,100 +160,91 @@ struct PersonaDetailView: View {
         existingDescription: String,
         existingTypes: [PersonaType]
     ) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Label("페르소나 미리보기", systemImage: "person.crop.circle.badge.checkmark")
-                .font(.subheadline.bold())
-                .foregroundStyle(.green)
-            Text(result.processorDescription).font(.caption2).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: AppTheme.Spacing.item) {
+            Text("페르소나 미리보기")
+                .font(.headline)
+            Text(result.processorDescription)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
 
-            HStack(alignment: .top, spacing: 8) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("현재")
-                        .font(.caption.bold())
-                        .foregroundStyle(.secondary)
-                    Text(existingTypes.map(\.displayName).joined(separator: ", ").isEmpty
-                         ? AppLanguage.localized("persona.detail.noTypes", defaultValue: "No types selected", language: .current, comment: "Placeholder when no persona types are selected.")
-                         : existingTypes.map(\.displayName).joined(separator: ", "))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text(existingDescription.isEmpty ? AppLanguage.localized("persona.detail.noDescription", defaultValue: "No description", language: .current, comment: "Placeholder when persona description is empty.") : existingDescription)
-                        .font(.body)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .padding(10)
-                .frame(maxWidth: .infinity, alignment: .topLeading)
-                .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+            VStack(alignment: .leading, spacing: AppTheme.Spacing.compact) {
+                Text("현재")
+                    .font(.subheadline.weight(.semibold))
+                Text(existingTypes.map(\.displayName).joined(separator: ", ").isEmpty
+                     ? AppLanguage.localized("persona.detail.noTypes", defaultValue: "No types selected", language: .current, comment: "Placeholder when no persona types are selected.")
+                     : existingTypes.map(\.displayName).joined(separator: ", "))
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(existingDescription.isEmpty ? AppLanguage.localized("persona.detail.noDescription", defaultValue: "No description", language: .current, comment: "Placeholder when persona description is empty.") : existingDescription)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("초안")
-                        .font(.caption.bold())
-                        .foregroundStyle(.tint)
-                    Text(result.personaTypes.map(\.displayName).joined(separator: ", ").isEmpty
-                         ? AppLanguage.localized("persona.detail.noTypes", defaultValue: "No types selected", language: .current, comment: "Placeholder when no persona types are selected.")
-                         : result.personaTypes.map(\.displayName).joined(separator: ", "))
-                        .font(.caption)
-                        .foregroundStyle(.tint)
-                    Text(result.descriptionText)
-                        .font(.body)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .padding(10)
-                .frame(maxWidth: .infinity, alignment: .topLeading)
-                .background(Color.accentColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
+            Divider()
+
+            VStack(alignment: .leading, spacing: AppTheme.Spacing.compact) {
+                Text("초안")
+                    .font(.subheadline.weight(.semibold))
+                Text(result.personaTypes.map(\.displayName).joined(separator: ", ").isEmpty
+                     ? AppLanguage.localized("persona.detail.noTypes", defaultValue: "No types selected", language: .current, comment: "Placeholder when no persona types are selected.")
+                     : result.personaTypes.map(\.displayName).joined(separator: ", "))
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(result.descriptionText)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             Label(
                 "신뢰도: \(result.confidence.label(language: .current))",
                 systemImage: "checkmark.seal"
             )
-            .font(.caption.bold())
+            .font(.subheadline)
             .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
 
             if !result.evidence.isEmpty {
-                VStack(alignment: .leading, spacing: 3) {
+                VStack(alignment: .leading, spacing: AppTheme.Spacing.compact) {
                     Text("근거")
-                        .font(.caption.bold())
-                        .foregroundStyle(.secondary)
+                        .font(.subheadline.weight(.semibold))
                     ForEach(result.evidence, id: \.self) { insight in
                         Text("• \(insight)")
-                            .font(.caption)
+                            .font(.subheadline)
                             .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }
 
             Text("적용하기 전에는 현재 설명과 유형이 변경되지 않습니다.")
-                .font(.caption2)
+                .font(.footnote)
                 .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
 
-            HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: AppTheme.Spacing.item) {
                 Button("이 페르소나 사용") { applyGeneratedPersona() }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
 
                 Button("다시 생성") {
                     startGeneration()
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
 
                 Button("취소") { generationResult = nil }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .foregroundStyle(.secondary)
             }
+            .buttonStyle(.borderless)
         }
-        .padding(.vertical, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, AppTheme.Spacing.compact)
     }
     
     private func startGeneration(tier: OpenAIAnalysisTier = .basic) {
-        guard !isGenerating else { return }
+        guard !isGenerating, tier != .advanced || regionalAvailability.isAvailable else { return }
         generationTask?.cancel()
         generationTask = Task { await runGeneration(tier: tier) }
     }
 
     private func runGeneration(tier: OpenAIAnalysisTier = .basic) async {
-        guard !isGenerating else { return }
+        guard !isGenerating, tier != .advanced || regionalAvailability.isAvailable else { return }
         isGenerating = true
         defer { isGenerating = false }
         do {
@@ -276,24 +266,30 @@ struct PersonaDetailView: View {
                 behaviorProfile: analysis.behaviorProfile,
                 personaTypes: personas.first?.personaTypes ?? []
             )
-            generationResult = try await generationService.generate(
+            let result = try await generationService.generate(
                 existingPersona: existing,
                 todos: todos,
                 context: context,
                 now: now,
                 tier: tier
             )
+            try Task.checkCancellation()
+            guard regionalAvailability.isAvailable || !result.processorDescription.hasPrefix("OpenAI") else { return }
+            generationResult = result
         } catch is CancellationError {
             return
         } catch {
             guard !Task.isCancelled else { return }
+            if !regionalAvailability.isAvailable,
+               error is OpenAIRequestError || error is OpenAIConnectionError { return }
             errorMessage = error.localizedDescription
             showError = true
         }
 
     }
     private func applyGeneratedPersona() {
-        guard let result = generationResult, let p = personas.first else { return }
+        guard let result = generationResult, let p = personas.first,
+              regionalAvailability.isAvailable || !result.processorDescription.hasPrefix("OpenAI") else { return }
         do {
             if modelContext.hasChanges { try modelContext.save() }
         } catch {

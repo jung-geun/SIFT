@@ -72,6 +72,7 @@ struct MailDetailView: View {
     let email: EmailMessage
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
+    @ObservedObject private var regionalAvailability = OpenAIRegionalAvailability.shared
     @State private var webViewHeight: CGFloat = 300
     @State private var showRegisterSheet = false
     @State private var isLoadingBody = false
@@ -111,27 +112,26 @@ struct MailDetailView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
-                    VStack(alignment: .leading, spacing: 6) {
+                    VStack(alignment: .leading, spacing: AppTheme.Spacing.item) {
                         Text(email.subject.isEmpty ? AppLanguage.localized("todo.noTitle", defaultValue: "(No Title)", language: .current) : email.subject)
-                            .font(.title3)
+                            .font(.title2)
                             .fontWeight(.semibold)
 
-                        HStack(alignment: .top) {
+                        VStack(alignment: .leading, spacing: AppTheme.Spacing.compact) {
                             Text(email.from)
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
                                 .lineLimit(2)
-                            Spacer()
                             Text(
                                 email.receivedAt.formatted(
                                     .dateTime.month(.abbreviated).day().hour().minute()
                                 )
                             )
                             .font(.caption)
-                            .foregroundStyle(.tertiary)
+                            .foregroundStyle(.secondary)
                         }
                     }
-                    .padding()
+                    .padding(AppTheme.Spacing.section)
                     if let candidate = email.analysisTodoCandidate {
                         Label(
                             AppLanguage.localized(
@@ -145,8 +145,8 @@ struct MailDetailView: View {
                             systemImage: candidate ? "checkmark.circle" : "info.circle"
                         )
                         .font(.caption.weight(.medium))
-                        .foregroundStyle(candidate ? AppTheme.accent : Color.secondary)
-                        .padding(.horizontal)
+                        .foregroundStyle(candidate ? AppTheme.success : Color.secondary)
+                        .padding(.horizontal, AppTheme.Spacing.section)
                         .padding(.bottom, 12)
                         .accessibilityIdentifier("mail.detail.layaDecision")
                     }
@@ -155,11 +155,11 @@ struct MailDetailView: View {
 
                     if email.analysisState == .analyzed,
                        !email.analysisSummary.isEmpty {
-                        VStack(alignment: .leading, spacing: 8) {
+                        VStack(alignment: .leading, spacing: AppTheme.Spacing.item) {
                             HStack {
                                 Label(analysisCardTitle, systemImage: "sparkles")
-                                    .font(.caption.weight(.semibold))
-                                    .foregroundStyle(AppTheme.accent)
+                                    .font(.headline)
+                                    .foregroundStyle(.primary)
                                 Spacer()
                                 Button {
                                     Task { await reanalyzeCurrentEmail() }
@@ -178,7 +178,7 @@ struct MailDetailView: View {
                                 .accessibilityIdentifier("mail.detail.reanalyze")
                             }
                             Text(email.analysisSummary)
-                                .font(.subheadline)
+                                .font(.body)
                             if let rawReason = email.analysisFailureReasonRaw,
                                let reason = RuleFallbackReason(rawValue: rawReason) {
                                 let language = AppLanguage.current
@@ -189,37 +189,37 @@ struct MailDetailView: View {
                                     comment: "Email analysis rules fallback label."
                                 )
                                 Text(String(format: label, locale: language.locale, reason.localizedDescription(language: language)))
-                                    .font(.caption2)
+                                    .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
                             if !email.analysisKeyPoints.isEmpty {
                                 ForEach(email.analysisKeyPoints, id: \.self) { point in
                                     Label(point, systemImage: "circle.fill")
-                                        .font(.caption)
+                                        .font(.subheadline)
                                         .foregroundStyle(.secondary)
                                 }
                             }
                             if !email.analysisActionItems.isEmpty {
                                 Divider()
                                 Text("확인/처리 필요")
-                                    .font(.caption.weight(.semibold))
+                                    .font(.subheadline.weight(.semibold))
                                 ForEach(email.analysisActionItems, id: \.self) { item in
                                     Label(item, systemImage: "square")
-                                        .font(.caption)
+                                        .font(.subheadline)
                                 }
                             }
                         }
-                        .padding()
+                        .padding(AppTheme.Spacing.section)
                         .background(
-                            AppTheme.accentSubtle,
-                            in: RoundedRectangle(cornerRadius: 12)
+                            AppTheme.insetSurface,
+                            in: RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous)
                         )
-                        .padding(.horizontal)
-                        .padding(.top, 12)
+                        .padding(.horizontal, AppTheme.Spacing.section)
+                        .padding(.top, AppTheme.Spacing.section)
                     } else if email.analysisState == .failed {
-                        VStack(alignment: .leading, spacing: 8) {
+                        VStack(alignment: .leading, spacing: AppTheme.Spacing.item) {
                             Label("AI 정리 실패", systemImage: "exclamationmark.triangle")
-                                .font(.caption.weight(.semibold))
+                                .font(.headline)
                                 .foregroundStyle(AppTheme.warning)
                             if !email.analysisError.isEmpty {
                                 Text(email.analysisError)
@@ -241,13 +241,13 @@ struct MailDetailView: View {
                             .disabled(isReanalyzing || isLoadingBody)
                             .accessibilityIdentifier("mail.detail.reanalyze")
                         }
-                        .padding()
+                        .padding(AppTheme.Spacing.section)
                         .background(
-                            AppTheme.warning.opacity(0.08),
-                            in: RoundedRectangle(cornerRadius: 12)
+                            AppTheme.insetSurface,
+                            in: RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous)
                         )
-                        .padding(.horizontal)
-                        .padding(.top, 12)
+                        .padding(.horizontal, AppTheme.Spacing.section)
+                        .padding(.top, AppTheme.Spacing.section)
                     } else if isReanalyzing || email.analysisState == .analyzing {
                         HStack(spacing: 8) {
                             ProgressView().controlSize(.small)
@@ -255,46 +255,47 @@ struct MailDetailView: View {
                                 .font(.caption.weight(.semibold))
                                 .foregroundStyle(.secondary)
                         }
-                        .padding()
+                        .padding(AppTheme.Spacing.section)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(
-                            AppTheme.accentSubtle,
-                            in: RoundedRectangle(cornerRadius: 12)
+                            AppTheme.insetSurface,
+                            in: RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous)
                         )
-                        .padding(.horizontal)
-                        .padding(.top, 12)
+                        .padding(.horizontal, AppTheme.Spacing.section)
+                        .padding(.top, AppTheme.Spacing.section)
                     }
-                    VStack(alignment: .leading, spacing: 8) {
-                        Button(AppLanguage.localized(
-                            "mail.openai.basicRequest",
-                            defaultValue: "OpenAI 기초 분석 · gpt-6-luna",
-                            language: .current,
-                            comment: "Open the optional basic OpenAI analysis for this email. Keep the model name unchanged."
-                        )) {
-                            openAITier = .basic
-                            showOpenAIAnalysis = true
+                    if regionalAvailability.isAvailable {
+                        VStack(alignment: .leading, spacing: AppTheme.Spacing.item) {
+                            Button(AppLanguage.localized(
+                                "mail.openai.basicRequest",
+                                defaultValue: "OpenAI 기초 분석 · gpt-6-luna",
+                                language: .current,
+                                comment: "Open the optional basic OpenAI analysis for this email. Keep the model name unchanged."
+                            )) {
+                                openAITier = .basic
+                                showOpenAIAnalysis = true
+                            }
+                            .accessibilityIdentifier("mail.detail.openAIBasic")
+                            Button(AppLanguage.localized(
+                                "mail.openai.advancedRequest",
+                                defaultValue: "중요 내용 고급 재요청 · gpt-6.1-sol",
+                                language: .current,
+                                comment: "Open an explicit advanced re-request for important email content. Keep the model name unchanged."
+                            )) {
+                                openAITier = .advanced
+                                showOpenAIAnalysis = true
+                            }
+                            .accessibilityIdentifier("mail.detail.openAIAdvanced")
+                            Text(AppLanguage.localized(
+                                "mail.openai.explanation",
+                                defaultValue: "선택적 외부 분석에는 별도 전송 동의가 필요합니다. 자동 메일 분석은 계속 기기 내에서 처리합니다.",
+                                language: .current,
+                                comment: "Explain that optional remote email analysis needs separate sharing consent and automatic analysis stays on device."
+                            ))
+                                .font(.caption).foregroundStyle(.secondary)
                         }
-                        .accessibilityIdentifier("mail.detail.openAIBasic")
-                        Button(AppLanguage.localized(
-                            "mail.openai.advancedRequest",
-                            defaultValue: "중요 내용 고급 재요청 · gpt-6.1-sol",
-                            language: .current,
-                            comment: "Open an explicit advanced re-request for important email content. Keep the model name unchanged."
-                        )) {
-                            openAITier = .advanced
-                            showOpenAIAnalysis = true
-                        }
-                        .accessibilityIdentifier("mail.detail.openAIAdvanced")
-                        Text(AppLanguage.localized(
-                            "mail.openai.explanation",
-                            defaultValue: "선택적 외부 분석에는 별도 전송 동의가 필요합니다. 자동 메일 분석은 계속 기기 내에서 처리합니다.",
-                            language: .current,
-                            comment: "Explain that optional remote email analysis needs separate sharing consent and automatic analysis stays on device."
-                        ))
-                            .font(.caption2).foregroundStyle(.secondary)
+                        .padding(AppTheme.Spacing.section)
                     }
-                    .padding()
-
                     if let html = email.htmlBody, !html.isEmpty {
                         EmailWebView(htmlBody: html, contentHeight: $webViewHeight)
                             .frame(height: webViewHeight)
@@ -327,7 +328,7 @@ struct MailDetailView: View {
                             Text(bodyText)
                                 .font(.body)
                                 .textSelection(.enabled)
-                                .padding()
+                                .padding(AppTheme.Spacing.section)
                         }
                         if isLoadingBody && !bodyText.isEmpty {
                             HStack(spacing: 6) {
@@ -341,7 +342,10 @@ struct MailDetailView: View {
                         }
                     }
                 }
+                .frame(maxWidth: 800, alignment: .leading)
+                .frame(maxWidth: .infinity)
             }
+            .background(AppTheme.surface)
             .navigationTitle("메일")
             .navigationBarTitleDisplayMode(.inline)
             .safeAreaInset(edge: .bottom, spacing: 0) {
@@ -354,6 +358,7 @@ struct MailDetailView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
+                .buttonBorderShape(.roundedRectangle(radius: AppTheme.controlRadius))
                 .tint(AppTheme.accent)
                 .padding(.horizontal)
                 .padding(.vertical, 8)
@@ -379,6 +384,9 @@ struct MailDetailView: View {
             }
             .sheet(isPresented: $showOpenAIAnalysis) {
                 OpenAIEmailAnalysisView(selection: MailDetailSelection(email), tier: openAITier)
+            }
+            .onChange(of: regionalAvailability.isAvailable) { _, available in
+                if !available { showOpenAIAnalysis = false }
             }
             .task {
                 await synchronizeReadLoadContentAndAnalyze()
@@ -758,13 +766,16 @@ enum EmailHTMLSanitizer {
         let viewport = #"<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5">"#
         let contentSecurityPolicy = #"<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: cid: blob: https:; style-src 'unsafe-inline' https:; font-src data: https:; connect-src 'none'; media-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none';">"#
         let css = """
+        <meta name="color-scheme" content="light dark">
         <style>
-        body{font-family:-apple-system,Helvetica,sans-serif;font-size:15px;
-             color:#1c1c1e;max-width:100%;word-wrap:break-word;
-             padding:12px;margin:0;background:#fff;}
+        :root{color-scheme:light dark;}
+        body{font-family:-apple-system,Helvetica,sans-serif;font-size:17px;
+             font:-apple-system-body;line-height:1.5;
+             color:CanvasText;max-width:100%;word-wrap:break-word;
+             padding:24px;margin:0;background:Canvas;}
         img{max-width:100%!important;height:auto!important;}
         table{max-width:100%!important;}
-        a{color:#007AFF;}
+        a{color:LinkText;}
         *{box-sizing:border-box;}
         </style>
         """

@@ -1,17 +1,16 @@
-import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest, type FastifyServerOptions } from 'fastify';
 import multipart from '@fastify/multipart';
 import websocket from '@fastify/websocket';
 import { createHash } from 'node:crypto';
 import canonicalize from 'canonicalize';
-import { authenticateRequest, type MeetingAuthVerifier, uidHash } from './auth.js';
-import { MAX_PART_BYTES, MAX_REQUEST_BYTES, canonicalManifest, validateManifest, validatePartFields } from './media.js';
+import { getApps, initializeApp } from 'firebase-admin/app';
+import { getAuth } from 'firebase-admin/auth';
+import { getAppCheck } from 'firebase-admin/app-check';
+import { authenticateRequest, FirebaseAdminAuthVerifier, type MeetingAuthVerifier, uidHash } from './auth.js';
+import { MAX_PART_BYTES, MAX_REQUEST_BYTES, canonicalManifest, validateFlacAudio, validateManifest } from './media.js';
 import { InMemoryMeetingBlobStore, InMemoryMeetingRepository, type MeetingBlobStore, type MeetingJob, type MeetingJobCreation, type MeetingRepository, type MeetingRecord, type PartUploadRecord } from './repository.js';
 import { defaultProviderConfig, ProviderConfigSchema, providerIsEnabled, type ProviderConfig } from './provider-config.js';
 import { ExtractionSchema, FinalizeManifestSchema, MeetingCreateSchema, PartFieldsSchema, ProviderMeetingExtractionSchema, deriveActionId, normalizeExtraction, validateSegments, type MeetingSegment, type ProviderMeetingExtraction } from './schema.js';
-interface MeetingSocket {
-  send(data: string): void;
-  on(event: 'message', listener: () => void): void;
-}
 
 export interface ExtractionAdapter {
   extract(input: { meetingId: string; languageTag: string; timezoneIdentifier: string; segments: MeetingSegment[] }): Promise<ProviderMeetingExtraction>;
@@ -27,7 +26,7 @@ export interface MeetingServerOptions {
   providerConfig?: ProviderConfig;
   extractionAdapter?: ExtractionAdapter;
   transcriptionAdapter?: TranscriptionAdapter;
-  logger?: boolean | object;
+  logger?: FastifyServerOptions['logger'];
 }
 
 class HttpError extends Error {
@@ -54,14 +53,9 @@ function ensureOwnerMeeting(repository: MeetingRepository, ownerUid: string, mee
   return repository.getMeeting(ownerUid, meetingId).then(record => record ?? fail(404, 'RESOURCE_NOT_FOUND'));
 }
 
-function deterministicExtraction(input: { segments: MeetingSegment[] }): ProviderMeetingExtraction {
-  const first = input.segments[0]?.text.trim() ?? '';
-  const summary = input.segments.map(segment => segment.text.trim()).filter(Boolean).join(' ');
-  return ProviderMeetingExtractionSchema.parse({ title: first ? first.slice(0, 80) : 'Meeting', summary, decisions: [], unresolvedQuestions: [], actionDrafts: [] });
-}
 
 async function readMultipart(request: FastifyRequest): Promise<{ fields: Record<string, string>; digest: string; byteCount: number; bytes: Buffer }> {
-  const fields: Record<string, string> = {};
+  const fields: Record<string, string> = Object.create(null) as Record<string, string>;
   const audioChunks: Buffer[] = [];
   let digest: string | undefined;
   let byteCount = 0;
@@ -69,7 +63,7 @@ async function readMultipart(request: FastifyRequest): Promise<{ fields: Record<
   try {
     for await (const part of request.parts()) {
       if (part.type === 'field') {
-        if (typeof part.value !== 'string' || !/^[\x00-\x7F]*$/.test(part.value) || part.fieldname in fields) fail(400, 'INVALID_MULTIPART_FIELD');
+        if (!['meetingId', 'languageTag', 'timezoneIdentifier', 'disclosureVersionID', 'partIndex', 'partCount', 'partStartSample', 'ownedStartSample', 'ownedEndSample', 'meetingSampleCount', 'audioSha256'].includes(part.fieldname) || part.fieldnameTruncated || part.valueTruncated || typeof part.value !== 'string' || !/^[\x00-\x7F]*$/.test(part.value) || Object.hasOwn(fields, part.fieldname)) fail(400, 'INVALID_MULTIPART_FIELD');
         fields[part.fieldname] = part.value;
         continue;
       }
@@ -83,6 +77,7 @@ async function readMultipart(request: FastifyRequest): Promise<{ fields: Record<
         hash.update(bytes);
         audioChunks.push(bytes);
       }
+      if (part.file.truncated) fail(413, 'PART_SIZE_LIMIT');
       digest = hash.digest('hex');
     }
   } catch (error) {
@@ -104,14 +99,25 @@ export function createMeetingServer(options: MeetingServerOptions): FastifyInsta
   const repository = options.repository ?? new InMemoryMeetingRepository();
   const blobStore = options.blobStore ?? new InMemoryMeetingBlobStore();
   const config = ProviderConfigSchema.parse(options.providerConfig ?? defaultProviderConfig);
-  const extractionAdapter = options.extractionAdapter ?? { extract: async (input: { meetingId: string; languageTag: string; timezoneIdentifier: string; segments: MeetingSegment[] }) => deterministicExtraction(input) };
-  const transcriptionAdapter = options.transcriptionAdapter ?? { transcribe: async () => [] };
-  const app = Fastify({ bodyLimit: MAX_REQUEST_BYTES, logger: options.logger ?? { level: 'warn', redact: ['req.headers.authorization', 'req.headers.x-firebase-appcheck', 'headers.authorization', 'headers.x-firebase-appcheck'] } });
+  const extractionAdapter = options.extractionAdapter;
+  const transcriptionAdapter = options.transcriptionAdapter;
+  const logger = options.logger === false ? false : {
+    level: 'warn',
+    ...(typeof options.logger === 'object' ? options.logger : {}),
+    // Never serialize credentials, user content, URL parameters or provider errors.
+    serializers: {
+      req: (request: FastifyRequest) => ({ method: request.method }),
+      res: (reply: { statusCode: number }) => ({ statusCode: reply.statusCode }),
+      err: () => ({ type: 'Error', message: 'REDACTED', stack: '' }),
+    },
+    redact: ['req.headers.authorization', 'req.headers["x-firebase-appcheck"]', 'headers.authorization', 'headers["x-firebase-appcheck"]'],
+  };
+  const app = Fastify({ bodyLimit: MAX_REQUEST_BYTES, logger, onProtoPoisoning: 'error', onConstructorPoisoning: 'error' });
 
   app.register(multipart, { limits: { fileSize: MAX_PART_BYTES, files: 1, fields: 12, parts: 13, fieldSize: 1024 }, attachFieldsToBody: false });
   app.register(websocket);
 
-  app.addHook('preValidation', async request => {
+  app.addHook('onRequest', async request => {
     try {
       request.meetingIdentity = await authenticateRequest(request, options.auth);
     } catch (error) {
@@ -126,12 +132,26 @@ export function createMeetingServer(options: MeetingServerOptions): FastifyInsta
       void reply.code(error.statusCode).send({ errorCode: error.code });
       return;
     }
+    if (error instanceof Error) {
+      const statusCode = error.message === 'RESOURCE_NOT_FOUND' ? 404
+        : ['MEETING_DELETED', 'MEETING_METADATA_CONFLICT', 'MANIFEST_MUTATION_CONFLICT', 'EXTRACTION_REVISION_CONFLICT', 'NON_MONOTONIC_REVISION', 'PART_DIGEST_CONFLICT', 'TRANSCRIPTION_NOT_READY', 'MANIFEST_REQUIRED', 'MANIFEST_PART_MISMATCH', 'PARTS_INCOMPLETE', 'INVALID_JOB_TRANSITION'].includes(error.message) ? 409 : undefined;
+      if (statusCode !== undefined) {
+        request.log.warn({ code: error.message, statusCode }, 'meeting request rejected');
+        void reply.code(statusCode).send({ errorCode: error.message });
+        return;
+      }
+    }
     if (typeof error === 'object' && error !== null && 'statusCode' in error && error.statusCode === 413) {
       request.log.warn({ code: 'REQUEST_SIZE_LIMIT' }, 'meeting request rejected');
       void reply.code(413).send({ errorCode: 'REQUEST_SIZE_LIMIT' });
       return;
     }
     if (typeof error === 'object' && error !== null && 'name' in error && error.name === 'ZodError') {
+      request.log.warn({ code: 'INVALID_REQUEST' }, 'meeting request rejected');
+      void reply.code(400).send({ errorCode: 'INVALID_REQUEST' });
+      return;
+    }
+    if (typeof error === 'object' && error !== null && 'statusCode' in error && error.statusCode === 400) {
       request.log.warn({ code: 'INVALID_REQUEST' }, 'meeting request rejected');
       void reply.code(400).send({ errorCode: 'INVALID_REQUEST' });
       return;
@@ -182,7 +202,7 @@ export function createMeetingServer(options: MeetingServerOptions): FastifyInsta
 
   const handleUpload = async (request: FastifyRequest<{ Body: unknown }>, reply: FastifyReply, provider: 'openAI' | 'google') => {
     const ownerUid = request.meetingIdentity.uid;
-    if (!providerIsEnabled(config, provider)) fail(503, 'PROVIDER_UNAVAILABLE');
+    if (!providerIsEnabled(config, provider) || !transcriptionAdapter) fail(503, 'PROVIDER_UNAVAILABLE');
     const payload = await readMultipart(request);
     const fields = parseBody(PartFieldsSchema, payload.fields);
     const meetingId = fields.meetingId;
@@ -192,7 +212,7 @@ export function createMeetingServer(options: MeetingServerOptions): FastifyInsta
     if (!meeting.manifest || !meeting.frozenManifestDigest) fail(409, 'MANIFEST_REQUIRED');
     if (fields.languageTag !== meeting.languageTag || fields.timezoneIdentifier !== meeting.timezoneIdentifier || fields.disclosureVersionID !== meeting.disclosureVersionID) fail(409, 'MEETING_METADATA_CONFLICT');
     if (fields.audioSha256 !== payload.digest) fail(400, 'AUDIO_DIGEST_MISMATCH');
-    try { validatePartFields(fields, payload.byteCount); } catch (error) { fail(400, error instanceof Error ? error.message : 'INVALID_PART'); }
+    try { validateFlacAudio(payload.bytes, fields); } catch (error) { fail(400, error instanceof Error ? error.message : 'INVALID_PART'); }
     const manifestPart = meeting.manifest.parts[fields.partIndex];
     const matchesManifest = manifestPart
       && manifestPart.sha256 === payload.digest
@@ -206,7 +226,13 @@ export function createMeetingServer(options: MeetingServerOptions): FastifyInsta
     const existing = await repository.getPart(ownerUid, meetingId, fields.partIndex);
     if (existing && existing.digest !== payload.digest) fail(409, 'PART_DIGEST_CONFLICT');
     const uploadedObject = !existing;
-    const objectRef = existing?.objectRef ?? await blobStore.put(ownerUid, meetingId, fields.partIndex, payload.digest, payload.bytes);
+    let objectRef: string;
+    try {
+      objectRef = existing?.objectRef ?? await blobStore.put(ownerUid, meetingId, fields.partIndex, payload.digest, payload.bytes);
+    } catch (error) {
+      if (error instanceof Error && error.message === 'MEETING_DELETED') fail(404, 'RESOURCE_NOT_FOUND');
+      throw error;
+    }
     const uploaded: PartUploadRecord = { partIndex: fields.partIndex, digest: payload.digest, objectRef, byteCount: payload.byteCount, fields: { partStartSample: Number(fields.partStartSample), ownedStartSample: Number(fields.ownedStartSample), ownedEndSample: Number(fields.ownedEndSample), meetingSampleCount: Number(fields.meetingSampleCount) }, uploadedAt: new Date().toISOString() };
     let stored: { part: PartUploadRecord; created: boolean };
     try {
@@ -235,13 +261,24 @@ export function createMeetingServer(options: MeetingServerOptions): FastifyInsta
           baseSegments = await transcriptionAdapter.transcribe({ ownerUid, meetingId, provider, parts: allParts });
         } catch {
           const failed = await repository.setJobResult(ownerUid, job.jobId, { errorCode: 'TRANSCRIPTION_FAILED' }, 'failed');
-          if (failed) job = failed;
+          if (!failed) fail(404, 'RESOURCE_NOT_FOUND');
+          job = failed;
           fail(502, 'TRANSCRIPTION_FAILED');
         }
+        await ensureOwnerMeeting(repository, ownerUid, meetingId);
+        try {
+          if (!Array.isArray(baseSegments)) throw new Error('INVALID_PROVIDER_RESULT');
+          validateSegments(baseSegments, Math.floor(meeting.meetingSampleCount! * 1000 / 16000));
+        } catch {
+          await repository.setJobResult(ownerUid, job.jobId, { errorCode: 'INVALID_PROVIDER_RESULT' }, 'failed');
+          fail(502, 'INVALID_PROVIDER_RESULT');
+        }
         const completed = await repository.completeTranscriptionJob(ownerUid, job.jobId, baseSegments);
-        if (completed) job = completed;
+        if (!completed) fail(404, 'RESOURCE_NOT_FOUND');
+        job = completed;
       }
     }
+    await ensureOwnerMeeting(repository, ownerUid, meetingId);
     return reply.code(stored.created ? 202 : 200).send({ jobId: job?.jobId ?? null, acceptedPartIndex: fields.partIndex, acceptedPartCount: allParts.length, expectedPartCount: meeting.expectedPartCount, status: job?.status ?? 'uploading' });
   };
 
@@ -253,7 +290,7 @@ export function createMeetingServer(options: MeetingServerOptions): FastifyInsta
     const meetingId = request.params.meetingId;
     const meeting = await ensureOwnerMeeting(repository, ownerUid, meetingId);
     if (meeting.provider === 'onDevice') fail(409, 'PROVIDER_MISMATCH');
-    if (!providerIsEnabled(config, meeting.provider)) fail(503, 'PROVIDER_UNAVAILABLE');
+    if (!providerIsEnabled(config, meeting.provider) || !extractionAdapter) fail(503, 'PROVIDER_UNAVAILABLE');
     const input = parseBody(ExtractionSchema, request.body);
     const transcriptionJob = await repository.getJob(ownerUid, input.transcriptionJobId);
     if (!transcriptionJob || transcriptionJob.meetingId !== meetingId || transcriptionJob.stage !== 'transcription') fail(404, 'RESOURCE_NOT_FOUND');
@@ -261,16 +298,13 @@ export function createMeetingServer(options: MeetingServerOptions): FastifyInsta
     if (input.languageTag !== meeting.languageTag || input.timezoneIdentifier !== meeting.timezoneIdentifier) fail(409, 'MEETING_METADATA_CONFLICT');
     const totalMs = meeting.meetingSampleCount === null ? undefined : Math.floor(meeting.meetingSampleCount * 1000 / 16000);
     try { validateSegments(input.segments, totalMs); } catch (error) { fail(400, error instanceof Error ? error.message : 'INVALID_SEGMENTS'); }
-    const currentRevision = meeting.currentTranscriptRevision;
-    if (currentRevision !== null && input.transcriptRevision < currentRevision) fail(409, 'NON_MONOTONIC_REVISION');
-    if (currentRevision !== null && input.transcriptRevision > currentRevision + 1) fail(409, 'NON_MONOTONIC_REVISION');
     const digest = canonicalExtractionDigest(input);
     let extraction: MeetingJobCreation;
     if (input.transcriptRevision === 0) {
       const baseSegments = transcriptionJob.transcriptSegments;
       if (!baseSegments || baseSegments.length !== input.segments.length || input.segments.some((segment, index) => {
         const base = baseSegments[index];
-        return !base || base.id !== segment.id || base.startMs !== segment.startMs || base.endMs !== segment.endMs || base.text !== segment.text || base.confidence !== segment.confidence;
+        return !base || base.id !== segment.id || base.startMs !== segment.startMs || base.endMs !== segment.endMs || base.text !== segment.text || base.confidence !== segment.confidence || base.isFinal !== segment.isFinal;
       })) fail(409, 'BASE_TRANSCRIPT_MISMATCH');
     }
     try {
@@ -282,13 +316,15 @@ export function createMeetingServer(options: MeetingServerOptions): FastifyInsta
     }
     if (extraction.created) {
       let extracted: ProviderMeetingExtraction | undefined;
+      let adapterReturned = false;
       try {
         extracted = await extractionAdapter.extract({ meetingId, languageTag: input.languageTag, timezoneIdentifier: input.timezoneIdentifier, segments: input.segments });
+        adapterReturned = true;
       } catch {
         const failed = await repository.setJobResult(ownerUid, extraction.job.jobId, { errorCode: 'EXTRACTION_FAILED' }, 'failed');
         if (failed) extraction = { job: failed, created: true };
       }
-      if (extracted !== undefined) {
+      if (adapterReturned) {
         let parsed: ProviderMeetingExtraction;
         try {
           parsed = normalizeExtraction(ProviderMeetingExtractionSchema.parse(extracted));
@@ -314,6 +350,7 @@ export function createMeetingServer(options: MeetingServerOptions): FastifyInsta
         }
       }
     }
+    await ensureOwnerMeeting(repository, ownerUid, meetingId);
     return reply.code(202).send({ jobId: extraction.job.jobId, transcriptionJobId: input.transcriptionJobId, transcriptRevision: input.transcriptRevision, status: extraction.job.status });
   });
 
@@ -349,10 +386,9 @@ export function createMeetingServer(options: MeetingServerOptions): FastifyInsta
     return reply.send(receipt);
   });
 
-  app.get('/v1/google/stream', { websocket: true }, (socket: MeetingSocket) => {
-    socket.send(JSON.stringify({ event: 'ready', provisional: true }));
-    socket.on('message', () => { socket.send(JSON.stringify({ event: 'accepted', provisional: true })); });
-  });
+  // Streaming has no provider adapter. Reject before a websocket upgrade instead
+  // of acknowledging audio that was never transcribed.
+  app.get('/v1/google/stream', { preValidation: async () => fail(503, 'PROVIDER_UNAVAILABLE') }, async () => fail(503, 'PROVIDER_UNAVAILABLE'));
 
   return app;
 }
@@ -364,7 +400,7 @@ declare module 'fastify' {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  const missingAuth: MeetingAuthVerifier = { verifyIdToken: async () => { throw new Error('AUTH_INVALID'); }, verifyAppCheckToken: async () => { throw new Error('AUTH_INVALID'); } };
-  const server = createMeetingServer({ auth: missingAuth });
+  const firebaseApp = getApps()[0] ?? initializeApp();
+  const server = createMeetingServer({ auth: new FirebaseAdminAuthVerifier(getAuth(firebaseApp), getAppCheck(firebaseApp)) });
   await server.listen({ host: '0.0.0.0', port: Number(process.env.PORT ?? 8080) });
 }

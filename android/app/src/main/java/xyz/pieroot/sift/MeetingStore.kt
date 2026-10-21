@@ -35,17 +35,23 @@ class MeetingStore(context: Context) {
         val parent = requireNotNull(target.parentFile)
         check(parent.exists() || parent.mkdirs()) { "unable to create meeting directory" }
         val temp = File(parent, ".meeting.json.${Thread.currentThread().id}.tmp")
-        FileOutputStream(temp).use { output ->
-            output.write(json.encodeToString(record).toByteArray(Charsets.UTF_8))
-            output.fd.sync()
+        try {
+            FileOutputStream(temp).use { output ->
+                output.write(json.encodeToString(record).toByteArray(Charsets.UTF_8))
+                output.fd.sync()
+            }
+            check(temp.renameTo(target)) { "unable to atomically replace meeting" }
+            fsyncDirectory(parent)
+        } finally {
+            temp.delete()
         }
-        check(temp.renameTo(target)) { "unable to atomically replace meeting" }
-        fsyncDirectory(parent)
     }
 
     fun load(meetingId: String): MeetingRecord? = runCatching {
         val file = meetingFile(meetingId)
-        if (!file.isFile) null else json.decodeFromString<MeetingRecord>(file.readText(Charsets.UTF_8))
+        if (!file.isFile) null else json.decodeFromString<MeetingRecord>(file.readText(Charsets.UTF_8)).also {
+            require(it.meetingId == meetingId) { "meeting identity mismatch" }
+        }
     }.getOrNull()
 
     fun list(): List<MeetingRecord> = root.listFiles()
@@ -65,7 +71,10 @@ class MeetingStore(context: Context) {
     fun deleteAll(): Int = root.listFiles()?.count { it.isDirectory && it.deleteRecursively() } ?: 0
 
     /** Backup rules must separately exclude files/meetings; this supports direct assertions. */
-    fun isBackupExcluded(path: File): Boolean = path.canonicalPath.startsWith(root.canonicalPath + File.separator)
+    fun isBackupExcluded(path: File): Boolean {
+        val canonicalRoot = root.canonicalPath
+        return path.canonicalPath == canonicalRoot || path.canonicalPath.startsWith(canonicalRoot + File.separator)
+    }
 
     private fun fsyncDirectory(directory: File) {
         val fd = Os.open(directory.path, OsConstants.O_RDONLY, 0)

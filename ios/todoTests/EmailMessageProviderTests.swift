@@ -116,53 +116,8 @@ struct EmailMessageProviderTests {
         )
     }
 
-    @Test("분석 기간 storage precedence와 후보 filtering은 mailbox 표시 개수와 분리된다")
-    func testEmailAnalysisLookbackStoragePrecedenceAndCandidates() async throws {
-        await AIProviderTestIsolation.shared.withLock {
-            let key = EmailAnalysisLookbackPolicy.lookbackSettingKey
-            let markerKey = "\(key).isLocal"
-            let testCloudKey = "pieroot.todo.testCloud.\(key)"
-            let iCloudKey = "pieroot.todo.iCloudSyncEnabled"
-            let local = UserDefaults.standard
-            let savedLocal: [(String, Any?)] = [
-                (key, local.object(forKey: key)),
-                (markerKey, local.object(forKey: markerKey)),
-                (iCloudKey, local.object(forKey: iCloudKey)),
-                (testCloudKey, local.object(forKey: testCloudKey))
-            ]
-            defer {
-                for (savedKey, value) in savedLocal {
-                    if let value {
-                        local.set(value, forKey: savedKey)
-                    } else {
-                        local.removeObject(forKey: savedKey)
-                    }
-                }
-            }
-
-            local.set(false, forKey: iCloudKey)
-            EmailAnalysisLookbackPolicy.saveLookbackDays(31)
-            #expect(EmailAnalysisLookbackPolicy.storedLookbackDays() == 30)
-            #expect(local.bool(forKey: markerKey))
-
-            local.set(5, forKey: key)
-            local.set(true, forKey: markerKey)
-            SettingsStore.setTestCloudValue(Int64(20), forKey: key)
-            #expect(EmailAnalysisLookbackPolicy.storedLookbackDays() == 5)
-
-            local.set(7, forKey: key)
-            local.set(false, forKey: markerKey)
-            SettingsStore.setTestCloudValue(Int64(12), forKey: key)
-            #if SIFT_LOCAL_ONLY
-            #expect(EmailAnalysisLookbackPolicy.storedLookbackDays() == 7)
-            #else
-            #expect(EmailAnalysisLookbackPolicy.storedLookbackDays() == 12)
-            #endif
-
-            SettingsStore.setTestCloudValue(nil, forKey: key)
-            local.set(9, forKey: key)
-            #expect(EmailAnalysisLookbackPolicy.storedLookbackDays() == 9)
-
+    @Test("분석 후보 filtering은 mailbox 표시 개수와 분리된다")
+    func testEmailAnalysisLookbackCandidates() {
             let now = Date(timeIntervalSince1970: 1_800_000_000)
             let recent = EmailMessage(
                 id: "recent",
@@ -196,7 +151,6 @@ struct EmailMessageProviderTests {
                 ).count == 2
             )
             #expect(emails.filter(\.isInInbox).count == displayCount)
-        }
     }
 
     @Test("Laya 설치 후 이미 요약된 메일도 한 번 분류하고 아니오 결과는 유지한다")

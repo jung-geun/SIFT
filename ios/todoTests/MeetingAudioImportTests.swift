@@ -89,6 +89,7 @@ struct MeetingAudioImportTests {
         #expect(record.status == .transcriptFinalizationFailed)
         #expect(record.mode == .onDevice)
         #expect(record.languageTag == "en-US")
+        #expect(!record.automaticLanguageDetection)
         let persisted = try #require(try records(in: ModelContext(store)).first)
         #expect(persisted.importedAudioFileName == "Planning.wav")
         #expect(persisted.audioManifest == manifest)
@@ -210,23 +211,41 @@ struct MeetingAudioImportTests {
         #expect((try? Data(contentsOf: fixture.source)) == original)
     }
 
-    @Test("a missing Whisper model keeps imported audio retryable, not successfully transcribed")
+    @Test("manual imports reject unsupported catalog tags without creating a record or audio", arguments: ["auto", "xx-Invalid", ""])
+    func manualLanguageValidation(tag: String) async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        try writeAudio(to: fixture.source)
+        let store = try container()
+        await #expect(throws: MeetingOfflineTranscriptionService.Failure.unsupportedLanguage) {
+            try await MeetingAudioImportService.importFile(
+                at: fixture.source, languageTag: tag, in: store.mainContext, rootURL: fixture.root)
+        }
+        #expect(try records(in: store.mainContext).isEmpty)
+        try fixture.expectNoImportOutput()
+    }
+
+    @Test("a missing Whisper model keeps automatic imported audio retryable, not successfully transcribed")
     func modelFailurePreservesImportedBase() async throws {
         let fixture = try Fixture()
         defer { fixture.remove() }
         try writeAudio(to: fixture.source)
         let store = try container()
         let record = try await MeetingAudioImportService.importFile(
-            at: fixture.source, languageTag: "en-US", in: store.mainContext, rootURL: fixture.root
+            at: fixture.source, languageTag: "en-US", automaticLanguageDetection: true,
+            summaryLanguageTag: "fr-FR", in: store.mainContext, rootURL: fixture.root
         )
         let manifest = record.manifestData
         let base = record.resultData
         let orchestrator = MeetingOfflineTranscriptionOrchestrator(
             gate: MeetingDiarizationExecutionGate(),
-            transcribe: { _, _, _ in throw MeetingWhisperModelError.notInstalled }
+            transcribe: { _, _, language in
+                #expect(language == nil)
+                throw MeetingWhisperModelError.notInstalled
+            }
         )
         do {
-            _ = try await orchestrator.run(record: record, context: store.mainContext, languageTag: "en-US")
+            _ = try await orchestrator.run(record: record, context: store.mainContext)
             Issue.record("Missing model unexpectedly transcribed")
         } catch {
             #expect(error is MeetingWhisperModelError)
@@ -239,14 +258,32 @@ struct MeetingAudioImportTests {
         #expect(record.appleRawResultData == nil)
         let audio = fixture.root.appendingPathComponent(try #require(record.audioManifest).relativeDirectory)
         #expect(FileManager.default.fileExists(atPath: audio.appendingPathComponent("part-00.flac").path))
+        let originalFLAC = try Data(contentsOf: audio.appendingPathComponent("part-00.flac"))
+        let retry = MeetingOfflineTranscriptionOrchestrator(gate: MeetingDiarizationExecutionGate()) { _, revision, language in
+            #expect(language == nil)
+            return MeetingOfflineTranscriptionService.Output(
+                result: MeetingResult(transcriptRevision: revision + 1, segments: [
+                    MeetingSegment(id: "retry", startMs: 0, endMs: 1_000, text: "Retried audio")
+                ]), sourceTranscriptRevision: revision, detectedLanguages: ["ko", "en"])
+        }
+        #expect(try await retry.run(record: record, context: store.mainContext) == .committed)
+        let persisted = try #require(records(in: ModelContext(store)).first)
+        #expect(persisted.automaticLanguageDetection)
+        #expect(persisted.languageTag == "en-US")
+        #expect(persisted.summaryLanguageTag == "fr-FR")
+        #expect(persisted.asrDetectedLanguages == ["ko", "en"])
+        #expect(persisted.rawResult == persisted.result)
+        #expect(persisted.result?.segments.first?.text == "Retried audio")
+        #expect(persisted.offlineASRFailure == nil)
+        #expect(try Data(contentsOf: audio.appendingPathComponent("part-00.flac")) == originalFLAC)
     }
 }
 
 @Suite("Imported recording offline retry")
 @MainActor
 struct MeetingAudioImportRetryTests {
-    @Test("normal offline orchestration replaces an imported empty base without inventing Apple provenance")
-    func offlineCommitUsesNormalMeetingContract() async throws {
+    @Test("normal offline orchestration replaces an imported empty base without inventing Apple provenance", arguments: [false, true])
+    func offlineCommitUsesNormalMeetingContract(automatic: Bool) async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("import-retry-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -264,7 +301,8 @@ struct MeetingAudioImportRetryTests {
             ModelConfiguration(isStoredInMemoryOnly: true, cloudKitDatabase: .none)
         ])
         let record = try await MeetingAudioImportService.importFile(
-            at: source, languageTag: "ko-KR", in: store.mainContext, rootURL: directory
+            at: source, languageTag: "ko-KR", automaticLanguageDetection: automatic,
+            in: store.mainContext, rootURL: directory
         )
         let manifest = record.manifestData
         let orchestrator = MeetingOfflineTranscriptionOrchestrator(
@@ -273,7 +311,7 @@ struct MeetingAudioImportRetryTests {
                 await MainActor.run {
                     #expect(savedAudio.totalSamples == 16_000)
                     #expect(revision == 0)
-                    #expect(language == "ko-KR")
+                    #expect(language == (automatic ? nil : "ko-KR"))
                     return MeetingOfflineTranscriptionService.Output(
                         result: MeetingResult(transcriptRevision: revision + 1, segments: [
                             MeetingSegment(id: "imported-segment", startMs: 0, endMs: 1_000, text: "실제 전사 결과 계약")
@@ -282,12 +320,14 @@ struct MeetingAudioImportRetryTests {
                 }
             }
         )
-        let outcome = try await orchestrator.run(record: record, context: store.mainContext, languageTag: "ko-KR")
+        let outcome = try await orchestrator.run(record: record, context: store.mainContext)
         #expect(outcome == .committed)
         #expect(record.status == .ready)
         #expect(record.asrSource == .offline)
         #expect(record.asrModelRevision == MeetingWhisperManifest.modelRevision)
-        #expect(record.asrDetectedLanguages == ["ko"])
+        #expect(record.asrDetectedLanguages == (automatic ? ["ko"] : []))
+        #expect(record.automaticLanguageDetection == automatic)
+        #expect(record.languageTag == "ko-KR")
         #expect(record.result?.transcriptRevision == 1)
         #expect(record.rawResult == record.result)
         #expect(record.appleRawResultData == nil)

@@ -7,7 +7,7 @@ import Foundation
 ///
 /// Engine selection (on-device only):
 ///   1. Apple Foundation Models (AFM / ANE) when available — preferred.
-///   2. Otherwise the on-device MLX LLM (Qwen), but only when its model is
+///   2. Otherwise the on-device MLX LLM, but only when its model is
 ///      already loaded, or (for explicit foreground actions) already downloaded —
 ///      never triggers a surprise download, and honors the "MLX foreground only"
 ///      invariant.
@@ -61,12 +61,7 @@ struct MeetingRefinementEngine {
                     comment: "Meeting transcript correction or analysis engine name"
                 )
             case .qwen:
-                return AppLanguage.localized(
-                    "meeting.engine.qwen",
-                    defaultValue: language == .english ? "On-Device LLM (Qwen)" : "온디바이스 LLM(Qwen)",
-                    language: language,
-                    comment: "Meeting transcript correction or analysis engine name"
-                )
+                return PersonaAIProvider.onDevice.displayName(language: language)
             case .userVocabulary:
                 return AppLanguage.localized(
                     "meeting.engine.userVocabulary",
@@ -123,18 +118,21 @@ struct MeetingRefinementEngine {
 
     private let afmProvider: (any MeetingRefinementProvider)?
     private let onDeviceProvider: (any MeetingRefinementProvider)?
+    private let policy: BetaFeaturePolicy
 
     init(
         afmProvider: (any MeetingRefinementProvider)? = nil,
-        onDeviceProvider: (any MeetingRefinementProvider)? = nil
+        onDeviceProvider: (any MeetingRefinementProvider)? = nil,
+        policy: BetaFeaturePolicy = BetaFeaturePolicy()
     ) {
         self.afmProvider = afmProvider
         self.onDeviceProvider = onDeviceProvider
+        self.policy = policy
     }
 
     /// The engine that *would* run, for pre-run UI. `allowModelLoad` should be
     func plannedEngine(allowModelLoad: Bool) -> Engine? {
-        guard case .providers(let providers) = BetaFeaturePolicy().routingDecision(for: .transcriptRefinement) else {
+        guard case .providers(let providers) = policy.routingDecision(for: .transcriptRefinement) else {
             return nil
         }
         for provider in providers {
@@ -163,11 +161,15 @@ struct MeetingRefinementEngine {
         return nil
     }
 
+    /// Corrects the transcript in its source language and script, never the UI language.
+    /// `language` only controls labels; local generation requires the loaded model
+    /// to support `sourceLanguageTag`, including after an explicitly allowed load.
     func refine(
         meetingID: String,
         result: MeetingResult,
         vocabulary: UserVocabularySnapshot,
-        language: AppLanguage,
+        sourceLanguageTag: String,
+        language: AppLanguage = .current,
         allowModelLoad: Bool
     ) async throws -> Outcome {
         guard !result.segments.isEmpty else {
@@ -180,7 +182,7 @@ struct MeetingRefinementEngine {
             mapped[index].text = canonicalizer.canonicalize(mapped[index].text)
         }
         let mappingChanged = mapped.map(\.text) != result.segments.map(\.text)
-        let routingDecision = BetaFeaturePolicy().routingDecision(for: .transcriptRefinement)
+        let routingDecision = policy.routingDecision(for: .transcriptRefinement)
         guard let engine = plannedEngine(allowModelLoad: allowModelLoad) else {
             let reason: RuleFallbackReason
             let onDeviceWasEnabled: Bool
@@ -220,6 +222,7 @@ struct MeetingRefinementEngine {
                     batchResult = try await afmProvider.correct(
                         segments: mapped,
                         glossaryHint: vocabulary.promptHint,
+                        sourceLanguageTag: sourceLanguageTag,
                         language: language
                     )
                 } else {
@@ -227,6 +230,7 @@ struct MeetingRefinementEngine {
                         .correctTranscript(
                             segments: mapped,
                             glossaryHint: vocabulary.promptHint,
+                            sourceLanguageTag: sourceLanguageTag,
                             language: language
                         )
                 }
@@ -238,13 +242,14 @@ struct MeetingRefinementEngine {
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
-                guard BetaFeaturePolicy().authorizes(.onDevice, for: .transcriptRefinement) else {
+                guard policy.authorizes(.onDevice, for: .transcriptRefinement) else {
                     throw error
                 }
                 if let onDeviceProvider {
                     let batchResult = try await onDeviceProvider.correct(
                         segments: mapped,
                         glossaryHint: vocabulary.promptHint,
+                        sourceLanguageTag: sourceLanguageTag,
                         language: language
                     )
                     guard batchResult.succeededBatchCount > 0 || batchResult.failedBatchCount == 0 else {
@@ -255,6 +260,7 @@ struct MeetingRefinementEngine {
                     corrected = try await correctViaLocalLLM(
                         segments: mapped,
                         glossaryHint: vocabulary.promptHint,
+                        sourceLanguageTag: sourceLanguageTag,
                         language: language,
                         allowModelLoad: allowModelLoad
                     )
@@ -266,6 +272,7 @@ struct MeetingRefinementEngine {
                 let batchResult = try await onDeviceProvider.correct(
                     segments: mapped,
                     glossaryHint: vocabulary.promptHint,
+                    sourceLanguageTag: sourceLanguageTag,
                     language: language
                 )
                 guard batchResult.succeededBatchCount > 0 || batchResult.failedBatchCount == 0 else {
@@ -276,6 +283,7 @@ struct MeetingRefinementEngine {
                 corrected = try await correctViaLocalLLM(
                     segments: mapped,
                     glossaryHint: vocabulary.promptHint,
+                    sourceLanguageTag: sourceLanguageTag,
                     language: language,
                     allowModelLoad: allowModelLoad
                 )
@@ -316,10 +324,11 @@ struct MeetingRefinementEngine {
     private func correctViaLocalLLM(
         segments: [MeetingSegment],
         glossaryHint: String,
+        sourceLanguageTag: String,
         language: AppLanguage,
         allowModelLoad: Bool
     ) async throws -> [MeetingSegment] {
-        guard BetaFeaturePolicy().authorizes(.onDevice, for: .transcriptRefinement) else {
+        guard policy.authorizes(.onDevice, for: .transcriptRefinement) else {
             throw RefinementError.localModelUnavailable
         }
         let llm = OnDeviceLLMService.shared
@@ -329,7 +338,13 @@ struct MeetingRefinementEngine {
             }
             await llm.loadModelIfNeeded(use: .transcriptRefinement)
         }
-        guard llm.isModelLoaded else { throw RefinementError.localModelUnavailable }
+        guard llm.isModelLoaded, let loadedModelID = llm.loadedModelIdentifier,
+              loadedModelID == llm.modelID else { throw RefinementError.localModelUnavailable }
+        try MeetingSummaryLanguages.requireLocalModelSupport(
+            modelID: loadedModelID,
+            sourceLanguageTag: sourceLanguageTag,
+            summaryLanguageTag: sourceLanguageTag
+        )
 
         var batches = [[Int]]()
         var current = [Int]()
@@ -353,10 +368,10 @@ struct MeetingRefinementEngine {
             \(glossaryBlock)[전사 구간]
             \(numbered)
 
-            \(Prompts.MeetingCorrectionLocal.requestSuffix(language: language))
+            \(Prompts.MeetingCorrectionLocal.requestSuffix(sourceLanguageTag: sourceLanguageTag))
             """
             let raw = try await llm.generate(
-                systemPrompt: Prompts.MeetingCorrectionLocal.systemInstruction(language: language),
+                systemPrompt: Prompts.MeetingCorrectionLocal.systemInstruction(sourceLanguageTag: sourceLanguageTag),
                 userPrompt: userPrompt,
                 maxTokens: 700,
                 use: .transcriptRefinement

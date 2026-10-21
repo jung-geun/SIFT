@@ -40,13 +40,135 @@ struct MeetingDiarizationCommitTests {
         MeetingSpeakerInterval(speakerID: "B", startSample: 950 * 16, endSample: 1_700 * 16)
     ]
 
+    @Test("identical voices and names on source records remain independent through edits and retries")
+    func sourceIdentitiesStayIndependent() throws {
+        let source = result([MeetingSegment(id: "shared-lineage", startMs: 0, endMs: 1_600, text: "Hello")])
+        let micManifest = MeetingAudioManifest(relativeDirectory: "microphone", sampleRate: 16_000,
+                                                totalSamples: 48_000, parts: [])
+        let appManifest = MeetingAudioManifest(relativeDirectory: "application", sampleRate: 16_000,
+                                                totalSamples: 48_000, parts: [])
+        let (mic, micSeed) = try record(source, audioManifest: micManifest)
+        let (app, appSeed) = try record(source, recordID: UUID().uuidString.lowercased(), audioManifest: appManifest)
+        let config = ModelConfiguration(isStoredInMemoryOnly: true, cloudKitDatabase: .none)
+        let container = try ModelContainer(for: AppDataContainer.meetingSchema, configurations: config)
+        let context = ModelContext(container)
+        context.insert(mic)
+        context.insert(app)
+        let save = { try context.save() }
+        var voice = [Float](repeating: 0, count: 256)
+        voice[0] = 1
+        let initialVoice = MeetingSpeakerVoiceEvidence(newEmbeddings: ["slot": voice], referenceEmbeddings: [:])
+        for (child, seed) in [(mic, micSeed), (app, appSeed)] {
+            #expect(try commit(child, seed, source: source, evidence: [activity("slot", 0, 1_600)],
+                               voiceEvidence: initialVoice, save: save) == .committed(didSplit: false))
+        }
+        let micID = try #require(mic.diarization?.profiles.first?.id)
+        let appID = try #require(app.diarization?.profiles.first?.id)
+        #expect(micID != appID)
+        for (child, id) in [(mic, micID), (app, appID)] {
+            try MeetingSpeakerEditCommitter.rename(record: child, speakerID: id, displayName: "Alex", save: save)
+            try MeetingSpeakerEditCommitter.assign(record: child, segmentID: "shared-lineage", speakerIDs: [id], save: save)
+            #expect(child.diarization?.manualAssignments == ["shared-lineage": [id]])
+        }
+        let appBefore = app.persistenceSnapshot()
+        try MeetingSpeakerEditCommitter.rename(record: mic, speakerID: micID, displayName: "Mic only", save: save)
+        try MeetingSpeakerEditCommitter.assign(record: mic, segmentID: "shared-lineage", speakerIDs: [], save: save)
+        let micPayload = try #require(mic.diarization)
+        #expect(try commit(mic, micPayload, source: source, evidence: [activity("retry", 0, 1_600)],
+                           voiceEvidence: MeetingSpeakerVoiceEvidence(newEmbeddings: ["retry": voice],
+                                                                      referenceEmbeddings: [micID: voice]),
+                           save: save) == .committed(didSplit: false))
+        #expect(mic.diarization?.intervals.map(\.speakerID) == [micID])
+        #expect(mic.diarization?.manualAssignments == ["shared-lineage": []])
+        #expect(mic.result?.segments.first?.speakerIDs == [])
+        #expect(app.persistenceSnapshot() == appBefore)
+        let micBefore = mic.persistenceSnapshot()
+        let appPayload = try #require(app.diarization)
+        #expect(try commit(app, appPayload, source: source, evidence: [activity("retry", 0, 1_600)],
+                           voiceEvidence: MeetingSpeakerVoiceEvidence(newEmbeddings: ["retry": voice],
+                                                                      referenceEmbeddings: [appID: voice]),
+                           save: save) == .committed(didSplit: false))
+        #expect(app.diarization?.profiles == [MeetingSpeakerProfile(id: appID, ordinal: 1, displayName: "Alex")])
+        #expect(app.diarization?.manualAssignments == ["shared-lineage": [appID]])
+        #expect(app.result?.segments.first?.speakerIDs == [appID])
+        #expect(mic.persistenceSnapshot() == micBefore)
+        let reloaded = try ModelContext(container).fetch(FetchDescriptor<MeetingRecord>())
+        #expect(reloaded.count == 2)
+        #expect(reloaded.first { $0.meetingID == mic.meetingID }?.diarization?.profiles.first?.displayName == "Mic only")
+        #expect(reloaded.first { $0.meetingID == app.meetingID }?.diarization?.manualAssignments == ["shared-lineage": [appID]])
+    }
+
+    @Test("a foreign live timeline cannot donate its identity even with matching voice and timing")
+    func foreignLiveIdentityRejected() throws {
+        let source = result([timedSegment()])
+        let (record, payload) = try record(source)
+        let session = UUID()
+        var foreign = MeetingLiveSpeakerTimeline(meetingID: UUID().uuidString.lowercased(), sessionID: session)
+        _ = foreign.apply(MeetingDiarizationUpdate(
+            sessionID: session, closedIntervals: [activity("foreign", 0, 1_600)],
+            openIntervals: [], coveredThroughSample: 1_600 * 16
+        ))
+        var voice = [Float](repeating: 0, count: 256)
+        voice[0] = 1
+        #expect(try commit(record, payload, source: source, evidence: [activity("detected", 0, 1_600)],
+                           liveTimeline: foreign,
+                           voiceEvidence: MeetingSpeakerVoiceEvidence(newEmbeddings: ["detected": voice],
+                                                                      referenceEmbeddings: ["foreign": voice]))
+                == .committed(didSplit: false))
+        let profiles = try #require(record.diarization?.profiles)
+        #expect(profiles.count == 1)
+        #expect(profiles.first?.id != "foreign")
+        #expect(record.result?.segments.first?.speakerIDs == profiles.map(\.id))
+    }
+
+    @Test("persisted identities from a mismatched manifest cannot seed, edit, or commit")
+    func mismatchedPayloadRejected() throws {
+        let source = result([timedSegment(speakerIDs: ["foreign"])])
+        let (record, seeded) = try record(
+            source, intervals: [activity("foreign", 0, 1_600)],
+            profiles: [MeetingSpeakerProfile(id: "foreign", ordinal: 1, displayName: "Alex")],
+            manual: ["seg": ["foreign"]]
+        )
+        var payload = seeded
+        payload.manifestDigest = "another-recording"
+        try record.update(diarization: payload)
+        let before = record.persistenceSnapshot()
+        #expect(throws: MeetingDiarizationFailure.timelineMismatch) {
+            try MeetingDiarizationPostProcessor.seed(record: record, source: source,
+                manifestDigest: MeetingDiarizationFingerprint.manifest(manifest),
+                sourceDigest: MeetingDiarizationFingerprint.source(source))
+        }
+        #expect(throws: MeetingDiarizationFailure.timelineMismatch) {
+            try MeetingSpeakerEditCommitter.rename(record: record, speakerID: "foreign", displayName: "Changed", save: {})
+        }
+        #expect(throws: MeetingDiarizationFailure.timelineMismatch) {
+            try MeetingSpeakerEditCommitter.assign(record: record, segmentID: "seg", speakerIDs: [], save: {})
+        }
+        #expect(try commit(record, payload, source: source, evidence: [activity("detected", 0, 1_600)]) == .superseded)
+        #expect(record.persistenceSnapshot() == before)
+    }
+
+    @Test("replay evidence from another audio manifest is rejected without saving")
+    func mismatchedReplayEvidenceRejected() throws {
+        let source = result([timedSegment()])
+        let (record, payload) = try record(source)
+        let before = record.persistenceSnapshot()
+        #expect(try commit(record, payload, source: source, evidence: [activity("foreign", 0, 1_600)],
+                           evidenceManifestDigest: "another-recording", save: { Issue.record("Must not save foreign evidence") })
+                == .superseded)
+        #expect(record.persistenceSnapshot() == before)
+    }
+
     private func record(
         _ source: MeetingResult,
         intervals: [MeetingSpeakerInterval] = [],
         profiles: [MeetingSpeakerProfile] = [],
-        manual: [String: [String]] = [:]
+        manual: [String: [String]] = [:],
+        recordID: String? = nil,
+        audioManifest: MeetingAudioManifest? = nil
     ) throws -> (MeetingRecord, MeetingDiarizationPayload) {
-        let record = MeetingRecord(meetingID: meetingID)
+        let manifest = audioManifest ?? self.manifest
+        let record = MeetingRecord(meetingID: recordID ?? meetingID)
         try record.replaceTranscriptionBase(source, status: .ready)
         try record.update(audioManifest: manifest)
         let payload = MeetingDiarizationPayload(
@@ -70,13 +192,18 @@ struct MeetingDiarizationCommitTests {
         generation: UUID? = nil,
         liveTimeline: MeetingLiveSpeakerTimeline? = nil,
         voiceEvidence: MeetingSpeakerVoiceEvidence? = nil,
+        evidenceManifestDigest: String? = nil,
         save: () throws -> Void = {}
     ) throws -> MeetingDiarizationCommitter.Outcome {
-        try MeetingDiarizationCommitter.commit(
+        let manifestDigest = try MeetingDiarizationFingerprint.manifest(record.audioManifest ?? manifest)
+        return try MeetingDiarizationCommitter.commit(
             record: record, generation: generation ?? payload.generation,
-            manifestDigest: try MeetingDiarizationFingerprint.manifest(manifest),
+            manifestDigest: manifestDigest,
             sourceDigest: try MeetingDiarizationFingerprint.source(source),
-            evidence: MeetingDiarizationReplay.Evidence(intervals: evidence, coveredThroughSample: coverage, voiceEvidence: voiceEvidence),
+            evidence: MeetingDiarizationReplay.Evidence(
+                manifestDigest: evidenceManifestDigest ?? manifestDigest,
+                intervals: evidence, coveredThroughSample: coverage, voiceEvidence: voiceEvidence
+            ),
             liveTimeline: liveTimeline, save: save
         )
     }
@@ -248,7 +375,7 @@ struct MeetingDiarizationCommitTests {
         let source = result([timedSegment()])
         let (record, payload) = try record(source)
         let session = UUID()
-        var live = MeetingLiveSpeakerTimeline(sessionID: session)
+        var live = MeetingLiveSpeakerTimeline(meetingID: meetingID, sessionID: session)
         _ = live.apply(MeetingDiarizationUpdate(
             sessionID: session,
             closedIntervals: [activity("live-1", 0, 950), activity("live-2", 950, 1_700)],
@@ -431,13 +558,14 @@ struct MeetingDiarizationPendingTests {
     private func start(
         _ record: MeetingRecord, in context: ModelContext,
         gate: MeetingDiarizationExecutionGate, probe: PendingReplayProbe,
+        liveTimeline: MeetingLiveSpeakerTimeline? = nil,
         installed: @escaping @Sendable () async -> Bool = { true }
     ) -> Task<MeetingDiarizationPostProcessor.Outcome, Error> {
         Task { @MainActor in
             try await MeetingDiarizationPostProcessor.run(
-                record: record, context: context, captureEnabledAtStart: true,
+                record: record, context: context, liveTimeline: liveTimeline, captureEnabledAtStart: true,
                 gate: gate, isInstalled: installed,
-                replay: { _, _, _ in try await probe.replay() }
+                replay: { manifest, reference, _ in try await probe.replay(manifest: manifest, reference: reference) }
             )
         }
     }
@@ -445,6 +573,59 @@ struct MeetingDiarizationPendingTests {
     private func waitForQueue(_ gate: MeetingDiarizationExecutionGate, count: Int = 1) async {
         // Observe actual admission, not a sleep or an assumed number of yields.
         while gate.queuedFinalCount != count { await Task.yield() }
+    }
+
+    @Test("only this source's live intervals reach embedding replay", arguments: [false, true])
+    func liveReferenceProvenance(belongsToRecord: Bool) async throws {
+        let (context, record) = try fixture(seeded: false)
+        let session = UUID()
+        var timeline = MeetingLiveSpeakerTimeline(
+            meetingID: belongsToRecord ? record.meetingID : UUID().uuidString.lowercased(), sessionID: session
+        )
+        let intervals = [MeetingSpeakerInterval(speakerID: "live", startSample: 0, endSample: 16_000)]
+        _ = timeline.apply(MeetingDiarizationUpdate(sessionID: session, closedIntervals: intervals,
+                                                    openIntervals: [], coveredThroughSample: 16_000))
+        let probe = PendingReplayProbe()
+        let task = start(record, in: context, gate: MeetingDiarizationExecutionGate(), probe: probe, liveTimeline: timeline)
+        #expect(try await task.value == .completed(didSplit: false))
+        #expect(await probe.references == [belongsToRecord ? intervals : []])
+        let ids = try #require(record.diarization?.intervals.map(\.speakerID))
+        #expect(ids.count == 1)
+        #expect(ids.contains("live") == belongsToRecord)
+    }
+
+    @Test("retry refuses mismatched persisted provenance before preflight or inference", arguments: [false, true])
+    func retryMismatchedPayload(installed: Bool) async throws {
+        let (context, record) = try fixture()
+        var payload = try #require(record.diarization)
+        payload.manifestDigest = "foreign-recording"
+        try record.update(diarization: payload)
+        try context.save()
+        let before = record.persistenceSnapshot()
+        let probe = PendingReplayProbe()
+        let task = start(record, in: context, gate: MeetingDiarizationExecutionGate(), probe: probe, installed: { installed })
+        #expect(try await task.value == .superseded)
+        #expect(await probe.calls == 0)
+        #expect(record.persistenceSnapshot() == before)
+    }
+
+    @Test("a queued retry rechecks payload provenance even when generation is unchanged")
+    func queuedPayloadProvenanceChange() async throws {
+        let (context, record) = try fixture()
+        let gate = MeetingDiarizationExecutionGate()
+        #expect(await gate.beginFinal())
+        let probe = PendingReplayProbe()
+        let task = start(record, in: context, gate: gate, probe: probe)
+        await waitForQueue(gate)
+        var payload = try #require(record.diarization)
+        payload.manifestDigest = "foreign-recording"
+        try record.update(diarization: payload)
+        try context.save()
+        let before = record.persistenceSnapshot()
+        gate.endFinal()
+        #expect(try await task.value == .superseded)
+        #expect(await probe.calls == 0)
+        #expect(record.persistenceSnapshot() == before)
     }
 
     @Test("rename while queued is read by the seed and the final commit")
@@ -659,10 +840,13 @@ struct MeetingDiarizationPendingTests {
 
 private actor PendingReplayProbe {
     private(set) var calls = 0
+    private(set) var references: [[MeetingSpeakerInterval]] = []
 
-    func replay() throws -> MeetingDiarizationReplay.Evidence {
+    func replay(manifest: MeetingAudioManifest, reference: [MeetingSpeakerInterval]) throws -> MeetingDiarizationReplay.Evidence {
         calls += 1
+        references.append(reference)
         return MeetingDiarizationReplay.Evidence(
+            manifestDigest: try MeetingDiarizationFingerprint.manifest(manifest),
             intervals: [MeetingSpeakerInterval(speakerID: "detected", startSample: 0, endSample: 16_000)],
             coveredThroughSample: 16_000, voiceEvidence: nil
         )

@@ -6,11 +6,15 @@ import WhisperKit
 /// fails. Supply a locally parsed tokenizer *before* loading models instead;
 /// `loadTokenizerIfNeeded` then has no occasion to contact the Hub.
 enum MeetingWhisperOfflineLoader {
-    static func load(modelDirectory: URL, tokenizerDirectory: URL) async throws -> WhisperKit {
+    static func load(modelDirectory: URL, tokenizerDirectory: URL) async throws -> MeetingWhisperKit {
         // This API parses local bytes only; unlike ModelUtilities.loadTokenizer,
         // AutoTokenizerWrapper.from(modelFolder:) has no pretrained/Hub fallback.
         let tokens = try await AutoTokenizerWrapper.from(modelFolder: tokenizerDirectory)
         try Task.checkCancellation()
+        let languageTokenCodes = try validatedLanguageTokenCodes(
+            tokenID: tokens.convertTokenToId, tokenText: tokens.convertIdToToken
+        )
+        let specialTokens = try validatedSpecialTokens(tokenID: tokens.convertTokenToId, tokenText: tokens.convertIdToToken)
         let config = WhisperKitConfig(
             modelFolder: modelDirectory.path,
             tokenizerFolder: tokenizerDirectory,
@@ -18,20 +22,64 @@ enum MeetingWhisperOfflineLoader {
             load: false,
             download: false
         )
-        let model = try await WhisperKit(config)
-        model.tokenizer = MeetingWhisperLocalTokenizer(tokens)
+        let model = try await MeetingWhisperKit(config, languageTokenCodes: languageTokenCodes)
+        let tokenizer = MeetingWhisperLocalTokenizer(tokens, specialTokens: specialTokens)
+        model.tokenizer = tokenizer
         try await model.loadModels()
         // Supplying the tokenizer before load intentionally bypasses the SDK's
         // Hub fallback, but also bypasses its multilingual-variant detection.
         // The pinned large-v3 graph must expose the expected vocabulary before
         // explicit language prompts or word timestamps are decoded.
         guard model.textDecoder.logitsSize == 51_866,
-              model.audioEncoder.embedSize == 1_280 else {
+              model.audioEncoder.embedSize == 1_280,
+              tokenizer.allLanguageTokens == Set(languageTokenCodes.keys) else {
             await model.unloadModels()
             throw MeetingWhisperModelError.corruptArtifact
         }
         model.textDecoder.isModelMultilingual = true
         return model
+    }
+
+    /// Validate raw local lookups, not the adapter's fallback special-token IDs.
+    /// The pinned large-v3 vocabulary has SOT followed by exactly 100 languages.
+    static func validatedLanguageTokenCodes(
+        tokenID: (String) -> Int?, tokenText: (Int) -> String?
+    ) throws -> [Int: String] {
+        guard tokenID("<|startoftranscript|>") == 50_258,
+              tokenText(50_258) == "<|startoftranscript|>",
+              MeetingLanguageCatalog.whisperLanguageCodes.count == 100 else {
+            throw MeetingWhisperModelError.corruptArtifact
+        }
+        var codes: [Int: String] = [:]
+        codes.reserveCapacity(100)
+        for code in MeetingLanguageCatalog.whisperLanguageCodes {
+            let token = "<|\(code)|>"
+            guard let id = tokenID(token), (50_259...50_358).contains(id),
+                  tokenText(id) == token, codes.updateValue(code, forKey: id) == nil else {
+                throw MeetingWhisperModelError.corruptArtifact
+            }
+        }
+        guard codes.count == 100 else { throw MeetingWhisperModelError.corruptArtifact }
+        return codes
+    }
+
+    /// The large-v3 language addition shifts task/no-speech/timestamp tokens.
+    /// An absent local token must fail loading, not inherit the SDK's older IDs.
+    static func validatedSpecialTokens(tokenID: (String) -> Int?, tokenText: (Int) -> String?) throws -> SpecialTokens {
+        func require(_ token: String, _ expected: Int) throws -> Int {
+            guard tokenID(token) == expected, tokenText(expected) == token else {
+                throw MeetingWhisperModelError.corruptArtifact
+            }
+            return expected
+        }
+        return try SpecialTokens(
+            endToken: require("<|endoftext|>", 50257), englishToken: require("<|en|>", 50259),
+            noSpeechToken: require("<|nospeech|>", 50363), noTimestampsToken: require("<|notimestamps|>", 50364),
+            specialTokenBegin: require("<|endoftext|>", 50257), startOfPreviousToken: require("<|startofprev|>", 50362),
+            startOfTranscriptToken: require("<|startoftranscript|>", 50258), timeTokenBegin: require("<|0.00|>", 50365),
+            transcribeToken: require("<|transcribe|>", 50360), translateToken: require("<|translate|>", 50359),
+            whitespaceToken: 220
+        )
     }
 }
 
@@ -43,26 +91,11 @@ private final class MeetingWhisperLocalTokenizer: WhisperTokenizer {
     let specialTokens: SpecialTokens
     let allLanguageTokens: Set<Int>
 
-    init(_ tokenizer: TokenizerWrapper) {
+    init(_ tokenizer: TokenizerWrapper, specialTokens: SpecialTokens) {
         self.tokenizer = tokenizer
-        func id(_ token: String, fallback: Int) -> Int {
-            tokenizer.convertTokenToId(token) ?? fallback
-        }
-        specialTokens = SpecialTokens(
-            endToken: id("<|endoftext|>", fallback: 50257),
-            englishToken: id("<|en|>", fallback: 50259),
-            noSpeechToken: id("<|nospeech|>", fallback: 50362),
-            noTimestampsToken: id("<|notimestamps|>", fallback: 50363),
-            specialTokenBegin: id("<|endoftext|>", fallback: 50257),
-            startOfPreviousToken: id("<|startofprev|>", fallback: 50361),
-            startOfTranscriptToken: id("<|startoftranscript|>", fallback: 50258),
-            timeTokenBegin: id("<|0.00|>", fallback: 50364),
-            transcribeToken: id("<|transcribe|>", fallback: 50359),
-            translateToken: id("<|translate|>", fallback: 50358),
-            whitespaceToken: id(" ", fallback: 220)
-        )
+        self.specialTokens = specialTokens
         let tokenBoundary = specialTokens.specialTokenBegin
-        allLanguageTokens = Set(Constants.languageCodes.compactMap {
+        allLanguageTokens = Set(MeetingLanguageCatalog.whisperLanguageCodes.compactMap {
             tokenizer.convertTokenToId("<|\($0)|>")
         }.filter { $0 > tokenBoundary })
     }

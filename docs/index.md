@@ -58,7 +58,7 @@ image: /assets/images/app-icon.webp
               <span class="tab-detail">메일·캘린더·iCloud 연결은 여기서</span>
             </a>
           </div>
-          <p class="screens-source">1.0.11 (9) 소스에서 실행·촬영한 현재 앱 화면입니다.<br>소개용 예시 데이터이며, 이 버전은 아직 심사 중입니다.<br>화면을 누르면 크게 볼 수 있어요.</p>
+          <p class="screens-source">1.0.11 (10) 개발 소스의 QA 앱에서 광고 없이 촬영한 예시 화면입니다.<br>소개용 데이터이며, 심사 제출본·공개 앱과 다를 수 있습니다.<br>화면을 누르면 크게 볼 수 있어요.</p>
         </div>
         <div class="tour-viewer">
           <div class="screen-panels">

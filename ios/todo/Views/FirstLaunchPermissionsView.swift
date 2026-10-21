@@ -33,7 +33,7 @@ struct FirstLaunchPermissionsView: View {
                 VStack(alignment: .leading, spacing: 32) {
                     Label("SIFT", systemImage: "waveform.circle.fill")
                         .font(.title2.weight(.semibold))
-                        .foregroundStyle(AppTheme.accent)
+                        .foregroundStyle(.primary)
                         .accessibilityIdentifier("permissions.firstLaunch")
 
                     if geometry.size.width >= 850 {
@@ -62,6 +62,8 @@ struct FirstLaunchPermissionsView: View {
                             .padding(.vertical, 10)
                     }
                     .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .buttonBorderShape(.roundedRectangle(radius: AppTheme.controlRadius))
                     .disabled(isRequesting)
                     .accessibilityIdentifier("permissions.continue")
 
@@ -114,7 +116,7 @@ struct FirstLaunchPermissionsView: View {
                     .foregroundStyle(.secondary)
                 }
                 .padding(18)
-                .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+                .background(AppTheme.surface, in: RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous))
                 .accessibilityIdentifier("permissions.appAudio")
             }
 
@@ -130,12 +132,12 @@ struct FirstLaunchPermissionsView: View {
         VStack(alignment: .leading, spacing: 24) {
             VStack(alignment: .leading, spacing: 10) {
                 Label(Self.copy("permissions.firstLaunch.local.title", fallback: "Audio stays on this device"), systemImage: "lock.shield")
-                    .font(.title3.bold())
+                    .font(.headline)
                 Text(Self.copy("permissions.firstLaunch.local.detail", fallback: "Meeting recording, transcription, and analysis run locally. Granting microphone access does not start a recording. You choose the audio sources and confirm recording consent in the meeting screen."))
             }
             VStack(alignment: .leading, spacing: 10) {
                 Text(Self.copy("permissions.firstLaunch.review.title", fallback: "Review before acting"))
-                    .font(.title3.bold())
+                    .font(.headline)
                 Text(Self.copy("permissions.firstLaunch.review.detail", fallback: "AI transcripts and summaries can be wrong. Review the original transcript before turning suggested actions into to-dos."))
             }
         }
@@ -143,7 +145,7 @@ struct FirstLaunchPermissionsView: View {
         .lineSpacing(4)
         .padding(24)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(AppTheme.accentSubtle, in: RoundedRectangle(cornerRadius: 20))
+        .background(AppTheme.surface, in: RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous))
     }
 
     private func permissionCard(
@@ -154,7 +156,7 @@ struct FirstLaunchPermissionsView: View {
             HStack(alignment: .top, spacing: 12) {
                 Image(systemName: icon)
                     .font(.title3)
-                    .foregroundStyle(AppTheme.accent)
+                    .foregroundStyle(.secondary)
                     .frame(width: 32)
                 VStack(alignment: .leading, spacing: 6) {
                     Text(title).font(.headline)
@@ -184,7 +186,7 @@ struct FirstLaunchPermissionsView: View {
             }
         }
         .padding(18)
-        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+        .background(AppTheme.surface, in: RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous))
     }
 
     private func refreshStatus() async {

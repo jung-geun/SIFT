@@ -5,6 +5,48 @@ nonisolated enum OpenAIAnalysisTier: String, Sendable {
     var modelID: String { self == .basic ? "gpt-6-luna" : "gpt-6.1-sol" }
 }
 
+nonisolated struct OpenAIAvailableModel: Identifiable, Sendable, Equatable {
+    let id: String
+    let displayName: String
+}
+
+private nonisolated struct OpenAIModelCatalog: Decodable {
+    let models: [OpenAIAvailableModel]
+
+    private struct PlanModel: Decodable {
+        let slug: String
+        let display_name: String?
+        let visibility: String
+    }
+    private struct APIModel: Decodable { let id: String }
+    private enum CodingKeys: String, CodingKey { case models, data }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        var visible: [OpenAIAvailableModel] = []
+        var seen = Set<String>()
+        if container.contains(.models) {
+            // SIWC catalogs have explicit visibility. Never fall through to a
+            // second envelope that could accidentally expose hidden models.
+            for model in try container.decode([PlanModel].self, forKey: .models) where model.visibility == "list" {
+                guard !model.slug.isEmpty else { throw OpenAIRequestError.invalidResponse }
+                if seen.insert(model.slug).inserted {
+                    visible.append(OpenAIAvailableModel(id: model.slug, displayName: model.display_name ?? model.slug))
+                }
+            }
+        } else {
+            // The public Models API uses data/id rather than models/slug.
+            for model in try container.decode([APIModel].self, forKey: .data) {
+                guard !model.id.isEmpty else { throw OpenAIRequestError.invalidResponse }
+                if seen.insert(model.id).inserted {
+                    visible.append(OpenAIAvailableModel(id: model.id, displayName: model.id))
+                }
+            }
+        }
+        models = visible
+    }
+}
+
 nonisolated enum OpenAIDataScope: String, CaseIterable, Sendable {
     case tasks, email, routines, persona
 }
@@ -178,30 +220,52 @@ private final class OpenAIResponseRedirectDelegate: NSObject, URLSessionTaskDele
     private let generation: @MainActor () -> UUID
     private let consent: @Sendable (OpenAIDataScope) -> Bool
     private let enabled: @MainActor () -> Bool
+    private let prepareSession: @MainActor () -> Void
+    private let regionAllowed: @MainActor () -> Bool
 
     init(
         transport: (any OpenAIResponseTransport)? = nil,
         accessToken: @escaping @MainActor () async throws -> String = { try await OpenAIConnection.shared.authorizedAccessToken() },
         generation: @escaping @MainActor () -> UUID = { OpenAIConnection.shared.sessionGeneration },
         consent: @escaping @Sendable (OpenAIDataScope) -> Bool = OpenAIPrivacy.allows,
-        enabled: @escaping @MainActor () -> Bool = { SettingsStore.betaProviderEnabled(.openAI) }
+        enabled: @escaping @MainActor () -> Bool = { SettingsStore.betaProviderEnabled(.openAI) },
+        prepareSession: @escaping @MainActor () -> Void = { OpenAIConnection.shared.refreshCredentials() },
+        regionAllowed: @escaping @MainActor () -> Bool = { OpenAIRegionalAvailability.allowsRequests }
     ) {
         self.transport = transport ?? OpenAIURLSessionResponseTransport()
         self.accessToken = accessToken
         self.generation = generation
         self.consent = consent
         self.enabled = enabled
+        self.prepareSession = prepareSession
+        self.regionAllowed = regionAllowed
+    }
+
+    /// Account metadata only: this neither runs inference nor authorizes app-data sharing.
+    func availableModels() async throws -> [OpenAIAvailableModel] {
+        try preflight(nil)
+        prepareSession()
+        let session = generation()
+        let request = Task {
+            try validateSession(session, scope: nil)
+            let token = try await accessToken()
+            try validateSession(session, scope: nil)
+            return try await loadModels(token: token, session: session, scope: nil, additionalScopes: [])
+        }
+        let id = OpenAIRequestRegistry.shared.register(generation: session, scope: nil, additionalScopes: [], cancel: { request.cancel() })
+        defer { OpenAIRequestRegistry.shared.remove(id) }
+        let models = try await withTaskCancellationHandler(operation: { try await request.value }, onCancel: { request.cancel() })
+        try validateSession(session, scope: nil)
+        return models
     }
 
     /// Explicitly checks the selected account with a fixed message, never with stored app data.
     func verifySubscriptionConnection() async throws -> String {
-        let output = try await performJSON(
-            systemInstruction: "This is a connection check. Return only the JSON object {\"connection\":\"ok\"}.",
+        _ = try await performResponse(
+            systemInstruction: "This is a connection check. Reply briefly to confirm receipt.",
             userPrompt: "Confirm this ChatGPT plan connection.",
-            scope: nil, tier: .basic, language: .current
+            scope: nil, tier: .basic, language: .current, requiresJSONObject: false
         )
-        guard let object = try? JSONSerialization.jsonObject(with: Data(output.utf8)) as? [String: String],
-              object["connection"] == "ok" else { throw OpenAIRequestError.invalidResponse }
         return OpenAIAnalysisTier.basic.modelID
     }
 
@@ -213,29 +277,34 @@ private final class OpenAIResponseRedirectDelegate: NSObject, URLSessionTaskDele
         tier: OpenAIAnalysisTier = .basic,
         language: AppLanguage = .current
     ) async throws -> String {
-        try await performJSON(systemInstruction: systemInstruction, userPrompt: userPrompt, scope: scope,
-                              additionalScopes: additionalScopes, tier: tier, language: language)
+        try await performResponse(systemInstruction: systemInstruction, userPrompt: userPrompt, scope: scope,
+                                  additionalScopes: additionalScopes, tier: tier, language: language, requiresJSONObject: true)
     }
 
-    private func performJSON(
+    private func performResponse(
         systemInstruction: String,
         userPrompt: String,
         scope: OpenAIDataScope?,
         additionalScopes: [OpenAIDataScope] = [],
         tier: OpenAIAnalysisTier,
-        language: AppLanguage
+        language: AppLanguage,
+        requiresJSONObject: Bool
     ) async throws -> String {
         try preflight(scope)
         for additional in additionalScopes { try preflight(additional) }
+        prepareSession()
         let session = generation()
         let request = Task {
-            try await executeJSON(systemInstruction: systemInstruction, userPrompt: userPrompt, scope: scope,
-                                  additionalScopes: additionalScopes, tier: tier, language: language, session: session)
+            try await executeResponse(systemInstruction: systemInstruction, userPrompt: userPrompt, scope: scope,
+                                      additionalScopes: additionalScopes, tier: tier, language: language,
+                                      session: session, requiresJSONObject: requiresJSONObject)
         }
         let id = OpenAIRequestRegistry.shared.register(generation: session, scope: scope, additionalScopes: additionalScopes, cancel: { request.cancel() })
         defer { OpenAIRequestRegistry.shared.remove(id) }
         do {
-            return try await withTaskCancellationHandler(operation: { try await request.value }, onCancel: { request.cancel() })
+            let response = try await withTaskCancellationHandler(operation: { try await request.value }, onCancel: { request.cancel() })
+            try validateSession(session, scope: scope, additionalScopes: additionalScopes)
+            return response
         } catch {
             if request.isCancelled || Task.isCancelled || (error as? OpenAIConnectionError) == .cancelled {
                 throw CancellationError()
@@ -247,29 +316,22 @@ private final class OpenAIResponseRedirectDelegate: NSObject, URLSessionTaskDele
         }
     }
 
-    private func executeJSON(
+    private func executeResponse(
         systemInstruction: String,
         userPrompt: String,
         scope: OpenAIDataScope?,
         additionalScopes: [OpenAIDataScope] = [],
         tier: OpenAIAnalysisTier = .basic,
         language _: AppLanguage,
-        session: UUID
+        session: UUID,
+        requiresJSONObject: Bool
     ) async throws -> String {
         try preflight(scope)
         for additional in additionalScopes { try preflight(additional) }
         let token = try await accessToken()
         try validateSession(session, scope: scope, additionalScopes: additionalScopes)
-        var catalogRequest = URLRequest(url: URL(string: "https://api.openai.com/v1/models")!)
-        catalogRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        let (catalogData, catalogResponse) = try await transport.data(for: catalogRequest)
-        try validateSession(session, scope: scope, additionalScopes: additionalScopes)
-        try validateHTTP(catalogResponse.statusCode)
-        guard let catalog = try? JSONSerialization.jsonObject(with: catalogData) as? [String: Any],
-              let models = catalog["models"] as? [[String: Any]] else {
-            throw OpenAIRequestError.invalidResponse
-        }
-        guard models.contains(where: { $0["slug"] as? String == tier.modelID && $0["visibility"] as? String == "list" }) else {
+        let models = try await loadModels(token: token, session: session, scope: scope, additionalScopes: additionalScopes)
+        guard models.contains(where: { $0.id == tier.modelID }) else {
             throw OpenAIRequestError.modelUnavailable(tier.modelID)
         }
         try validateSession(session, scope: scope, additionalScopes: additionalScopes)
@@ -279,13 +341,15 @@ private final class OpenAIResponseRedirectDelegate: NSObject, URLSessionTaskDele
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-        request.httpBody = try JSONSerialization.data(withJSONObject: [
+        var body: [String: Any] = [
             "model": tier.modelID,
             "instructions": systemInstruction,
             "input": [["role": "user", "content": userPrompt]],
             "store": false,
             "stream": true
-        ])
+        ]
+        if requiresJSONObject { body["text"] = ["format": ["type": "json_object"]] }
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
         let stream = try await transport.stream(for: request)
         defer { stream.cancel() }
         try validateSession(session, scope: scope, additionalScopes: additionalScopes)
@@ -326,16 +390,39 @@ private final class OpenAIResponseRedirectDelegate: NSObject, URLSessionTaskDele
         }
         try validateSession(session, scope: scope, additionalScopes: additionalScopes)
         guard completed else { throw OpenAIRequestError.interrupted }
-        guard let data = output.data(using: .utf8),
-              let json = try? JSONSerialization.jsonObject(with: data),
-              json is [String: Any] else { throw OpenAIRequestError.invalidResponse }
+        guard !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw OpenAIRequestError.invalidResponse
+        }
+        if requiresJSONObject {
+            guard let data = output.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: data),
+                  json is [String: Any] else { throw OpenAIRequestError.invalidResponse }
+        }
         return output
+    }
+
+    private func loadModels(token: String, session: UUID, scope: OpenAIDataScope?, additionalScopes: [OpenAIDataScope]) async throws -> [OpenAIAvailableModel] {
+        try validateSession(session, scope: scope, additionalScopes: additionalScopes)
+        var request = URLRequest(url: URL(string: "https://api.openai.com/v1/models")!)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        let (data, response) = try await transport.data(for: request)
+        try validateSession(session, scope: scope, additionalScopes: additionalScopes)
+        try validateHTTP(response.statusCode)
+        guard let catalog = try? JSONDecoder().decode(OpenAIModelCatalog.self, from: data) else {
+            throw OpenAIRequestError.invalidResponse
+        }
+        return catalog.models
     }
 
     private func preflight(_ scope: OpenAIDataScope?) throws {
         try Task.checkCancellation()
-        guard enabled() else { throw OpenAIRequestError.disabled }
-        if let scope, !consent(scope) { throw OpenAIRequestError.consentRequired }
+        guard regionAllowed() else { throw OpenAIRequestError.disabled }
+        // Only the explicit fixed-message check uses nil. App-data requests
+        // still require both provider opt-in and consent for every scope.
+        if let scope {
+            guard enabled() else { throw OpenAIRequestError.disabled }
+            guard consent(scope) else { throw OpenAIRequestError.consentRequired }
+        }
     }
 
     private func validateSession(_ session: UUID, scope: OpenAIDataScope?, additionalScopes: [OpenAIDataScope] = []) throws {
@@ -372,14 +459,35 @@ private final class OpenAIResponseRedirectDelegate: NSObject, URLSessionTaskDele
             return .delta(delta)
         }
         guard type == "response.completed" else { return .ignored }
-        guard let response = event["response"] as? [String: Any],
-              response["status"] as? String == "completed" else { throw OpenAIRequestError.invalidResponse }
+        guard let response = event["response"] as? [String: Any] else { throw OpenAIRequestError.invalidResponse }
+        // The terminal event establishes completion; Response.status is optional
+        // in the public schema. A supplied contradictory/malformed status is not.
+        if let status = response["status"] {
+            guard status as? String == "completed" else { throw OpenAIRequestError.invalidResponse }
+        } else {
+            // Without the optional status, require the final output snapshot;
+            // an empty/malformed response object is not evidence of success.
+            guard response["output"] != nil else { throw OpenAIRequestError.invalidResponse }
+        }
         if let error = response["error"], !(error is NSNull) { throw OpenAIRequestError.failed }
-        if let output = response["output"] as? [[String: Any]] {
-            let text = output.flatMap { $0["content"] as? [[String: Any]] ?? [] }
-                .filter { $0["type"] as? String == "output_text" }
-                .compactMap { $0["text"] as? String }.joined()
-            if !text.isEmpty { return .completed(text) }
+        if let details = response["incomplete_details"], !(details is NSNull) { throw OpenAIRequestError.failed }
+        if let value = response["output"] {
+            guard let output = value as? [[String: Any]] else { throw OpenAIRequestError.invalidResponse }
+            var text = ""
+            for item in output where item["type"] as? String == "message" {
+                if let status = item["status"] {
+                    guard status as? String == "completed" else { throw OpenAIRequestError.invalidResponse }
+                }
+                guard let content = item["content"] as? [[String: Any]] else { throw OpenAIRequestError.invalidResponse }
+                for part in content where part["type"] as? String == "output_text" {
+                    guard let value = part["text"] as? String else { throw OpenAIRequestError.invalidResponse }
+                    text += value
+                }
+            }
+            // An explicit final snapshot is authoritative, even if empty or
+            // invalid. Never resurrect earlier deltas over a bad final output.
+            guard !text.isEmpty else { throw OpenAIRequestError.invalidResponse }
+            return .completed(text)
         }
         return .completed(nil)
     }

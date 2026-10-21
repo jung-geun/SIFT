@@ -32,10 +32,10 @@ final class DiagnosticReportUITests: SIFTUITestCase {
             XCTAssertTrue(send.isEnabled, "취소로 로컬 진단이 삭제되었습니다.")
         }
 
-        step("다시 검토한 뒤 명시적으로 공유 계속") {
+        step("진단 검토 후 로그인 없는 의견 작성 화면 열기") {
             sendReport()
-            tap(app.buttons["diagnostics.preview.continue"], message: "공유 계속 버튼이 없습니다.")
-            require(deliveryScreen, message: "검토 승인 후 메일 또는 공유 화면이 열리지 않았습니다.")
+            tap(app.buttons["diagnostics.preview.continue"], message: "의견 작성 계속 버튼이 없습니다.")
+            require(deliveryScreen, message: "검토 후 인앱 의견 작성 화면이 열리지 않았습니다.")
             let screenshot = XCTAttachment(screenshot: app.screenshot())
             screenshot.name = "Approved diagnostic delivery"
             screenshot.lifetime = .keepAlways
@@ -44,11 +44,7 @@ final class DiagnosticReportUITests: SIFTUITestCase {
     }
 
     private var deliveryScreen: XCUIElement {
-        // UIKit can replace the representable root with its remote share container.
-        app.descendants(matching: .any).matching(NSPredicate(
-            format: "identifier IN %@",
-            ["diagnostics.shareSheet", "diagnostics.mailComposer", "ActivityListView", "ShareSheet.RemoteContainerView"]
-        )).firstMatch
+        app.textFields["feedback.titleField"]
     }
 
     private func sendReport() {

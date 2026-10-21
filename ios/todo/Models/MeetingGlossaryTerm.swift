@@ -6,11 +6,13 @@ import SwiftData
 /// (`AnalysisContext.contextualStrings`) and to hint the correction/summary
 /// prompts toward the user's canonical spelling of names, projects, and terms.
 ///
-/// Local-only: stored in `AppDataContainer.meetingSchema` (CloudKit `.none`),
-/// alongside the transcripts it is derived from. All properties carry defaults so
-/// the model stays lightweight and migration-safe.
+/// Stored locally in `AppDataContainer.meetingSchema` (CloudKit `.none`),
+/// alongside its source transcripts. Explicit full-scope transport is separate
+/// from automatic SwiftData mirroring. Defaults keep migrations lightweight.
 @Model
 final class MeetingGlossaryTerm {
+    /// Canonical spelling and aliases are editable; identity must not change with them.
+    var id: UUID = UUID()
     /// Correct spelling / display form, e.g. "쿠버네티스". Also the dedup key
     /// (case/whitespace-normalized) so repeated observations reinforce one entry.
     var canonical: String = ""

@@ -93,7 +93,7 @@ struct EmailIngestionTests {
     
     @Test("pending email review todos are not automatic calendar candidates")
     func pendingEmailReviewTodosAreNotAutomaticCalendarCandidates() {
-        let pendingDue = Date().addingTimeInterval(3600)
+        let pendingDue = Date(timeIntervalSinceReferenceDate: 800_000_000)
         let pending = Todo(
             title: "광고성 일정 후보",
             notes: "날짜는 있지만 사용자가 등록하지 않은 메일",
@@ -103,7 +103,7 @@ struct EmailIngestionTests {
         )
         pending.triageStatus = TodoTriage.review.rawValue
 
-        let confirmedDue = Date().addingTimeInterval(7200)
+        let confirmedDue = pendingDue.addingTimeInterval(3600)
         let confirmed = Todo(
             title: "확정된 메일 할 일",
             notes: "",
@@ -113,8 +113,12 @@ struct EmailIngestionTests {
         )
         confirmed.triageStatus = TodoTriage.todo.rawValue
 
-        #expect(CalendarService.isAutomaticRegistrationCandidate(pending) == false)
-        #expect(CalendarService.isAutomaticRegistrationCandidate(confirmed) == true)
+        #expect(CalendarService.isAutomaticRegistrationCandidate(
+            pending, autoEnabled: true, sourceFilter: "all"
+        ) == false)
+        #expect(CalendarService.isAutomaticRegistrationCandidate(
+            confirmed, autoEnabled: true, sourceFilter: "all"
+        ) == true)
     }
 
     @Test("applyExtractedItems keeps review email unlinked from calendar")

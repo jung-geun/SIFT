@@ -8,10 +8,11 @@ import SwiftData
 /// isResetup = true : 설정 내 시트(PersonaSettingsView) — 재설정 모드
 struct OnboardingView: View {
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Query(sort: \Persona.updatedAt, order: .reverse) private var personas: [Persona]
     @AppStorage("pieroot.todo.hasOnboarded") private var hasOnboarded = false
 
-    @AppStorage("pieroot.todo.iCloudSyncEnabled") private var iCloudSyncEnabled = false
 
     @Binding var isPresented: Bool
     var isResetup: Bool = false
@@ -21,6 +22,9 @@ struct OnboardingView: View {
     @State private var selectedTypes: Set<PersonaType> = []
     @State private var selectedPresets: Set<String> = []
     @State private var customText: String = ""
+    @State private var syncSetupTask: Task<Void, Never>?
+    @State private var isSettingUpSync = false
+    @State private var syncSetupError: String?
 
     init(isPresented: Binding<Bool>, isResetup: Bool = false) {
         self._isPresented = isPresented
@@ -46,11 +50,13 @@ struct OnboardingView: View {
                     descriptionStep
                 }
             }
+            .frame(maxWidth: 720)
+            .frame(maxWidth: .infinity)
+            .appScreenStyle()
             .navigationTitle(AppLanguage.localized(isResetup ? "페르소나 다시 설정" : "처음 오셨군요!", defaultValue: isResetup ? "페르소나 다시 설정" : "처음 오셨군요!", language: .current, comment: "Persona onboarding title."))
             .navigationBarTitleDisplayMode(.large)
             .toolbar { toolbarContent }
-            .animation(.easeInOut(duration: 0.25), value: step)
-            // 재시작 알림 제거 — AppDataContainer.rebuild()로 동적 전환
+            .animation(AppTheme.motion(reduceMotion: reduceMotion), value: step)
             .task {
                 // 재설정 모드: 유형 + 프리셋 칩 + 커스텀 텍스트 복원
                 guard isResetup, let p = personas.first else { return }
@@ -75,6 +81,12 @@ struct OnboardingView: View {
                 selectedPresets = restoredPresets
                 customText = customParts.joined(separator: ". ")
             }
+            .onDisappear {
+                syncSetupTask?.cancel()
+                if isSettingUpSync {
+                    Task { try? await FullCloudSyncService.shared.setEnabled(false) }
+                }
+            }
         }
     }
 
@@ -92,7 +104,7 @@ struct OnboardingView: View {
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 20)
 
-                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: dynamicTypeSize.isAccessibilitySize ? 1 : 2), spacing: AppTheme.Spacing.item) {
                     ForEach(PersonaType.selectable, id: \.rawValue) { type in
                         typeCard(type)
                     }
@@ -100,18 +112,16 @@ struct OnboardingView: View {
                 .padding(.horizontal, 16)
 
                 Button {
-                    withAnimation { step = 2 }
+                    step = 2
                 } label: {
                     Label("다음", systemImage: "arrow.right")
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 14)
-                        .background(
-                            selectedTypes.isEmpty ? Color.gray.opacity(0.3) : Color.accentColor,
-                            in: RoundedRectangle(cornerRadius: 14)
-                        )
-                        .foregroundStyle(selectedTypes.isEmpty ? Color.secondary : .white)
-                        .fontWeight(.semibold)
+                        .padding(.vertical, AppTheme.Spacing.compact)
+                        .font(.headline)
                 }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .buttonBorderShape(.roundedRectangle(radius: AppTheme.controlRadius))
                 .disabled(selectedTypes.isEmpty)
                 .padding(.horizontal, 20)
                 .padding(.top, 8)
@@ -123,33 +133,34 @@ struct OnboardingView: View {
     private func typeCard(_ type: PersonaType) -> some View {
         let isSelected = selectedTypes.contains(type)
         return Button {
-            withAnimation(.spring(duration: 0.2)) {
-                if isSelected { selectedTypes.remove(type) }
-                else          { selectedTypes.insert(type) }
-                selectedPresets = []
-            }
+            if isSelected { selectedTypes.remove(type) }
+            else          { selectedTypes.insert(type) }
+            selectedPresets = []
         } label: {
-            VStack(spacing: 10) {
+            VStack(spacing: AppTheme.Spacing.item) {
                 Image(systemName: type.systemImage)
-                    .font(.system(size: 28))
-                    .foregroundStyle(isSelected ? .white : Color.accentColor)
+                    .font(.title)
+                    .foregroundStyle(.secondary)
                 Text(type.displayName)
-                    .font(.subheadline.bold())
-                    .foregroundStyle(isSelected ? .white : .primary)
+                    .font(.headline)
+                    .foregroundStyle(.primary)
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 20)
             .background(
-                isSelected ? Color.accentColor : Color(.secondarySystemGroupedBackground),
-                in: RoundedRectangle(cornerRadius: 16)
+                isSelected ? AppTheme.neutralFill : AppTheme.surface,
+                in: RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous)
             )
-            .overlay(
-                RoundedRectangle(cornerRadius: 16)
-                    .stroke(isSelected ? Color.clear : Color(.separator), lineWidth: 1)
-            )
-            .shadow(color: isSelected ? Color.accentColor.opacity(0.3) : .clear, radius: 6, y: 3)
+            .overlay(alignment: .topTrailing) {
+                if isSelected {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(AppTheme.accent)
+                        .padding(AppTheme.Spacing.item)
+                }
+            }
         }
         .buttonStyle(.plain)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 
     // MARK: - Step 1: 자기소개
@@ -165,11 +176,11 @@ struct OnboardingView: View {
                                 Image(systemName: type.systemImage)
                                 Text(type.displayName)
                             }
-                            .font(.subheadline.bold())
+                            .font(.subheadline.weight(.medium))
                             .padding(.horizontal, 12)
                             .padding(.vertical, 6)
-                            .background(Color.accentColor.opacity(0.12), in: Capsule())
-                            .foregroundStyle(Color.accentColor)
+                            .background(AppTheme.insetSurface, in: RoundedRectangle(cornerRadius: AppTheme.controlRadius, style: .continuous))
+                            .foregroundStyle(.secondary)
                         }
                     }
                     .padding(.horizontal, 20)
@@ -201,7 +212,7 @@ struct OnboardingView: View {
                         .lineLimit(3...5)
                         .textFieldStyle(.plain)
                         .padding(12)
-                        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
+                        .background(AppTheme.surface, in: RoundedRectangle(cornerRadius: AppTheme.controlRadius, style: .continuous))
                 }
                 .padding(.horizontal, 20)
 
@@ -211,11 +222,12 @@ struct OnboardingView: View {
                 } label: {
                     Text(AppLanguage.localized(isResetup ? "action.save" : "시작하기", defaultValue: isResetup ? "저장" : "시작하기", language: .current, comment: "Complete persona onboarding."))
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 14)
-                        .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 14))
-                        .foregroundStyle(.white)
-                        .fontWeight(.semibold)
+                        .padding(.vertical, AppTheme.Spacing.compact)
+                        .font(.headline)
                 }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .buttonBorderShape(.roundedRectangle(radius: AppTheme.controlRadius))
                 .padding(.horizontal, 20)
                 .padding(.top, 8)
 
@@ -234,23 +246,21 @@ struct OnboardingView: View {
     private func presetChip(_ text: String) -> some View {
         let isSelected = selectedPresets.contains(text)
         return Button {
-            withAnimation(.spring(duration: 0.15)) {
-                if isSelected { selectedPresets.remove(text) }
-                else          { selectedPresets.insert(text) }
-            }
+            if isSelected { selectedPresets.remove(text) }
+            else          { selectedPresets.insert(text) }
         } label: {
             Text(text)
                 .font(.subheadline)
                 .padding(.horizontal, 14)
-                .padding(.vertical, 8)
+                .padding(.vertical, AppTheme.Spacing.item)
                 .background(
-                    isSelected ? Color.accentColor : Color(.secondarySystemGroupedBackground),
-                    in: Capsule()
+                    isSelected ? AppTheme.neutralFill : AppTheme.surface,
+                    in: RoundedRectangle(cornerRadius: AppTheme.controlRadius, style: .continuous)
                 )
-                .foregroundStyle(isSelected ? .white : .primary)
-                .overlay(Capsule().stroke(isSelected ? Color.clear : Color(.separator), lineWidth: 1))
+                .foregroundStyle(.primary)
         }
         .buttonStyle(.plain)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 
     // MARK: - Step 0: iCloud Sync Setup
@@ -264,7 +274,7 @@ struct OnboardingView: View {
                 
                 Group {
                     if SettingsStore.supportsICloud {
-                        Text("할 일, 페르소나 등의 데이터를 iCloud에 동기화할지 선택해 주세요. 연동 시 다른 기기의 데이터가 즉시 로드됩니다.")
+                        Text(AppLanguage.localized("settings.sync.full.onboardingPrompt", defaultValue: "로컬 실행은 iCloud 없이도 사용할 수 있습니다. iCloud를 선택하면 메일·회의 녹음까지 포함한 앱 데이터를 같은 Apple 계정에서 저장·복원합니다. 다른 기기에는 Apple의 전송 완료 후 적용됩니다.", language: .current))
                     } else {
                         Text(AppLanguage.localized(
                             "settings.sync.unavailableMessage",
@@ -282,63 +292,56 @@ struct OnboardingView: View {
                     // Option 1: iCloud Sync
                     Button {
                         guard SettingsStore.supportsICloud else { return }
-                        withAnimation(.spring(duration: 0.2)) {
-                            tempICloudSync = true
-                        }
+                        tempICloudSync = true
                     } label: {
                         VStack(alignment: .leading, spacing: 12) {
                             HStack {
                                 Label("iCloud 동기화 활성화", systemImage: "cloud.fill")
                                     .font(.headline)
-                                    .foregroundStyle(tempICloudSync ? .white : .accentColor)
+                                    .foregroundStyle(.primary)
                                 Spacer()
                                 if tempICloudSync {
                                     Image(systemName: "checkmark.circle.fill")
-                                        .foregroundStyle(.white)
+                                        .foregroundStyle(AppTheme.accent)
                                 }
                             }
-                            Text("페르소나, 할 일, 감사 기록을 iCloud를 통해 동일한 Apple ID의 모든 기기와 안전하게 동기화합니다. 기존 기기의 데이터가 있는 경우 자동으로 불러옵니다.")
+                            Text(AppLanguage.localized("settings.sync.full.onboardingScope", defaultValue: "할 일·페르소나·분석·메일 본문·회의 음성/전사·루틴·학습 사전·설정·연결 정보를 저장합니다. 건강정보·OS 권한·재다운로드 가능한 모델 파일은 제외합니다. iCloud 키체인이 필요하며 ChatGPT 전송 동의와는 별개입니다.", language: .current))
                                 .font(.caption)
-                                .foregroundStyle(tempICloudSync ? .white.opacity(0.8) : .secondary)
+                                .foregroundStyle(.secondary)
                                 .multilineTextAlignment(.leading)
                                 .lineSpacing(4)
                         }
                         .padding()
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(
-                            tempICloudSync ? Color.accentColor : Color(.secondarySystemGroupedBackground),
-                            in: RoundedRectangle(cornerRadius: 16)
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 16)
-                                .stroke(tempICloudSync ? Color.clear : Color(.separator), lineWidth: 1)
+                            tempICloudSync ? AppTheme.neutralFill : AppTheme.surface,
+                            in: RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous)
                         )
                     }
                     .buttonStyle(.plain)
+                    .accessibilityAddTraits(tempICloudSync ? .isSelected : [])
                     .disabled(!SettingsStore.supportsICloud)
                     .opacity(SettingsStore.supportsICloud ? 1 : 0.5)
                     
                     // Option 2: Local Only
                     Button {
-                        withAnimation(.spring(duration: 0.2)) {
-                            tempICloudSync = false
-                        }
+                        tempICloudSync = false
                     } label: {
                         VStack(alignment: .leading, spacing: 12) {
                             HStack {
                                 Label("이 기기에만 저장 (로컬)", systemImage: "folder")
                                     .font(.headline)
-                                    .foregroundStyle(!tempICloudSync ? .white : .primary)
+                                    .foregroundStyle(.primary)
                                 Spacer()
                                 if !tempICloudSync {
                                     Image(systemName: "checkmark.circle.fill")
-                                        .foregroundStyle(.white)
+                                        .foregroundStyle(AppTheme.accent)
                                 }
                             }
                             if SettingsStore.supportsICloud {
                                 Text("데이터를 클라우드에 업로드하지 않고 현재 기기에만 보관합니다. 추후 설정에서 언제든지 iCloud 동기화를 켤 수 있습니다.")
                                     .font(.caption)
-                                    .foregroundStyle(!tempICloudSync ? .white.opacity(0.8) : .secondary)
+                                    .foregroundStyle(.secondary)
                                     .multilineTextAlignment(.leading)
                                     .lineSpacing(4)
                             }
@@ -346,40 +349,46 @@ struct OnboardingView: View {
                         .padding()
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(
-                            !tempICloudSync ? Color.accentColor : Color(.secondarySystemGroupedBackground),
-                            in: RoundedRectangle(cornerRadius: 16)
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 16)
-                                .stroke(!tempICloudSync ? Color.clear : Color(.separator), lineWidth: 1)
+                            !tempICloudSync ? AppTheme.neutralFill : AppTheme.surface,
+                            in: RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous)
                         )
                     }
                     .buttonStyle(.plain)
+                    .accessibilityAddTraits(!tempICloudSync ? .isSelected : [])
                 }
                 .padding(.horizontal, 20)
                 
                 Button {
                     if SettingsStore.supportsICloud && tempICloudSync {
-                        iCloudSyncEnabled = true
-                        SettingsStore.shared.uploadLocalSettingsToCloud()
-                        KeychainStore.applySyncPolicy()
-                        hasOnboarded = true
-                        AppDataContainer.shared.rebuild(useICloud: true)
-                    } else {
-                        withAnimation {
-                            step = 1
+                        isSettingUpSync = true
+                        syncSetupError = nil
+                        syncSetupTask = Task {
+                            defer { isSettingUpSync = false }
+                            do {
+                                try await FullCloudSyncService.shared.setEnabled(true)
+                                hasOnboarded = true
+                            } catch is CancellationError { }
+                            catch { syncSetupError = FullCloudSyncService.shared.errorMessage }
                         }
+                    } else {
+                        step = 1
                     }
                 } label: {
                     Text(AppLanguage.localized(SettingsStore.supportsICloud && tempICloudSync ? "iCloud 연동하고 시작하기" : "로컬 전용으로 다음 단계 진행", defaultValue: SettingsStore.supportsICloud && tempICloudSync ? "iCloud 연동하고 시작하기" : "로컬 전용으로 다음 단계 진행", language: .current, comment: "Continue onboarding with the chosen storage mode."))
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 14)
-                        .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 14))
-                        .foregroundStyle(.white)
-                        .fontWeight(.semibold)
+                        .padding(.vertical, AppTheme.Spacing.compact)
+                        .font(.headline)
                 }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .buttonBorderShape(.roundedRectangle(radius: AppTheme.controlRadius))
                 .padding(.horizontal, 20)
                 .padding(.top, 8)
+                .disabled(isSettingUpSync)
+                if isSettingUpSync { ProgressView().frame(maxWidth: .infinity) }
+                if let syncSetupError {
+                    Text(syncSetupError).font(.caption).foregroundStyle(.orange).padding(.horizontal, 20)
+                }
             }
             .padding(.vertical, 24)
         }
@@ -391,7 +400,7 @@ struct OnboardingView: View {
     private var toolbarContent: some ToolbarContent {
         ToolbarItem(placement: .navigationBarLeading) {
             if step == 2 || (step == 1 && !isResetup) {
-                Button("이전") { withAnimation { step -= 1 } }
+                Button("이전") { step -= 1 }
             }
         }
         ToolbarItem(placement: .navigationBarTrailing) {

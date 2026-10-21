@@ -2,7 +2,6 @@ import SwiftUI
 import SwiftData
 import UserNotifications
 import Combine
-import TipKit
 enum AppTutorialStep: String, CaseIterable, Identifiable {
     case addTodoOpen
     case addTodoTitle
@@ -80,7 +79,7 @@ enum AppTutorialScreen {
     case personaDetail
     case aiDetail
     case emailDetail
-    case permissionsDetail
+    case todoSettings
     case calendarTab
     case mailTab
 }
@@ -89,13 +88,15 @@ struct AppTutorialHint: Equatable {
     let title: String
     let body: String
     var allowsNextAction = false
+    var titleKey: String? = nil
+    var bodyKey: String? = nil
 
     var localizedTitle: String {
-        AppTutorialCopy.localized(title)
+        AppTutorialCopy.localized(title, key: titleKey)
     }
 
     var localizedBody: String {
-        AppTutorialCopy.localized(body, isBody: true)
+        AppTutorialCopy.localized(body, isBody: true, key: bodyKey)
     }
 }
 
@@ -105,15 +106,14 @@ struct AppTutorialCompletionNotice: Identifiable, Equatable {
 
 private enum AppTutorialCopy {
     static var next: String { localized("다음") }
-    static var close: String { AppLanguage.localized("action.close", defaultValue: "닫기", language: .current, comment: "Close button label.") }
     static var endTutorial: String { localized("튜토리얼 종료") }
     static var completionTitle: String { localized("튜토리얼 완료") }
     static var completionMessage: String { localized("튜토리얼을 다시 확인하고 싶다면 할 일 > 더 보기 > 설정 > 앱 정보 > 튜토리얼 다시 시작에 있습니다.", isBody: true) }
     static var confirm: String { localized("확인") }
 
-    static func localized(_ korean: String, isBody: Bool = false) -> String {
+    static func localized(_ korean: String, isBody: Bool = false, key: String? = nil) -> String {
         AppLanguage.localized(
-            "tutorial.\(isBody ? "body." : "")\(korean)",
+            key ?? "tutorial.\(isBody ? "body." : "")\(korean)",
             defaultValue: korean,
             language: .current,
             comment: isBody ? "Tutorial hint body." : "Tutorial hint title or action."
@@ -127,14 +127,12 @@ final class AppTutorialState: ObservableObject {
     @Published var currentStep: AppTutorialStep?
     @Published var tabVisibility = AppTabVisibility(calendarVisible: false, mailVisible: false)
     @Published var completionNotice: AppTutorialCompletionNotice?
-    @Published private(set) var sessionID = UUID().uuidString
 
     private var visitedCalendarTab = false
     private var visitedMailTab = false
 
     func start(tabVisibility: AppTabVisibility) {
         self.tabVisibility = tabVisibility
-        sessionID = UUID().uuidString
         visitedCalendarTab = false
         visitedMailTab = false
         currentStep = AppTutorialStep.sequence(
@@ -302,7 +300,8 @@ final class AppTutorialState: ObservableObject {
         case (.priorityRules, .todoList):
             return AppTutorialHint(
                 title: "설정 다시 열기",
-                body: "우측 상단 더 보기 > 설정을 눌러 TODO 우선순위 규칙 항목으로 이동해보세요."
+                body: "우측 상단 더 보기 > 설정 > 할 일 > TODO 우선순위 규칙으로 이동해보세요.",
+                bodyKey: "tutorial.todoSettings.priorityRules.fromTodoList.body"
             )
 
         case (.emailOptional, .todoList):
@@ -314,7 +313,8 @@ final class AppTutorialState: ObservableObject {
         case (.permissions, .todoList):
             return AppTutorialHint(
                 title: "설정 다시 열기",
-                body: "우측 상단 더 보기 > 설정을 눌러 시스템 권한 및 상태 항목을 확인해보세요."
+                body: "우측 상단 더 보기 > 설정 > 할 일에서 알림 권한을 확인해보세요.",
+                bodyKey: "tutorial.todoSettings.notifications.fromTodoList.body"
             )
 
         case (.persona, .todoList):
@@ -336,7 +336,14 @@ final class AppTutorialState: ObservableObject {
         case (.priorityRules, .settings):
             return AppTutorialHint(
                 title: "우선순위 규칙",
-                body: "TODO 우선순위 규칙을 눌러 자동 정렬이 사용하는 규칙을 확인해보세요."
+                body: "할 일을 눌러 TODO 우선순위 규칙이 있는 화면으로 이동해보세요.",
+                bodyKey: "tutorial.todoSettings.priorityRules.fromSettings.body"
+            )
+        case (.priorityRules, .todoSettings):
+            return AppTutorialHint(
+                title: "우선순위 규칙",
+                body: "TODO 우선순위 규칙을 눌러 자동 정렬이 사용하는 규칙을 확인해보세요.",
+                bodyKey: "tutorial.todoSettings.priorityRules.openRules.body"
             )
         case (.priorityRules, .aiDetail):
             return AppTutorialHint(
@@ -357,13 +364,17 @@ final class AppTutorialState: ObservableObject {
 
         case (.permissions, .settings):
             return AppTutorialHint(
-                title: "시스템 권한",
-                body: "시스템 권한 및 상태를 눌러 알림과 캘린더 권한 상태를 확인해보세요."
+                title: "알림 권한",
+                body: "할 일을 눌러 알림 권한 상태를 확인해보세요.",
+                titleKey: "tutorial.todoSettings.notifications.title",
+                bodyKey: "tutorial.todoSettings.notifications.fromSettings.body"
             )
-        case (.permissions, .permissionsDetail):
+        case (.permissions, .todoSettings):
             return AppTutorialHint(
-                title: "권한 허용",
-                body: "필요하면 허용 버튼으로 알림과 캘린더 권한을 주세요. 확인했으면 뒤로 돌아가 계속하세요."
+                title: "알림 권한",
+                body: "필요하면 알림 권한을 허용해 마감 알림을 받으세요. 알림은 선택이며, 허용하지 않아도 뒤로 돌아가 튜토리얼을 계속할 수 있습니다.",
+                titleKey: "tutorial.todoSettings.notifications.title",
+                bodyKey: "tutorial.todoSettings.notifications.reviewPermission.body"
             )
 
         case (.calendarEnabled, .settings):
@@ -407,7 +418,8 @@ final class AppTutorialState: ObservableObject {
         case (.autoSort, .todoList):
             return AppTutorialHint(
                 title: "AI 정리 실행",
-                body: "왼쪽 위 AI 정리 버튼을 눌러 실제 자동 정렬을 실행해보세요. 할 일이 없으면 먼저 하나 추가한 뒤 눌러보세요."
+                body: "AI 정리 버튼을 눌러 실제 자동 정렬을 실행해보세요. 할 일이 없으면 먼저 하나 추가한 뒤 눌러보세요.",
+                bodyKey: "tutorial.body.왼쪽 위 AI 정리 버튼을 눌러 실제 자동 정렬을 실행해보세요. 할 일이 없으면 먼저 하나 추가한 뒤 눌러보세요."
             )
 
         default:
@@ -456,6 +468,29 @@ extension EnvironmentValues {
         set { self[AppTutorialStateKey.self] = newValue }
     }
 }
+// An EnvironmentKey carries a reference but does not subscribe to its publisher.
+// Re-evaluate controls and scroll targets as well as the hint when steps change.
+// Place inside lazy navigation/scroll builders so their task IDs see each step.
+struct AppTutorialObserving<Content: View>: View {
+    @Environment(\.appTutorialState) private var tutorial
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        if let tutorial {
+            AppTutorialObservedContent(tutorial: tutorial, content: content)
+        } else {
+            content()
+        }
+    }
+}
+
+private struct AppTutorialObservedContent<Content: View>: View {
+    @ObservedObject var tutorial: AppTutorialState
+    let content: () -> Content
+
+    var body: some View { content() }
+}
+
 
 struct AppTutorialView: View {
     @Binding var selectedTab: Int
@@ -464,6 +499,7 @@ struct AppTutorialView: View {
     @Environment(\.appTutorialState) private var tutorial
 
     var body: some View {
+        AppTutorialObserving {
         Color.clear
             .allowsHitTesting(false)
             .onAppear {
@@ -483,117 +519,115 @@ struct AppTutorialView: View {
             } message: {
                 Text(AppTutorialCopy.completionMessage)
             }
-    }
-}
-
-@available(iOS 17.0, *)
-private struct AppTutorialTip: Tip {
-    let id: String
-    let hint: AppTutorialHint
-
-    var title: Text {
-        Text(hint.localizedTitle)
-    }
-
-    var message: Text? {
-        Text(hint.localizedBody)
-    }
-
-    var image: Image? {
-        Image(systemName: "lightbulb")
-    }
-
-    var actions: [Action] {
-        var actions: [Action] = []
-        if hint.allowsNextAction {
-            actions.append(Action(id: "next", title: AppTutorialCopy.next))
         }
-        actions.append(Action(id: "end-tutorial", title: AppTutorialCopy.endTutorial))
-        return actions
-    }
-
-    var options: [Option] {
-        IgnoresDisplayFrequency(true)
     }
 }
 
+/// Toolbar guidance stays under the toolbar, never over its buttons. Guidance
+/// for an entire screen has no pointer pretending to identify a single control.
 struct AppTutorialTipHost: View {
     @ObservedObject var tutorial: AppTutorialState
     let screen: AppTutorialScreen
 
+    private var showsHint: Bool {
+        switch screen {
+        case .todoList, .personaDetail, .aiDetail, .emailDetail, .calendarTab, .mailTab:
+            return true
+        case .settings:
+            return tutorial.currentStep == .calendarEnabled || tutorial.currentStep == .mailEnabled
+                || tutorial.currentStep == .autoSort
+        case .addTodo:
+            return tutorial.currentStep == .addTodoSave
+        case .todoSettings:
+            return false
+        }
+    }
+
+    private var isToolbarHint: Bool {
+        switch screen {
+        case .todoList, .settings, .addTodo: true
+        default: false
+        }
+    }
+
     var body: some View {
-        if let hint = tutorial.hint(for: screen) {
-            AppTutorialTipView(hint: hint)
+        if showsHint, let hint = tutorial.hint(for: screen) {
+            AppTutorialCard(hint: hint)
                 .environment(\.appTutorialState, tutorial)
+                .frame(maxWidth: isToolbarHint ? 360 : 520)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .frame(maxWidth: .infinity, alignment: isToolbarHint ? .trailing : .leading)
         }
     }
 }
 
-struct AppTutorialTipView: View {
-    let hint: AppTutorialHint
-
+private struct AppTutorialAnchorModifier: ViewModifier {
     @Environment(\.appTutorialState) private var tutorial
+    let screen: AppTutorialScreen
+    let steps: [AppTutorialStep]
+    let above: Bool
 
-    private var tipID: String {
-        "\(tutorial?.sessionID ?? "standalone")-\(hint.title)-\(hint.body)"
+    func body(content: Content) -> some View {
+        if let tutorial {
+            content.modifier(AppTutorialObservedAnchor(
+                tutorial: tutorial, screen: screen, steps: steps, above: above
+            ))
+        } else {
+            content
+        }
+    }
+}
+
+private struct AppTutorialObservedAnchor: ViewModifier {
+    @ObservedObject var tutorial: AppTutorialState
+    let screen: AppTutorialScreen
+    let steps: [AppTutorialStep]
+    let above: Bool
+
+    private var hint: AppTutorialHint? {
+        guard let step = tutorial.currentStep, steps.contains(step) else { return nil }
+        return tutorial.hint(for: screen)
     }
 
-    var body: some View {
-        if hint.allowsNextAction {
-            AppTutorialFallbackCard(hint: hint)
-                .padding(.horizontal, 16)
-                .padding(.bottom, 12)
-        } else if #available(iOS 17.0, *) {
-            TipView(
-                AppTutorialTip(id: tipID, hint: hint),
-                arrowEdge: .bottom
-            ) { action in
-                if action.id == "end-tutorial" {
-                    tutorial?.stop(markCompleted: true)
-                }
+    func body(content: Content) -> some View {
+        if let hint {
+            // Inline layout reserves space for the hint. There is no dismiss
+            // region, coordinate conversion, or transparent view over the target.
+            VStack(alignment: .leading, spacing: 10) {
+                if above { AppTutorialCard(hint: hint).frame(maxWidth: 420) }
+                content
+                if !above { AppTutorialCard(hint: hint).frame(maxWidth: 420) }
             }
-            .id(tipID)
-            .tint(AppTheme.accent)
-            .padding(.horizontal, 16)
-            .padding(.bottom, 12)
         } else {
-            AppTutorialFallbackCard(hint: hint)
-                .padding(.horizontal, 16)
-                .padding(.bottom, 12)
+            content
         }
+    }
+}
+
+extension View {
+    func appTutorialAnchor(
+        screen: AppTutorialScreen, steps: [AppTutorialStep], above: Bool = false
+    ) -> some View {
+        modifier(AppTutorialAnchorModifier(screen: screen, steps: steps, above: above))
     }
 }
 
 struct AppTutorialGlowModifier: ViewModifier {
     let active: Bool
-    @State private var isLit = false
 
     func body(content: Content) -> some View {
         content
             .overlay {
                 if active {
-                    RoundedRectangle(cornerRadius: 10)
-                        .stroke(AppTheme.accent.opacity(isLit ? 0.95 : 0.35), lineWidth: 2)
+                    RoundedRectangle(cornerRadius: AppTheme.controlRadius, style: .continuous)
+                        .stroke(AppTheme.accent.opacity(0.6), lineWidth: 2)
                         .padding(-5)
-                        .shadow(color: AppTheme.accent.opacity(isLit ? 0.65 : 0.2), radius: isLit ? 10 : 3)
                         .allowsHitTesting(false)
                 }
             }
-            .onAppear { updatePulse(active) }
-            .onChange(of: active) { _, newValue in
-                updatePulse(newValue)
-            }
     }
 
-    private func updatePulse(_ shouldPulse: Bool) {
-        if shouldPulse {
-            withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
-                isLit = true
-            }
-        } else {
-            isLit = false
-        }
-    }
 }
 
 extension View {
@@ -602,26 +636,27 @@ extension View {
     }
 }
 
-private struct AppTutorialFallbackCard: View {
+private struct AppTutorialCard: View {
     let hint: AppTutorialHint
 
     @Environment(\.appTutorialState) private var tutorial
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: AppTheme.Spacing.item) {
             HStack(alignment: .top) {
                 Text(hint.localizedTitle)
-                    .font(.subheadline.weight(.semibold))
+                    .font(.headline)
                 Spacer()
-                Button(AppTutorialCopy.close) {
+                Button(AppTutorialCopy.endTutorial) {
                     tutorial?.stop(markCompleted: true)
                 }
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
+                .accessibilityIdentifier("tutorial.end")
             }
 
             Text(hint.localizedBody)
-                .font(.caption)
+                .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -631,16 +666,16 @@ private struct AppTutorialFallbackCard: View {
                 }
                 .font(.caption.weight(.semibold))
                 .buttonStyle(.borderedProminent)
+                .accessibilityIdentifier("tutorial.next")
                 .controlSize(.small)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(12)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(Color.accentColor.opacity(0.18), lineWidth: 1)
-        )
+        .padding(AppTheme.Spacing.section)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous))
+        .buttonStyle(.borderless)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("tutorial.hint")
     }
 }
 

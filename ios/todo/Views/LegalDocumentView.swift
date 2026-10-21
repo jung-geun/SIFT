@@ -54,7 +54,7 @@ struct LegalDocumentView: View {
 
     var body: some View {
         ScrollView {
-            VStack(spacing: 12) {
+            VStack(spacing: AppTheme.Spacing.item) {
                 legalHeader
 
                 switch document {
@@ -64,32 +64,33 @@ struct LegalDocumentView: View {
 
                 webLinkFooter
             }
+            .frame(maxWidth: 760)
+            .frame(maxWidth: .infinity)
             .padding(.horizontal, 16)
-            .padding(.vertical, 20)
+            .padding(.vertical, AppTheme.Spacing.section)
         }
         .navigationTitle(document.displayTitle)
         .navigationBarTitleDisplayMode(.inline)
-        .background(Color(.systemGroupedBackground))
+        .background(AppTheme.canvas)
     }
 
     private var legalHeader: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(document.displayTitle)
                 .font(.title2.bold())
-            HStack {
+            VStack(alignment: .leading, spacing: 4) {
                 Label(
                     AppLanguage.localized("legal.developer", defaultValue: "개인 개발자 jung-geun", language: .current, comment: "Legal document developer attribution."),
                     systemImage: "person.circle"
                 )
-                Spacer()
                 Text(document.effectiveDate)
             }
-            .font(.caption)
+            .font(.footnote)
             .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
-        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
+        .background(AppTheme.surface, in: RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous))
     }
 
     private var webLinkFooter: some View {
@@ -103,10 +104,10 @@ struct LegalDocumentView: View {
                 ),
                 systemImage: "safari"
             )
-                .font(.subheadline)
+                .font(.body)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 12)
-                .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10))
+                .background(AppTheme.surface, in: RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous))
         }
     }
 }
@@ -119,20 +120,19 @@ private struct LegalCard<Content: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 10) {
-                Text("\(number)")
-                    .font(.caption.bold())
-                    .foregroundStyle(.white)
-                    .frame(width: 22, height: 22)
-                    .background(Color.accentColor, in: Circle())
+            HStack(alignment: .firstTextBaseline, spacing: AppTheme.Spacing.compact) {
+                Text("\(number).")
+                    .foregroundStyle(.secondary)
                 Text(legalLocalized(title))
+                    .fixedSize(horizontal: false, vertical: true)
             }
+            .font(.headline)
             Divider()
             content()
         }
         .padding()
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
+        .background(AppTheme.surface, in: RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous))
     }
 }
 
@@ -140,7 +140,7 @@ private struct LegalSubTitle: View {
     let text: String
     var body: some View {
         Text(legalLocalized(text))
-            .font(.subheadline.bold())
+            .font(.headline)
     }
 }
 
@@ -148,7 +148,7 @@ private struct LegalBody: View {
     let text: String
     var body: some View {
         Text(legalLocalized(text))
-            .font(.subheadline)
+            .font(.body)
             .fixedSize(horizontal: false, vertical: true)
     }
 }
@@ -160,8 +160,8 @@ private struct LegalBullets: View {
         VStack(alignment: .leading, spacing: 5) {
             ForEach(items, id: \.self) { item in
                 HStack(alignment: .top, spacing: 8) {
-                    Text("•").font(.subheadline).foregroundStyle(.secondary)
-                    Text(legalLocalized(item)).font(.subheadline).fixedSize(horizontal: false, vertical: true)
+                    Text("•").font(.body).foregroundStyle(.secondary)
+                    Text(legalLocalized(item)).font(.body).fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
@@ -175,9 +175,9 @@ private struct LegalLocalizedBullets: View {
         VStack(alignment: .leading, spacing: 5) {
             ForEach(items, id: \.key) { item in
                 HStack(alignment: .top, spacing: 8) {
-                    Text("•").font(.subheadline).foregroundStyle(.secondary)
+                    Text("•").font(.body).foregroundStyle(.secondary)
                     Text(legalCopy(item.key, defaultValue: item.defaultValue))
-                        .font(.subheadline)
+                        .font(.body)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -187,13 +187,18 @@ private struct LegalLocalizedBullets: View {
 
 private struct InfoBox: View {
     let text: String
+    var localizationKey: String? = nil
+    private var localizedText: String {
+        if let localizationKey { return legalCopy(localizationKey, defaultValue: text) }
+        return legalLocalized(text)
+    }
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "info.circle.fill").foregroundStyle(.blue).font(.subheadline)
-            Text(legalLocalized(text)).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            Image(systemName: "info.circle").foregroundStyle(.secondary).font(.body)
+            Text(localizedText).font(.body).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
-        .padding(10)
-        .background(Color.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+        .padding(AppTheme.Spacing.item)
+        .background(AppTheme.insetSurface, in: RoundedRectangle(cornerRadius: AppTheme.controlRadius, style: .continuous))
     }
 }
 
@@ -224,6 +229,7 @@ nonisolated private struct LegalTableCell: Hashable {
 }
 
 private struct LegalTable: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     let headers: [LegalTableCell]
     let rows: [[LegalTableCell]]
 
@@ -238,15 +244,35 @@ private struct LegalTable: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            tableRow(cells: headers, isHeader: true, isEven: false)
-            ForEach(Array(rows.enumerated()), id: \.offset) { i, row in
-                Divider()
-                tableRow(cells: row, isHeader: false, isEven: i.isMultiple(of: 2))
+        if dynamicTypeSize.isAccessibilitySize {
+            VStack(alignment: .leading, spacing: AppTheme.Spacing.item) {
+                ForEach(Array(rows.enumerated()), id: \.offset) { index, row in
+                    if index > 0 { Divider() }
+                    VStack(alignment: .leading, spacing: AppTheme.Spacing.item) {
+                        ForEach(Array(row.enumerated()), id: \.offset) { column, cell in
+                            VStack(alignment: .leading, spacing: 4) {
+                                if headers.indices.contains(column) {
+                                    Text(headers[column].localized)
+                                        .font(.headline)
+                                }
+                                Text(cell.localized)
+                                    .font(.body)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
+                }
             }
+        } else {
+            VStack(spacing: 0) {
+                tableRow(cells: headers, isHeader: true, isEven: false)
+                ForEach(Array(rows.enumerated()), id: \.offset) { i, row in
+                    Divider()
+                    tableRow(cells: row, isHeader: false, isEven: i.isMultiple(of: 2))
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: AppTheme.controlRadius, style: .continuous))
         }
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color(.separator), lineWidth: 0.5))
     }
 
     @ViewBuilder
@@ -254,15 +280,15 @@ private struct LegalTable: View {
         HStack(alignment: .top, spacing: 0) {
             ForEach(Array(cells.enumerated()), id: \.offset) { i, cell in
                 Text(cell.localized)
-                    .font(isHeader ? .caption.bold() : .caption)
+                    .font(isHeader ? .footnote.weight(.semibold) : .footnote)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 6)
                     .background(
                         isHeader
-                            ? Color.accentColor.opacity(0.15)
-                            : (isEven ? Color(.systemGroupedBackground) : Color(.secondarySystemGroupedBackground))
+                            ? AppTheme.neutralFill
+                            : (isEven ? AppTheme.canvas : AppTheme.surface)
                     )
                 if i < cells.count - 1 {
                     Rectangle().fill(Color(.separator)).frame(width: 0.5)
@@ -279,26 +305,22 @@ private struct ThirdPartyCard: View {
     let provider: String
     let items: String
     let url: URL
+    var itemsLocalizationKey: String? = nil
 
     var body: some View {
-        HStack(alignment: .center, spacing: 10) {
+        VStack(alignment: .leading, spacing: AppTheme.Spacing.compact) {
             VStack(alignment: .leading, spacing: 3) {
-                Text(legalLocalized(name)).font(.subheadline.bold())
-                Text(legalLocalized(provider)).font(.caption2).foregroundStyle(.secondary)
-                Text(legalLocalized(items)).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Text(legalLocalized(name)).font(.headline)
+                Text(legalLocalized(provider)).font(.footnote).foregroundStyle(.secondary)
+                Text(itemsLocalizationKey.map { legalCopy($0, defaultValue: items) } ?? legalLocalized(items)).font(.body).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
-            Spacer()
             Link(destination: url) {
                 Text(legalLocalized("방침 보기"))
-                    .font(.caption2.bold())
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .background(Color.accentColor.opacity(0.12), in: Capsule())
-                    .foregroundStyle(Color.accentColor)
+                    .font(.body)
             }
         }
-        .padding(10)
-        .background(Color(.tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 8))
+        .padding(AppTheme.Spacing.item)
+        .background(AppTheme.insetSurface, in: RoundedRectangle(cornerRadius: AppTheme.controlRadius, style: .continuous))
     }
 }
 
@@ -327,13 +349,13 @@ private struct PrivacyPolicyContent: View {
             )
 
             LegalSubTitle(text: "1-3. 이메일 연동 (Gmail·Outlook, 선택, 명시적 동의 후 활성화)")
-            LegalBullets([
-                "수집 항목: 메시지 제목·발신자·스니펫·본문. Gmail OAuth는 gmail.modify 권한으로 열람·읽음 처리·휴지통 동작을 제공하며 IMAP 연결은 Gmail·Outlook 앱 비밀번호를 사용",
-                "목적: 마감·일정 관련 이메일에서 할 일 자동 추출",
-                "저장 위치: 기기 내 별도 로컬 전용 저장소 — 기본적으로 iCloud 동기화 및 외부 전송 차단",
-                "OAuth 토큰·IMAP 앱 비밀번호: 기기 Keychain에만 저장하고 해당 제공자의 인증에 사용",
-                "HTML 메일을 열면 HTTPS 이미지·스타일·글꼴을 자동으로 불러올 수 있으며, 해당 외부 호스트는 열람 시각과 기기 IP를 기록할 수 있음. JavaScript·양식·프레임·미디어·HTTP 리소스는 차단",
-                "자동 메일 후보·요약은 기기 내에서 처리합니다. 메일 전송 동의 후 상세에서 직접 외부 분석을 요청할 때만 선택한 메일의 제목·평문 본문을 OpenAI로 전송하며 원문과 로컬 요약은 보존합니다.",
+            LegalLocalizedBullets(items: [
+                ("legal.text.수집 항목: 메시지 제목·발신자·스니펫·본문. Gmail OAuth는 gmail.modify 권한으로 열람·읽음 처리·휴지통 동작을 제공하며 IMAP 연결은 Gmail·Outlook 앱 비밀번호를 사용", "수집 항목: 메시지 제목·발신자·스니펫·본문. Gmail OAuth는 gmail.modify 권한으로 열람·읽음 처리·휴지통 동작을 제공하며 IMAP 연결은 Gmail·Outlook 앱 비밀번호를 사용"),
+                ("legal.text.목적: 마감·일정 관련 이메일에서 할 일 자동 추출", "목적: 마감·일정 관련 이메일에서 할 일 자동 추출"),
+                ("legal.privacy.email.storage", "메시지는 우선 기기에 저장합니다. 전체 iCloud 저장에 명시적으로 동의하면 메일 본문과 분석 결과도 같은 Apple 계정에서 저장·복원합니다. 이는 외부 AI로 데이터를 전송하는 동의가 아닙니다."),
+                ("legal.privacy.email.credentials", "OAuth 토큰·IMAP 앱 비밀번호는 해당 제공자의 인증을 위해 Keychain에 저장합니다. 전체 iCloud 저장을 켜면 같은 Apple 계정의 기기에서 iCloud 키체인을 통해 복원할 수 있습니다."),
+                ("legal.text.HTML 메일을 열면 HTTPS 이미지·스타일·글꼴을 자동으로 불러올 수 있으며, 해당 외부 호스트는 열람 시각과 기기 IP를 기록할 수 있음. JavaScript·양식·프레임·미디어·HTTP 리소스는 차단", "HTML 메일을 열면 HTTPS 이미지·스타일·글꼴을 자동으로 불러올 수 있으며, 해당 외부 호스트는 열람 시각과 기기 IP를 기록할 수 있음. JavaScript·양식·프레임·미디어·HTTP 리소스는 차단"),
+                ("legal.text.자동 메일 후보·요약은 기기 내에서 처리합니다. 메일 전송 동의 후 상세에서 직접 외부 분석을 요청할 때만 선택한 메일의 제목·평문 본문을 OpenAI로 전송하며 원문과 로컬 요약은 보존합니다.", "자동 메일 후보·요약은 기기 내에서 처리합니다. 메일 전송 동의 후 상세에서 직접 외부 분석을 요청할 때만 선택한 메일의 제목·평문 본문을 OpenAI로 전송하며 원문과 로컬 요약은 보존합니다."),
             ])
 
             LegalSubTitle(text: "1-4. 캘린더 연동 (선택, 시스템 권한 허용 후 활성화)")
@@ -343,6 +365,9 @@ private struct PrivacyPolicyContent: View {
             ])
             LegalLocalizedBullets(items: [
                 ("legal.privacy.calendar.remoteBoundary", "처리 위치: 기기 내 EventKit. OpenAI로 보내는 별도 캘린더 이벤트 컨텍스트는 제목을 Busy로 가리고 시작·종료 시각만 포함합니다. 다만 외부 캘린더에서 가져와 진행중으로 확정한 할 일은 일반 할 일 공유 동의 범위에 포함되어 제목·메모가 전송될 수 있습니다."),
+                ("calendar.settings.autoRegisterFooter", "선택한 출처의 마감이 있는 진행 중 할 일만 자동으로 등록합니다. 검토 대기·캘린더 출처 할 일과 건강 루틴은 제외됩니다. 긴급·최우선 할 일도 이 동의가 필요합니다. 캘린더 접근 권한과 쓰기 가능한 등록 대상이 필요하며, 자동 등록을 꺼도 기존 일정은 삭제되지 않습니다."),
+                ("calendar.settings.completionFooter", "'일정 유지'는 일정을 그대로 둡니다. 기본값인 '알람만 끄기'는 일정은 남기고 알람만 끕니다. '이벤트 삭제'는 일정을 삭제합니다. 이 처리는 SIFT가 해당 할 일을 위해 만든 일정에만 적용되며, 외부 캘린더의 원본 일정에는 적용되지 않습니다."),
+                ("calendar.destination.footer", "일정을 내보내기 전에 쓰기 가능한 캘린더를 선택하세요. 이 선택은 이 기기에만 저장됩니다. 캘린더는 자동으로 선택되지 않으며 시스템 기본값도 명시적으로 선택해야 합니다. 위 항목을 열어 캘린더를 선택하거나 사용할 수 없는 대상을 바꾸세요."),
             ])
 
             LegalSubTitle(text: "1-5. 할 일 우선순위 정렬 AI")
@@ -366,41 +391,87 @@ private struct PrivacyPolicyContent: View {
                 ("legal.privacy.diagnostics.collected", "수집 항목: 오류 발생 시각·반복 횟수, 소스 파일·줄 번호·함수, 오류 도메인·코드·유형·메시지(파일 경로와 이메일 주소 제거, 300자 제한)와 하위 오류 사슬, 오류 당시 앱 버전·빌드·운영체제 버전·빌드·앱 실행 상태·기능 설정·언어·기기 언어 설정에서 파생한 국가/지역·시간대·UTC 오프셋·달력·24시간 설정, 보고서 준비 시점의 기기 모델 식별자·메모리·저장 공간·화면 크기·프로세서 수·언어·지역·시간대, 앱이 남긴 최근 오류 로그(최대 300건, 30분), Apple이 나중에 제공할 수 있는 충돌·멈춤·메모리 종료 진단. 국가/지역은 실제 위치가 아닌 기기 언어 설정에서 파생합니다."),
                 ("legal.privacy.diagnostics.excluded", "제외 항목: 실제 위치·GPS 위치, 기기 이름, 음성 녹음, 전사문, 할 일, 이메일 본문·제목·주소, 페르소나, 계정 식별자, 인증 토큰"),
                 ("legal.privacy.diagnostics.storage", "명시적으로 허용한 경우에만 기기 로컬의 백업 제외·파일 보호 저장소에 제한된 개수로 보관하며, 동의 철회 또는 삭제 시 즉시 제거"),
-                ("legal.privacy.diagnostics.transmission", "앱은 진단 로그를 자동 전송하지 않으며, 사용자가 메일 또는 공유 시트에서 검토하고 보낼 때만 전송"),
+                ("feedback.legal.transmission", "오류 보고·기능 제안은 입력 내용과 앱·OS·언어 정보를 검토하고 직접 승인한 경우에만 HTTPS로 Cloudflare의 SIFT 비공개 접수함에 전송합니다. 진단은 별도로 포함을 선택한 경우에만 첨부합니다. 계정·메일 연결 없이 운영자만 확인하며, 접수 내용·운영 메모는 30일 후 정기 삭제합니다. Cloudflare는 네트워크 정보를 처리하고, 앱은 원본 IP 대신 일별 HMAC 제한 키를 최대 2일 보관합니다. 개별 답변은 제공하지 않습니다."),
                 ("legal.privacy.diagnostics.deliveryLimit", "Apple 시스템 진단은 지연되거나 제공되지 않을 수 있고 모든 강제 종료를 포착하지 않음"),
             ])
 
             Text(legalCopy("legal.privacy.audioImport.title", defaultValue: "1-7. 로컬 오디오 가져오기 (선택)"))
                 .font(.subheadline.bold())
             LegalLocalizedBullets(items: [
-                ("legal.privacy.audioImport.storage", "사용자가 선택한 오디오를 읽기 전용으로 열어 기기 내 회의 음성으로 변환·저장합니다. 원본은 바꾸지 않고 기본 파일명만 기록하며, 앱의 음성 복사본·전사문은 CloudKit/Firebase에 동기화하거나 외부 AI로 보내지 않습니다. 회의 삭제 시 앱 안의 복사본을 삭제합니다."),
+                ("legal.privacy.audioImport.storage", "사용자가 선택한 오디오를 읽기 전용으로 열어 기기 내 회의 음성으로 변환·저장합니다. 원본은 바꾸지 않고 기본 파일명만 기록합니다. 전체 iCloud 저장에 명시적으로 동의하면 음성 복사본과 전사문을 같은 Apple 계정에서 저장·복원합니다. 외부 AI로 보내지는 않습니다. 회의 삭제 시 앱 안의 복사본을 삭제합니다."),
                 ("legal.privacy.audioImport.processing", "가져오기는 마이크 권한이나 자동 모델 다운로드를 시작하지 않습니다. 파일 제공자가 원본을 내려받는 경우 해당 제공자의 정책이 적용됩니다. 오프라인 모델 미설치나 전사 실패 후에도 가져온 음성을 보존해 재시도할 수 있습니다."),
             ])
+
+            Text(legalCopy("health.title", defaultValue: "건강·운동 기록"))
+                .font(.subheadline.bold())
+                .accessibilityIdentifier("privacy.healthHistory")
+            LegalLocalizedBullets(items: [
+                ("health.history.disclosure", "운동 또는 복약 기록을 각 항목별로 최근 최대 90일까지만 읽습니다. 승인한 출처만 루틴을 제안하며, 직접 검토하고 확정하기 전에는 활성화되지 않습니다."),
+                ("health.privacy.local", "원본 기록과 루틴 후보는 백업에서 제외된 보호 저장소에 기기 내에서만 보관됩니다. 동기화하거나 OpenAI로 보내지 않습니다. 이 기능은 HealthKit·캘린더에 쓰거나 알림을 예약하지 않습니다."),
+                ("health.autoCreate.disclosure", "생성된 할 일의 제목과 일정은 건강 정보를 드러낼 수 있습니다. 건강 데이터·루틴 후보·건강 기록에서 생성된 할 일은 iCloud에서 제외합니다. 다만 암호화된 Firebase 스냅샷을 수동으로 내보내면 생성된 할 일은 포함됩니다. 생성하려면 승인한 출처, 직접 확정하고 활성화한 루틴, 이 별도의 동의가 모두 필요합니다. HealthKit·캘린더 쓰기나 알림은 실행하지 않습니다. 허용 후 새로고침하여 다음 미래 일정의 할 일을 생성하세요."),
+                ("health.medication.safety", "복약 기록은 처방전이나 처방 일정의 증거가 아닙니다. 본인이 의료진에게 안내받은 일정과 이 알림을 대조해 확인하세요. 이 기능은 처방·용량 변경을 권하지 않으며 복용 누락이나 보충 복용에 대한 조언을 제공하지 않습니다."),
+            ])
+            Text(legalCopy("health.erase", defaultValue: "로컬 건강 기록 지우기"))
+                .font(.subheadline.bold())
+            LegalLocalizedBullets(items: [
+                ("health.erase.disclosure", "지우면 모든 항목의 연결과 자동 생성 동의를 중지하고 로컬 원본 기록·출처 승인·루틴 후보를 삭제합니다. 이미 생성된 할 일은 남습니다. 중복 방지를 위해 비임상 처리 일정 표식은 유지합니다. HealthKit 기록과 iOS 건강 권한은 변경하지 않습니다."),
+            ])
+            Text(legalCopy("health.reset", defaultValue: "모든 건강 데이터 및 중복 방지 기록 초기화"))
+                .font(.subheadline.bold())
+            LegalLocalizedBullets(items: [
+                ("health.reset.warning", "연결과 자동 생성 동의를 중지하고 로컬 건강 기록·후보·비임상 중복 방지 표식을 모두 삭제합니다. 이미 생성된 할 일은 남습니다. 다시 연결하고 출처를 승인한 뒤 루틴을 확정하고 생성을 허용하면, 이전 할 일을 완료하거나 삭제했더라도 이미 처리한 일정이 다시 생성될 수 있습니다."),
+            ])
+
+            Text(legalCopy("legal.privacy.ads.title", defaultValue: "1-11. Google AdMob 광고 및 동의"))
+                .font(.subheadline.bold())
+            LegalLocalizedBullets(items: [
+                ("legal.privacy.ads.requests", "광고를 제공하는 버전에 적용됩니다. 비개인 맞춤 광고를 요청하고 게시자 퍼스트 파티 ID를 비활성화합니다. ATT 추적 허용 팝업이나 IDFA 접근 권한은 요청하지 않지만, 이것이 SDK의 데이터 수집이나 추적 가능성이 없다는 뜻은 아닙니다."),
+                ("legal.privacy.ads.consent", "광고 요청 전 Google UMP로 동의 상태를 확인하고 필요한 안내·동의 양식을 표시합니다. UMP가 광고 요청을 허용하는 경우에만 요청하며, 필요한 경우 설정에서 광고 개인정보 옵션을 다시 열어 선택을 변경할 수 있습니다."),
+                ("legal.privacy.ads.data", "Google 광고·동의 SDK는 IP 주소와 그로부터 추정한 대략적 위치, 앱·기기 식별자, 광고 조회·클릭 등 상호작용, 충돌·진단·성능 정보를 광고 제공·부정행위 방지·측정 및 동의 관리에 처리할 수 있습니다. 일부 식별자·광고 및 상호작용 정보는 사용자와 연결되거나 추적에 사용될 수 있습니다. 비개인 맞춤 광고도 완전 익명이나 수집 없음이 아닙니다."),
+                ("legal.privacy.ads.boundary", "SIFT는 할 일·이메일·캘린더·건강·음성·전사·페르소나 내용을 광고 타기팅에 전달하지 않습니다. HealthKit 데이터는 광고에 절대 사용하지 않으며 광고 SDK로 보내지 않습니다. SDK의 진단 처리는 별도 선택형 SIFT 오류 보고와 구분됩니다."),
+                ("legal.privacy.ads.controls", "Google의 처리·보관·삭제에는 Google 정책과 적용되는 UMP 선택이 따릅니다. 앱 데이터나 로컬 진단을 삭제해도 Google이 이미 처리한 정보가 즉시 삭제되는 것은 아닙니다. Google 정책에서 개인정보 관리·삭제 방법을 확인하세요."),
+            ])
+            Link(legalCopy("legal.privacy.ads.policyLink", defaultValue: "Google 광고 데이터 처리 방침"), destination: URL(string: "https://policies.google.com/technologies/partner-sites")!)
+            Link(legalCopy("legal.privacy.ads.disclosureLink", defaultValue: "Google SDK 데이터 공개 안내"), destination: URL(string: "https://developers.google.com/admob/ios/privacy/data-disclosure")!)
         }
 
         LegalCard(number: 2, title: "정보 저장 위치") {
             LegalTable(
                 headers: ["저장소", "저장 항목"],
                 cells: [
-                    ["기기 내 로컬 (SwiftData)", "할 일·페르소나·Audit 이벤트·분석 결과 (iCloud 비활성 시)"].map(LegalTableCell.init(source:)),
-                    ["기기 내 로컬 전용 (emailContainer)", "Gmail·Outlook 메시지 전체 — iCloud 동기화 완전 제외"].map(LegalTableCell.init(source:)),
-                    ["iCloud CloudKit 비공개 DB (선택)", "할 일·페르소나·Audit 이벤트·분석 결과 (iCloud 활성 시)"].map(LegalTableCell.init(source:)),
-                    ["iCloud Key-Value Store (선택)", "앱 설정값 (AI 제공자 선택 등)"].map(LegalTableCell.init(source:)),
-                    ["기기 Keychain", "이메일 OAuth 토큰·IMAP 앱 비밀번호"].map(LegalTableCell.init(source:)),
+                    [
+                        LegalTableCell(key: "legal.privacy.storage.local", defaultValue: "기기 내 앱 저장소"),
+                        LegalTableCell(key: "legal.privacy.storage.localDetail", defaultValue: "앱 데이터는 기기에서 계속 사용할 수 있습니다. iCloud 저장을 꺼도 로컬 데이터와 다른 기기의 데이터는 삭제하지 않습니다."),
+                    ],
+                    [
+                        LegalTableCell(key: "legal.privacy.storage.cloud", defaultValue: "iCloud 비공개 저장소 (선택)"),
+                        LegalTableCell(key: "legal.privacy.storage.cloudDetail", defaultValue: "할 일·페르소나·감사/행동 기록·메일 본문/분석·회의 음성/전사·화자/편집·루틴·학습 사전·설정 — 전체 범위에 동의한 경우에만 저장합니다."),
+                    ],
+                    [
+                        LegalTableCell(key: "legal.privacy.storage.keychain", defaultValue: "Keychain / iCloud 키체인 (선택)"),
+                        LegalTableCell(key: "legal.privacy.storage.keychainDetail", defaultValue: "이메일 OAuth 토큰·IMAP 앱 비밀번호·ChatGPT 연결 정보. 다른 기기에서 복원하려면 iCloud 키체인과 같은 Apple 계정이 필요합니다."),
+                    ],
+                    [
+                        LegalTableCell(key: "legal.privacy.storage.excluded", defaultValue: "iCloud 저장 제외"),
+                        LegalTableCell(key: "legal.privacy.storage.excludedDetail", defaultValue: "건강 데이터와 건강 기록에서 생성된 할 일·OS 권한·기기별 승인·재다운로드 가능한 모델 파일. 권한 확인과 모델 설치는 각 기기에서 진행합니다."),
+                    ],
                     [
                         LegalTableCell(key: "legal.privacy.diagnostics.storeLabel", defaultValue: "기기 내 로컬 진단 저장소 (선택)"),
                         LegalTableCell(key: "legal.privacy.diagnostics.storeDetail", defaultValue: "동의한 오류 시각·소스 파일·줄 번호·함수·코드·유형·메시지, 오류 당시 OS·언어/지역·실행 상태·설정 스냅샷, 보고서 준비 시점의 기기 사양·언어/지역 설정, 최근 앱 오류 로그 및 제한된 Apple 시스템 진단 — iCloud·백업 제외"),
                     ],
                 ]
             )
-            InfoBox(text: "메일 원문은 기기 내 별도 저장소에 보관하며 직접 동의·요청한 메일만 외부 분석합니다. 루틴 근거·피드백·OpenAI 토큰과 전송 동의는 기기 내 전용 기록이며 iCloud로 동기화하지 않습니다. 승인해 만든 할 일과 적용한 페르소나·행동 분석은 기존 iCloud 설정에 따릅니다. 외부 미리보기는 적용 전 원문·확정 일정을 변경하지 않습니다.")
+            InfoBox(text: "전체 iCloud 저장은 선택 사항이며 확대된 범위에 명시적으로 동의해야 합니다. 저장된 권한 내역만으로 새 기기에 권한을 부여하지 않습니다. 외부 AI 전송·메일 백그라운드 접근·캘린더 선택은 해당 기기에서 확인하며 복원된 메일 작업은 자동 재실행하지 않습니다. 데이터는 같은 Apple 계정에 연결되며 Apple의 전송이 끝난 뒤 다른 기기에 적용됩니다. 연결 정보 복원에는 iCloud 키체인도 필요합니다. 건강정보·OS 권한·모델 파일은 제외합니다. 저장을 꺼도 로컬 데이터와 다른 기기의 데이터는 삭제하지 않습니다.", localizationKey: "legal.privacy.openai.syncBoundary")
+                .padding(.top, 6)
+            InfoBox(text: "이 연결의 갱신은 원래 연결한 기기에서 처리합니다. 해당 기기의 SIFT → 설정 → AI → OpenAI · ChatGPT에서 모델 목록을 새로고침한 뒤 iCloud 키체인 동기화를 기다리거나, 이 기기에서 다시 연결하세요.", localizationKey: "error.openai.connection.refreshOwnerRequired")
                 .padding(.top, 6)
         }
 
         LegalCard(number: 3, title: "제3자 처리위탁 및 데이터 국외 이전") {
             VStack(spacing: 6) {
-                ThirdPartyCard(name: "Apple Inc.", provider: "미국 외 다수", items: "할 일·페르소나·설정값 (iCloud 활성 시) — 기기 간 동기화", url: URL(string: "https://www.apple.com/legal/privacy/")!)
+                ThirdPartyCard(name: "Apple Inc.", provider: "미국 외 다수", items: "선택적 전체 iCloud 저장: 할 일·메일·회의 녹음/전사·루틴·학습 사전·설정·연결 정보. 건강정보·OS 권한·재다운로드 가능한 모델 파일은 제외합니다.", url: URL(string: "https://www.apple.com/legal/privacy/")!, itemsLocalizationKey: "legal.privacy.apple.storage")
                 ThirdPartyCard(name: "Google LLC", provider: "미국 외 다수", items: "Gmail 메시지 조회·사용자가 실행한 읽음/휴지통 반영 / OAuth 또는 IMAP 인증", url: URL(string: "https://policies.google.com/privacy")!)
+                ThirdPartyCard(name: "Google LLC", provider: "미국 외 다수", items: "광고 제공 버전: IP·대략적 위치·앱/기기 식별자·광고 상호작용·진단/성능 정보 — 광고 제공·부정행위 방지·측정·동의 관리", url: URL(string: "https://policies.google.com/privacy")!, itemsLocalizationKey: "legal.privacy.ads.recipient")
                 ThirdPartyCard(name: "Microsoft Corporation", provider: "미국 외 다수", items: "Outlook IMAP 인증·메일 조회·사용자가 실행한 읽음/휴지통 반영", url: URL(string: "https://privacy.microsoft.com/privacystatement")!)
                 ThirdPartyCard(name: "OpenAI", provider: "미국 외 다수", items: "ChatGPT 로그인·선택한 구독 사용 및 데이터별로 동의한 외부 분석", url: URL(string: "https://openai.com/policies/privacy-policy/")!)
             }
@@ -456,9 +527,13 @@ private struct PrivacyPolicyContent: View {
         }
 
         LegalCard(number: 7, title: "데이터 보안") {
+            LegalLocalizedBullets(items: [
+                ("legal.privacy.openai.credentials", "이메일 OAuth 토큰·IMAP 앱 비밀번호·ChatGPT 등록/OAuth 토큰은 Keychain에 저장합니다. 전체 iCloud 저장에 동의하면 iCloud 키체인을 통해 연결 정보를 복원할 수 있습니다. 기기 host ID와 로컬 승인은 이전하지 않으며 모델은 기기마다 설치해야 합니다."),
+            ])
+            LegalLocalizedBullets(items: [
+                ("legal.privacy.routines.security", "루틴은 보호된 로컬 파일에 원자적으로 저장합니다. 전체 iCloud 저장에 동의하면 루틴·근거·피드백·수락 예약도 동기화합니다. 외부 AI 전송은 각 기기에서 기본 꺼짐이며 OpenAI 인증 정보·요청·응답·원문은 진단 로그에 기록하지 않습니다."),
+            ])
             LegalBullets([
-                "이메일 OAuth 토큰·IMAP 앱 비밀번호는 Keychain에 저장하며, OpenAI 액세스·갱신·ID 토큰은 동기화하지 않는 기기 전용 Keychain에 저장합니다.",
-                "루틴 기록은 원자적으로 저장한 보호된 로컬 파일이며, 외부 전송 동의는 기기별 기본 꺼짐입니다. OpenAI 인증 정보·요청·응답·원문을 진단 로그에 기록하지 않습니다.",
                 "iCloud 데이터는 Apple의 전송 중·저장 시 암호화 인프라 이용",
                 "앱은 비보안 암호화를 사용하지 않음 (ITSAppUsesNonExemptEncryption = NO)",
             ])
@@ -501,7 +576,7 @@ private struct TermsOfServiceContent: View {
             LegalBody(text: "서비스는 아래 제3자 서비스와 연동됩니다. 각 서비스의 독자적인 이용약관 및 개인정보 처리방침이 함께 적용됩니다.")
             VStack(spacing: 6) {
                 ThirdPartyCard(name: "Gmail API", provider: "Google LLC", items: "메일 조회·사용자가 실행한 읽음/휴지통 반영", url: URL(string: "https://policies.google.com/terms")!)
-                ThirdPartyCard(name: "iCloud / CloudKit", provider: "Apple Inc.", items: "할 일 데이터 기기 간 동기화", url: URL(string: "https://www.apple.com/legal/internet-services/icloud/")!)
+                ThirdPartyCard(name: "iCloud / CloudKit", provider: "Apple Inc.", items: "선택적 전체 iCloud 저장: 할 일·메일·회의 녹음/전사·루틴·학습 사전·설정·연결 정보. 건강정보·OS 권한·재다운로드 가능한 모델 파일은 제외합니다.", url: URL(string: "https://www.apple.com/legal/internet-services/icloud/")!, itemsLocalizationKey: "legal.privacy.apple.storage")
                 ThirdPartyCard(name: "Outlook IMAP", provider: "Microsoft Corporation", items: "Outlook IMAP 인증·메일 조회·사용자가 실행한 읽음/휴지통 반영", url: URL(string: "https://www.microsoft.com/servicesagreement")!)
                 ThirdPartyCard(name: "OpenAI · ChatGPT", provider: "OpenAI", items: "선택적 계정 연결·구독 사용·명시적 외부 분석", url: URL(string: "https://openai.com/policies/terms-of-use/")!)
             }

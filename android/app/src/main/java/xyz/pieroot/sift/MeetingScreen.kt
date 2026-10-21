@@ -156,11 +156,10 @@ fun MeetingScreen(
             text = { Text("회의 녹음, 전사, 요약, 임시 파일을 이 기기에서 삭제합니다. 이미 확인한 할 일은 유지됩니다.") },
             confirmButton = {
                 TextButton(onClick = {
-                    val count = meetingStore.deleteAll()
-                    capture.refresh()
-                    refreshMeetings()
+                    capture.deleteAll()
+                        .onSuccess { count -> refreshMeetings(); onMessage("회의 ${count}개를 삭제했습니다.") }
+                        .onFailure { onMessage(it.message ?: "회의를 삭제하지 못했습니다.") }
                     showDeleteAll = false
-                    onMessage("회의 ${count}개를 삭제했습니다.")
                 }) { Text("삭제") }
             },
             dismissButton = { TextButton(onClick = { showDeleteAll = false }) { Text("취소") } },

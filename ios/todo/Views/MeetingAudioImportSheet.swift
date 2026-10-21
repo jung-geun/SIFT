@@ -8,8 +8,11 @@ struct MeetingAudioImportSheet: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var whisperModel = MeetingWhisperModelController.shared
+    @ObservedObject private var localModel = OnDeviceLLMService.shared
+    @ObservedObject private var settings = SettingsStore.shared
     @State private var selectedURL: URL?
-    @State private var languageTag = AppLanguage.current.speechLanguageTag
+    @ObservedObject private var languagePreferences = MeetingLanguagePreferences.shared
+    @State private var summaryLanguageOptions: [MeetingLanguageOption] = []
     @State private var showingFilePicker = false
     @State private var importTask: Task<Void, Never>?
     @State private var progress = 0.0
@@ -23,6 +26,16 @@ struct MeetingAudioImportSheet: View {
     let onImported: @MainActor (MeetingRecord) -> Void
 
     private var importing: Bool { importTask != nil }
+
+    private var languageTag: String {
+        languagePreferences.sourceSelection(options: MeetingTranscriptionLanguages.whisper)
+    }
+
+    private var summaryLanguageTag: String {
+        languagePreferences.summarySelection(options: summaryLanguageOptions)
+    }
+
+    private var automaticLanguageDetection: Bool { languagePreferences.automaticLanguageDetection }
 
     var body: some View {
         NavigationStack {
@@ -51,15 +64,23 @@ struct MeetingAudioImportSheet: View {
                         .foregroundStyle(.secondary)
                 }
                 Section {
-                    Picker(copy("meeting.audioImport.language", fallback: "전사 언어"), selection: $languageTag) {
-                        ForEach(AppLanguage.supported) { language in
-                            Text(language.displayName).tag(language.speechLanguageTag)
-                        }
+                    MeetingLanguagePicker(title: MeetingLanguageCopy.sourceTitle,
+                        selection: Binding(get: { languageTag }, set: { languagePreferences.selectSource($0) }),
+                        options: MeetingTranscriptionLanguages.whisper, identifier: "meeting.audioImport.language",
+                        automaticLanguageDetection: Binding(get: { automaticLanguageDetection },
+                            set: { languagePreferences.selectAutomaticDetection($0) }),
+                        automaticDetectionAvailable: whisperModel.isInstalled, savedAudioOnly: true)
+                        .disabled(importing)
+                    if !summaryLanguageOptions.isEmpty {
+                        MeetingLanguagePicker(title: MeetingLanguageCopy.summaryTitle,
+                            selection: Binding(get: { summaryLanguageTag }, set: { languagePreferences.selectSummary($0) }),
+                            options: summaryLanguageOptions, identifier: "meeting.audioImport.summaryLanguage")
+                            .disabled(importing)
                     }
-                    .disabled(importing)
-                    .accessibilityIdentifier("meeting.audioImport.language")
+                    MeetingAIAccuracyNotice()
+                    if automaticLanguageDetection { MeetingAutomaticLanguageNotice(savedAudioOnly: true) }
                     if !whisperModel.isInstalled {
-                        Text(copy("meeting.audioImport.modelNotice", fallback: "오프라인 Whisper 모델이 없습니다. 음성은 저장할 수 있으며 베타 설정에서 모델을 설치한 후 회의에서 전사를 다시 시도할 수 있습니다. 전사문을 임의로 만들지 않습니다."))
+                        Text(copy("meeting.audioImport.modelNotice", fallback: "오프라인 Whisper 모델이 없습니다. 음성은 저장할 수 있으며 설정 → 베타 기능에서 모델을 설치한 후 회의에서 전사를 다시 시도할 수 있습니다. 전사문을 임의로 만들지 않습니다."))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .accessibilityIdentifier("meeting.audioImport.modelRequired")
@@ -78,7 +99,7 @@ struct MeetingAudioImportSheet: View {
                             .accessibilityIdentifier("meeting.audioImport.cancel")
                     } else {
                         Button(copy("meeting.audioImport.start", fallback: "이 기기로 가져오기")) { startImport() }
-                            .disabled(selectedURL == nil)
+                            .disabled(selectedURL == nil || (!automaticLanguageDetection && languageTag.isEmpty))
                             .accessibilityIdentifier("meeting.audioImport.start")
                     }
                     if cancelled {
@@ -93,6 +114,7 @@ struct MeetingAudioImportSheet: View {
                     }
                 }
             }
+            .appFormStyle()
             .navigationTitle(copy("meeting.audioImport.title", fallback: "오디오 가져오기"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -118,7 +140,13 @@ struct MeetingAudioImportSheet: View {
             }
         }
         .interactiveDismissDisabled(importing)
-        .task { await whisperModel.refresh() }
+        .task {
+            refreshSummaryLanguageOptions()
+            await whisperModel.refresh()
+        }
+        .onChange(of: localModel.loadedModelIdentifier) { _, _ in refreshSummaryLanguageOptions() }
+        .onChange(of: localModel.modelID) { _, _ in refreshSummaryLanguageOptions() }
+        .onChange(of: SettingsStore.betaSelectedProvider()) { _, _ in refreshSummaryLanguageOptions() }
         .onDisappear { importTask?.cancel() }
     }
 
@@ -127,13 +155,19 @@ struct MeetingAudioImportSheet: View {
                               comment: "Local audio import controls and status.")
     }
 
+    private func refreshSummaryLanguageOptions() {
+        summaryLanguageOptions = MeetingSummaryLanguages.available
+    }
+
     private func cancelImport() {
         cancelling = true
         importTask?.cancel()
     }
 
     private func startImport() {
-        guard let selectedURL, !importing else { return }
+        guard let selectedURL, !importing, automaticLanguageDetection || !languageTag.isEmpty else { return }
+        let chosenLanguages = (source: languageTag.isEmpty ? summaryLanguageTag : languageTag,
+                               summary: summaryLanguageTag, automatic: automaticLanguageDetection)
         let token = UUID()
         operationID = token
         progress = 0
@@ -148,7 +182,9 @@ struct MeetingAudioImportSheet: View {
             }
             do {
                 let record = try await MeetingAudioImportService.importFile(
-                    at: selectedURL, languageTag: languageTag, in: modelContext,
+                    at: selectedURL, languageTag: chosenLanguages.source,
+                    automaticLanguageDetection: chosenLanguages.automatic,
+                    summaryLanguageTag: chosenLanguages.summary, in: modelContext,
                     progress: { value in
                         Task { @MainActor in
                             guard operationID == token else { return }

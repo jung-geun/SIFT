@@ -24,6 +24,13 @@ struct GmailIMAPIngestionServiceTests {
         UserDefaults(suiteName: "GmailIMAPIngestionServiceTests_\(UUID().uuidString)")!
     }
 
+    private func makeAnalysisService() -> EmailMessageAnalysisService {
+        EmailMessageAnalysisService(
+            foundationModelsEnabledProvider: { false },
+            todoCandidateProvider: { _, _, _ in nil }
+        )
+    }
+
     private func setupCredentials() throws {
         try? IMAPCredentialStore.delete(for: email)
         try IMAPCredentialStore.save(appPassword: "app-password", for: email, backgroundEnabled: false)
@@ -130,7 +137,8 @@ struct GmailIMAPIngestionServiceTests {
             transport.addRoute(matching: "UID FETCH 20 (UID FLAGS INTERNALDATE", response: ["* 1 FETCH (UID 20 X-GM-MSGID 1020 BODY[TEXT] {11}Body text 20)", "A0013 OK FETCH"])
 
             let imapService = GmailIMAPService(transport: transport)
-            let service = GmailIMAPIngestionService(emailContext: context, imapService: imapService, cursorStore: cursorStore)
+            let service = GmailIMAPIngestionService(emailContext: context, imapService: imapService,
+                cursorStore: cursorStore, analysisService: makeAnalysisService())
 
             #expect(cursorStore.cursor(for: email) == nil)
             let result = try await service.sync(account: " Ingest@Example.COM ", backgroundEnabled: false)
@@ -159,7 +167,7 @@ struct GmailIMAPIngestionServiceTests {
                 provider: "gmail-imap",
                 canonicalAccount: email,
                 gmailMessageID: "9001",
-                key: MailAnalysisLedgerKeyStore.key()
+                key: try MailAnalysisLedgerKeyStore.key()
             )
             #expect(try ledgerStore.claim(fingerprint, revision: Int.max))
             try ledgerStore.markAnalyzed(fingerprint, revision: Int.max)
@@ -192,7 +200,8 @@ struct GmailIMAPIngestionServiceTests {
                 emailContext: context,
                 imapService: GmailIMAPService(transport: transport),
                 cursorStore: cursorStore,
-                ledgerStore: ledgerStore
+                ledgerStore: ledgerStore,
+                analysisService: makeAnalysisService()
             )
             let result = try await service.sync(account: email, backgroundEnabled: false)
 
@@ -263,7 +272,8 @@ struct GmailIMAPIngestionServiceTests {
             transport.addRoute(matching: "UID FETCH 201 (UID FLAGS INTERNALDATE", response: ["* 1 FETCH (UID 201 X-GM-MSGID 1201 BODY[TEXT] {8}Body 201)", "A0201 OK FETCH"])
 
             let imapService = GmailIMAPService(transport: transport)
-            let service = GmailIMAPIngestionService(emailContext: context, imapService: imapService, cursorStore: cursorStore)
+            let service = GmailIMAPIngestionService(emailContext: context, imapService: imapService,
+                cursorStore: cursorStore, analysisService: makeAnalysisService())
 
             let result = try await service.sync(account: email, backgroundEnabled: false)
             #expect(result.analyzedCount == 101)
@@ -305,7 +315,8 @@ struct GmailIMAPIngestionServiceTests {
             transport.addRoute(matching: "UID FETCH 999 (BODYSTRUCTURE)", error: GmailIMAPError.transport("Body fetch network error"))
 
             let imapService = GmailIMAPService(transport: transport)
-            let service = GmailIMAPIngestionService(emailContext: context, imapService: imapService, cursorStore: cursorStore)
+            let service = GmailIMAPIngestionService(emailContext: context, imapService: imapService,
+                cursorStore: cursorStore, analysisService: makeAnalysisService())
 
             await #expect(throws: GmailIMAPError.self) {
                 try await service.sync(account: email, backgroundEnabled: false)
@@ -371,7 +382,8 @@ struct GmailIMAPIngestionServiceTests {
             transport.addRoute(matching: "UID FETCH 201 (UID FLAGS INTERNALDATE", response: ["* 1 FETCH (UID 201 X-GM-MSGID 6201 BODY[TEXT] {8}Body 201)", "A0201 OK FETCH"])
 
             let imapService = GmailIMAPService(transport: transport)
-            let service = GmailIMAPIngestionService(emailContext: context, imapService: imapService, cursorStore: cursorStore)
+            let service = GmailIMAPIngestionService(emailContext: context, imapService: imapService,
+                cursorStore: cursorStore, analysisService: makeAnalysisService())
 
             // Initial sync fails on page 2 after page 1 committed
             await #expect(throws: GmailIMAPError.self) {
@@ -430,7 +442,8 @@ struct GmailIMAPIngestionServiceTests {
             transport.addRoute(matching: "UID FETCH 50 (UID FLAGS INTERNALDATE", response: ["* 1 FETCH (UID 50 X-GM-MSGID 1050 BODY[TEXT] {7}Body 50)", "A0011 OK FETCH"])
 
             let imapService = GmailIMAPService(transport: transport)
-            let service = GmailIMAPIngestionService(emailContext: context, imapService: imapService, cursorStore: cursorStore)
+            let service = GmailIMAPIngestionService(emailContext: context, imapService: imapService,
+                cursorStore: cursorStore, analysisService: makeAnalysisService())
 
             let result = try await service.sync(account: email, backgroundEnabled: false)
             #expect(result.analyzedCount == 1)

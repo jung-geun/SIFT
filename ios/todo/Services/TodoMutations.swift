@@ -21,24 +21,15 @@ enum TodoMutations {
 
         guard completed else { return }
 
-        let calendarCompletionAction: String = SettingsStore.shared.get(
+        let storedAction: String = SettingsStore.shared.get(
             "pieroot.todo.calendarCompletionAction",
             defaultValue: "silence"
         )
-        if calendarCompletionAction == "silence" {
-            if let eventID = todo.calendarEventID {
-                _ = try? CalendarService.shared.removeAlarms(eventID: eventID)
-            }
-            // 알람만 끈 경우 calendarEventID는 유지 (이벤트는 캘린더에 남음)
-        } else if todo.todoSource == .email {
-            _ = CalendarService.shared.removeEmailCalendarArtifacts(for: todo)
-        } else if let eventID = todo.calendarEventID {
-            _ = try? CalendarService.shared.removeEvent(eventID: eventID)
-            todo.calendarEventID = nil
-        }
+        let action = CalendarCompletionAction(rawValue: storedAction) ?? .keep
+        try? CalendarService.shared.applyCompletionPolicy(for: todo, action: action)
     }
 
-    /// Success means the deletion and its audit records are on disk, not awaiting autosave.
+    /// Success means the deletion and any eligible audit records are on disk, not awaiting autosave.
     /// A failed save restores the row and must be presented by the caller as an error.
     static func delete(_ todo: Todo, in context: ModelContext) throws {
         // Establish a baseline so rollback cannot discard unrelated pending edits.
@@ -48,6 +39,7 @@ enum TodoMutations {
 
         // SwiftData can invalidate a deleted model after save. Retain only the inputs
         // required by the existing cleanup APIs, without inserting this detached copy.
+        // Preserve both health provenance markers, plus sourceRef for email dismissal learning.
         let cleanupTodo = Todo(
             id: todo.id,
             startDate: todo.startDate,
@@ -58,13 +50,17 @@ enum TodoMutations {
         cleanupTodo.isCompleted = todo.isCompleted
         cleanupTodo.triageStatus = todo.triageStatus
         cleanupTodo.isFixedSchedule = todo.isFixedSchedule
+        cleanupTodo.calendarEventOrigin = todo.calendarEventOrigin
         cleanupTodo.calendarEventID = todo.calendarEventID
         cleanupTodo.calendarEventExternalID = todo.calendarEventExternalID
         cleanupTodo.sourceSenderEmail = todo.sourceSenderEmail
 
-        // User deletion and both audit records form one durable transaction.
+        // User deletion and eligible audit records form one durable transaction.
+        // Health tasks still mutate and clean up normally, but emit neither record.
         TaskBehaviorRecorder.recordDeletion(of: todo, actor: .user, in: context)
-        context.insert(TaskAuditEvent(from: todo))
+        if !todo.isHealthRelated {
+            context.insert(TaskAuditEvent(from: todo))
+        }
         context.delete(todo)
         do {
             try context.save()
@@ -85,13 +81,9 @@ enum TodoMutations {
         if !todo.isCompleted && todo.triage == .todo {
             if todo.todoSource == .email {
                 _ = CalendarService.shared.removeEmailCalendarArtifacts(for: todo)
-            } else if let eventID = todo.calendarEventID {
-                if todo.isFixedSchedule, let anchor = todo.scheduleAnchor {
-                    // 반복 이벤트: 일정 시작 시각 기준 해당 발생분만 제거
-                    _ = try? CalendarService.shared.removeEventOccurrence(eventID: eventID, on: anchor)
-                } else {
-                    _ = try? CalendarService.shared.removeEvent(eventID: eventID)
-                }
+            } else {
+                let occurrence = todo.isFixedSchedule ? todo.scheduleAnchor : nil
+                _ = try? CalendarService.shared.removeTodoEvent(for: todo, on: occurrence)
             }
         }
         // 이메일 출처 삭제 → 학습 기록 (단일 choke point)

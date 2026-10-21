@@ -31,6 +31,8 @@ final class VocabularySourceState {
 
 @Model
 final class VocabularyObservation {
+    /// Evidence and spelling can be repaired independently of this durable row identity.
+    var id: UUID = UUID()
     var canonicalKey: String = ""
     var canonicalDisplay: String = ""
     var sourceKey: String = ""

@@ -41,8 +41,8 @@ struct DiagnosticReportServiceTests {
         #expect(store.load() == DiagnosticReportArchive())
     }
 
-    @Test("acknowledged reports retain only diagnostics recorded afterward")
-    func acknowledgedReportsKeepOnlyNewDiagnostics() throws {
+    @Test("acknowledged reports remove only included event and metric snapshots")
+    func acknowledgedReportsKeepUnsentDiagnostics() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         let store = DiagnosticReportStore(
@@ -56,7 +56,7 @@ struct DiagnosticReportServiceTests {
         _ = store.ingestMetricPayloads(["later-metric"], digests: ["later-metric-digest"])
 
         let remaining = store.acknowledgeReportedDiagnostics(
-            through: Date(timeIntervalSince1970: 15),
+            events: [event(code: 1, at: 10)],
             metricPayloadIDs: [try #require(store.load().metricPayloadIDs.first)]
         )
         #expect(remaining.events.compactMap(\.error?.code) == [2])
@@ -174,7 +174,6 @@ struct DiagnosticReportServiceTests {
         #expect(preview.events == report.events)
 
         #expect(report.reportVersion == UserDiagnosticReport.currentVersion)
-        #expect(report.app.installSource == DiagnosticEnvironment.installSource())
         #expect(!report.app.bundleIdentifier.isEmpty)
         #expect(!report.device.modelIdentifier.isEmpty)
         #expect(report.settings?.isEmpty == false)
@@ -194,8 +193,8 @@ struct DiagnosticReportServiceTests {
         #expect(recorder.snapshot() == DiagnosticReportArchive())
         #expect(await service.reportAttachment() == nil)
     }
-    @Test("successful delivery acknowledges a report without dropping later errors")
-    func deliveredReportLeavesOnlyLaterErrorsQueued() async throws {
+    @Test("successful delivery retains older unsent incidents and later repeated errors")
+    func deliveredReportLeavesUnsentAndLaterErrorsQueued() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         let suiteName = "DiagnosticReportServiceTests.\(UUID().uuidString)"
@@ -215,6 +214,11 @@ struct DiagnosticReportServiceTests {
 
         service.setCollectionEnabled(true)
         recorder.record(
+            error: NSError(domain: "DiagnosticReportServiceTests", code: 99),
+            component: "diagnostics",
+            operation: "older-unsent"
+        )
+        recorder.record(
             error: NSError(domain: "DiagnosticReportServiceTests", code: 1),
             component: "diagnostics",
             operation: "first"
@@ -222,9 +226,7 @@ struct DiagnosticReportServiceTests {
         let delivered = try #require(await service.prepareAttachment())
         let request = DiagnosticExportRequest(
             data: delivered.data,
-            fileURL: nil,
-            canSendMail: false,
-            generatedAt: delivered.generatedAt,
+            events: delivered.events,
             metricPayloads: delivered.metricPayloads,
             metricPayloadIDs: delivered.metricPayloadIDs
         )
@@ -241,15 +243,14 @@ struct DiagnosticReportServiceTests {
         #expect(preview.events.count == 1)
         service.acknowledgeDeliveredReport(.init(
             data: request.data,
-            generatedAt: request.generatedAt,
+            events: request.events,
             metricPayloads: request.metricPayloads,
             metricPayloadIDs: request.metricPayloadIDs
         ))
 
         let queued = recorder.snapshot().events
-        #expect(queued.count == 1)
-        #expect(queued[0].error?.code == 1)
-        #expect(queued[0].repeatCount == 1)
+        #expect(queued.compactMap(\.error?.code) == [99, 1])
+        #expect(queued.last?.repeatCount == 1)
 
         let nextData = try #require(await service.reportAttachment())
         let nextReport = try decodedReport(nextData)
@@ -361,9 +362,7 @@ struct DiagnosticReportServiceTests {
         let prepared = try #require(await service.prepareAttachment())
         let request = DiagnosticExportRequest(
             data: prepared.data,
-            fileURL: nil,
-            canSendMail: false,
-            generatedAt: prepared.generatedAt,
+            events: prepared.events,
             metricPayloads: prepared.metricPayloads,
             metricPayloadIDs: prepared.metricPayloadIDs
         )

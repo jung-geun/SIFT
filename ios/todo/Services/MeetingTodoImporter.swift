@@ -18,6 +18,16 @@ enum MeetingTodoImporter {
         else {
             throw MeetingTodoImportError.staleOrUnknownDraft
         }
+        let attribution = MeetingTranscriptAttribution(meetingID: meeting.meetingID, result: result,
+            profiles: meeting.diarization?.profiles ?? [])
+        guard !MeetingActionAttribution.isCompleted(draft,
+            completedSegmentIDs: MeetingActionAttribution.completedOnlySegmentIDs(in: attribution)) else {
+            throw MeetingTodoImportError.staleOrUnknownDraft
+        }
+        // Resolve from the same persisted transcript and latest manual names shown in review.
+        // Keep the reviewed draft identity so a rename cannot duplicate an already imported task.
+        var reviewedDraft = draft
+        reviewedDraft.assignee = MeetingActionAttribution.supportedAssignee(for: draft, attribution: attribution)
 
         let language = AppLanguage.current
         let sourceRef = "meeting:\(meeting.meetingID):action:\(draft.id)"
@@ -30,7 +40,7 @@ enum MeetingTodoImporter {
         } else {
             todo = Todo(
                 title: draft.title,
-                notes: notes(for: draft, meetingID: meeting.meetingID, language: language),
+                notes: notes(for: reviewedDraft, meetingID: meeting.meetingID, language: language),
                 dueDate: MeetingDate.date(draft.dueAtISO8601),
                 source: .meeting,
                 sourceRef: sourceRef,

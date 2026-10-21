@@ -91,6 +91,54 @@ struct MeetingTranscriptionServiceTests {
         let backends = await probe.backends
         #expect(backends == [.speechTranscriber])
     }
+
+    @Test("runtime-supported languages and script/region variants bypass app UI language restrictions") @MainActor
+    func runtimeLanguageRequests() async throws {
+        let recorder = SelectionRecorder()
+        let factory = DefaultMeetingTranscriptionSessionFactory(
+            foundationModelsAvailable: { false },
+            capabilityProbe: { _, locale in .supported(resolvedLocaleIdentifier: locale.identifier) },
+            sessionBuilder: { backend, locale, _, _ in
+                await recorder.append(backend: backend, locale: locale.identifier(.bcp47))
+                return FakeMeetingTranscriptionSession(backend: backend)
+            },
+            forcedBackend: nil
+        )
+        let tags = ["bn-BD", "hi-IN", "ar-SA", "pt-BR", "zh-Hant-TW", "sr-Latn-RS"]
+        for tag in tags { _ = try await factory.make(languageTag: tag, purpose: .retry) }
+        let calls = await recorder.calls
+        #expect(calls == tags.map { "dictationTranscriber:\($0)" })
+    }
+
+    @Test("malformed tags fail before probing; unsupported runtime locales never build a session") @MainActor
+    func unknownLanguagesNeverDefaultToEnglish() async {
+        let probe = SelectionProbe()
+        let recorder = SelectionRecorder()
+        let factory = DefaultMeetingTranscriptionSessionFactory(
+            foundationModelsAvailable: { false },
+            capabilityProbe: { backend, _ in
+                await probe.append(backend)
+                return .unsupportedLocale
+            },
+            sessionBuilder: { backend, locale, _, _ in
+                await recorder.append(backend: backend, locale: locale.identifier)
+                return FakeMeetingTranscriptionSession(backend: backend)
+            },
+            forcedBackend: nil
+        )
+        for tag in ["", "not-a-language", "en--US", "xx-US"] {
+            do {
+                _ = try await factory.make(languageTag: tag, purpose: .live)
+                Issue.record("Unsupported locale unexpectedly created a session")
+            } catch {
+                #expect(error as? MeetingTranscriptionError == .unsupportedLocale(tag))
+            }
+        }
+        let backends = await probe.backends
+        let calls = await recorder.calls
+        #expect(backends == [.dictationTranscriber, .speechTranscriber])
+        #expect(calls.isEmpty)
+    }
 }
 
 @Suite("Meeting transcription input isolation")

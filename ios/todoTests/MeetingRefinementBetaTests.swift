@@ -6,8 +6,6 @@ import Testing
 @MainActor
 struct MeetingRefinementBetaTests {
     private let betaKeys = [
-        SettingsStore.betaFoundationModelsEnabledKey,
-        SettingsStore.betaOnDeviceModelEnabledKey,
         SettingsStore.betaOpenAIEnabledKey,
         SettingsStore.betaSelectedProviderKey
     ]
@@ -16,15 +14,9 @@ struct MeetingRefinementBetaTests {
         betaKeys.forEach { UserDefaults.standard.removeObject(forKey: $0) }
     }
 
-    private func disableAllProviders() {
-        UserDefaults.standard.set(false, forKey: SettingsStore.betaFoundationModelsEnabledKey)
-        UserDefaults.standard.set(false, forKey: SettingsStore.betaOnDeviceModelEnabledKey)
-        UserDefaults.standard.set(false, forKey: SettingsStore.betaOpenAIEnabledKey)
-        UserDefaults.standard.removeObject(forKey: SettingsStore.betaSelectedProviderKey)
-    }
 
-    private func result() -> MeetingResult {
-        MeetingResult(segments: [MeetingSegment(id: "s1", startMs: 0, endMs: 1_000, text: "원문")])
+    private func result(text: String = "원문") -> MeetingResult {
+        MeetingResult(segments: [MeetingSegment(id: "s1", startMs: 0, endMs: 1_000, text: text)])
     }
 
     private actor ProviderCallRecorder {
@@ -40,62 +32,56 @@ struct MeetingRefinementBetaTests {
     }
 
     private struct FakeProvider: MeetingRefinementProvider {
-        let action: @Sendable ([MeetingSegment]) async throws -> TranscriptCorrectionBatchResult
+        let action: @Sendable ([MeetingSegment], String, AppLanguage) async throws -> TranscriptCorrectionBatchResult
 
         func correct(
             segments: [MeetingSegment],
             glossaryHint _: String,
-            language _: AppLanguage
+            sourceLanguageTag: String,
+            language: AppLanguage
         ) async throws -> TranscriptCorrectionBatchResult {
-            try await action(segments)
+            try await action(segments, sourceLanguageTag, language)
         }
     }
 
-    @Test("off/off and OpenAI-only keep the transcript unchanged with policy reason")
+    @Test("routing without local providers keeps the transcript unchanged")
     func noLocalProviderUsesPolicyReason() async throws {
-        await AIProviderTestIsolation.shared.withLock {
-            resetBeta()
-            defer { resetBeta() }
-            disableAllProviders()
-            let engine = MeetingRefinementEngine()
-            let off = try? await engine.refine(
-                meetingID: "123e4567-e89b-12d3-a456-426614174000",
-                result: result(),
-                vocabulary: .empty,
-                language: .korean,
-                allowModelLoad: false
-            )
-            #expect(off?.executionPath == .rules(.noEligibleProvider))
-
-            SettingsStore.shared.setBetaProvider(.openAI, enabled: true)
-            let openAIOnly = try? await engine.refine(
-                meetingID: "123e4567-e89b-12d3-a456-426614174000",
-                result: result(),
-                vocabulary: .empty,
-                language: .korean,
-                allowModelLoad: false
-            )
-            #expect(openAIOnly?.executionPath == .rules(.noEligibleProvider))
-        }
-    }
-
-    @Test("AFM failure proceeds to enabled on-device provider")
-    func localProviderRunsAfterAFMFailure() async throws {
         try await AIProviderTestIsolation.shared.withLock {
             resetBeta()
             defer { resetBeta() }
-            SettingsStore.shared.setBetaProvider(.foundationModels, enabled: true)
-            SettingsStore.shared.setBetaProvider(.onDevice, enabled: true)
+            let engine = MeetingRefinementEngine(
+                policy: BetaFeaturePolicy(accessReader: { .disabled }, selectionReader: { nil })
+            )
+            let off = try await engine.refine(
+                meetingID: "123e4567-e89b-12d3-a456-426614174000",
+                result: result(),
+                vocabulary: .empty,
+                sourceLanguageTag: "ko-KR",
+                language: .korean,
+                allowModelLoad: false
+            )
+            #expect(off.executionPath == .rules(.noEligibleProvider))
+        }
+    }
+
+    @Test("AFM failure preserves Bengali/Arabic source language for the enabled local provider", arguments: ["bn-BD", "ar-SA"])
+    func localProviderRunsAfterAFMFailure(sourceLanguageTag: String) async throws {
+        try await AIProviderTestIsolation.shared.withLock {
+            resetBeta()
+            defer { resetBeta() }
+            let sourceText = sourceLanguageTag == "bn-BD" ? "বাংলা এবং العربية SIFT" : "العربية এবং বাংলা SIFT"
             let calls = ProviderCallRecorder()
-            let afm = FakeProvider { _ in
-                await calls.append("afm")
+            let afm = FakeProvider { _, tag, language in
+                await calls.append("afm:\(tag)")
+                #expect(language == .korean)
                 throw IntelligenceRoutingError.backendUnavailable(provider: .foundationModels, reason: "offline")
             }
-            let local = FakeProvider { segments in
-                await calls.append("onDevice")
+            let local = FakeProvider { segments, tag, language in
+                await calls.append("onDevice:\(tag)")
+                #expect(language == .korean)
                 let corrected = await MainActor.run {
                     var corrected = segments
-                    corrected[0].text = "교정문"
+                    corrected[0].text = sourceText + "."
                     return corrected
                 }
                 return TranscriptCorrectionBatchResult(
@@ -107,14 +93,15 @@ struct MeetingRefinementBetaTests {
             }
             let outcome = try await MeetingRefinementEngine(afmProvider: afm, onDeviceProvider: local).refine(
                 meetingID: "123e4567-e89b-12d3-a456-426614174000",
-                result: result(),
+                result: result(text: sourceText),
                 vocabulary: .empty,
+                sourceLanguageTag: sourceLanguageTag,
                 language: .korean,
                 allowModelLoad: false
             )
-            #expect(await calls.snapshot == ["afm", "onDevice"])
+            #expect(await calls.snapshot == ["afm:\(sourceLanguageTag)", "onDevice:\(sourceLanguageTag)"])
             #expect(outcome.executionPath == .beta(.onDevice))
-            #expect(outcome.result.segments[0].text == "교정문")
+            #expect(outcome.result.segments[0].text == sourceText + ".")
         }
     }
 
@@ -123,11 +110,9 @@ struct MeetingRefinementBetaTests {
         await AIProviderTestIsolation.shared.withLock {
             resetBeta()
             defer { resetBeta() }
-            SettingsStore.shared.setBetaProvider(.foundationModels, enabled: true)
-            SettingsStore.shared.setBetaProvider(.onDevice, enabled: true)
             let localCalls = ProviderCallRecorder()
-            let afm = FakeProvider { _ in throw CancellationError() }
-            let local = FakeProvider { segments in
+            let afm = FakeProvider { _, _, _ in throw CancellationError() }
+            let local = FakeProvider { segments, _, _ in
                 await localCalls.append("onDevice")
                 return TranscriptCorrectionBatchResult(
                     segments: segments,
@@ -141,11 +126,58 @@ struct MeetingRefinementBetaTests {
                     meetingID: "123e4567-e89b-12d3-a456-426614174000",
                     result: result(),
                     vocabulary: .empty,
+                    sourceLanguageTag: "ko-KR",
                     language: .korean,
                     allowModelLoad: false
                 )
             }
             #expect(await localCalls.snapshot.isEmpty)
+        }
+    }
+
+    @Test("Bengali/Arabic source tags reach either injected provider independently of English UI labels", arguments: ["bn-BD", "ar-SA"], [false, true])
+    func sourceLanguageReachesSelectedProvider(sourceLanguageTag: String, useFoundationModels: Bool) async throws {
+        try await AIProviderTestIsolation.shared.withLock {
+            resetBeta()
+            defer { resetBeta() }
+            let sourceText = sourceLanguageTag == "bn-BD" ? "আগামীকাল SIFT নিয়ে আলোচনা করব العربية" : "سنناقش SIFT غدًا বাংলা"
+            let calls = ProviderCallRecorder()
+            let provider = FakeProvider { segments, tag, language in
+                await calls.append(tag)
+                #expect(language == .english)
+                return TranscriptCorrectionBatchResult(
+                    segments: segments,
+                    attemptedBatchCount: 1,
+                    succeededBatchCount: 1,
+                    failedBatchCount: 0
+                )
+            }
+            let engine = MeetingRefinementEngine(
+                afmProvider: useFoundationModels ? provider : nil,
+                onDeviceProvider: useFoundationModels ? nil : provider,
+                policy: BetaFeaturePolicy(accessReader: {
+                    BetaProviderAccess(
+                        foundationModelsEnabled: useFoundationModels,
+                        onDeviceEnabled: !useFoundationModels,
+                        openAIEnabled: false,
+                        layaEnabled: false,
+                        meetingVoiceProcessingEnabled: false
+                    )
+                })
+            )
+            let outcome = try await engine.refine(
+                meetingID: "123e4567-e89b-12d3-a456-426614174000",
+                result: result(text: sourceText),
+                vocabulary: .empty,
+                sourceLanguageTag: sourceLanguageTag,
+                language: .english,
+                allowModelLoad: false
+            )
+            #expect(await calls.snapshot == [sourceLanguageTag])
+            #expect(outcome.executionPath == .beta(useFoundationModels ? .foundationModels : .onDevice))
+            #expect(outcome.providerRan)
+            #expect(!outcome.changed)
+            #expect(outcome.result.segments[0].text == sourceText)
         }
     }
 }

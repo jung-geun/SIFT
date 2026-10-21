@@ -109,250 +109,367 @@ private func layoutCalColumns(_ items: [CalTimelineItem]) -> [CalColumnedItem] {
 struct CalendarTabView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.colorScheme) private var colorScheme
     @Environment(\.appTutorialState) private var tutorial
     @Query private var allTodos: [Todo]
-    @State private var displayMonth: Date = CalendarTabView.currentMonthStart
+    @State private var displayMonth = CalendarTabView.currentMonthStart
+    @State private var eventWindowMonth = CalendarTabView.currentMonthStart
+    #if targetEnvironment(macCatalyst)
+    @State private var scrollDate = CalendarTabView.currentMonthStart
+    @State private var scrollRevision = 0
+    #endif
     @State private var selectedDate: Date?
     @State private var activeSheet: CalendarActiveSheet?
     @State private var showSourceSheet = false
+    @State private var sidebarVisible = true
     @State private var allEvents: [CalendarService.CalendarEventSummary] = []
     @State private var calendarSources: [CalendarService.CalendarSourceGroup] = []
+    @State private var calendarColors: [String: Color] = [:]
     @State private var disabledIDs: Set<String> = []
-    @State private var authorized: Bool = false
-    @State private var initialScrollDone = false
-    @State private var scrollToTodayTrigger = 0
+    @State private var authorized = false
+    @State private var reloadRevision = 0
+    @State private var isLoading = false
     @State private var isSyncing = false
 
-    private let cal = Calendar.current
-
-    // 오늘이 현재 월에 표시되는지 여부 — "오늘" 버튼 강조에 사용
-    private var isTodayVisible: Bool {
-        let today = cal.dateComponents([.year, .month], from: Date())
-        let disp  = cal.dateComponents([.year, .month], from: displayMonth)
-        return today.year == disp.year && today.month == disp.month
-    }
-
     static var currentMonthStart: Date {
-        let comps = Calendar.current.dateComponents([.year, .month], from: Date())
-        return Calendar.current.date(from: comps) ?? Date()
+        Calendar.current.dateInterval(of: .month, for: Date())?.start ?? Date()
     }
 
-    private var scrollMonths: [Date] {
-        (-12...12).compactMap { cal.date(byAdding: .month, value: $0, to: Self.currentMonthStart) }
+    private var request: CalendarMonthRequest {
+        CalendarMonthRequest(month: eventWindowMonth, revision: reloadRevision,
+                             disabledIDs: disabledIDs, authorized: authorized,
+                             timeZone: Calendar.current.timeZone.identifier)
     }
-
-    private func monthID(_ date: Date) -> String {
-        let c = cal.dateComponents([.year, .month], from: date)
-        return "month-\(c.year ?? 0)-\(c.month ?? 0)"
-    }
-
-    // MARK: Body
 
     var body: some View {
         NavigationStack {
             Group {
-                if !authorized {
-                    noPermissionView
-                } else {
-                    mainContent
-                }
+                if authorized { mainContent } else { noPermissionView }
             }
+            .background(colorScheme == .dark ? Color(.secondarySystemBackground) : Color(.systemBackground))
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if let tutorial { AppTutorialTipHost(tutorial: tutorial, screen: .calendarTab) }
+            }
+            #if targetEnvironment(macCatalyst)
+            // Give Catalyst's native toolbar a calendar-specific navigation
+            // title instead of leaving it to the app-name fallback.
             .navigationTitle("캘린더")
+            #else
+            .navigationTitle(horizontalSizeClass == .regular ? Text("") : Text("캘린더"))
+            #endif
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { toolbarItems }
-            .sheet(item: $activeSheet) { sheet in
-                activeSheetView(sheet)
+            .toolbar {
+                #if targetEnvironment(macCatalyst)
+                ToolbarItem(placement: .navigationBarLeading) {
+                    CatalystToolbarButton(
+                        title: calendarCopy("calendar.sidebar.toggle", "Show or hide calendars", "캘린더 사이드바 표시 또는 가리기"),
+                        systemImage: "sidebar.left", accessibilityIdentifier: "calendar.sidebarToggle"
+                    ) { sidebarVisible.toggle() }
+                    .disabled(!authorized)
+                }
+                #else
+                toolbarItems
+                #endif
             }
-            .sheet(isPresented: $showSourceSheet, onDismiss: { reloadAllEvents() }) {
+            .sheet(item: eventEditorSheet, onDismiss: reloadAllEvents) { activeSheetView($0) }
+            .outsideDismissSheet(item: dayDetailSheet, onDismiss: reloadAllEvents) { activeSheetView($0) }
+            .sheet(isPresented: $showSourceSheet) {
                 CalendarSourceSheet(sources: calendarSources, disabledIDs: $disabledIDs)
             }
         }
-        .task {
-            authorized = CalendarService.shared.isAuthorized
-            if authorized {
-                disabledIDs = CalendarService.shared.disabledCalendarIDs
-                calendarSources = CalendarService.shared.availableCalendars()
-                reloadAllEvents()
-            }
+        .task { refreshAuthorization() }
+        .task(id: request) {
+            let expected = request
+            guard expected.authorized else { return }
+            isLoading = true
+            do { try await Task.sleep(for: .milliseconds(100)) }
+            catch { return }
+            // Keep neighboring months loaded before they enter the viewport.
+            // Scrolling changes the title, not the data set on every wheel event.
+            let calendar = Calendar.current
+            let first = calendar.date(byAdding: .month, value: -3, to: expected.month) ?? expected.month
+            let last = calendar.date(byAdding: .month, value: 3, to: expected.month) ?? expected.month
+            let start = CalendarMonthGeometry(month: first).interval.start
+            let end = CalendarMonthGeometry(month: last).interval.end
+            let events = await CalendarService.shared.events(from: start, to: end)
+            guard !Task.isCancelled, request == expected else { return }
+            allEvents = events
+            refreshSources()
+            isLoading = false
         }
-        .onReceive(NotificationCenter.default.publisher(for: .EKEventStoreChanged)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .EKEventStoreChanged)
+            .receive(on: RunLoop.main)) { _ in
             if authorized { reloadAllEvents() }
         }
-        .onChange(of: scenePhase) { _, newPhase in
-            if newPhase == .active && authorized { reloadAllEvents() }
+        .onReceive(NotificationCenter.default.publisher(for: .calendarAuthorizationChanged)
+            .receive(on: RunLoop.main)) { _ in refreshAuthorization() }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { refreshAuthorization() }
         }
-        // 캘린더 탭 재탭 시 오늘로 이동
-        .onReceive(NotificationCenter.default.publisher(for: .calendarScrollToToday)) { _ in
-            displayMonth = Self.currentMonthStart
-            scrollToTodayTrigger += 1
+        .onReceive(NotificationCenter.default.publisher(for: .calendarScrollToToday)) { _ in goToToday() }
+        .onChange(of: displayMonth) { _, month in
+            let distance = Calendar.current.dateComponents([.month], from: eventWindowMonth, to: month).month ?? 0
+            if abs(distance) >= 2 { eventWindowMonth = month }
         }
-        .safeAreaInset(edge: .bottom, spacing: 12) {
-            if let tutorial {
-                AppTutorialTipHost(tutorial: tutorial, screen: .calendarTab)
-            }
-        }
-        .onAppear {
-            tutorial?.handleCalendarTabAppeared()
-        }
+        .onAppear { tutorial?.handleCalendarTabAppeared() }
     }
-
-    // MARK: Permission Placeholder
 
     private var noPermissionView: some View {
         ContentUnavailableView {
-            Label(
-                AppLanguage.localized("calendar.permissionUnavailable", defaultValue: "캘린더 접근 권한 없음", language: .current, comment: "Calendar permission state title."),
-                systemImage: "calendar.badge.exclamationmark"
-            )
+            Label(AppLanguage.localized("calendar.permissionUnavailable", defaultValue: "캘린더 접근 권한 없음", language: .current, comment: "Calendar permission state title."), systemImage: "calendar.badge.exclamationmark")
                 .accessibilityIdentifier("calendar.permissionUnavailable")
         } description: {
-            Text(
-                AppLanguage.localized(
-                    "calendar.permissionDescription",
-                    defaultValue: "설정 > 개인정보 보호 > 캘린더에서 이 앱의 접근을 허용해주세요.",
-                    language: .current,
-                    comment: "Calendar permission state description."
-                )
-            )
+            Text(AppLanguage.localized("calendar.permissionDescription", defaultValue: "설정 > 개인정보 보호 > 캘린더에서 이 앱의 접근을 허용해주세요.", language: .current, comment: "Calendar permission state description."))
         }
     }
-
-    // MARK: Main Content
 
     private var mainContent: some View {
-        monthGridView
-    }
-
-    // MARK: Toolbar
-
-    @ToolbarContentBuilder
-    private var toolbarItems: some ToolbarContent {
-        ToolbarItem(placement: .navigationBarLeading) {
-            Button {
-                showSourceSheet = true
-            } label: {
-                Image(systemName: disabledIDs.isEmpty
-                      ? "line.3.horizontal.decrease.circle"
-                      : "line.3.horizontal.decrease.circle.fill")
+        GeometryReader { geometry in
+            #if targetEnvironment(macCatalyst)
+            let desktop = true
+            #else
+            let desktop = horizontalSizeClass == .regular && geometry.size.width >= 700
+            #endif
+            HStack(spacing: 0) {
+                if desktop && sidebarVisible {
+                    sidebar.frame(width: 224)
+                    Divider()
+                }
+                VStack(spacing: 0) {
+                    monthHeader(desktop: desktop)
+                    #if targetEnvironment(macCatalyst)
+                    CalendarContinuousGrid(month: displayMonth,
+                        target: CalendarWeekScrollTarget(date: scrollDate, revision: scrollRevision),
+                        selectedDate: selectedDate,
+                        events: allEvents.filter { !disabledIDs.contains($0.calendarID) },
+                        todos: Array(allTodos), colors: calendarColors, desktop: desktop,
+                        onVisibleMonth: { displayMonth = $0 }, onDayTap: selectDay)
+                    #else
+                    monthGrid(desktop: desktop)
+                    #endif
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .accessibilityLabel(AppLanguage.localized("calendar.filter.accessibilityLabel", defaultValue: "캘린더 필터", language: .current, comment: "Calendar filter button."))
-            .accessibilityIdentifier("calendar.filterButton")
-            .disabled(!authorized)
-        }
-        // 네비게이션 타이틀 영역 — 현재 뷰 모드를 드롭다운 Menu로 표시
-        ToolbarItem(placement: .navigationBarTrailing) {
-            Button {
-                displayMonth = Self.currentMonthStart
-                scrollToTodayTrigger += 1
-            } label: {
-                Text("오늘")
-                    .fontWeight(isTodayVisible ? .regular : .semibold)
-                    .foregroundStyle(isTodayVisible ? AppTheme.accent : AppTheme.destructive)
-            }
-            .disabled(!authorized)
-        }
-        ToolbarItem(placement: .navigationBarTrailing) {
-            Button {
-                activeSheet = .newEvent(date: selectedDate ?? Date())
-            } label: {
-                Image(systemName: "plus")
-            }
-            .accessibilityLabel(AppLanguage.localized("calendar.add.accessibilityLabel", defaultValue: "일정 추가", language: .current, comment: "Calendar add button."))
-            .accessibilityIdentifier("calendar.addButton")
-            .disabled(!authorized)
         }
     }
 
-    // MARK: Sheet Routing
-
-    @ViewBuilder
-    private func activeSheetView(_ sheet: CalendarActiveSheet) -> some View {
-        switch sheet {
-        case .dayDetail(let date):
-            DayDetailSheet(date: date, events: allEvents, todos: Array(allTodos)) { reloadAllEvents() }
-        case .newEvent(let date):
-            EventEditSheet(mode: .create(date: date)) { reloadAllEvents() }
-        case .editEvent(let detail):
-            EventEditSheet(mode: .edit(detail: detail)) { reloadAllEvents() }
-        }
+    private func monthGrid(desktop: Bool) -> some View {
+        CalendarMonthGrid(
+            month: displayMonth, selectedDate: selectedDate,
+            events: allEvents.filter { !disabledIDs.contains($0.calendarID) },
+            todos: Array(allTodos), colors: calendarColors, desktop: desktop,
+            onDayTap: selectDay
+        )
+        .refreshable { await performSync() }
     }
 
-    // MARK: Month Grid View
+    private func monthHeader(desktop: Bool) -> some View {
+        HStack(spacing: 12) {
+            #if !targetEnvironment(macCatalyst)
+            if desktop {
+                Button { sidebarVisible.toggle() } label: { Image(systemName: "sidebar.left") }
+                    .accessibilityLabel(calendarCopy("calendar.sidebar.toggle", "Show or hide calendars", "캘린더 사이드바 표시 또는 가리기"))
+                    .accessibilityIdentifier("calendar.sidebarToggle")
+            }
+            #endif
+            Text(monthTitle(desktop: desktop))
+                .lineLimit(1).minimumScaleFactor(0.7)
+            Spacer(minLength: 0)
+            if isLoading {
+                ProgressView().controlSize(.small)
+                    .accessibilityLabel(calendarCopy("calendar.loading", "Loading events", "일정 로딩 중"))
+            }
+            HStack(spacing: 0) {
+                Button { moveMonth(-1) } label: { Image(systemName: "chevron.left").frame(width: 30, height: 30) }
+                    .accessibilityLabel(calendarCopy("calendar.month.previous", "Previous month", "이전 달"))
+                    .accessibilityIdentifier("calendar.previousMonth")
+                Button("오늘", action: goToToday).padding(.horizontal, 8)
+                    .accessibilityIdentifier("calendar.today")
+                Button { moveMonth(1) } label: { Image(systemName: "chevron.right").frame(width: 30, height: 30) }
+                    .accessibilityLabel(calendarCopy("calendar.month.next", "Next month", "다음 달"))
+                    .accessibilityIdentifier("calendar.nextMonth")
+            }
+            .font(.system(size: 13))
+            #if targetEnvironment(macCatalyst)
+            filterButton.frame(width: 30, height: 30)
+            addButton.frame(width: 30, height: 30)
+            #endif
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, desktop ? 14 : 12).padding(.vertical, desktop ? 18 : 12)
+    }
 
-    private var monthGridView: some View {
+    private var sidebar: some View {
         VStack(spacing: 0) {
-            weekdayHeader
-            Divider()
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(spacing: 0) {
-                        ForEach(scrollMonths, id: \.timeIntervalSince1970) { month in
-                            MonthBlock(
-                                month: month,
-                                allEvents: allEvents,
-                                allTodos: Array(allTodos),
-                                onDayTap: { date in
-                                    selectedDate = date
-                                    activeSheet = .dayDetail(date: date)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    ForEach(calendarSources) { source in
+                        VStack(alignment: .leading, spacing: 9) {
+                            Text(source.title).font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
+                            ForEach(source.calendars) { info in
+                                Button { toggleCalendar(info.id) } label: {
+                                    HStack(spacing: 8) {
+                                        Image(systemName: disabledIDs.contains(info.id) ? "square" : "checkmark.square.fill")
+                                            .foregroundStyle(calendarColors[info.id] ?? .accentColor)
+                                        Text(info.title).foregroundStyle(.primary).lineLimit(2)
+                                        Spacer(minLength: 0)
+                                    }.font(.system(size: 13)).frame(minHeight: 22).contentShape(Rectangle())
                                 }
-                            )
-                            .id(monthID(month))
+                                .buttonStyle(.plain)
+                                .accessibilityValue(disabledIDs.contains(info.id)
+                                    ? calendarCopy("calendar.source.deselected", "Not selected", "선택 안 됨")
+                                    : calendarCopy("calendar.source.selected", "Selected", "선택됨"))
+                                .accessibilityIdentifier("calendar.source.\(info.id)")
+                            }
                         }
                     }
-                }
-                .onAppear {
-                    guard !initialScrollDone else { return }
-                    initialScrollDone = true
-                    DispatchQueue.main.async {
-                        proxy.scrollTo(monthID(Self.currentMonthStart), anchor: .top)
-                    }
-                }
-                .onChange(of: scrollToTodayTrigger) { _, _ in
-                    withAnimation {
-                        proxy.scrollTo(monthID(Self.currentMonthStart), anchor: .top)
-                    }
-                }
-                .refreshable {
-                    reloadAllEvents()
-                    await performSync()
-                }
+                }.padding(16)
             }
+            Divider()
+            CalendarMiniMonth(month: displayMonth, selectedDate: selectedDate, onSelect: selectMiniDay)
+                .padding(14)
+        }
+        .background(colorScheme == .dark ? Color(.tertiarySystemBackground) : Color(.secondarySystemBackground))
+    }
+
+    @ToolbarContentBuilder private var toolbarItems: some ToolbarContent {
+        ToolbarItem(placement: .navigationBarLeading) {
+            filterButton
+        }
+        ToolbarItem(placement: .navigationBarTrailing) {
+            addButton
         }
     }
 
-    // MARK: Weekday Header
-
-    private var weekdayHeader: some View {
-        var calendar = cal
-        calendar.locale = AppLanguage.current.locale
-        return HStack(spacing: 0) {
-            ForEach(calendar.shortStandaloneWeekdaySymbols, id: \.self) { day in
-                Text(day)
-                    .font(.caption).fontWeight(.medium).foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity)
-            }
-        }
-        .padding(.horizontal, 4).padding(.vertical, 4)
-        .background(Color(.systemBackground))
+    private var filterButton: some View {
+        Button { showSourceSheet = true } label: { Image(systemName: "line.3.horizontal.decrease.circle") }
+            .accessibilityLabel(AppLanguage.localized("calendar.filter.accessibilityLabel", defaultValue: "캘린더 필터", language: .current, comment: "Calendar filter button."))
+            .accessibilityIdentifier("calendar.filterButton").disabled(!authorized)
     }
 
-    // MARK: Data
+    private var addButton: some View {
+        Button { activeSheet = .newEvent(date: selectedDate ?? Date()) } label: { Image(systemName: "plus") }
+            .accessibilityLabel(AppLanguage.localized("calendar.add.accessibilityLabel", defaultValue: "일정 추가", language: .current, comment: "Calendar add button."))
+            .accessibilityIdentifier("calendar.addButton").disabled(!authorized)
+    }
 
-    @MainActor
-    func performSync() async {
-        guard !isSyncing else { return }
+    private var dayDetailSheet: Binding<CalendarActiveSheet?> {
+        Binding(get: {
+            if case .dayDetail? = activeSheet { return activeSheet }
+            return nil
+        }, set: { activeSheet = $0 })
+    }
+
+    private var eventEditorSheet: Binding<CalendarActiveSheet?> {
+        Binding(get: {
+            if case .dayDetail? = activeSheet { return nil }
+            return activeSheet
+        }, set: { activeSheet = $0 })
+    }
+
+    @ViewBuilder private func activeSheetView(_ sheet: CalendarActiveSheet) -> some View {
+        switch sheet {
+        case .dayDetail(let date):
+            DayDetailSheet(date: date, events: allEvents.filter { !disabledIDs.contains($0.calendarID) }, todos: Array(allTodos)) { reloadAllEvents() }
+        case .newEvent(let date): EventEditSheet(mode: .create(date: date)) { reloadAllEvents() }
+        case .editEvent(let detail): EventEditSheet(mode: .edit(detail: detail)) { reloadAllEvents() }
+        }
+    }
+
+    private func selectDay(_ date: Date) {
+        selectedDate = date
+        activeSheet = .dayDetail(date: date)
+    }
+
+    private func selectMiniDay(_ date: Date) {
+        selectedDate = date
+        displayMonth = Calendar.current.dateInterval(of: .month, for: date)?.start ?? date
+        #if targetEnvironment(macCatalyst)
+        scrollDate = date
+        scrollRevision += 1
+        #endif
+    }
+
+
+    private func monthTitle(desktop: Bool) -> AttributedString {
+        var title = displayMonth.formatted(.dateTime.year().month(.wide).locale(AppLanguage.current.locale).attributedStyle)
+        let size: CGFloat = desktop ? 32 : 22
+        for run in title.runs {
+            title[run.range].font = .system(size: size, weight: run.dateField == .year ? .light : .semibold)
+        }
+        return title
+    }
+
+    private func moveMonth(_ offset: Int) {
+        guard let date = Calendar.current.date(byAdding: .month, value: offset, to: displayMonth) else { return }
+        displayMonth = date
+        selectedDate = nil
+        #if targetEnvironment(macCatalyst)
+        scrollDate = date
+        scrollRevision += 1
+        #endif
+    }
+
+    private func goToToday() {
+        displayMonth = Self.currentMonthStart
+        selectedDate = Calendar.current.startOfDay(for: Date())
+        #if targetEnvironment(macCatalyst)
+        scrollDate = Self.currentMonthStart
+        scrollRevision += 1
+        #endif
+    }
+
+    private func toggleCalendar(_ id: String) {
+        if disabledIDs.contains(id) { disabledIDs.remove(id) } else { disabledIDs.insert(id) }
+        CalendarService.shared.disabledCalendarIDs = disabledIDs
+    }
+
+    private func refreshAuthorization() {
+        CalendarService.shared.restoreAuthorizationIfGranted()
+        authorized = CalendarService.shared.isAuthorized
+        if authorized {
+            disabledIDs = CalendarService.shared.disabledCalendarIDs
+            reloadAllEvents()
+        } else {
+            allEvents = []
+            calendarSources = []
+            calendarColors = [:]
+            activeSheet = nil
+            showSourceSheet = false
+            isLoading = false
+        }
+    }
+
+    private func refreshSources() {
+        calendarSources = CalendarService.shared.availableCalendars()
+        calendarColors = Dictionary(uniqueKeysWithValues: calendarSources.flatMap(\.calendars).map {
+            ($0.id, CalendarPresentation.color(forCalendarID: $0.id))
+        })
+    }
+
+    func reloadAllEvents() { reloadRevision += 1 }
+
+    @MainActor func performSync() async {
+        guard authorized, !isSyncing else { return }
         isSyncing = true
         defer { isSyncing = false }
         await CalendarService.shared.syncCalendarTodos(context: modelContext)
         reloadAllEvents()
     }
+}
 
-    func reloadAllEvents() {
-        guard let start = cal.date(byAdding: .month, value: -13, to: Self.currentMonthStart),
-              let end   = cal.date(byAdding: .month, value:  14, to: Self.currentMonthStart)
-        else { return }
-        allEvents = CalendarService.shared.events(from: start, to: end)
-    }
+struct CalendarMonthRequest: Equatable, Hashable {
+    let month: Date
+    let revision: Int
+    let disabledIDs: Set<String>
+    let authorized: Bool
+    let timeZone: String
+}
+
+func calendarCopy(_ key: String, _ english: String, _ korean: String) -> String {
+    AppLanguage.localized(key, defaultValue: AppLanguage.current == .english ? english : korean,
+                          language: .current, comment: "Calendar month interface.")
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -373,365 +490,6 @@ enum CalendarActiveSheet: Identifiable {
     }
 }
 
-// ─────────────────────────────────────────────────────────────
-// MARK: - MonthBlock  (주 행 기반 재구성)
-// ─────────────────────────────────────────────────────────────
-
-private struct MonthBlock: View {
-    let month: Date
-    let allEvents: [CalendarService.CalendarEventSummary]
-    let allTodos: [Todo]
-    let onDayTap: (Date) -> Void
-
-    private let cal = Calendar.current
-
-    /// 월을 7-element 주 배열로 분해 (nil = 선행/후행 빈칸)
-    private var weekRows: [[Date?]] {
-        let comps = cal.dateComponents([.year, .month], from: month)
-        guard let firstDay = cal.date(from: comps),
-              let range = cal.range(of: .day, in: .month, for: firstDay) else { return [] }
-        let leadingNils = cal.component(.weekday, from: firstDay) - 1
-        var days: [Date?] = Array(repeating: nil, count: leadingNils)
-        for offset in 0..<range.count {
-            days.append(cal.date(byAdding: .day, value: offset, to: firstDay))
-        }
-        while days.count % 7 != 0 { days.append(nil) }
-        return stride(from: 0, to: days.count, by: 7).map { Array(days[$0..<($0+7)]) }
-    }
-
-    private var monthTitle: String {
-        let fmt = DateFormatter()
-        fmt.locale = AppLanguage.current.locale
-        fmt.setLocalizedDateFormatFromTemplate("yMMMM")
-        return fmt.string(from: month)
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text(monthTitle).font(.headline)
-                    .padding(.horizontal, 16).padding(.top, 14).padding(.bottom, 6)
-                Spacer()
-            }
-            ForEach(Array(weekRows.enumerated()), id: \.offset) { _, row in
-                WeekRowView(days: row, allEvents: allEvents, allTodos: allTodos, onDayTap: onDayTap)
-            }
-            Divider()
-        }
-    }
-}
-
-// ─────────────────────────────────────────────────────────────
-// MARK: - WeekRowView
-// ─────────────────────────────────────────────────────────────
-
-private struct WeekRowView: View {
-    let days: [Date?]       // 7 elements (nil = 빈칸)
-    let allEvents: [CalendarService.CalendarEventSummary]
-    let allTodos: [Todo]
-    let onDayTap: (Date) -> Void
-
-    private let cal = Calendar.current
-
-    // Layout constants
-    private let maxLanes = 3
-    private let dayH: CGFloat = 28
-    private let laneH: CGFloat = 16
-    private let laneGap: CGFloat = 2
-    private let overH: CGFloat = 13
-
-    private var rowH: CGFloat { dayH + CGFloat(maxLanes) * (laneH + laneGap) + overH }
-
-    // MARK: Date helpers
-
-    private var weekStart: Date? { days.compactMap { $0 }.first }
-    private var weekEnd: Date? {
-        guard let last = days.compactMap({ $0 }).last,
-              let end = cal.date(byAdding: .day, value: 1, to: last) else { return nil }
-        return end
-    }
-
-    /// 이 주에 걸치는 모든 이벤트
-    private var weekEvents: [CalendarService.CalendarEventSummary] {
-        guard let ws = weekStart, let we = weekEnd else { return [] }
-        return allEvents.filter { $0.startDate < we && $0.endDate > ws }
-    }
-
-    /// Todo와 연동된 캘린더 이벤트 ID 집합 — 중복 표시 방지용
-    private var linkedEventIDs: Set<String> {
-        Set(allTodos.compactMap { $0.calendarEventID })
-    }
-
-    /// 스팬 바 이벤트 — 긴 것 먼저 (연동된 Todo가 있는 이벤트는 숨김)
-    private var spanBarEvents: [CalendarService.CalendarEventSummary] {
-        let linked = linkedEventIDs
-        return weekEvents.filter { eventIsAllDayStyle($0) && !linked.contains($0.identifier) }
-            .sorted { a, b in
-                let (acs, ace) = spanCols(a); let (bcs, bce) = spanCols(b)
-                let aL = ace - acs; let bL = bce - bcs
-                return aL != bL ? aL > bL : a.startDate < b.startDate
-            }
-    }
-
-    /// 단일일 타임드 이벤트 (컬럼별, 연동된 Todo가 있는 이벤트는 숨김)
-    private var timedByCol: [Int: [CalendarService.CalendarEventSummary]] {
-        let linked = linkedEventIDs
-        var d: [Int: [CalendarService.CalendarEventSummary]] = [:]
-        for e in weekEvents where !eventIsAllDayStyle(e) && !linked.contains(e.identifier) {
-            if let col = colIndex(for: e.startDate) { d[col, default: []].append(e) }
-        }
-        return d
-    }
-
-    private var todosByCol: [Int: [Todo]] {
-        var d: [Int: [Todo]] = [:]
-        for todo in allTodos where !todo.isCompleted {
-            guard let anchor = todo.scheduleAnchor, let col = colIndex(for: anchor) else { continue }
-            d[col, default: []].append(todo)
-        }
-        return d
-    }
-
-    // MARK: Lane assignment
-
-    private struct LaneItem {
-        let event: CalendarService.CalendarEventSummary
-        let lane: Int
-        let colStart: Int
-        let colEnd: Int
-    }
-
-    private var laneItems: [LaneItem] {
-        var laneLastCol: [Int: Int] = [:]
-        var result: [LaneItem] = []
-        for event in spanBarEvents {
-            let (cs, ce) = spanCols(event)
-            guard cs <= ce else { continue }
-            var assignedLane: Int? = nil
-            for lane in 0..<maxLanes {
-                if (laneLastCol[lane] ?? -1) < cs { assignedLane = lane; break }
-            }
-            guard let lane = assignedLane else { continue }  // overflow
-            laneLastCol[lane] = ce
-            result.append(LaneItem(event: event, lane: lane, colStart: cs, colEnd: ce))
-        }
-        return result
-    }
-
-    // MARK: Geometry helpers
-
-    private func spanCols(_ event: CalendarService.CalendarEventSummary) -> (Int, Int) {
-        var cs = 7, ce = -1
-        for (i, day) in days.enumerated() {
-            guard let day else { continue }
-            if eventOccupiesDay(event, day: day) { cs = min(cs, i); ce = max(ce, i) }
-        }
-        return (cs == 7 ? 0 : cs, ce < 0 ? 0 : ce)
-    }
-
-    private func colIndex(for date: Date) -> Int? {
-        for (i, day) in days.enumerated() {
-            guard let day else { continue }
-            if cal.isDate(date, inSameDayAs: day) { return i }
-        }
-        return nil
-    }
-
-    private func availableLanes(col: Int, cachedLaneItems: [LaneItem]) -> [Int] {
-        let used = Set(cachedLaneItems.filter { $0.colStart <= col && $0.colEnd >= col }.map { $0.lane })
-        return (0..<maxLanes).filter { !used.contains($0) }
-    }
-
-    // MARK: Chip model
-
-    private enum ChipContent {
-        case event(CalendarService.CalendarEventSummary)
-        case todo(Todo)
-        var title: String {
-            switch self { case .event(let e): return e.title; case .todo(let t): return t.title }
-        }
-        var color: Color {
-            switch self {
-            case .event(let e): return calendarEventColor(for: e.calendarID)
-            case .todo: return AppTheme.accent
-            }
-        }
-    }
-
-    private func chips(col: Int) -> [ChipContent] {
-        var items: [ChipContent] = []
-        if let evts = timedByCol[col] { items += evts.map { .event($0) } }
-        if let todos = todosByCol[col] { items += todos.map { .todo($0) } }
-        return items
-    }
-
-    private func overflowCount(col: Int, cachedLaneItems: [LaneItem], cachedSpanBarEvents: [CalendarService.CalendarEventSummary]) -> Int {
-        let spanOverflow = cachedSpanBarEvents.filter { e in
-            let (cs, ce) = spanCols(e)
-            return cs <= col && ce >= col &&
-                   !cachedLaneItems.contains(where: { $0.event.identifier == e.identifier })
-        }.count
-        let avail = availableLanes(col: col, cachedLaneItems: cachedLaneItems).count
-        let chipOverflow = max(0, chips(col: col).count - avail)
-        return spanOverflow + chipOverflow
-    }
-
-    // MARK: Body
-
-    var body: some View {
-        let cached = laneItems
-        let cachedSpan = spanBarEvents
-        let wFirst = weekStart
-        let wLast  = weekEnd
-
-        return GeometryReader { geo in
-            let cw = max(geo.size.width / 7, 0)
-
-            ZStack(alignment: .topLeading) {
-
-                // ⓪ 투명 탭 레이어 — 전체 셀 높이, 가장 아래 z 레이어
-                ForEach(0..<7, id: \.self) { col in
-                    if let day = days[col] {
-                        Color.clear
-                            .frame(width: cw, height: rowH)
-                            .contentShape(Rectangle())
-                            .offset(x: CGFloat(col) * cw)
-                            .onTapGesture { onDayTap(day) }
-                    }
-                }
-
-                // ① 날짜 숫자 (히트테스트 비활성 → 탭이 ⓪으로 통과)
-                ForEach(0..<7, id: \.self) { col in
-                    if let day = days[col] {
-                        DayNumCell(date: day)
-                            .frame(width: cw, height: dayH)
-                            .offset(x: CGFloat(col) * cw)
-                            .allowsHitTesting(false)
-                    }
-                }
-
-                // ② 스팬 바 (히트테스트 비활성)
-                ForEach(Array(cached.enumerated()), id: \.offset) { _, item in
-                    spanBarView(item: item, cw: cw, weekFirst: wFirst, weekLast: wLast)
-                        .offset(y: dayH + CGFloat(item.lane) * (laneH + laneGap))
-                        .allowsHitTesting(false)
-                }
-
-                // ③ 칩 + 오버플로 (히트테스트 비활성)
-                ForEach(0..<7, id: \.self) { col in
-                    let avail = availableLanes(col: col, cachedLaneItems: cached)
-                    let cs = chips(col: col)
-                    let paired = Array(zip(avail, cs))
-
-                    ForEach(Array(paired.enumerated()), id: \.offset) { pairIdx, laneChip in
-                        chipView(chip: laneChip.1)
-                            .frame(width: max(cw - 2, 0), height: laneH)
-                            .offset(x: CGFloat(col) * cw + 1,
-                                    y: dayH + CGFloat(laneChip.0) * (laneH + laneGap))
-                            .allowsHitTesting(false)
-                    }
-
-                    let ov = overflowCount(col: col, cachedLaneItems: cached, cachedSpanBarEvents: cachedSpan)
-                    if ov > 0 {
-                        Text("+\(ov)")
-                            .font(.system(size: 9, weight: .medium))
-                            .foregroundStyle(.secondary)
-                            .frame(width: max(cw, 0), alignment: .leading)
-                            .offset(x: CGFloat(col) * cw + 3,
-                                    y: dayH + CGFloat(maxLanes) * (laneH + laneGap) + 1)
-                            .allowsHitTesting(false)
-                    }
-                }
-            }
-        }
-        .frame(height: rowH)
-    }
-
-    // MARK: Sub-views
-
-    @ViewBuilder
-    private func spanBarView(item: LaneItem, cw: CGFloat,
-                              weekFirst: Date?, weekLast: Date?) -> some View {
-        let color = calendarEventColor(for: item.event.calendarID)
-        let x = CGFloat(item.colStart) * cw
-        let rawBarW = CGFloat(item.colEnd - item.colStart + 1) * cw
-        let barW = max(rawBarW, 0)
-        let contL: Bool = {
-            guard let wf = weekFirst else { return false }
-            return item.event.startDate < cal.startOfDay(for: wf)
-        }()
-        let contR: Bool = {
-            guard let wl = weekLast else { return false }
-            return item.event.endDate > wl
-        }()
-        let lRad: CGFloat = contL ? 0 : 4
-        let rRad: CGFloat = contR ? 0 : 4
-        let frameWidth = max(barW - (contL ? 0 : 1) - (contR ? 0 : 1), 0)
-
-        HStack(spacing: 2) {
-            if contL {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: 7, weight: .bold))
-                    .foregroundStyle(.white)
-                    .padding(.leading, 1)
-            }
-            Text(item.event.title.isEmpty ? AppLanguage.localized("calendar.event.noTitle", defaultValue: "(No Title)", language: .current, comment: "Placeholder for a calendar event without a title.") : item.event.title)
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(.white)
-                .lineLimit(1)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            if contR {
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 7, weight: .bold))
-                    .foregroundStyle(.white)
-                    .padding(.trailing, 1)
-            }
-        }
-        .padding(.horizontal, contL || contR ? 0 : 3)
-        .frame(width: frameWidth, height: laneH)
-        .background(color, in: UnevenRoundedRectangle(
-            topLeadingRadius: lRad, bottomLeadingRadius: lRad,
-            bottomTrailingRadius: rRad, topTrailingRadius: rRad
-        ))
-        .offset(x: x + (contL ? 0 : 1))
-    }
-
-    @ViewBuilder
-    private func chipView(chip: ChipContent) -> some View {
-        HStack(spacing: 2) {
-            Circle().fill(chip.color).frame(width: 5, height: 5)
-            Text(chip.title.isEmpty ? AppLanguage.localized("calendar.item.emptyTitle", defaultValue: "(None)", language: .current, comment: "Compact placeholder for a calendar item without a title.") : chip.title)
-                .font(.system(size: 10)).lineLimit(1).foregroundStyle(Color(.label))
-        }
-        .frame(height: laneH)
-    }
-
-}
-
-// ─────────────────────────────────────────────────────────────
-// MARK: - DayNumCell
-// ─────────────────────────────────────────────────────────────
-
-private struct DayNumCell: View {
-    let date: Date
-    private var isToday: Bool { Calendar.current.isDateInToday(date) }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            ZStack {
-                if isToday {
-                    Circle().fill(AppTheme.accent).frame(width: 24, height: 24)
-                }
-                Text("\(Calendar.current.component(.day, from: date))")
-                    .font(.system(.callout, design: .rounded))
-                    .fontWeight(isToday ? .semibold : .regular)
-                    .foregroundStyle(isToday ? .white : Color(.label))
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .padding(.top, 3)
-    }
-}
 
 // ─────────────────────────────────────────────────────────────
 // MARK: - DayDetailSheet  (24h 타임라인)
@@ -775,14 +533,21 @@ struct DayDetailSheet: View {
         Set(dayTodos.compactMap { $0.calendarEventID })
     }
 
-    /// 종일 밴드: isAllDay 또는 다일 이벤트 (연동된 Todo가 있는 이벤트는 숨김)
+    /// A todo on the start date does not represent a multi-day event's full span.
     private var allDayEvents: [CalendarService.CalendarEventSummary] {
-        dayEvents.filter { eventIsAllDayStyle($0) && !linkedEventIDs.contains($0.identifier) }
+        dayEvents.filter { event in
+            let nextDay = cal.date(byAdding: .day, value: 1, to: cal.startOfDay(for: event.startDate)) ?? event.startDate
+            return eventIsAllDayStyle(event)
+                && (event.endDate > nextDay || !linkedEventIDs.contains(event.identifier))
+        }
     }
 
     private var timedEvents: [CalendarService.CalendarEventSummary] {
         dayEvents.filter { !eventIsAllDayStyle($0) && !linkedEventIDs.contains($0.identifier) }
     }
+
+    private var hasTimedItems: Bool { !timedEvents.isEmpty || !dayTodos.isEmpty }
+    private var hasSchedule: Bool { hasTimedItems || !allDayEvents.isEmpty }
 
     private var dateTitle: String {
         let formatter = DateFormatter()
@@ -829,29 +594,31 @@ struct DayDetailSheet: View {
         NavigationStack {
             VStack(spacing: 0) {
                 if !allDayEvents.isEmpty {
-                    allDaySection
-                    Divider()
+                    ScrollView { allDaySection }
+                        .frame(maxHeight: hasTimedItems ? min(132, 40 + CGFloat(allDayEvents.count) * 36) : .infinity)
+                    if hasTimedItems { Divider() }
                 }
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        if timedEvents.isEmpty && dayTodos.isEmpty && allDayEvents.isEmpty {
-                            ContentUnavailableView("일정 없음", systemImage: "calendar")
-                                .padding(.top, 60)
-                        } else {
-                            timelineGrid.padding(.bottom, 24)
+                if hasTimedItems {
+                    ScrollViewReader { proxy in
+                        ScrollView {
+                            timelineGrid
+                                .padding(.horizontal, AppTheme.Spacing.item)
+                                .padding(.vertical, AppTheme.Spacing.item)
+                        }
+                        .onAppear {
+                            let h = initialScrollHour
+                            DispatchQueue.main.async { proxy.scrollTo("hour-\(h)", anchor: .top) }
                         }
                     }
-                    .onAppear {
-                        let h = initialScrollHour
-                        DispatchQueue.main.async { proxy.scrollTo("hour-\(h)", anchor: .top) }
-                    }
+                } else if !hasSchedule {
+                    ContentUnavailableView("일정 없음", systemImage: "calendar")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
+            .background(AppTheme.surface)
+            .navigationTitle(dateTitle)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .principal) {
-                    Text(dateTitle).font(.headline)
-                }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button("닫기") { dismiss() }
                 }
@@ -872,23 +639,23 @@ struct DayDetailSheet: View {
                 now = Date()
             }
         }
+        #if targetEnvironment(macCatalyst)
+        .frame(width: 520, height: hasTimedItems ? 560 : hasSchedule
+            ? min(520, 96 + CGFloat(allDayEvents.count) * 36) : 240)
+        .presentationSizing(.fitted)
+        #endif
     }
 
-    // MARK: All-day section (compact pill 한 줄)
+    // MARK: All-day agenda
 
     private var allDaySection: some View {
-        HStack(spacing: 0) {
+        VStack(alignment: .leading, spacing: 4) {
             Text("종일")
-                .font(.caption2).foregroundStyle(.secondary)
-                .frame(width: 44, alignment: .center)
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 6) {
-                    ForEach(allDayEvents, id: \.identifier) { allDayChip($0) }
-                }
-                .padding(.horizontal, 8)
-            }
+                .font(.caption).foregroundStyle(.secondary)
+            ForEach(allDayEvents, id: \.identifier) { allDayChip($0) }
         }
-        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(AppTheme.Spacing.item)
     }
 
     @ViewBuilder
@@ -900,25 +667,21 @@ struct DayDetailSheet: View {
         let contR = event.endDate   > day1
 
         Button { openEventEdit(event) } label: {
-            HStack(spacing: 3) {
-                if contL {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: 8, weight: .bold)).foregroundStyle(.white)
-                }
+            HStack(spacing: AppTheme.Spacing.compact) {
+                Circle().fill(color).frame(width: 7, height: 7)
+                if contL { Image(systemName: "chevron.left").font(.caption2).foregroundStyle(.secondary) }
                 Text(event.title.isEmpty ? AppLanguage.localized("calendar.event.noTitle", defaultValue: "(No Title)", language: .current, comment: "Placeholder for a calendar event without a title.") : event.title)
-                    .font(.caption).fontWeight(.medium).lineLimit(1)
-                    .foregroundStyle(.white)
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.primary)
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 if event.isRecurring {
-                    Image(systemName: "arrow.triangle.2.circlepath")
-                        .font(.system(size: 7)).foregroundStyle(.white.opacity(0.85))
+                    Image(systemName: "arrow.triangle.2.circlepath").font(.caption).foregroundStyle(.secondary)
                 }
-                if contR {
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 8, weight: .bold)).foregroundStyle(.white)
-                }
+                if contR { Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.secondary) }
             }
-            .padding(.horizontal, 8).padding(.vertical, 7)
-            .background(color.opacity(0.9), in: Capsule())
+            .frame(minHeight: 28)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
@@ -932,8 +695,8 @@ struct DayDetailSheet: View {
                 ForEach(0..<24, id: \.self) { hour in
                     Text(String(format: "%02d", hour))
                         .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
-                        .frame(width: labelWidth, height: hourHeight, alignment: .top)
                         .padding(.top, 3)
+                        .frame(width: labelWidth, height: hourHeight, alignment: .top)
                         .id("hour-\(hour)")
                 }
             }
@@ -1004,7 +767,7 @@ struct DayDetailSheet: View {
         let bh    = max(CGFloat(dh / 3600) * hourHeight, 30)
         return Button { openEventEdit(event) } label: {
             HStack(alignment: .top, spacing: 4) {
-                RoundedRectangle(cornerRadius: 2).fill(color).frame(width: 3)
+                RoundedRectangle(cornerRadius: 2, style: .continuous).fill(color).frame(width: 3)
                 VStack(alignment: .leading, spacing: 1) {
                     HStack(spacing: 3) {
                         Text(event.title.isEmpty ? AppLanguage.localized("calendar.event.noTitle", defaultValue: "(No Title)", language: .current, comment: "Placeholder for a calendar event without a title.") : event.title)
@@ -1023,8 +786,7 @@ struct DayDetailSheet: View {
             }
             .padding(5)
             .frame(height: bh, alignment: .top)
-            .background(color.opacity(0.13), in: RoundedRectangle(cornerRadius: 6))
-            .overlay(RoundedRectangle(cornerRadius: 6).stroke(color.opacity(0.35), lineWidth: 0.5))
+            .background(AppTheme.insetSurface, in: RoundedRectangle(cornerRadius: AppTheme.controlRadius, style: .continuous))
         }
         .buttonStyle(.plain)
     }
@@ -1074,8 +836,7 @@ struct DayDetailSheet: View {
             }
         }
         .padding(.horizontal, 6).padding(.vertical, 5)
-        .background(AppTheme.accentSubtle, in: RoundedRectangle(cornerRadius: 6))
-        .overlay(RoundedRectangle(cornerRadius: 6).stroke(AppTheme.accentStroke, lineWidth: 0.5))
+        .background(AppTheme.insetSurface, in: RoundedRectangle(cornerRadius: AppTheme.controlRadius, style: .continuous))
     }
 
     private func linkedCalendarEvent(for todo: Todo) -> CalendarService.CalendarEventSummary? {
@@ -1181,9 +942,17 @@ struct EventEditSheet: View {
                     }
                 }
 
-                if !calendarSources.isEmpty {
+                if mode.isCreate {
                     Section("캘린더") {
                         Picker("캘린더 선택", selection: $calendarID) {
+                            Text(AppLanguage.localized("calendar.destination.unselected", defaultValue: "Choose a calendar", language: .current)).tag("")
+                            Text(AppLanguage.localized("calendar.destination.systemDefault", defaultValue: "System Default Calendar", language: .current))
+                                .tag(CalendarService.systemDefaultCalendarID)
+                            if !calendarID.isEmpty,
+                               calendarID != CalendarService.systemDefaultCalendarID,
+                               !calendarSources.flatMap(\.calendars).contains(where: { $0.id == calendarID }) {
+                                Text(AppLanguage.localized("calendar.destination.unavailable", defaultValue: "Choose another writable calendar", language: .current)).tag(calendarID)
+                            }
                             ForEach(calendarSources) { source in
                                 ForEach(source.calendars) { calInfo in
                                     calendarLabel(calInfo).tag(calInfo.id)
@@ -1200,6 +969,7 @@ struct EventEditSheet: View {
                     }
                 }
             }
+            .appFormStyle()
             .navigationTitle(mode.isCreate
                 ? AppLanguage.localized("calendar.event.createTitle", defaultValue: "New Event", language: .current, comment: "New calendar event navigation title.")
                 : AppLanguage.localized("calendar.event.editTitle", defaultValue: "Edit Event", language: .current, comment: "Calendar event editor navigation title."))
@@ -1251,12 +1021,9 @@ struct EventEditSheet: View {
             Text("선택한 날짜의 일정, 이후 일정 또는 전체 시리즈에 적용할 수 있습니다.")
         }
         .task {
-            calendarSources = CalendarService.shared.availableCalendars()
+            calendarSources = CalendarService.shared.availableCalendars(writableOnly: true)
             if calendarID.isEmpty {
-                let defaultID = CalendarService.shared.defaultCalendarID
-                calendarID = defaultID.isEmpty
-                    ? (calendarSources.first?.calendars.first?.id ?? "")
-                    : defaultID
+                calendarID = CalendarService.shared.defaultCalendarID
             }
         }
     }
@@ -1265,7 +1032,7 @@ struct EventEditSheet: View {
     private func calendarLabel(_ info: CalendarService.CalendarInfo) -> some View {
         let color = CalendarPresentation.color(forCalendarID: info.id)
         Label {
-            Text(info.title)
+            Text("\(info.sourceTitle) · \(info.title)")
         } icon: {
             Circle().fill(color).frame(width: 10, height: 10)
         }
@@ -1275,7 +1042,7 @@ struct EventEditSheet: View {
         switch detail.marker?.origin {
         case .siftRecommendation:
             return AppLanguage.localized("calendar.event.origin.recommendation", defaultValue: "SIFT-recommended event", language: .current, comment: "Calendar event origin label for a SIFT recommendation.")
-        case .siftManual, .siftEmail, .siftMeeting:
+        case .siftManual, .siftEmail, .siftMeeting, .siftHealth:
             return AppLanguage.localized("calendar.event.origin.sift", defaultValue: "Event created in SIFT", language: .current, comment: "Calendar event origin label for an event created in SIFT.")
         case .externalCalendar, nil:
             return AppLanguage.localized("calendar.event.origin.external", defaultValue: "External calendar event", language: .current, comment: "Calendar event origin label for an external calendar event.")
@@ -1297,7 +1064,7 @@ struct EventEditSheet: View {
             case .create:
                 try CalendarService.shared.createEvent(
                     title: title, startDate: startDate, endDate: endDate,
-                    notes: notes, calendarID: calendarID.isEmpty ? nil : calendarID)
+                    notes: notes, calendarID: calendarID)
             case .edit(let detail):
                 if detail.isRecurring {
                     try CalendarService.shared.updateOccurrence(
@@ -1385,6 +1152,7 @@ struct CalendarSourceSheet: View {
                     }
                 }
             }
+            .appListStyle()
             .navigationTitle("캘린더 선택")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -1402,7 +1170,7 @@ struct CalendarSourceSheet: View {
             Circle().fill(color).frame(width: 12, height: 12)
             Text(info.title)
             Spacer()
-            Toggle("", isOn: Binding(
+            Toggle(info.title, isOn: Binding(
                 get: { !disabledIDs.contains(info.id) },
                 set: { enabled in
                     CalendarService.shared.setCalendar(info.id, enabled: enabled)
@@ -1421,14 +1189,39 @@ struct CalendarSourceSheet: View {
 
 struct DefaultCalendarPickerView: View {
     @State private var selectedID: String = CalendarService.shared.defaultCalendarID
-    private let sources: [CalendarService.CalendarSourceGroup]
-
-    init() {
-        self.sources = CalendarService.shared.availableCalendars()
-    }
+    @State private var sources: [CalendarService.CalendarSourceGroup] = []
 
     var body: some View {
         List {
+            Section {
+                Button {
+                    selectedID = CalendarService.systemDefaultCalendarID
+                    CalendarService.shared.defaultCalendarID = CalendarService.systemDefaultCalendarID
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "gearshape")
+                            .foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(copy("calendar.destination.systemDefault", fallback: "시스템 기본 캘린더"))
+                                .foregroundStyle(Color(.label))
+                            Text(copy("calendar.destination.systemDefaultSubtitle", fallback: "iOS 시스템 기본 설정을 따릅니다"))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        if selectedID == CalendarService.systemDefaultCalendarID {
+                            Image(systemName: "checkmark")
+                                .font(.body.weight(.semibold))
+                                .foregroundStyle(AppTheme.accent)
+                        }
+                    }
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("calendar.picker.systemDefault")
+            } header: {
+                Text(copy("calendar.destination.defaultHeader", fallback: "기본값"))
+            }
+
             ForEach(sources) { source in
                 Section(source.title) {
                     ForEach(source.calendars) { calInfo in
@@ -1437,8 +1230,16 @@ struct DefaultCalendarPickerView: View {
                 }
             }
         }
-        .navigationTitle("기본 캘린더")
+        .appListStyle()
+        .navigationTitle(copy("calendar.destination.title", fallback: "등록 대상 캘린더"))
         .navigationBarTitleDisplayMode(.inline)
+        .onAppear(perform: refreshCalendars)
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+            refreshCalendars()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .EKEventStoreChanged)) { _ in
+            refreshCalendars()
+        }
     }
 
     @ViewBuilder
@@ -1450,7 +1251,10 @@ struct DefaultCalendarPickerView: View {
         } label: {
             HStack(spacing: 10) {
                 Circle().fill(color).frame(width: 12, height: 12)
-                Text(info.title).foregroundStyle(Color(.label))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(info.title).foregroundStyle(Color(.label))
+                    Text(info.sourceTitle).font(.caption2).foregroundStyle(.secondary)
+                }
                 Spacer()
                 if selectedID == info.id {
                     Image(systemName: "checkmark")
@@ -1459,5 +1263,16 @@ struct DefaultCalendarPickerView: View {
             }
         }
         .buttonStyle(.plain)
+        .accessibilityIdentifier("calendar.picker.row.\(info.id)")
+    }
+
+    private func refreshCalendars() {
+        CalendarService.shared.restoreAuthorizationIfGranted()
+        selectedID = CalendarService.shared.defaultCalendarID
+        sources = CalendarService.shared.availableCalendars(writableOnly: true)
+    }
+
+    private func copy(_ key: String, fallback: String) -> String {
+        AppLanguage.localized(key, defaultValue: fallback, language: .current, comment: "Calendar destination picker copy.")
     }
 }
