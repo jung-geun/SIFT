@@ -347,7 +347,7 @@
 				CODE_SIGN_ENTITLEMENTS = todo/todo.entitlements;
 				"CODE_SIGN_ENTITLEMENTS[sdk=macosx*]" = "todo/todo-macCatalyst.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 9;
+				CURRENT_PROJECT_VERSION = 10;
 				DEVELOPMENT_TEAM = VQXGRP23X5;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -397,7 +397,7 @@
 				CODE_SIGN_ENTITLEMENTS = todo/todo.entitlements;
 				"CODE_SIGN_ENTITLEMENTS[sdk=macosx*]" = "todo/todo-macCatalyst.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 9;
+				CURRENT_PROJECT_VERSION = 10;
 				DEVELOPMENT_TEAM = VQXGRP23X5;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -665,7 +665,7 @@
 				CODE_SIGN_ENTITLEMENTS = todo/todo.entitlements;
 				"CODE_SIGN_ENTITLEMENTS[sdk=macosx*]" = "todo/todo-macCatalyst.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 9;
+				CURRENT_PROJECT_VERSION = 10;
 				DEVELOPMENT_TEAM = VQXGRP23X5;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -716,7 +716,7 @@
 				CODE_SIGN_ENTITLEMENTS = todo/todo.entitlements;
 				"CODE_SIGN_ENTITLEMENTS[sdk=macosx*]" = "todo/todo-macCatalyst.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 9;
+				CURRENT_PROJECT_VERSION = 10;
 				DEVELOPMENT_TEAM = VQXGRP23X5;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;

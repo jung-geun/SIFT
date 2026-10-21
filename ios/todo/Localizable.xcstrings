@@ -1,6 +1,20 @@
 {
   "sourceLanguage" : "ko",
   "strings" : {
+    "meeting.languages.search" : {
+      "comment" : "Search supported spoken or summary languages in the language picker.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "de" : { "stringUnit" : { "state" : "translated", "value" : "Sprachen suchen" } },
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Search languages" } },
+        "es" : { "stringUnit" : { "state" : "translated", "value" : "Buscar idiomas" } },
+        "fr" : { "stringUnit" : { "state" : "translated", "value" : "Rechercher des langues" } },
+        "it" : { "stringUnit" : { "state" : "translated", "value" : "Cerca lingue" } },
+        "ja" : { "stringUnit" : { "state" : "translated", "value" : "言語を検索" } },
+        "ko" : { "stringUnit" : { "state" : "translated", "value" : "언어 검색" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "搜索语言" } }
+      }
+    },
     "" : {
       "localizations" : {
         "de" : {

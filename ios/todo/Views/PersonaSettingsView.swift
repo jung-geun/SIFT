@@ -145,6 +145,13 @@ struct PersonaSettingsView: View {
                     .accessibilityIdentifier("settings.closeButton")
             }
         }
+        #if !targetEnvironment(macCatalyst)
+        .task {
+            // Privacy choices remain accessible even when placement access disables ads.
+            // This explicit Settings-entry refresh never starts GMA or a startup form.
+            AdMobConsentManager.shared.refreshPrivacyOptionsRequirement()
+        }
+        #endif
         .task(id: tutorial?.currentStep) {
             revealTutorialSettings()
             let target: String?
@@ -299,43 +306,47 @@ struct BetaFeaturesSettingsView: View {
     @ViewBuilder
     private var speakerModelManagement: some View {
 
-        Group {
-            if speakerModel.isInstalling {
-                ProgressView(
-                    copy("beta.diarization.installing", korean: "화자 모델 팩 재사용·다운로드·검증 및 로드 중…", english: "Reusing, downloading, verifying and loading the speaker model pack…"),
-                    value: speakerModel.progress
-                )
-            } else if speakerModel.isInstalled {
-                Label(copy("beta.diarization.installed", korean: "전체 화자 모델 팩 설치됨 (약 218 MB)", english: "Complete speaker model pack installed (about 218 MB)"), systemImage: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-            } else {
-                Text(copy("beta.diarization.notInstalled", korean: "전체 화자 모델 팩이 필요합니다. 기존 Nemotron 단독 설치도 업그레이드해야 합니다.", english: "The complete speaker model pack is required. Existing Nemotron-only installs also need an upgrade."))
-                    .font(.footnote)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .accessibilityIdentifier("meeting.diarization.state")
-
-        if speakerModel.isInstalling {
-            Button(copy("beta.diarization.cancel", korean: "설치 취소", english: "Cancel installation"), role: .cancel) {
-                speakerModel.cancelInstall()
-            }
-        } else {
-            if speakerModel.hasRemovableModels {
-                Button(copy("beta.diarization.delete", korean: "화자 모델 삭제", english: "Delete speaker model"), role: .destructive) {
-                    Task { await speakerModel.delete() }
+        ModelManagementRow {
+            Group {
+                if speakerModel.isInstalling {
+                    ProgressView(
+                        copy("beta.diarization.installing", korean: "화자 모델 팩 재사용·다운로드·검증 및 로드 중…", english: "Reusing, downloading, verifying and loading the speaker model pack…"),
+                        value: speakerModel.progress
+                    )
+                } else if speakerModel.isInstalled {
+                    Label(copy("beta.diarization.installed", korean: "전체 화자 모델 팩 설치됨 (약 218 MB)", english: "Complete speaker model pack installed (about 218 MB)"), systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                } else {
+                    Text(copy("beta.diarization.notInstalled", korean: "전체 화자 모델 팩이 필요합니다. 기존 Nemotron 단독 설치도 업그레이드해야 합니다.", english: "The complete speaker model pack is required. Existing Nemotron-only installs also need an upgrade."))
+                        .font(.footnote)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .foregroundStyle(.secondary)
                 }
-                .disabled(speakerModel.isDeleting)
-                .accessibilityIdentifier("beta.diarization.delete")
             }
-            if settingsStore.meetingDiarizationEnabled && !speakerModel.isInstalled {
-                // Installation is user-initiated only, never triggered by the toggle or view lifecycle.
-                Button(copy("beta.diarization.download", korean: "화자 모델 팩 설치 또는 업그레이드 (약 218 MB)", english: "Install or upgrade speaker model pack (about 218 MB)")) {
-                    speakerModel.install()
+            .accessibilityIdentifier("meeting.diarization.state")
+        } actions: {
+            VStack(alignment: .trailing, spacing: AppTheme.Spacing.compact) {
+                if speakerModel.isInstalling {
+                    Button(copy("beta.diarization.cancel", korean: "설치 취소", english: "Cancel installation"), role: .cancel) {
+                        speakerModel.cancelInstall()
+                    }
+                } else {
+                    if speakerModel.hasRemovableModels {
+                        Button(copy("beta.diarization.delete", korean: "화자 모델 삭제", english: "Delete speaker model"), role: .destructive) {
+                            Task { await speakerModel.delete() }
+                        }
+                        .disabled(speakerModel.isDeleting)
+                        .accessibilityIdentifier("beta.diarization.delete")
+                    }
+                    if settingsStore.meetingDiarizationEnabled && !speakerModel.isInstalled {
+                        // Installation is user-initiated only, never triggered by the toggle or view lifecycle.
+                        Button(copy("beta.diarization.download", korean: "화자 모델 팩 설치 또는 업그레이드 (약 218 MB)", english: "Install or upgrade speaker model pack (about 218 MB)")) {
+                            speakerModel.install()
+                        }
+                        .disabled(speakerModel.isDeleting)
+                        .accessibilityIdentifier("meeting.diarization.download")
+                    }
                 }
-                .disabled(speakerModel.isDeleting)
-                .accessibilityIdentifier("meeting.diarization.download")
             }
         }
         Text(copy(
@@ -367,41 +378,43 @@ struct BetaFeaturesSettingsView: View {
     @ViewBuilder
     private var whisperModelManagement: some View {
 
-        Group {
+        ModelManagementRow {
+            Group {
+                if whisperModel.isInstalling {
+                    ProgressView(
+                        copy("beta.whisper.installing", korean: "음성 모델 다운로드 및 검증 중…", english: "Downloading and verifying the transcription model…"),
+                        value: whisperModel.progress
+                    )
+                } else if whisperModel.isInstalled {
+                    Label(copy("beta.whisper.installed", korean: "음성 모델 설치됨 (약 631 MB)", english: "Transcription model installed (about 631 MB)"), systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                } else {
+                    Text(copy("beta.whisper.notInstalled", korean: "고급 전사 모델이 설치되지 않았습니다. Apple 실시간 전사는 계속 사용할 수 있습니다.", english: "The transcription model is not installed. Apple live transcription remains available."))
+                        .font(.footnote)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .accessibilityIdentifier("beta.whisper.state")
+        } actions: {
             if whisperModel.isInstalling {
-                ProgressView(
-                    copy("beta.whisper.installing", korean: "음성 모델 다운로드 및 검증 중…", english: "Downloading and verifying the transcription model…"),
-                    value: whisperModel.progress
-                )
+                Button(copy("beta.whisper.cancel", korean: "다운로드 취소", english: "Cancel download"), role: .cancel) {
+                    whisperModel.cancelInstall()
+                }
+                .accessibilityIdentifier("beta.whisper.cancel")
             } else if whisperModel.isInstalled {
-                Label(copy("beta.whisper.installed", korean: "음성 모델 설치됨 (약 631 MB)", english: "Transcription model installed (about 631 MB)"), systemImage: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-            } else {
-                Text(copy("beta.whisper.notInstalled", korean: "고급 전사 모델이 설치되지 않았습니다. Apple 실시간 전사는 계속 사용할 수 있습니다.", english: "The transcription model is not installed. Apple live transcription remains available."))
-                    .font(.footnote)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .foregroundStyle(.secondary)
+                Button(copy("beta.whisper.delete", korean: "음성 모델 삭제", english: "Delete transcription model"), role: .destructive) {
+                    Task { await whisperModel.delete() }
+                }
+                .disabled(whisperModel.isDeleting)
+                .accessibilityIdentifier("beta.whisper.delete")
+            } else if settingsStore.meetingAdvancedTranscriptionEnabled {
+                Button(copy("beta.whisper.download", korean: "음성 모델 다운로드 (약 631 MB)", english: "Download transcription model (about 631 MB)")) {
+                    whisperModel.install()
+                }
+                .disabled(whisperModel.isDeleting)
+                .accessibilityIdentifier("beta.whisper.download")
             }
-        }
-        .accessibilityIdentifier("beta.whisper.state")
-
-        if whisperModel.isInstalling {
-            Button(copy("beta.whisper.cancel", korean: "다운로드 취소", english: "Cancel download"), role: .cancel) {
-                whisperModel.cancelInstall()
-            }
-            .accessibilityIdentifier("beta.whisper.cancel")
-        } else if whisperModel.isInstalled {
-            Button(copy("beta.whisper.delete", korean: "음성 모델 삭제", english: "Delete transcription model"), role: .destructive) {
-                Task { await whisperModel.delete() }
-            }
-            .disabled(whisperModel.isDeleting)
-            .accessibilityIdentifier("beta.whisper.delete")
-        } else if settingsStore.meetingAdvancedTranscriptionEnabled {
-            Button(copy("beta.whisper.download", korean: "음성 모델 다운로드 (약 631 MB)", english: "Download transcription model (about 631 MB)")) {
-                whisperModel.install()
-            }
-            .disabled(whisperModel.isDeleting)
-            .accessibilityIdentifier("beta.whisper.download")
         }
         Text(copy(
             "beta.whisper.warning",

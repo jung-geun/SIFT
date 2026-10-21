@@ -1,4 +1,7 @@
 import SwiftUI
+#if targetEnvironment(macCatalyst)
+import UIKit
+#endif
 
 /// Calendar arithmetic, including locale first-weekday and DST, is shared by
 /// loading and rendering so an adjacent-month cell never lies outside the read.
@@ -8,11 +11,15 @@ struct CalendarMonthGeometry {
     let weeks: [[Date]]
     let interval: DateInterval
 
+    static func weekStart(containing date: Date, calendar: Calendar = .current) -> Date {
+        let day = calendar.startOfDay(for: date)
+        let leading = (calendar.component(.weekday, from: day) - calendar.firstWeekday + 7) % 7
+        return calendar.date(byAdding: .day, value: -leading, to: day) ?? day
+    }
+
     init(month: Date, calendar: Calendar = .current) {
         self.month = calendar.dateInterval(of: .month, for: month)?.start ?? calendar.startOfDay(for: month)
-        let weekday = calendar.component(.weekday, from: self.month)
-        let leading = (weekday - calendar.firstWeekday + 7) % 7
-        let start = calendar.date(byAdding: .day, value: -leading, to: self.month) ?? self.month
+        let start = Self.weekStart(containing: self.month, calendar: calendar)
         let dates = (0..<42).compactMap { calendar.date(byAdding: .day, value: $0, to: start) }
         days = dates
         weeks = stride(from: 0, to: dates.count, by: 7).map { Array(dates[$0..<min($0 + 7, dates.count)]) }
@@ -62,15 +69,16 @@ struct CalendarMonthWeekLayout {
         var spanCandidates: [(CalendarService.CalendarEventSummary, Int, Int)] = []
         var columns = Array(repeating: [Item](), count: days.count)
         for event in events {
-            // A recurring identifier names the series, not an occurrence. One
-            // linked todo must not erase all the other occurrences this month.
-            if linkedDates[event.identifier, default: []].contains(where: {
+            let nextDay = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: event.startDate)) ?? event.startDate
+            let spansDays = event.endDate > nextDay
+            // A due-date todo replaces only a single-day event. It cannot
+            // represent the remaining days of a multi-day reservation.
+            if !spansDays && linkedDates[event.identifier, default: []].contains(where: {
                 calendar.isDate($0, inSameDayAs: event.startDate)
             }) { continue }
             let occupied = days.indices.filter { CalendarMonthGeometry.occupies(event, day: days[$0], calendar: calendar) }
             guard let first = occupied.first, let last = occupied.last else { continue }
-            let nextDay = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: event.startDate)) ?? event.startDate
-            if event.isAllDay || event.endDate > nextDay {
+            if event.isAllDay || spansDays {
                 spanCandidates.append((event, first, last))
             } else {
                 for column in occupied { columns[column].append(.event(event)) }
@@ -91,6 +99,9 @@ struct CalendarMonthWeekLayout {
         }
         spans = assigned
         for todo in todos {
+            if assigned.contains(where: {
+                $0.event.identifier == todo.eventID && calendar.isDate($0.event.startDate, inSameDayAs: todo.date)
+            }) { continue }
             guard let column = days.firstIndex(where: { calendar.isDate($0, inSameDayAs: todo.date) }) else { continue }
             columns[column].append(.todo(todo))
         }
@@ -128,7 +139,7 @@ struct CalendarMonthGrid: View {
         }
         let weeks = geometry.weeks.map { CalendarMonthWeekLayout(days: $0, events: events, todos: visibleTodos) }
         VStack(spacing: 0) {
-            weekdayStrip
+            CalendarWeekdayStrip(desktop: desktop)
             GeometryReader { bounds in
                 let rowHeight = max(desktop ? 96 : 86, bounds.size.height / CGFloat(weeks.count))
                 if desktop && bounds.size.height >= rowHeight * CGFloat(weeks.count) - 1 {
@@ -143,7 +154,24 @@ struct CalendarMonthGrid: View {
         .accessibilityIdentifier("calendar.monthGrid")
     }
 
-    private var weekdayStrip: some View {
+
+    private func weekRows(_ weeks: [CalendarMonthWeekLayout], height: CGFloat) -> some View {
+        VStack(spacing: 0) {
+            ForEach(weeks.indices, id: \.self) { index in
+                CalendarWeekRow(layout: weeks[index], month: month, selectedDate: selectedDate,
+                                colors: colors, desktop: desktop, height: height, onDayTap: onDayTap)
+            }
+        }
+    }
+
+}
+
+private struct CalendarWeekdayStrip: View {
+    let desktop: Bool
+    @Environment(\.colorScheme) private var colorScheme
+    private let calendar = Calendar.current
+
+    var body: some View {
         var localizedCalendar = calendar
         localizedCalendar.locale = AppLanguage.current.locale
         let symbols = localizedCalendar.shortStandaloneWeekdaySymbols
@@ -159,21 +187,26 @@ struct CalendarMonthGrid: View {
         .background(colorScheme == .dark ? Color(.tertiarySystemBackground) : Color(.secondarySystemBackground))
         .overlay(alignment: .bottom) { Rectangle().fill(Color(.separator)).frame(height: 0.5) }
     }
+}
 
-    private func weekRows(_ weeks: [CalendarMonthWeekLayout], height: CGFloat) -> some View {
-        VStack(spacing: 0) {
-            ForEach(weeks.indices, id: \.self) { index in
-                week(weeks[index], height: height)
-            }
-        }
-    }
+private struct CalendarWeekRow: View {
+    let layout: CalendarMonthWeekLayout
+    let month: Date
+    let selectedDate: Date?
+    let colors: [String: Color]
+    let desktop: Bool
+    let height: CGFloat
+    var showsMonthBoundary = false
+    let onDayTap: (Date) -> Void
+    @Environment(\.colorScheme) private var colorScheme
+    private let calendar = Calendar.current
 
-    private func week(_ layout: CalendarMonthWeekLayout, height: CGFloat) -> some View {
+    var body: some View {
         GeometryReader { bounds in
             let width = bounds.size.width / 7
-            let dayHeight: CGFloat = desktop ? 32 : 29
-            let laneHeight: CGFloat = desktop ? 21 : 18
-            let capacity = max(1, Int((height - dayHeight - 19) / laneHeight))
+            let dayHeight: CGFloat = desktop ? 29 : 27
+            let laneHeight: CGFloat = 18
+            let capacity = max(0, Int((height - dayHeight - 19) / laneHeight))
             ZStack(alignment: .topLeading) {
                 HStack(spacing: 0) {
                     ForEach(layout.days.indices, id: \.self) { column in
@@ -221,12 +254,18 @@ struct CalendarMonthGrid: View {
         let selected = selectedDate.map { calendar.isDate($0, inSameDayAs: day) } ?? false
         return Button { onDayTap(day) } label: {
             VStack(alignment: .trailing, spacing: 0) {
-                Text("\(calendar.component(.day, from: day))")
+                HStack(spacing: 3) {
+                    if showsMonthBoundary && calendar.component(.day, from: day) == 1 {
+                        Text(day, format: .dateTime.month(.abbreviated).locale(AppLanguage.current.locale))
+                            .font(.system(size: desktop ? 12 : 10)).foregroundStyle(.secondary)
+                    }
+                    Text("\(calendar.component(.day, from: day))")
                     .font(.system(size: desktop ? 14 : 12, weight: today ? .semibold : .regular))
                     .foregroundStyle(today ? Color.white : inMonth ? Color.primary : Color.secondary.opacity(0.65))
                     .frame(width: desktop ? 26 : 24, height: desktop ? 26 : 24)
                     .background { if today { Circle().fill(Color.red) } }
                     .padding(.trailing, desktop ? 6 : 3).padding(.top, 3)
+                }
                 Spacer(minLength: 0)
             }
             .frame(maxWidth: .infinity, alignment: .trailing).frame(height: height)
@@ -285,6 +324,232 @@ struct CalendarMonthGrid: View {
         title.isEmpty ? AppLanguage.localized("calendar.event.noTitle", defaultValue: "(No Title)", language: .current, comment: "Placeholder for a calendar event without a title.") : title
     }
 }
+
+#if targetEnvironment(macCatalyst)
+struct CalendarWeekScrollTarget: Equatable {
+    let date: Date
+    let revision: Int
+}
+
+/// A single native scrolling surface, with one reusable cell per week. Adjacent
+/// months share their boundary week rather than repeating six-week month grids.
+struct CalendarContinuousGrid: View {
+    let month: Date
+    let target: CalendarWeekScrollTarget
+    let selectedDate: Date?
+    let events: [CalendarService.CalendarEventSummary]
+    let todos: [Todo]
+    let colors: [String: Color]
+    let desktop: Bool
+    let onVisibleMonth: (Date) -> Void
+    let onDayTap: (Date) -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            CalendarWeekdayStrip(desktop: desktop)
+            CalendarWeekScrollView(month: month, target: target, selectedDate: selectedDate,
+                events: events, todos: todos.compactMap { todo in
+                    guard !todo.isCompleted, let date = todo.scheduleAnchor else { return nil }
+                    return CalendarMonthTodo(title: todo.title, date: date, eventID: todo.calendarEventID)
+                }, colors: colors, desktop: desktop, onVisibleMonth: onVisibleMonth, onDayTap: onDayTap)
+        }
+        .accessibilityIdentifier("calendar.monthGrid")
+    }
+}
+
+private struct CalendarWeekScrollView: UIViewRepresentable {
+    let month: Date
+    let target: CalendarWeekScrollTarget
+    let selectedDate: Date?
+    let events: [CalendarService.CalendarEventSummary]
+    let todos: [CalendarMonthTodo]
+    let colors: [String: Color]
+    let desktop: Bool
+    let onVisibleMonth: (Date) -> Void
+    let onDayTap: (Date) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(owner: self) }
+
+    func makeUIView(context: Context) -> WeekCollectionView {
+        let layout = UICollectionViewFlowLayout()
+        layout.minimumLineSpacing = 0
+        layout.minimumInteritemSpacing = 0
+        let view = WeekCollectionView(frame: .zero, collectionViewLayout: layout)
+        view.backgroundColor = UIColor { traits in
+            traits.userInterfaceStyle == .dark ? .secondarySystemBackground : .systemBackground
+        }
+        view.contentInsetAdjustmentBehavior = .never
+        view.alwaysBounceVertical = true
+        view.allowsSelection = false
+        view.showsHorizontalScrollIndicator = false
+        view.register(WeekCell.self, forCellWithReuseIdentifier: "week")
+        view.dataSource = context.coordinator
+        view.delegate = context.coordinator
+        view.accessibilityIdentifier = "calendar.continuousWeeks"
+        view.onResize = { [weak coordinator = context.coordinator] view in coordinator?.resize(view) }
+        view.onLayout = { [weak coordinator = context.coordinator] view in coordinator?.applyTarget(view) }
+        return view
+    }
+
+    func updateUIView(_ view: WeekCollectionView, context: Context) {
+        let coordinator = context.coordinator
+        coordinator.owner = self
+        coordinator.resize(view)
+        if coordinator.appliedTarget != target { view.setNeedsLayout() }
+        for path in view.indexPathsForVisibleItems {
+            if let cell = view.cellForItem(at: path) { coordinator.configure(cell, at: path) }
+        }
+    }
+
+    final class WeekCollectionView: UICollectionView {
+        var onResize: ((WeekCollectionView) -> Void)?
+        var onLayout: ((WeekCollectionView) -> Void)?
+        private var viewportSize = CGSize.zero
+
+        override func layoutSubviews() {
+            if viewportSize != bounds.size {
+                viewportSize = bounds.size
+                onResize?(self)
+            }
+            super.layoutSubviews()
+            onLayout?(self)
+        }
+    }
+
+    final class WeekCell: UICollectionViewCell {
+        private var hostedContent: (UIView & UIContentView)?
+        override var canBecomeFocused: Bool { false }
+
+        func setContent(_ configuration: any UIContentConfiguration) {
+            // Keep one hosting view for the reusable cell's lifetime. Updating
+            // a week must not replace its displayed view during a scroll.
+            if let hostedContent {
+                hostedContent.configuration = configuration
+            } else {
+                let content = configuration.makeContentView()
+                content.backgroundColor = .clear
+                content.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+                contentView.addSubview(content)
+                hostedContent = content
+            }
+            hostedContent?.frame = contentView.bounds
+        }
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            hostedContent?.frame = contentView.bounds
+        }
+    }
+
+    final class Coordinator: NSObject, UICollectionViewDataSource, UICollectionViewDelegate {
+        var owner: CalendarWeekScrollView
+        var appliedTarget: CalendarWeekScrollTarget?
+        private let calendar = Calendar.current
+        private let weekCount = 521
+        private var baseWeek: Date
+        private var rowHeight: CGFloat = 100
+        private var lastReportedMonth: Date
+        private var adjusting = false
+
+        init(owner: CalendarWeekScrollView) {
+            self.owner = owner
+            let week = CalendarMonthGeometry.weekStart(containing: owner.target.date)
+            baseWeek = Calendar.current.date(byAdding: .weekOfYear, value: -260, to: week) ?? week
+            lastReportedMonth = owner.month
+        }
+
+        func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int { weekCount }
+
+        func collectionView(_ collectionView: UICollectionView, cellForItemAt path: IndexPath) -> UICollectionViewCell {
+            let cell = collectionView.dequeueReusableCell(withReuseIdentifier: "week", for: path)
+            configure(cell, at: path)
+            return cell
+        }
+
+        func collectionView(_ collectionView: UICollectionView, willDisplay cell: UICollectionViewCell, forItemAt path: IndexPath) {
+            // UIKit may prepare an offscreen cell before an async event read
+            // completes. Refresh it when it actually enters the viewport.
+            configure(cell, at: path)
+        }
+
+        func configure(_ cell: UICollectionViewCell, at path: IndexPath) {
+            guard let cell = cell as? WeekCell,
+                  let start = calendar.date(byAdding: .weekOfYear, value: path.item, to: baseWeek),
+                  let end = calendar.date(byAdding: .day, value: 7, to: start) else { return }
+            let days = (0..<7).compactMap { calendar.date(byAdding: .day, value: $0, to: start) }
+            let layout = CalendarMonthWeekLayout(days: days,
+                events: owner.events.filter { $0.startDate < end && $0.endDate > start },
+                todos: owner.todos.filter { $0.date >= start && $0.date < end })
+            cell.setContent(UIHostingConfiguration {
+                CalendarWeekRow(layout: layout, month: owner.month, selectedDate: owner.selectedDate,
+                    colors: owner.colors, desktop: owner.desktop, height: rowHeight,
+                    showsMonthBoundary: true, onDayTap: owner.onDayTap)
+                    .environment(\.locale, AppLanguage.current.locale)
+                    .tint(AppTheme.accent)
+            }.margins(.all, 0))
+        }
+
+        func resize(_ view: UICollectionView) {
+            guard view.bounds.width > 0, view.bounds.height > 0,
+                  let layout = view.collectionViewLayout as? UICollectionViewFlowLayout else { return }
+            let height = max(owner.desktop ? 96 : 86, view.bounds.height / 6)
+            let size = CGSize(width: view.bounds.width, height: height)
+            guard layout.itemSize != size else { return }
+            let position = view.contentOffset.y / rowHeight
+            rowHeight = height
+            layout.itemSize = size
+            layout.invalidateLayout()
+            adjusting = true
+            view.contentOffset.y = position * rowHeight
+            adjusting = false
+            for path in view.indexPathsForVisibleItems {
+                if let cell = view.cellForItem(at: path) { configure(cell, at: path) }
+            }
+        }
+
+        func applyTarget(_ view: UICollectionView) {
+            guard view.bounds.width > 0, view.bounds.height > 0, appliedTarget != owner.target else { return }
+            let week = CalendarMonthGeometry.weekStart(containing: owner.target.date)
+            var index = calendar.dateComponents([.weekOfYear], from: baseWeek, to: week).weekOfYear ?? 260
+            if !(0..<weekCount).contains(index) {
+                baseWeek = calendar.date(byAdding: .weekOfYear, value: -260, to: week) ?? week
+                index = 260
+                view.reloadData()
+            }
+            appliedTarget = owner.target
+            lastReportedMonth = calendar.dateInterval(of: .month, for: owner.target.date)?.start ?? owner.target.date
+            adjusting = true
+            view.setContentOffset(CGPoint(x: 0, y: CGFloat(index) * rowHeight), animated: false)
+            adjusting = false
+        }
+
+        func scrollViewDidScroll(_ scrollView: UIScrollView) {
+            guard !adjusting, appliedTarget != nil, let view = scrollView as? UICollectionView else { return }
+            var index = min(weekCount - 1, max(0, Int(floor(view.contentOffset.y / rowHeight))))
+            // Rebase far beyond the viewport; preserve the fractional week and
+            // keep both scroll directions available without an ever-growing list.
+            if index < 52 || index > weekCount - 53 {
+                let shift = index - 260
+                if let start = calendar.date(byAdding: .weekOfYear, value: shift, to: baseWeek) {
+                    baseWeek = start
+                    adjusting = true
+                    view.reloadData()
+                    view.contentOffset.y -= CGFloat(shift) * rowHeight
+                    adjusting = false
+                    index = 260
+                }
+            }
+            guard let week = calendar.date(byAdding: .weekOfYear, value: index, to: baseWeek),
+                  let lastDay = calendar.date(byAdding: .day, value: 6, to: week),
+                  let month = calendar.dateInterval(of: .month, for: lastDay)?.start,
+                  month != lastReportedMonth else { return }
+            lastReportedMonth = month
+            let onVisibleMonth = owner.onVisibleMonth
+            DispatchQueue.main.async { onVisibleMonth(month) }
+        }
+    }
+}
+#endif
 
 struct CalendarMiniMonth: View {
     let month: Date

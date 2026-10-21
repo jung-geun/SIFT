@@ -45,24 +45,6 @@ enum BoardColumnType: String, CaseIterable, Identifiable {
 
 // MARK: - Board Card
 
-private struct TodoDragPreview: View {
-    let todo: Todo
-    let col: BoardColumnType
-
-    var body: some View {
-        Label {
-            Text(todo.title.isEmpty ? AppLanguage.localized("todo.noTitle", defaultValue: "(제목 없음)", language: .current, comment: "Untitled to-do placeholder.") : todo.title)
-                .font(.headline)
-                .lineLimit(1)
-        } icon: {
-            Image(systemName: col.iconName)
-                .foregroundStyle(.secondary)
-        }
-        .padding(AppTheme.Spacing.item)
-        .background(AppTheme.surface, in: RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous))
-    }
-}
-
 struct TodoBoardCardView: View {
     let todo: Todo
     var onToggleComplete: (() -> Void)? = nil
@@ -70,9 +52,38 @@ struct TodoBoardCardView: View {
     var onPromote: (() -> Void)? = nil
 
     @State private var isHovered = false
+    @State private var cardSize: CGSize = .zero
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
+        cardSurface
+            .onGeometryChange(for: CGSize.self) { geometry in
+                geometry.size
+            } action: { size in
+                cardSize = size
+            }
+            .contentShape(.dragPreview, RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous))
+            .draggable(todo.id.uuidString) {
+                // Reuse the actual card at its laid-out size, including metadata and actions.
+                cardSurface
+                    .frame(width: cardSize.width, height: cardSize.height)
+                    .environment(\.colorScheme, colorScheme)
+                    .environment(\.dynamicTypeSize, dynamicTypeSize)
+                    .allowsHitTesting(false)
+            }
+            .onHover { hovering in
+                withAnimation(AppTheme.motion(reduceMotion: reduceMotion)) {
+                    isHovered = hovering
+                }
+            }
+            .contextMenu {
+                cardMenuActions
+            }
+    }
+
+    private var cardSurface: some View {
         // Keep navigation and the action menu as sibling controls, not nested buttons.
         HStack(alignment: .top, spacing: 0) {
             NavigationLink(value: todo) {
@@ -137,14 +148,6 @@ struct TodoBoardCardView: View {
             in: RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous)
         )
         .contentShape(RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous))
-        .onHover { hovering in
-            withAnimation(AppTheme.motion(reduceMotion: reduceMotion)) {
-                isHovered = hovering
-            }
-        }
-        .contextMenu {
-            cardMenuActions
-        }
     }
 
     private var hasMetadata: Bool {
@@ -404,9 +407,6 @@ struct TodoBoardView: View {
                                 onDelete: { onDelete(todo) },
                                 onPromote: { onPromote(todo) }
                             )
-                            .draggable(todo.id.uuidString) {
-                                TodoDragPreview(todo: todo, col: col)
-                            }
                         }
                     }
 

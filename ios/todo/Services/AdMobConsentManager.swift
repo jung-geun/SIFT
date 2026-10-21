@@ -5,7 +5,7 @@ import GoogleMobileAds
 import UserMessagingPlatform
 import OSLog
 
-/// Process-wide UMP/GMA owner. Mount `BannerAdStrip(isEligible:)` once outside the TabView;
+/// Process-wide UMP/GMA owner. Mount `BannerAdStrip(isEligible:)` below the task filters;
 /// it supplies a live, scene-specific presenter and starts consent when eligible and active.
 /// Put `AdMobPrivacyOptionsRow()` in Settings, independently of ad eligibility.
 ///
@@ -41,6 +41,10 @@ final class AdMobConsentManager: ObservableObject {
         var errorDescription: String? { AdMobCopy.errorMessage }
     }
 
+    private enum InformationPhase {
+        case notStarted, updating, finished
+    }
+
     private enum StartupPhase {
         case notStarted, updating, needsForm, presentingForm, finished
     }
@@ -49,6 +53,8 @@ final class AdMobConsentManager: ObservableObject {
         case notStarted, starting, ready
     }
 
+    private var informationPhase = InformationPhase.notStarted
+    private var informationUpdateFailed = false
     private var startupPhase = StartupPhase.notStarted
     private var sdkPhase = SDKPhase.notStarted
     private var isEditingPrivacy = false
@@ -60,6 +66,7 @@ final class AdMobConsentManager: ObservableObject {
     /// A backgrounded consent update waits for a usable presenter instead of presenting
     /// into an inactive scene. There is one info update and at most one startup form per process.
     func prepare(from presenter: UIViewController) {
+        guard AdPresentationPolicy.current.allowsAds else { return }
         if startupPhase == .finished {
             startSDKIfPermitted()
             return
@@ -68,24 +75,12 @@ final class AdMobConsentManager: ObservableObject {
 
         switch startupPhase {
         case .notStarted:
-            startupPhase = .updating
-            publishState()
-            ConsentInformation.shared.requestConsentInfoUpdate(with: RequestParameters()) {
-                [weak self] error in
-                // Do not move an SDK NSError across isolation boundaries or expose it to users.
-                let failed = error != nil
-                Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    #if DEBUG || SIFT_QA
-                    if failed {
-                        Self.logger.debug("Consent information update failed.")
-                    } else {
-                        Self.logger.debug("Consent information update completed.")
-                    }
-                    #endif
-                    self.startupPhase = failed ? .finished : .needsForm
-                    self.publishState()
-                }
+            if informationPhase == .finished {
+                startupPhase = informationUpdateFailed ? .finished : .needsForm
+                publishState()
+            } else {
+                startupPhase = .updating
+                updateInformationIfNeeded()
             }
         case .needsForm:
             startupPhase = .presentingForm
@@ -106,6 +101,41 @@ final class AdMobConsentManager: ObservableObject {
             startSDKIfPermitted()
         case .updating, .presentingForm:
             break
+        }
+    }
+
+    /// Explicit Settings entry, independent of placement access. UMP reports .unknown on a
+    /// fresh launch until this session requests an update; a cached getter is not sufficient.
+    /// This refresh alone never presents a startup form or initializes Google Mobile Ads.
+    func refreshPrivacyOptionsRequirement() {
+        updateInformationIfNeeded()
+    }
+
+    /// One session-wide information request shared by Settings and placement startup.
+    private func updateInformationIfNeeded() {
+        guard informationPhase == .notStarted else { return }
+        informationPhase = .updating
+        publishState()
+        ConsentInformation.shared.requestConsentInfoUpdate(with: RequestParameters()) {
+            [weak self] error in
+            // Do not move an SDK NSError across isolation boundaries or expose it to users.
+            let failed = error != nil
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                #if DEBUG || SIFT_QA
+                if failed {
+                    Self.logger.debug("Consent information update failed.")
+                } else {
+                    Self.logger.debug("Consent information update completed.")
+                }
+                #endif
+                self.informationPhase = .finished
+                self.informationUpdateFailed = failed
+                if self.startupPhase == .updating {
+                    self.startupPhase = failed ? .finished : .needsForm
+                }
+                self.publishState()
+            }
         }
     }
 
@@ -139,7 +169,8 @@ final class AdMobConsentManager: ObservableObject {
     }
 
     private func startSDKIfPermitted() {
-        guard sdkPhase == .notStarted, canRequestAds,
+        guard AdPresentationPolicy.current.allowsAds,
+              sdkPhase == .notStarted, canRequestAds,
               UIApplication.shared.applicationState == .active else { return }
         // Set before invoking the SDK, including when completion is synchronous.
         sdkPhase = .starting
@@ -160,11 +191,13 @@ final class AdMobConsentManager: ObservableObject {
     }
 
     private func publishState() {
-        let busy = isEditingPrivacy || (startupPhase != .notStarted && startupPhase != .finished)
+        let busy = isEditingPrivacy || informationPhase == .updating
+            || (startupPhase != .notStarted && startupPhase != .finished)
         let next = State(
             canRequestAds: startupPhase == .finished && !isEditingPrivacy
                 && ConsentInformation.shared.canRequestAds,
-            isPrivacyOptionsRequired: ConsentInformation.shared.privacyOptionsRequirementStatus == .required,
+            isPrivacyOptionsRequired: informationPhase == .finished
+                && ConsentInformation.shared.privacyOptionsRequirementStatus == .required,
             isBusy: busy,
             isSDKReady: sdkPhase == .ready,
             revision: revision

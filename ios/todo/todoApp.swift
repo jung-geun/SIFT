@@ -486,7 +486,10 @@ struct todoApp: App {
             globalSearchAppContainer: appData.container,
             globalSearchEmailContainer: appData.emailContainer,
             globalSearchMeetingContainer: appData.meetingContainer,
-            globalSearchMailAccess: searchMailAccess
+            globalSearchMailAccess: searchMailAccess,
+            isAdPlacementEligible: hasOnboarded && hasCompletedTutorial
+                && !tutorial.isActive && scenePhase == .active
+                && tabVisibility.clamped(selectedTab) == AppTabID.todo.rawValue
         )
         .tabItem { Label("할 일", systemImage: "checklist") }
         .tag(AppTabID.todo.rawValue)
@@ -517,7 +520,6 @@ struct todoApp: App {
                     tutorial.handleTabSelection(clamped)
                 }
             )
-            VStack(spacing: 0) {
             TabView(selection: tabBinding) {
                 todoTab
 
@@ -540,10 +542,6 @@ struct todoApp: App {
                     .tag(AppTabID.meeting.rawValue)
             }
             .disableTabBarMinimization()
-            #if !targetEnvironment(macCatalyst)
-                BannerAdStrip(isEligible: hasOnboarded && hasCompletedTutorial && !tutorial.isActive && scenePhase == .active)
-            #endif
-            }
             #if targetEnvironment(macCatalyst)
             .modifier(CatalystSettingsPresenter())
             #else

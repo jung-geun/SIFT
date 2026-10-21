@@ -303,6 +303,8 @@ struct TodoListView: View {
     let globalSearchEmailContainer: ModelContainer?
     let globalSearchMeetingContainer: ModelContainer?
     let globalSearchMailAccess: MailboxCachedProviderAccess?
+    /// Root-owned onboarding/tutorial, selected-tab, and foreground eligibility.
+    let isAdPlacementEligible: Bool
 
     @State private var showAddTodo = false
     @State private var filter: TodoFilter = .active
@@ -334,12 +336,14 @@ struct TodoListView: View {
         globalSearchAppContainer: ModelContainer? = nil,
         globalSearchEmailContainer: ModelContainer? = nil,
         globalSearchMeetingContainer: ModelContainer? = nil,
-        globalSearchMailAccess: MailboxCachedProviderAccess? = nil
+        globalSearchMailAccess: MailboxCachedProviderAccess? = nil,
+        isAdPlacementEligible: Bool = false
     ) {
         self.globalSearchAppContainer = globalSearchAppContainer
         self.globalSearchEmailContainer = globalSearchEmailContainer
         self.globalSearchMeetingContainer = globalSearchMeetingContainer
         self.globalSearchMailAccess = globalSearchMailAccess
+        self.isAdPlacementEligible = isAdPlacementEligible
     }
     // MARK: - iCloud Sync (앱 레벨에서 주입받음 — todoApp.swift의 @StateObject)
     @EnvironmentObject private var syncMonitor: CloudSyncMonitor
@@ -447,20 +451,7 @@ struct TodoListView: View {
         AppTutorialObserving {
             Group {
                 if horizontalSizeClass == .regular && isBoardMode {
-                    TodoBoardView(
-                        todos: todos,
-                        showActiveColumn: $showActiveColumn,
-                        showOverdueColumn: $showOverdueColumn,
-                        showReviewColumn: $showReviewColumn,
-                        showCompletedColumn: $showCompletedColumn,
-                        autoHideEmpty: $autoHideEmpty,
-                        onToggleComplete: { toggleComplete($0) },
-                        onDelete: { deleteTodo($0) },
-                        onPromote: { promoteTodo($0) },
-                        onMoveTodoToColumn: { moveTodo($0, toColumn: $1) },
-                        onAddTodo: { openAddTodoIfAllowed() },
-                        canOpenAddTodo: canOpenAddTodoDuringTutorial
-                    )
+                    todoBoard
                 } else {
                     todoList
                 }
@@ -555,11 +546,14 @@ struct TodoListView: View {
                 set: { if !$0 { hasOnboarded = true } }
             ))
         }
-        .sheet(isPresented: $showAddTodo, onDismiss: {
+        #if targetEnvironment(macCatalyst)
+        // Catalyst unboxes toolbar buttons into AppKit; keep the presentation host in the window.
+        .outsideDismissSheet(isPresented: $showAddTodo, onDismiss: {
             tutorial?.handleAddTodoDismissed()
         }) {
             AddTodoView()
         }
+        #endif
         .onReceive(NotificationCenter.default.publisher(for: .tutorialRunPrioritizeRequested)) { _ in
             let activeTodos = TodoPriorityScope.candidates(from: todos)
             guard !isPrioritizing, !activeTodos.isEmpty else { return }
@@ -645,6 +639,73 @@ struct TodoListView: View {
 
     // MARK: - Subviews
 
+    private var todoBoard: some View {
+        VStack(spacing: 0) {
+            #if !targetEnvironment(macCatalyst)
+            boardCategoryBar
+            taskBanner
+            #endif
+            TodoBoardView(
+                todos: todos,
+                showActiveColumn: $showActiveColumn,
+                showOverdueColumn: $showOverdueColumn,
+                showReviewColumn: $showReviewColumn,
+                showCompletedColumn: $showCompletedColumn,
+                autoHideEmpty: $autoHideEmpty,
+                onToggleComplete: { toggleComplete($0) },
+                onDelete: { deleteTodo($0) },
+                onPromote: { promoteTodo($0) },
+                onMoveTodoToColumn: { moveTodo($0, toColumn: $1) },
+                onAddTodo: { openAddTodoIfAllowed() },
+                canOpenAddTodo: canOpenAddTodoDuringTutorial
+            )
+        }
+    }
+
+    #if !targetEnvironment(macCatalyst)
+    /// These categories control actual board visibility, not the independent list filter.
+    private var boardCategoryBar: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(BoardColumnType.allCases) { column in
+                    boardCategoryChip(column)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+        }
+    }
+
+    private func boardCategoryChip(_ column: BoardColumnType) -> some View {
+        let visibility = boardColumnVisibility(column)
+        let isVisible = visibility.wrappedValue
+        return Button {
+            withAnimation(AppTheme.motion(reduceMotion: reduceMotion)) {
+                visibility.wrappedValue.toggle()
+            }
+        } label: {
+            Label(column.title, systemImage: isVisible ? "checkmark.circle.fill" : "circle")
+                .font(.subheadline.weight(isVisible ? .semibold : .regular))
+                .frame(minWidth: 44, minHeight: 44)
+        }
+        .buttonStyle(.bordered)
+        .buttonBorderShape(.roundedRectangle(radius: AppTheme.controlRadius))
+        .tint(isVisible ? AppTheme.accent : .secondary)
+        .accessibilityLabel(column.title)
+        .accessibilityAddTraits(isVisible ? [.isSelected] : [])
+        .accessibilityIdentifier("todo.board.category.\(column.rawValue)")
+    }
+
+    private func boardColumnVisibility(_ column: BoardColumnType) -> Binding<Bool> {
+        switch column {
+        case .active: return $showActiveColumn
+        case .overdue: return $showOverdueColumn
+        case .review: return $showReviewColumn
+        case .completed: return $showCompletedColumn
+        }
+    }
+    #endif
+
     private var filterBar: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
@@ -686,14 +747,25 @@ struct TodoListView: View {
     }
 
     private var todoList: some View {
-        List {
-            Section {
-                filterBar
-                    .listRowInsets(EdgeInsets())
-                    .listRowBackground(Color.clear)
-                    .listRowSeparator(.hidden)
+        todoRows
+            .safeAreaInset(edge: .top, spacing: 0) {
+                VStack(spacing: 0) {
+                    filterBar
+                    taskBanner
+                }
+                .background(AppTheme.canvas, ignoresSafeAreaEdges: [])
             }
+    }
 
+    @ViewBuilder
+    private var taskBanner: some View {
+        #if !targetEnvironment(macCatalyst)
+        BannerAdStrip(isEligible: isAdPlacementEligible && globalSearchText.isEmpty)
+        #endif
+    }
+
+    private var todoRows: some View {
+        List {
             if filteredTodos.isEmpty {
                 Section {
                     emptyState
@@ -1063,6 +1135,15 @@ struct TodoListView: View {
             .disabled(!canOpenAddTodoDuringTutorial)
             .accessibilityLabel(AppLanguage.localized("todo.add.accessibilityLabel", defaultValue: "새 할 일 추가", language: .current, comment: "Add to-do button."))
             .accessibilityIdentifier("todo.addButton")
+            #if !targetEnvironment(macCatalyst)
+            .outsideDismissSheet(isPresented: $showAddTodo, onDismiss: {
+                tutorial?.handleAddTodoDismissed()
+            }) {
+                AddTodoView()
+                    // iPad popovers report compact traits; size the editor for the presenting window.
+                    .environment(\.horizontalSizeClass, horizontalSizeClass)
+            }
+            #endif
         }
         ToolbarItem(placement: .topBarTrailing) {
             Menu {

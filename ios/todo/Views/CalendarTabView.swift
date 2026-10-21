@@ -114,6 +114,11 @@ struct CalendarTabView: View {
     @Environment(\.appTutorialState) private var tutorial
     @Query private var allTodos: [Todo]
     @State private var displayMonth = CalendarTabView.currentMonthStart
+    @State private var eventWindowMonth = CalendarTabView.currentMonthStart
+    #if targetEnvironment(macCatalyst)
+    @State private var scrollDate = CalendarTabView.currentMonthStart
+    @State private var scrollRevision = 0
+    #endif
     @State private var selectedDate: Date?
     @State private var activeSheet: CalendarActiveSheet?
     @State private var showSourceSheet = false
@@ -132,7 +137,7 @@ struct CalendarTabView: View {
     }
 
     private var request: CalendarMonthRequest {
-        CalendarMonthRequest(month: displayMonth, revision: reloadRevision,
+        CalendarMonthRequest(month: eventWindowMonth, revision: reloadRevision,
                              disabledIDs: disabledIDs, authorized: authorized,
                              timeZone: Calendar.current.timeZone.identifier)
     }
@@ -146,10 +151,29 @@ struct CalendarTabView: View {
             .safeAreaInset(edge: .top, spacing: 0) {
                 if let tutorial { AppTutorialTipHost(tutorial: tutorial, screen: .calendarTab) }
             }
+            #if targetEnvironment(macCatalyst)
+            // Give Catalyst's native toolbar a calendar-specific navigation
+            // title instead of leaving it to the app-name fallback.
+            .navigationTitle("캘린더")
+            #else
             .navigationTitle(horizontalSizeClass == .regular ? Text("") : Text("캘린더"))
+            #endif
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { toolbarItems }
-            .sheet(item: $activeSheet, onDismiss: reloadAllEvents) { activeSheetView($0) }
+            .toolbar {
+                #if targetEnvironment(macCatalyst)
+                ToolbarItem(placement: .navigationBarLeading) {
+                    CatalystToolbarButton(
+                        title: calendarCopy("calendar.sidebar.toggle", "Show or hide calendars", "캘린더 사이드바 표시 또는 가리기"),
+                        systemImage: "sidebar.left", accessibilityIdentifier: "calendar.sidebarToggle"
+                    ) { sidebarVisible.toggle() }
+                    .disabled(!authorized)
+                }
+                #else
+                toolbarItems
+                #endif
+            }
+            .sheet(item: eventEditorSheet, onDismiss: reloadAllEvents) { activeSheetView($0) }
+            .outsideDismissSheet(item: dayDetailSheet, onDismiss: reloadAllEvents) { activeSheetView($0) }
             .sheet(isPresented: $showSourceSheet) {
                 CalendarSourceSheet(sources: calendarSources, disabledIDs: $disabledIDs)
             }
@@ -161,8 +185,14 @@ struct CalendarTabView: View {
             isLoading = true
             do { try await Task.sleep(for: .milliseconds(100)) }
             catch { return }
-            let interval = CalendarMonthGeometry(month: expected.month).interval
-            let events = await CalendarService.shared.events(from: interval.start, to: interval.end)
+            // Keep neighboring months loaded before they enter the viewport.
+            // Scrolling changes the title, not the data set on every wheel event.
+            let calendar = Calendar.current
+            let first = calendar.date(byAdding: .month, value: -3, to: expected.month) ?? expected.month
+            let last = calendar.date(byAdding: .month, value: 3, to: expected.month) ?? expected.month
+            let start = CalendarMonthGeometry(month: first).interval.start
+            let end = CalendarMonthGeometry(month: last).interval.end
+            let events = await CalendarService.shared.events(from: start, to: end)
             guard !Task.isCancelled, request == expected else { return }
             allEvents = events
             refreshSources()
@@ -178,6 +208,10 @@ struct CalendarTabView: View {
             if phase == .active { refreshAuthorization() }
         }
         .onReceive(NotificationCenter.default.publisher(for: .calendarScrollToToday)) { _ in goToToday() }
+        .onChange(of: displayMonth) { _, month in
+            let distance = Calendar.current.dateComponents([.month], from: eventWindowMonth, to: month).month ?? 0
+            if abs(distance) >= 2 { eventWindowMonth = month }
+        }
         .onAppear { tutorial?.handleCalendarTabAppeared() }
     }
 
@@ -192,7 +226,11 @@ struct CalendarTabView: View {
 
     private var mainContent: some View {
         GeometryReader { geometry in
+            #if targetEnvironment(macCatalyst)
+            let desktop = true
+            #else
             let desktop = horizontalSizeClass == .regular && geometry.size.width >= 700
+            #endif
             HStack(spacing: 0) {
                 if desktop && sidebarVisible {
                     sidebar.frame(width: 224)
@@ -200,26 +238,41 @@ struct CalendarTabView: View {
                 }
                 VStack(spacing: 0) {
                     monthHeader(desktop: desktop)
-                    CalendarMonthGrid(
-                        month: displayMonth, selectedDate: selectedDate,
+                    #if targetEnvironment(macCatalyst)
+                    CalendarContinuousGrid(month: displayMonth,
+                        target: CalendarWeekScrollTarget(date: scrollDate, revision: scrollRevision),
+                        selectedDate: selectedDate,
                         events: allEvents.filter { !disabledIDs.contains($0.calendarID) },
                         todos: Array(allTodos), colors: calendarColors, desktop: desktop,
-                        onDayTap: selectDay
-                    )
-                    .refreshable { await performSync() }
+                        onVisibleMonth: { displayMonth = $0 }, onDayTap: selectDay)
+                    #else
+                    monthGrid(desktop: desktop)
+                    #endif
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
     }
 
+    private func monthGrid(desktop: Bool) -> some View {
+        CalendarMonthGrid(
+            month: displayMonth, selectedDate: selectedDate,
+            events: allEvents.filter { !disabledIDs.contains($0.calendarID) },
+            todos: Array(allTodos), colors: calendarColors, desktop: desktop,
+            onDayTap: selectDay
+        )
+        .refreshable { await performSync() }
+    }
+
     private func monthHeader(desktop: Bool) -> some View {
         HStack(spacing: 12) {
+            #if !targetEnvironment(macCatalyst)
             if desktop {
                 Button { sidebarVisible.toggle() } label: { Image(systemName: "sidebar.left") }
                     .accessibilityLabel(calendarCopy("calendar.sidebar.toggle", "Show or hide calendars", "캘린더 사이드바 표시 또는 가리기"))
                     .accessibilityIdentifier("calendar.sidebarToggle")
             }
+            #endif
             Text(monthTitle(desktop: desktop))
                 .lineLimit(1).minimumScaleFactor(0.7)
             Spacer(minLength: 0)
@@ -238,6 +291,10 @@ struct CalendarTabView: View {
                     .accessibilityIdentifier("calendar.nextMonth")
             }
             .font(.system(size: 13))
+            #if targetEnvironment(macCatalyst)
+            filterButton.frame(width: 30, height: 30)
+            addButton.frame(width: 30, height: 30)
+            #endif
         }
         .buttonStyle(.plain)
         .padding(.horizontal, desktop ? 14 : 12).padding(.vertical, desktop ? 18 : 12)
@@ -278,15 +335,37 @@ struct CalendarTabView: View {
 
     @ToolbarContentBuilder private var toolbarItems: some ToolbarContent {
         ToolbarItem(placement: .navigationBarLeading) {
-            Button { showSourceSheet = true } label: { Image(systemName: "line.3.horizontal.decrease.circle") }
-                .accessibilityLabel(AppLanguage.localized("calendar.filter.accessibilityLabel", defaultValue: "캘린더 필터", language: .current, comment: "Calendar filter button."))
-                .accessibilityIdentifier("calendar.filterButton").disabled(!authorized)
+            filterButton
         }
         ToolbarItem(placement: .navigationBarTrailing) {
-            Button { activeSheet = .newEvent(date: selectedDate ?? Date()) } label: { Image(systemName: "plus") }
-                .accessibilityLabel(AppLanguage.localized("calendar.add.accessibilityLabel", defaultValue: "일정 추가", language: .current, comment: "Calendar add button."))
-                .accessibilityIdentifier("calendar.addButton").disabled(!authorized)
+            addButton
         }
+    }
+
+    private var filterButton: some View {
+        Button { showSourceSheet = true } label: { Image(systemName: "line.3.horizontal.decrease.circle") }
+            .accessibilityLabel(AppLanguage.localized("calendar.filter.accessibilityLabel", defaultValue: "캘린더 필터", language: .current, comment: "Calendar filter button."))
+            .accessibilityIdentifier("calendar.filterButton").disabled(!authorized)
+    }
+
+    private var addButton: some View {
+        Button { activeSheet = .newEvent(date: selectedDate ?? Date()) } label: { Image(systemName: "plus") }
+            .accessibilityLabel(AppLanguage.localized("calendar.add.accessibilityLabel", defaultValue: "일정 추가", language: .current, comment: "Calendar add button."))
+            .accessibilityIdentifier("calendar.addButton").disabled(!authorized)
+    }
+
+    private var dayDetailSheet: Binding<CalendarActiveSheet?> {
+        Binding(get: {
+            if case .dayDetail? = activeSheet { return activeSheet }
+            return nil
+        }, set: { activeSheet = $0 })
+    }
+
+    private var eventEditorSheet: Binding<CalendarActiveSheet?> {
+        Binding(get: {
+            if case .dayDetail? = activeSheet { return nil }
+            return activeSheet
+        }, set: { activeSheet = $0 })
     }
 
     @ViewBuilder private func activeSheetView(_ sheet: CalendarActiveSheet) -> some View {
@@ -306,6 +385,10 @@ struct CalendarTabView: View {
     private func selectMiniDay(_ date: Date) {
         selectedDate = date
         displayMonth = Calendar.current.dateInterval(of: .month, for: date)?.start ?? date
+        #if targetEnvironment(macCatalyst)
+        scrollDate = date
+        scrollRevision += 1
+        #endif
     }
 
 
@@ -322,11 +405,19 @@ struct CalendarTabView: View {
         guard let date = Calendar.current.date(byAdding: .month, value: offset, to: displayMonth) else { return }
         displayMonth = date
         selectedDate = nil
+        #if targetEnvironment(macCatalyst)
+        scrollDate = date
+        scrollRevision += 1
+        #endif
     }
 
     private func goToToday() {
         displayMonth = Self.currentMonthStart
         selectedDate = Calendar.current.startOfDay(for: Date())
+        #if targetEnvironment(macCatalyst)
+        scrollDate = Self.currentMonthStart
+        scrollRevision += 1
+        #endif
     }
 
     private func toggleCalendar(_ id: String) {
@@ -442,14 +533,21 @@ struct DayDetailSheet: View {
         Set(dayTodos.compactMap { $0.calendarEventID })
     }
 
-    /// 종일 밴드: isAllDay 또는 다일 이벤트 (연동된 Todo가 있는 이벤트는 숨김)
+    /// A todo on the start date does not represent a multi-day event's full span.
     private var allDayEvents: [CalendarService.CalendarEventSummary] {
-        dayEvents.filter { eventIsAllDayStyle($0) && !linkedEventIDs.contains($0.identifier) }
+        dayEvents.filter { event in
+            let nextDay = cal.date(byAdding: .day, value: 1, to: cal.startOfDay(for: event.startDate)) ?? event.startDate
+            return eventIsAllDayStyle(event)
+                && (event.endDate > nextDay || !linkedEventIDs.contains(event.identifier))
+        }
     }
 
     private var timedEvents: [CalendarService.CalendarEventSummary] {
         dayEvents.filter { !eventIsAllDayStyle($0) && !linkedEventIDs.contains($0.identifier) }
     }
+
+    private var hasTimedItems: Bool { !timedEvents.isEmpty || !dayTodos.isEmpty }
+    private var hasSchedule: Bool { hasTimedItems || !allDayEvents.isEmpty }
 
     private var dateTitle: String {
         let formatter = DateFormatter()
@@ -496,30 +594,31 @@ struct DayDetailSheet: View {
         NavigationStack {
             VStack(spacing: 0) {
                 if !allDayEvents.isEmpty {
-                    allDaySection
-                    Divider()
+                    ScrollView { allDaySection }
+                        .frame(maxHeight: hasTimedItems ? min(132, 40 + CGFloat(allDayEvents.count) * 36) : .infinity)
+                    if hasTimedItems { Divider() }
                 }
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        if timedEvents.isEmpty && dayTodos.isEmpty && allDayEvents.isEmpty {
-                            ContentUnavailableView("일정 없음", systemImage: "calendar")
-                                .padding(.top, 60)
-                        } else {
-                            timelineGrid.padding(.bottom, 24)
+                if hasTimedItems {
+                    ScrollViewReader { proxy in
+                        ScrollView {
+                            timelineGrid
+                                .padding(.horizontal, AppTheme.Spacing.item)
+                                .padding(.vertical, AppTheme.Spacing.item)
+                        }
+                        .onAppear {
+                            let h = initialScrollHour
+                            DispatchQueue.main.async { proxy.scrollTo("hour-\(h)", anchor: .top) }
                         }
                     }
-                    .onAppear {
-                        let h = initialScrollHour
-                        DispatchQueue.main.async { proxy.scrollTo("hour-\(h)", anchor: .top) }
-                    }
+                } else if !hasSchedule {
+                    ContentUnavailableView("일정 없음", systemImage: "calendar")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
             .background(AppTheme.surface)
+            .navigationTitle(dateTitle)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .principal) {
-                    Text(dateTitle).font(.headline)
-                }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button("닫기") { dismiss() }
                 }
@@ -540,23 +639,23 @@ struct DayDetailSheet: View {
                 now = Date()
             }
         }
+        #if targetEnvironment(macCatalyst)
+        .frame(width: 520, height: hasTimedItems ? 560 : hasSchedule
+            ? min(520, 96 + CGFloat(allDayEvents.count) * 36) : 240)
+        .presentationSizing(.fitted)
+        #endif
     }
 
-    // MARK: All-day section (compact pill 한 줄)
+    // MARK: All-day agenda
 
     private var allDaySection: some View {
-        HStack(spacing: 0) {
+        VStack(alignment: .leading, spacing: 4) {
             Text("종일")
-                .font(.caption2).foregroundStyle(.secondary)
-                .frame(width: 44, alignment: .center)
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 6) {
-                    ForEach(allDayEvents, id: \.identifier) { allDayChip($0) }
-                }
-                .padding(.horizontal, 8)
-            }
+                .font(.caption).foregroundStyle(.secondary)
+            ForEach(allDayEvents, id: \.identifier) { allDayChip($0) }
         }
-        .padding(.vertical, AppTheme.Spacing.item)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(AppTheme.Spacing.item)
     }
 
     @ViewBuilder
@@ -568,25 +667,21 @@ struct DayDetailSheet: View {
         let contR = event.endDate   > day1
 
         Button { openEventEdit(event) } label: {
-            HStack(spacing: 3) {
-                if contL {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: 8, weight: .bold)).foregroundStyle(.white)
-                }
+            HStack(spacing: AppTheme.Spacing.compact) {
+                Circle().fill(color).frame(width: 7, height: 7)
+                if contL { Image(systemName: "chevron.left").font(.caption2).foregroundStyle(.secondary) }
                 Text(event.title.isEmpty ? AppLanguage.localized("calendar.event.noTitle", defaultValue: "(No Title)", language: .current, comment: "Placeholder for a calendar event without a title.") : event.title)
-                    .font(.caption).fontWeight(.medium).lineLimit(1)
-                    .foregroundStyle(.white)
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.primary)
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 if event.isRecurring {
-                    Image(systemName: "arrow.triangle.2.circlepath")
-                        .font(.system(size: 7)).foregroundStyle(.white.opacity(0.85))
+                    Image(systemName: "arrow.triangle.2.circlepath").font(.caption).foregroundStyle(.secondary)
                 }
-                if contR {
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 8, weight: .bold)).foregroundStyle(.white)
-                }
+                if contR { Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.secondary) }
             }
-            .padding(.horizontal, 8).padding(.vertical, 7)
-            .background(color.opacity(0.9), in: RoundedRectangle(cornerRadius: AppTheme.controlRadius, style: .continuous))
+            .frame(minHeight: 28)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
@@ -600,8 +695,8 @@ struct DayDetailSheet: View {
                 ForEach(0..<24, id: \.self) { hour in
                     Text(String(format: "%02d", hour))
                         .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
-                        .frame(width: labelWidth, height: hourHeight, alignment: .top)
                         .padding(.top, 3)
+                        .frame(width: labelWidth, height: hourHeight, alignment: .top)
                         .id("hour-\(hour)")
                 }
             }

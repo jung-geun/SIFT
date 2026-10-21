@@ -8,6 +8,7 @@ struct AddTodoView: View {
     @Environment(\.appTutorialState) private var tutorial
     @Environment(\.userVocabulary) private var userVocabulary
     @Environment(\.verticalSizeClass) private var verticalSizeClass
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Query(sort: \Persona.updatedAt, order: .reverse) private var personas: [Persona]
 
@@ -217,7 +218,7 @@ struct AddTodoView: View {
             // including when the keyboard reduces the navigation content's safe area.
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 VStack(spacing: 8) {
-                    if tutorial?.isActive != true && verticalSizeClass != .compact {
+                    if !usesRoomyEditor && tutorial?.isActive != true && verticalSizeClass != .compact {
                         Button {
                             Task { await addTodo() }
                         } label: {
@@ -246,12 +247,12 @@ struct AddTodoView: View {
                     Button("취소") { dismiss() }
                         .accessibilityIdentifier("todo.add.cancelButton")
                 }
-                if tutorial?.isActive == true || verticalSizeClass == .compact {
+                if usesRoomyEditor || tutorial?.isActive == true || verticalSizeClass == .compact {
                     ToolbarItem(placement: .confirmationAction) {
                         Button {
                             Task { await addTodo() }
                         } label: {
-                            Text("추가")
+                            Text(usesRoomyEditor ? LocalizedStringKey("저장") : LocalizedStringKey("추가"))
                                 .fontWeight(.semibold)
                                 .appTutorialGlow(tutorial?.currentStep == .addTodoSave)
                         }
@@ -301,6 +302,8 @@ struct AddTodoView: View {
             }
             }
         }
+        .modifier(AddTodoEditorPresentation(isRoomy: usesRoomyEditor))
+        .interactiveDismissDisabled(isSaving)
         .alert(
             AppLanguage.localized("todo.add.saveError.title", defaultValue: "저장 실패", language: .current, comment: "Manual to-do save failure title."),
             isPresented: $showSaveError
@@ -320,6 +323,14 @@ struct AddTodoView: View {
     }
 
     // MARK: - Action
+
+    private var usesRoomyEditor: Bool {
+        #if targetEnvironment(macCatalyst)
+        true
+        #else
+        horizontalSizeClass == .regular
+        #endif
+    }
 
     private var canSave: Bool {
         !isSaving && !hasSaved && !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -407,6 +418,21 @@ struct AddTodoView: View {
         Task { await QuickSortService.analyzeOnAdd(todo, persona: ctx, context: modelContext) }
 
         if !showCalendarError { dismiss() }
+    }
+}
+
+private struct AddTodoEditorPresentation: ViewModifier {
+    let isRoomy: Bool
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if isRoomy {
+            content
+                .frame(idealWidth: 640, maxWidth: 640, idealHeight: 680, maxHeight: 680)
+                .presentationSizing(.fitted)
+        } else {
+            content
+        }
     }
 }
 

@@ -5,9 +5,9 @@ import UIKit
 import GoogleMobileAds
 import OSLog
 
-/// Mount exactly once, outside the TabView, in a safe-area-respecting VStack(spacing: 0).
+/// Mount exactly once below the task categories, in a safe-area-respecting VStack(spacing: 0).
 /// Pass false during onboarding/tutorials, on ineligible screens, or while a custom overlay
-/// obscures the placement. Do not conditionally remove the strip, put it inside a ScrollView,
+/// obscures the placement. Keep the eligible host stable; do not put it inside a ScrollView,
 /// add padding/animation, use ignoresSafeArea, or constrain its parent to less than 50pt high.
 ///
 /// The strip is either 0pt or 50pt high. The creative is always exactly 320x50, never clipped,
@@ -25,16 +25,18 @@ struct BannerAdStrip: View {
     }
 
     var body: some View {
-        BannerHost(mount: mount, isEligible: isEligible && scenePhase == .active)
-            .frame(height: mount.height)
-            .frame(maxWidth: .infinity)
-            .fixedSize(horizontal: false, vertical: true)
-            .accessibilityIdentifier("ads.bottomBanner")
-            .transaction {
-                // Never animate through intermediate heights that could crop an ad.
-                $0.animation = nil
-                $0.disablesAnimations = true
-            }
+        if AdPresentationPolicy.current.allowsAds {
+            BannerHost(mount: mount, isEligible: isEligible && scenePhase == .active)
+                .frame(height: mount.height)
+                .frame(maxWidth: .infinity)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("ads.taskFilterBanner")
+                .transaction {
+                    // Never animate through intermediate heights that could crop an ad.
+                    $0.animation = nil
+                    $0.disablesAnimations = true
+                }
+        }
     }
 }
 
@@ -352,7 +354,7 @@ private final class BannerAdSession: NSObject, BannerViewDelegate {
             candidate.reserveHeight(0)
             return
         }
-        guard candidate.isPlacementEligible else {
+        guard AdPresentationPolicy.current.allowsAds, candidate.isPlacementEligible else {
             hide()
             return
         }
@@ -443,7 +445,8 @@ private final class BannerAdSession: NSObject, BannerViewDelegate {
             host?.scheduleReconcile()
             return false
         }
-        guard AdMobConsentManager.shared.canRequestAds,
+        guard AdPresentationPolicy.current.allowsAds,
+              AdMobConsentManager.shared.canRequestAds,
               !AdMobConsentManager.shared.isBusy else {
             invalidateBanner()
             host?.scheduleReconcile()

@@ -146,33 +146,71 @@ struct AISettingsView: View {
 }
 
 
+/// Model state and actions share one full-width settings row in every install state.
+struct ModelManagementRow<Status: View, Actions: View>: View {
+    let status: Status
+    let actions: Actions
+
+    init(@ViewBuilder status: () -> Status, @ViewBuilder actions: () -> Actions) {
+        self.status = status()
+        self.actions = actions()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: AppTheme.Spacing.item) {
+            status
+                .frame(maxWidth: .infinity, alignment: .leading)
+            actions
+                .frame(maxWidth: .infinity, alignment: .trailing)
+                .buttonStyle(.bordered)
+                .controlSize(.regular)
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .lineLimit(nil)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, AppTheme.Spacing.compact)
+    }
+}
+
 struct LayaModelManagementSection: View {
     @ObservedObject var service: LayaDecisionService
     let isEnabled: Bool
     @State private var downloadTask: Task<Void, Never>?
 
     var body: some View {
-        if service.isLoading || downloadTask != nil {
-            ProgressView(value: service.downloadProgress)
-            Button(copy("beta.model.cancel", korean: "다운로드 취소", english: "Cancel download"), role: .cancel) {
-                downloadTask?.cancel()
-            }
-            .accessibilityIdentifier("beta.laya.cancelDownload")
-        } else if service.isModelInstalled {
-            VStack(alignment: .leading, spacing: AppTheme.Spacing.compact) {
-                Label(copy("beta.model.downloaded", korean: "다운로드됨", english: "Downloaded"), systemImage: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-                Text(ByteCountFormatter.string(fromByteCount: service.installedSizeBytes, countStyle: .file))
+        ModelManagementRow {
+            if service.isLoading || downloadTask != nil {
+                ProgressView(value: service.downloadProgress)
+            } else if service.isModelInstalled {
+                VStack(alignment: .leading, spacing: AppTheme.Spacing.compact) {
+                    Label(copy("beta.model.downloaded", korean: "다운로드됨", english: "Downloaded"), systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                    Text(ByteCountFormatter.string(fromByteCount: service.installedSizeBytes, countStyle: .file))
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            } else if isEnabled && !service.isCapable {
+                Label(copy("beta.laya.unsupported", korean: "이 기기는 Laya 모델을 실행할 수 없습니다.", english: "This device cannot run the Laya model."), systemImage: "exclamationmark.triangle.fill")
                     .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .foregroundStyle(.orange)
+            } else if isEnabled {
+                Text(copy("intelligence.model.notInstalled", korean: "설치되지 않음", english: "Not Installed"))
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
+        } actions: {
+            if service.isLoading || downloadTask != nil {
+                Button(copy("beta.model.cancel", korean: "다운로드 취소", english: "Cancel download"), role: .cancel) {
+                    downloadTask?.cancel()
+                }
+                .accessibilityIdentifier("beta.laya.cancelDownload")
+            } else if service.isModelInstalled {
                 Button(copy("beta.model.delete", korean: "삭제", english: "Delete"), role: .destructive) {
                     Task { await service.deleteDownloadedModel() }
                 }
                 .disabled(service.isLoading || service.isDeleting)
                 .accessibilityIdentifier("beta.laya.delete")
-            }
-        } else if isEnabled {
-            if service.isCapable {
+            } else if isEnabled && service.isCapable {
                 Button(copy("beta.model.download", korean: "모델 다운로드", english: "Download model")) {
                     downloadTask = Task {
                         defer { downloadTask = nil }
@@ -181,12 +219,9 @@ struct LayaModelManagementSection: View {
                 }
                 .disabled(service.isDeleting)
                 .accessibilityIdentifier("beta.laya.download")
-            } else {
-                Label(copy("beta.laya.unsupported", korean: "이 기기는 Laya 모델을 실행할 수 없습니다.", english: "This device cannot run the Laya model."), systemImage: "exclamationmark.triangle.fill")
-                    .font(.footnote)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .foregroundStyle(.orange)
             }
+        }
+        if !service.isLoading && downloadTask == nil && !service.isModelInstalled && isEnabled {
             if let loadError = service.loadError {
                 Text(loadError).font(.footnote).foregroundStyle(.red)
             }
@@ -238,24 +273,35 @@ struct OnDeviceModelManagementSection: View {
                     }
                     ForEach(installed) { model in Text(model.displayName).tag(Optional(model.id)) }
                 }
+                .pickerStyle(.menu)
+                .controlSize(.regular)
                 .accessibilityIdentifier("beta.model.installedPicker")
                 .disabled(llmService.isLoading || llmService.isDeleting)
             }
             Picker(copy("beta.model.downloadTarget", korean: "설치할 로컬 모델", english: "Local model to install"), selection: $downloadModelID) {
                 ForEach(OnDeviceLLMService.availableModels) { model in Text(model.displayName).tag(model.id) }
             }
+            .pickerStyle(.menu)
+            .controlSize(.regular)
             .disabled(llmService.isLoading || llmService.isDeleting)
             .accessibilityIdentifier("beta.model.downloadPicker")
-            VStack(alignment: .leading, spacing: AppTheme.Spacing.compact) {
+            ModelManagementRow {
                 if llmService.isLoading {
                     ProgressView(value: llmService.downloadProgress)
+                } else if llmService.isModelCachedOnDisk(for: downloadModelID) {
+                    Label(copy("beta.model.downloaded", korean: "다운로드됨", english: "Downloaded"), systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                } else {
+                    Text(copy("intelligence.model.notInstalled", korean: "설치되지 않음", english: "Not Installed"))
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+            } actions: {
+                if llmService.isLoading {
                     Button(copy("beta.model.cancel", korean: "다운로드 취소", english: "Cancel download"), role: .cancel) {
                         llmService.unloadModel(reason: .manual)
                     }
                     .accessibilityIdentifier("beta.model.localCancelDownload")
                 } else if llmService.isModelCachedOnDisk(for: downloadModelID) {
-                    Label(copy("beta.model.downloaded", korean: "다운로드됨", english: "Downloaded"), systemImage: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
                     Button(copy("beta.model.delete", korean: "삭제", english: "Delete"), role: .destructive) {
                         Task { await llmService.deleteDownloadedModel(id: downloadModelID) }
                     }
@@ -275,11 +321,15 @@ struct OnDeviceModelManagementSection: View {
             }
             if let error = llmService.loadError { Text(error).font(.footnote).foregroundStyle(.red) }
         } else {
-            Label(copy("beta.model.unsupported", korean: "이 기기는 다운로드 온디바이스 모델을 지원하지 않습니다.", english: "This device does not support downloaded on-device models."), systemImage: "exclamationmark.triangle.fill")
-                .font(.footnote)
-                .fixedSize(horizontal: false, vertical: true)
-                .foregroundStyle(.orange)
-                .accessibilityIdentifier("intelligence.onDevice.unsupported")
+            ModelManagementRow {
+                Label(copy("beta.model.unsupported", korean: "이 기기는 다운로드 온디바이스 모델을 지원하지 않습니다.", english: "This device does not support downloaded on-device models."), systemImage: "exclamationmark.triangle.fill")
+                    .font(.footnote)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .foregroundStyle(.orange)
+                    .accessibilityIdentifier("intelligence.onDevice.unsupported")
+            } actions: {
+                EmptyView()
+            }
         }
     }
 

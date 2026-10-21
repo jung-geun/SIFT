@@ -27,6 +27,8 @@ struct EmailDetailView: View {
     @State private var imapPassword = ""
     @State private var outlookEmail = ""
     @State private var outlookPassword = ""
+    @State private var showGmailConnection = false
+    @State private var showOutlookConnection = false
     @State private var hasGmailStoredCredential = false
     @State private var hasOutlookStoredCredential = false
     @State private var showBackgroundWarning = false
@@ -156,7 +158,7 @@ struct EmailDetailView: View {
                             replace: { hasGmailStoredCredential = false }
                         )
                     } else {
-                        DisclosureGroup("Gmail IMAP 연결") {
+                        DisclosureGroup(isExpanded: $showGmailConnection) {
                             VStack(alignment: .leading, spacing: 10) {
                                 TextField("Gmail 이메일 주소", text: $imapEmail)
                                     .textInputAutocapitalization(.never)
@@ -192,6 +194,11 @@ struct EmailDetailView: View {
                                 }
                                 .disabled(isConnectingGmail || imapEmail.isEmpty || imapPassword.isEmpty)
                             }
+                        } label: {
+                            Text("Gmail IMAP 연결")
+                                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                                .contentShape(Rectangle())
+                                .onTapGesture { showGmailConnection.toggle() }
                         }
                     }
                 }
@@ -219,7 +226,7 @@ struct EmailDetailView: View {
                             replace: { hasOutlookStoredCredential = false }
                         )
                     } else {
-                        DisclosureGroup("Outlook IMAP 연결") {
+                        DisclosureGroup(isExpanded: $showOutlookConnection) {
                             VStack(alignment: .leading, spacing: 10) {
                                 TextField(
                                     AppLanguage.localized(
@@ -298,6 +305,11 @@ struct EmailDetailView: View {
                                 }
                                 .disabled(isConnectingOutlook || outlookEmail.isEmpty || outlookPassword.isEmpty)
                             }
+                        } label: {
+                            Text("Outlook IMAP 연결")
+                                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                                .contentShape(Rectangle())
+                                .onTapGesture { showOutlookConnection.toggle() }
                         }
                     }
                 }

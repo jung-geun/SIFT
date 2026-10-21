@@ -83,7 +83,27 @@ private struct MeetingLanguagePickerDestination: View {
         }
         .appListStyle()
         .navigationTitle(title)
-        .searchable(text: $search, placement: .navigationBarDrawer(displayMode: .always))
+        // Keep search in this destination on every platform so no navigation search
+        // controller can remain attached after Back or language selection.
+        .safeAreaInset(edge: .top, spacing: 0) {
+            VStack(alignment: .leading, spacing: AppTheme.Spacing.compact) {
+                Label(MeetingLanguageCopy.text("meeting.languages.search", "Search languages"), systemImage: "magnifyingglass")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .accessibilityIdentifier("\(identifier).search.title")
+                TextField(MeetingLanguageCopy.text("meeting.languages.search", "Search languages"), text: $search)
+                    .textFieldStyle(.roundedBorder)
+                    .controlSize(.regular)
+                    .font(.body)
+                    .foregroundStyle(.primary)
+                    .accessibilityIdentifier("\(identifier).search")
+            }
+            .padding(.horizontal, AppTheme.Spacing.page)
+            .padding(.vertical, AppTheme.Spacing.item)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(AppTheme.surface, ignoresSafeAreaEdges: [])
+            .overlay(alignment: .bottom) { Divider() }
+        }
     }
 
     private func isSelected(_ option: MeetingLanguageOption) -> Bool {

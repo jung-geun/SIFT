@@ -114,4 +114,39 @@ struct CalendarMonthLayoutTests {
         #expect(withTodo.items.flatMap { $0 }.count == 1)
         if case .todo = withTodo.items.flatMap({ $0 })[0] {} else { Issue.record("Linked event should be represented by its displayed todo") }
     }
+
+    @Test("a linked multi-day event remains visible in every occupied week")
+    func linkedMultiDayEventKeepsContinuations() {
+        let calendar = calendar()
+        let start = date(2026, 10, 8, hour: 9, calendar: calendar)
+        let end = date(2026, 10, 16, hour: 10, calendar: calendar)
+        let event = event("reservation", start: start, end: end)
+        let todo = CalendarMonthTodo(title: "Reservation task", date: start, eventID: event.identifier)
+        let weeks = CalendarMonthGeometry(month: start, calendar: calendar).weeks
+            .map { CalendarMonthWeekLayout(days: $0, events: [event], todos: [todo], calendar: calendar) }
+        for week in weeks {
+            for column in week.days.indices {
+                let occupies = CalendarMonthGeometry.occupies(event, day: week.days[column], calendar: calendar)
+                let spans = week.spans.filter { $0.firstColumn <= column && $0.lastColumn >= column }
+                #expect(spans.count == (occupies ? 1 : 0))
+                #expect(week.items[column].isEmpty)
+            }
+        }
+    }
+
+    @Test("continuous boundary weeks do not repeat days across a month or DST change")
+    func continuousWeekBoundary() {
+        for firstWeekday in [1, 2, 7] {
+            let calendar = calendar(firstWeekday: firstWeekday)
+            let start = CalendarMonthGeometry.weekStart(containing: date(2026, 10, 31, calendar: calendar), calendar: calendar)
+            let next = calendar.date(byAdding: .weekOfYear, value: 1, to: start)!
+            #expect(calendar.component(.weekday, from: start) == firstWeekday)
+            for offset in 0..<7 {
+                let day = calendar.date(byAdding: .day, value: offset, to: start)!
+                #expect(CalendarMonthGeometry.weekStart(containing: day, calendar: calendar) == start)
+            }
+            #expect(calendar.date(byAdding: .day, value: 7, to: start) == next)
+            #expect(CalendarMonthGeometry.weekStart(containing: next, calendar: calendar) == next)
+        }
+    }
 }

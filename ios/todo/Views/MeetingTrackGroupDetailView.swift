@@ -21,6 +21,7 @@ struct MeetingTrackGroupDetailView: View {
     @State private var timeline = MeetingConversationTimeline(sources: [])
     @State private var sourceNames: [String: String] = [:]
     @State private var speakerDisplays: [String: MeetingSpeakerDisplay] = [:]
+    @State private var conversationTurnStarts: Set<MeetingConversationTimeline.Row.ID> = []
     @ScaledMetric(relativeTo: .body) private var transcriptViewportHeight = 300
 
     private var contentInset: CGFloat {
@@ -96,15 +97,7 @@ struct MeetingTrackGroupDetailView: View {
             } else if !timeline.rows.isEmpty {
                 ScrollViewReader { proxy in
                     ScrollView(.vertical) {
-                        LazyVStack(alignment: .leading, spacing: AppTheme.Spacing.compact) {
-                            ForEach(timeline.rows) { row in
-                                conversationRow(row)
-                                    .id(row.id)
-                            }
-                        }
-                        .frame(maxWidth: 784, alignment: .leading)
-                        .padding(.vertical, AppTheme.Spacing.compact)
-                        .frame(maxWidth: .infinity)
+                        conversationRows(timeline.rows)
                     }
                     .frame(height: min(transcriptViewportHeight, 420))
                     .clipped()
@@ -129,19 +122,48 @@ struct MeetingTrackGroupDetailView: View {
                 Text(copy("meeting.conversation.unknownTiming", korean: "공통 시작 시각 없음 · 소스 간 순서 미확정",
                     english: "Common start time unavailable · order between sources unknown"))
                     .font(.caption).foregroundStyle(AppTheme.warning)
-                ForEach(source.rows) { row in
-                    conversationRow(row)
-                        .frame(maxWidth: 784, alignment: .leading)
-                        .frame(maxWidth: .infinity)
-                        .listRowInsets(EdgeInsets(top: AppTheme.Spacing.compact,
-                            leading: contentInset - AppTheme.Spacing.item,
-                            bottom: AppTheme.Spacing.compact, trailing: contentInset - AppTheme.Spacing.item))
-                }
+                conversationRows(source.rows)
+                    .listRowInsets(EdgeInsets(top: 0, leading: contentInset - AppTheme.Spacing.item,
+                        bottom: 0, trailing: contentInset - AppTheme.Spacing.item))
+                    .listRowSeparator(.hidden)
             }
         }
     }
 
-    private func conversationRow(_ row: MeetingConversationTimeline.Row) -> some View {
+    private func conversationRows(_ rows: [MeetingConversationTimeline.Row]) -> some View {
+        LazyVStack(alignment: .leading, spacing: 0) {
+            ForEach(rows) { row in
+                let startsTurn = conversationTurnStarts.contains(row.id)
+                conversationRow(row, startsTurn: startsTurn)
+                    .padding(.top, row.id != rows.first?.id && startsTurn ? AppTheme.Spacing.compact : 0)
+                    .id(row.id)
+            }
+        }
+        .padding(.vertical, AppTheme.Spacing.compact)
+    }
+
+    /// Compare source-local identities, never display names or source-local speaker ordinals.
+    /// Build once with the transcript rather than on every playback-progress update.
+    private func turnStarts(in rows: [MeetingConversationTimeline.Row]) -> Set<MeetingConversationTimeline.Row.ID> {
+        var starts: Set<MeetingConversationTimeline.Row.ID> = []
+        for index in rows.indices {
+            let row = rows[index]
+            guard index > rows.startIndex else {
+                starts.insert(row.id)
+                continue
+            }
+            let previous = rows[index - 1]
+            // An overlap's speaker set is the same even if its stored ordering changes.
+            let sameSpeakers = row.id.trackID == previous.id.trackID
+                && row.speakerIDs.allSatisfy { previous.speakerIDs.contains($0) }
+                && previous.speakerIDs.allSatisfy { row.speakerIDs.contains($0) }
+            if !sameSpeakers { starts.insert(row.id) }
+        }
+        return starts
+    }
+
+
+    private func conversationRow(_ row: MeetingConversationTimeline.Row, startsTurn: Bool) -> some View {
         let sample = player.playbackMilliseconds * (MeetingMediaTimeline.sampleRate / 1_000)
         let isActive = (player.isPlaying || player.isPaused)
             && row.startSample.map { $0 <= sample } == true
@@ -149,30 +171,29 @@ struct MeetingTrackGroupDetailView: View {
         let timeRange = row.startSample.flatMap { start in row.endSample.map { "\(duration(start))–\(duration($0))" } }
             ?? "\(localDuration(row.localStartMs))–\(localDuration(row.localEndMs))"
         return VStack(alignment: .leading, spacing: 4) {
-            ViewThatFits(in: .horizontal) {
+            if startsTurn {
                 HStack(alignment: .firstTextBaseline, spacing: AppTheme.Spacing.compact) {
-                    Text(sourceNames[row.id.trackID] ?? "")
-                        .font(.subheadline.weight(.medium)).foregroundStyle(.primary)
-                        .fixedSize(horizontal: true, vertical: false)
+                    if !row.speakerIDs.isEmpty {
+                        Text(MeetingSpeakerLabelFormatter.label(for: row.speakerIDs,
+                            profiles: speakerDisplays[row.id.trackID]?.profiles ?? [:], state: .final))
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                     Spacer(minLength: AppTheme.Spacing.compact)
                     Text(timeRange).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                         .fixedSize(horizontal: true, vertical: false)
                 }
-                VStack(alignment: .leading, spacing: AppTheme.Spacing.compact) {
-                    Text(sourceNames[row.id.trackID] ?? "")
-                        .font(.subheadline.weight(.medium)).foregroundStyle(.primary)
+                Text(row.text).fontWeight(isActive ? .semibold : .regular).textSelection(.enabled)
+            } else {
+                HStack(alignment: .firstTextBaseline, spacing: AppTheme.Spacing.compact) {
+                    Text(row.text).fontWeight(isActive ? .semibold : .regular).textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     Text(timeRange).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: true, vertical: false)
                 }
             }
-            if !row.speakerIDs.isEmpty {
-                Text(MeetingSpeakerLabelFormatter.label(for: row.speakerIDs,
-                    profiles: speakerDisplays[row.id.trackID]?.profiles ?? [:], state: .final))
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            Text(row.text).fontWeight(isActive ? .semibold : .regular).textSelection(.enabled)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, AppTheme.Spacing.compact)
+        .padding(.vertical, 2)
         .padding(.horizontal, AppTheme.Spacing.item)
         .background(isActive ? AppTheme.accentSoft : Color.clear,
             in: RoundedRectangle(cornerRadius: AppTheme.controlRadius, style: .continuous))
@@ -250,6 +271,11 @@ struct MeetingTrackGroupDetailView: View {
 
     private func preparePresentation() async {
         timeline = MeetingConversationTimeline.saved(tracks, groupID: meeting.meetingID)
+        var starts = turnStarts(in: timeline.rows)
+        for source in timeline.unalignedSources {
+            starts.formUnion(turnStarts(in: source.rows))
+        }
+        conversationTurnStarts = starts
         sourceNames = Dictionary(tracks.map { ($0.meetingID, $0.audioTrackDisplayName) }, uniquingKeysWith: { first, _ in first })
         speakerDisplays = Dictionary(tracks.map { ($0.meetingID, MeetingSpeakerDisplay(record: $0)) }, uniquingKeysWith: { first, _ in first })
         isPreparing = true
