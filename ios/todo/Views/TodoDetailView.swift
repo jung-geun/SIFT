@@ -37,6 +37,7 @@ struct TodoDetailView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
     @Environment(\.userVocabulary) private var userVocabulary
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var draft = TodoDraft()
     @State private var initialDraft = TodoDraft()
@@ -76,7 +77,8 @@ struct TodoDetailView: View {
             completionSection
             deleteSection
         }
-        .listSectionSpacing(.compact)
+        .appFormStyle()
+        .font(.body)
         .navigationTitle(AppLanguage.localized(
             "todo.detail.navigationTitle",
             defaultValue: "할 일 세부",
@@ -205,12 +207,11 @@ struct TodoDetailView: View {
     private var titleSection: some View {
         Section("제목 및 메모") {
             TextField("제목", text: $draft.title)
-                .font(.body)
+                .font(.headline)
                 .accessibilityIdentifier("todo.detail.titleField")
             TextField("메모 (선택)", text: $draft.notes, axis: .vertical)
                 .lineLimit(3...8)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
+                .font(.body)
                 .accessibilityIdentifier("todo.detail.notesField")
         }
     }
@@ -228,7 +229,7 @@ struct TodoDetailView: View {
                         draft.reminderOffsets = []
                     }
                 }
-            )) {
+            ).animation(AppTheme.motion(reduceMotion: reduceMotion))) {
                 Label("마감 시각 설정", systemImage: "calendar.badge.clock")
             }
 
@@ -292,87 +293,59 @@ struct TodoDetailView: View {
 
     private var prioritySection: some View {
         Section("우선순위") {
-            HStack {
-                Label("수동 우선순위", systemImage: "hand.raised")
-                Spacer()
-                if let priority = draft.manualPriority.flatMap(TodoPriority.init(rawValue:)) {
-                    Text(priority.label)
-                        .foregroundStyle(.secondary)
+            Picker(selection: $draft.manualPriority) {
+                Text("설정 안함").tag(Int?.none)
+                ForEach(TodoPriority.allCases, id: \.rawValue) { priority in
+                    Text(priority.label).tag(Int?.some(priority.rawValue))
                 }
-                Menu {
-                    Button("설정 안함") {
-                        draft.manualPriority = nil
-                    }
-                    Divider()
-                    ForEach(TodoPriority.allCases, id: \.rawValue) { priority in
-                        Button {
-                            draft.manualPriority = priority.rawValue
-                        } label: {
-                            Label(priority.label, systemImage: "flag")
-                        }
-                    }
-                } label: {
-                    Image(systemName: "chevron.up.chevron.down")
-                        .foregroundStyle(.secondary)
-                }
-                .accessibilityLabel(AppLanguage.localized("todo.priority.accessibilityLabel", defaultValue: "우선순위 선택", language: .current, comment: "To-do priority picker."))
-                .accessibilityIdentifier("todo.priorityPicker")
+            } label: {
+                Text("수동 우선순위")
             }
+            .pickerStyle(.menu)
+            .accessibilityLabel(AppLanguage.localized("todo.priority.accessibilityLabel", defaultValue: "우선순위 선택", language: .current, comment: "To-do priority picker."))
+            .accessibilityIdentifier("todo.priorityPicker")
 
             if !todo.priorityReason.isEmpty {
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Label("AI 우선순위", systemImage: "sparkles")
-                            .font(.subheadline)
-                        Spacer()
+                VStack(alignment: .leading, spacing: AppTheme.Spacing.item) {
+                    HStack(alignment: .firstTextBaseline, spacing: AppTheme.Spacing.item) {
+                        Text("AI 우선순위")
+                            .font(.headline)
+                        Spacer(minLength: AppTheme.Spacing.item)
                         Text(String(format: "%.0f%%", todo.computedPriorityScore * 100))
-                            .font(.subheadline.monospacedDigit())
+                            .font(.body.monospacedDigit())
                             .foregroundStyle(.secondary)
                     }
                     Text(todo.priorityReason)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .padding(.leading, 22)
+                        .font(.body)
+                        .fixedSize(horizontal: false, vertical: true)
                     if !todo.aiDetail.isEmpty {
                         Text(todo.aiDetail)
-                            .font(.caption2)
+                            .font(.body)
                             .foregroundStyle(.secondary)
-                            .padding(.leading, 22)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                     if let recommendation = todo.aiRecommendedTime {
-                        HStack(spacing: 4) {
-                            Image(systemName: "clock")
-                            Text("추천 처리 시각: \(recommendation.formatted(.dateTime.month().day().hour().minute()))")
-                        }
-                        .font(.caption2)
-                        .foregroundStyle(.blue)
-                        .padding(.leading, 22)
+                        Label("추천 처리 시각: \(recommendation.formatted(.dateTime.month().day().hour().minute()))", systemImage: "clock")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                     if todo.aiNeedsNotification {
-                        HStack(spacing: 4) {
-                            Image(systemName: "bell.fill")
-                            Text("알림 자동 설정됨")
-                        }
-                        .font(.caption2)
-                        .foregroundStyle(.orange)
-                        .padding(.leading, 22)
+                        Label("알림 자동 설정됨", systemImage: "bell")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                     if todo.aiPersonaFit {
-                        HStack(spacing: 4) {
-                            Image(systemName: "sparkles")
-                            Text("페르소나 부합 항목")
-                        }
-                        .font(.caption2)
-                        .foregroundStyle(.purple)
-                        .padding(.leading, 22)
+                        Text("페르소나 부합 항목")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                     if todo.manualPriority != nil {
                         Text("수동 우선순위가 AI 점수를 덮어씁니다.")
-                            .font(.caption2)
-                            .foregroundStyle(.orange)
-                            .padding(.leading, 22)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                 }
+                .padding(.vertical, AppTheme.Spacing.compact)
             }
         }
     }
@@ -387,16 +360,19 @@ struct TodoDetailView: View {
                 ForEach(draft.reminderOffsets, id: \.self) { offset in
                     HStack {
                         Image(systemName: "bell.fill")
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(.secondary)
                         Text(offsetLabel(offset))
                         Spacer()
                         Button(role: .destructive) {
                             removeOffset(offset)
                         } label: {
-                            Image(systemName: "minus.circle.fill")
-                                .foregroundStyle(.red)
+                            Image(systemName: "minus.circle")
+                                .frame(minWidth: 44, minHeight: 44)
+                                .contentShape(Rectangle())
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.borderless)
+                        .accessibilityLabel(Text("삭제"))
+                        .accessibilityValue(offsetLabel(offset))
                     }
                 }
 
@@ -454,12 +430,12 @@ struct TodoDetailView: View {
     private var metaSection: some View {
         Section {
             metaRow(AppLanguage.localized("todo.detail.sourceLabel", defaultValue: "Source", language: .current, comment: "To-do metadata source label.")) {
-                sourceBadge
+                sourceDescription
             }
             if todo.isFixedSchedule {
                 metaRow(AppLanguage.localized("todo.detail.typeLabel", defaultValue: "Type", language: .current, comment: "To-do metadata type label.")) {
                     Label("고정 일정 (반복)", systemImage: "arrow.triangle.2.circlepath")
-                        .foregroundStyle(.green)
+                        .foregroundStyle(.secondary)
                 }
             }
             if todo.todoSource == .email {
@@ -477,7 +453,6 @@ struct TodoDetailView: View {
                                 ProgressView().controlSize(.mini)
                             }
                         }
-                        .foregroundStyle(.blue)
                     }
                     .disabled(isResolvingEmail)
                 }
@@ -493,7 +468,6 @@ struct TodoDetailView: View {
                 }
             }
         }
-        .font(.subheadline)
     }
 
     private var completionSection: some View {
@@ -508,9 +482,12 @@ struct TodoDetailView: View {
                     ),
                     systemImage: todo.isCompleted ? "arrow.uturn.left" : "checkmark.circle.fill"
                 )
-                .foregroundStyle(todo.isCompleted ? AppTheme.warning : AppTheme.success)
-                .frame(maxWidth: .infinity, alignment: .center)
+                .font(.headline)
+                .frame(maxWidth: .infinity, minHeight: 44)
             }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .buttonBorderShape(.roundedRectangle(radius: AppTheme.controlRadius))
             .disabled(draft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             .accessibilityIdentifier("todo.detail.completeButton")
         }
@@ -523,9 +500,11 @@ struct TodoDetailView: View {
                     AppLanguage.localized("action.delete", defaultValue: "삭제", language: .current, comment: "Delete to-do action."),
                     systemImage: "trash"
                 )
-                .foregroundStyle(AppTheme.destructive)
-                .frame(maxWidth: .infinity, alignment: .center)
+                .frame(maxWidth: .infinity, minHeight: 44)
             }
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+            .buttonBorderShape(.roundedRectangle(radius: AppTheme.controlRadius))
             .accessibilityIdentifier("todo.detail.deleteButton")
         }
     }
@@ -569,16 +548,16 @@ struct TodoDetailView: View {
     }
 
     @ViewBuilder
-    private var sourceBadge: some View {
+    private var sourceDescription: some View {
         switch todo.todoSource {
         case .manual:
             Text("직접 입력").foregroundStyle(.secondary)
         case .email:
-            Label("이메일", systemImage: "envelope.fill").foregroundStyle(.blue)
+            Text("이메일").foregroundStyle(.secondary)
         case .calendar:
-            Label("캘린더", systemImage: "calendar").foregroundStyle(.green)
+            Text("캘린더").foregroundStyle(.secondary)
         case .meeting:
-            Label("회의", systemImage: "person.2.fill").foregroundStyle(.purple)
+            Text("회의").foregroundStyle(.secondary)
         }
     }
 
@@ -654,39 +633,13 @@ struct TodoDetailView: View {
 
         // 3. 캘린더 부작용
         var calendarFailure: String?
+        do {
+            try CalendarService.shared.applyTodoCalendarEdit(for: todo, linked: draft.calendarLinked)
+        } catch {
+            calendarFailure = error.localizedDescription
+        }
         if todo.dueDate == nil {
-            if todo.todoSource == .email {
-                _ = CalendarService.shared.removeEmailCalendarArtifacts(for: todo)
-            } else if let eventID = todo.calendarEventID {
-                _ = try? CalendarService.shared.removeEvent(eventID: eventID)
-            }
-            todo.calendarEventID = nil
             NotificationService.shared.cancel(todo: todo)
-        } else if todo.todoSource == .calendar {
-            // 캘린더에서 가져온 항목은 제목 저장 때문에 EventKit에 쓰지 않는다.
-            // 토글을 끈 경우에만 로컬 링크를 끊는다.
-            if wasLinked && !draft.calendarLinked {
-                todo.calendarEventID = nil
-            }
-        } else if draft.calendarLinked {
-            do {
-                if let eventID = try CalendarService.shared.registerOrUpdate(todo: todo) {
-                    todo.calendarEventID = eventID
-                }
-            } catch {
-                calendarFailure = error.localizedDescription
-            }
-        } else {
-            if wasLinked {
-                if todo.todoSource == .email {
-                    _ = CalendarService.shared.removeEmailCalendarArtifacts(for: todo)
-                } else if let eventID = todo.calendarEventID {
-                    _ = try? CalendarService.shared.removeEvent(eventID: eventID)
-                    todo.calendarEventID = nil
-                }
-            }
-            // 긴급·최우선 + 마감 있음 조합의 강제 등록 정책은 그대로 유지한다.
-            CalendarService.shared.applyAutoRegistration(for: todo)
         }
 
         // 4. 행동 로그 — 실제로 바뀐 항목만
@@ -772,36 +725,40 @@ struct TagEditorView: View {
     @State private var newTag = ""
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            FlowLayout(tags) { tag in
-                HStack(spacing: 4) {
+        // Tags remain individual removable values without compact decorative pills.
+        VStack(alignment: .leading, spacing: AppTheme.Spacing.item) {
+            ForEach(tags, id: \.self) { tag in
+                HStack(alignment: .firstTextBaseline, spacing: AppTheme.Spacing.item) {
                     Text(tag)
-                        .font(.caption)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(.blue.opacity(0.1), in: Capsule())
+                        .font(.body)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
                     Button(role: .destructive) {
                         tags.removeAll { $0 == tag }
                     } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                        Image(systemName: "minus.circle")
+                            .frame(minWidth: 44, minHeight: 44)
+                            .contentShape(Rectangle())
                     }
                     .accessibilityLabel(AppLanguage.localized("todo.tag.delete.accessibilityLabel", defaultValue: "태그 삭제", language: .current, comment: "To-do tag delete button."))
+                    .accessibilityValue(tag)
                     .accessibilityIdentifier("todo.tagDeleteButton")
-                    .buttonStyle(.plain)
+                    .buttonStyle(.borderless)
                 }
             }
 
-            HStack {
+            HStack(spacing: AppTheme.Spacing.item) {
                 TextField("태그 추가…", text: $newTag)
-                    .font(.subheadline)
+                    .font(.body)
                     .onSubmit { addTag() }
                 Button("추가", action: addTag)
-                    .font(.caption)
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
+                    .buttonBorderShape(.roundedRectangle(radius: AppTheme.controlRadius))
                     .disabled(newTag.trimmingCharacters(in: .whitespaces).isEmpty)
             }
         }
+        .padding(.vertical, AppTheme.Spacing.compact)
     }
 
     private func addTag() {

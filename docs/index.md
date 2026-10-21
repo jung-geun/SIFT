@@ -1,7 +1,7 @@
 ---
 layout: landing
-title: 할 일과 일정을 한곳에서
-description: 직접 적은 할 일부터 메일 속 요청까지. 실제 앱 화면으로 SIFT를 둘러보고, App Store에서 iPhone과 iPad용 앱을 다운로드하세요.
+title: iPhone·iPad·Mac에서 쓰는 무료 할 일 관리
+description: 직접 적은 할 일부터 메일 속 요청까지. 실제 마감을 확인하고 오늘 할 일에 집중하세요. SIFT는 무료이며 기본 처리는 기기 안에서, 메일·캘린더 연결과 iCloud 동기화는 사용자가 선택합니다.
 image: /assets/images/app-icon.webp
 ---
 
@@ -12,20 +12,21 @@ image: /assets/images/app-icon.webp
     <div class="container hero-grid">
       <div class="hero-copy">
         <h1 id="hero-title">할 일과 일정,<br><span>한곳에서.</span></h1>
-        <p class="hero-description">직접 적은 할 일부터 메일 속 요청까지.<br>마감을 확인하고, 오늘 할 일에 집중하세요.</p>
+        <p class="hero-description">직접 적은 할 일부터 메일 속 요청까지.<br>실제 마감을 확인하고, 오늘 할 일에 집중하세요.</p>
         <div class="hero-actions">
           <a class="store-link" href="{{ site.app_store_url }}">
             <img src="{{ '/assets/images/app-store-badge.svg' | relative_url }}" width="195" height="60" alt="App Store에서 다운로드">
           </a>
           <a class="text-link" href="#screens">앱 화면 보기 <span aria-hidden="true">→</span></a>
         </div>
+        <p class="download-meta">무료 · iPhone · iPad · Mac<br>메일이나 AI 계정 연결 없이 기본 할 일 관리부터 시작하세요.</p>
       </div>
       <div class="hero-visual" aria-label="SIFT의 실제 할 일 목록과 캘린더 화면">
         <figure class="hero-device hero-device-secondary device">
-          <img src="{{ '/assets/images/app-1113.webp' | relative_url }}" width="640" height="1391" alt="날짜를 선택하고 일정을 확인하는 SIFT 캘린더 화면" decoding="async">
+          <img src="{{ '/assets/images/app-1-0-11-calendar.webp' | relative_url }}" width="640" height="1391" alt="날짜를 선택하고 일정을 확인하는 SIFT 1.0.11 캘린더 화면" decoding="async">
         </figure>
         <figure class="hero-device hero-device-primary device">
-          <img src="{{ '/assets/images/app-1112.webp' | relative_url }}" width="640" height="1391" alt="진행중, 기한초과, 등록 대기열, 완료로 나누어 보는 SIFT 할 일 목록" fetchpriority="high" decoding="async">
+          <img src="{{ '/assets/images/app-1-0-11-tasks.webp' | relative_url }}" width="640" height="1391" alt="직접 저장한 할 일을 실제 마감과 상태별로 확인하는 SIFT 1.0.11 목록" fetchpriority="high" decoding="async">
         </figure>
       </div>
     </div>
@@ -57,40 +58,40 @@ image: /assets/images/app-icon.webp
               <span class="tab-detail">메일·캘린더·iCloud 연결은 여기서</span>
             </a>
           </div>
-          <p class="screens-source">App Store에 공개된 실제 앱 화면입니다.<br>화면을 누르면 크게 볼 수 있어요.</p>
+          <p class="screens-source">1.0.11 (9) 소스에서 실행·촬영한 현재 앱 화면입니다.<br>소개용 예시 데이터이며, 이 버전은 아직 심사 중입니다.<br>화면을 누르면 크게 볼 수 있어요.</p>
         </div>
         <div class="tour-viewer">
           <div class="screen-panels">
             <article class="screen-panel" id="screen-tasks" data-screen-label="할 일">
               <figure>
-                <a class="device-link" href="{{ '/assets/images/app-1112.webp' | relative_url }}" target="_blank" rel="noopener" aria-label="할 일 화면 크게 보기 (새 탭)">
-                  <span class="device tour-device"><img src="{{ '/assets/images/app-1112.webp' | relative_url }}" width="640" height="1391" alt="진행중인 할 일과 완료 상태를 확인하는 실제 SIFT 목록 화면" loading="lazy" decoding="async"></span>
+                <a class="device-link" href="{{ '/assets/images/app-1-0-11-tasks.webp' | relative_url }}" target="_blank" rel="noopener" aria-label="할 일 화면 크게 보기 (새 탭)">
+                  <span class="device tour-device"><img src="{{ '/assets/images/app-1-0-11-tasks.webp' | relative_url }}" width="640" height="1391" alt="소개용 할 일을 저장하고 마감·진행 상태를 확인하는 현재 SIFT 목록" loading="lazy" decoding="async"></span>
                 </a>
-                <figcaption><h3>해야 할 일을 놓치지 않게.</h3><p>진행중·기한초과·등록 대기열·완료를 나누어 확인하세요.</p></figcaption>
+                <figcaption><h3>해야 할 일을 놓치지 않게.</h3><p>직접 기록한 할 일을 실제 마감부터 확인하고, 검토 대기·완료 항목은 나누어 보세요.</p></figcaption>
               </figure>
             </article>
             <article class="screen-panel" id="screen-add" data-screen-label="새 할 일">
               <figure>
-                <a class="device-link" href="{{ '/assets/images/app-1125.webp' | relative_url }}" target="_blank" rel="noopener" aria-label="새 할 일 화면 크게 보기 (새 탭)">
-                  <span class="device tour-device"><img src="{{ '/assets/images/app-1125.webp' | relative_url }}" width="640" height="1391" alt="제목과 메모를 입력하고 마감·우선순위를 선택하는 실제 SIFT 새 할 일 화면" loading="lazy" decoding="async"></span>
+                <a class="device-link" href="{{ '/assets/images/app-1-0-11-capture.webp' | relative_url }}" target="_blank" rel="noopener" aria-label="새 할 일 화면 크게 보기 (새 탭)">
+                  <span class="device tour-device"><img src="{{ '/assets/images/app-1-0-11-capture.webp' | relative_url }}" width="640" height="1391" alt="제목부터 적고 필요한 옵션만 더하는 현재 SIFT 새 할 일 화면" loading="lazy" decoding="async"></span>
                 </a>
                 <figcaption><h3>생각났을 때, 바로 적어요.</h3><p>제목을 입력하고 필요할 때만 메모·마감·우선순위를 더하세요.</p></figcaption>
               </figure>
             </article>
             <article class="screen-panel" id="screen-calendar" data-screen-label="캘린더">
               <figure>
-                <a class="device-link" href="{{ '/assets/images/app-1113.webp' | relative_url }}" target="_blank" rel="noopener" aria-label="캘린더 화면 크게 보기 (새 탭)">
-                  <span class="device tour-device"><img src="{{ '/assets/images/app-1113.webp' | relative_url }}" width="640" height="1391" alt="월간 날짜와 선택한 날의 일정을 확인하는 실제 SIFT 캘린더 화면" loading="lazy" decoding="async"></span>
+                <a class="device-link" href="{{ '/assets/images/app-1-0-11-calendar.webp' | relative_url }}" target="_blank" rel="noopener" aria-label="캘린더 화면 크게 보기 (새 탭)">
+                  <span class="device tour-device"><img src="{{ '/assets/images/app-1-0-11-calendar.webp' | relative_url }}" width="640" height="1391" alt="현재 월의 날짜별 일정과 할 일을 살펴보는 SIFT 1.0.11 캘린더" loading="lazy" decoding="async"></span>
                 </a>
                 <figcaption><h3>목록에서 날짜로, 한 번에.</h3><p>캘린더에서 날짜를 선택해 일정을 확인하고 새 이벤트를 추가하세요.</p></figcaption>
               </figure>
             </article>
             <article class="screen-panel" id="screen-settings" data-screen-label="설정">
               <figure>
-                <a class="device-link" href="{{ '/assets/images/app-1115.webp' | relative_url }}" target="_blank" rel="noopener" aria-label="설정 화면 크게 보기 (새 탭)">
-                  <span class="device tour-device"><img src="{{ '/assets/images/app-1115.webp' | relative_url }}" width="640" height="1391" alt="이메일 연동, 캘린더, 시스템 권한, iCloud 동기화를 관리하는 실제 SIFT 설정 화면" loading="lazy" decoding="async"></span>
+                <a class="device-link" href="{{ '/assets/images/app-1-0-11-settings.webp' | relative_url }}" target="_blank" rel="noopener" aria-label="설정 화면 크게 보기 (새 탭)">
+                  <span class="device tour-device"><img src="{{ '/assets/images/app-1-0-11-settings.webp' | relative_url }}" width="640" height="1391" alt="한국어·영어 등 여덟 가지 앱 언어를 고르는 현재 SIFT 설정" loading="lazy" decoding="async"></span>
                 </a>
-                <figcaption><h3>필요한 연결만 켜두세요.</h3><p>메일·캘린더·iCloud와 AI 관련 옵션을 확인하고 직접 선택하세요.</p></figcaption>
+                <figcaption><h3>필요한 연결만 켜두세요.</h3><p>할 일 설정에서 알림·정렬용 AI를, 캘린더 설정에서 권한·분석 출처를 선택하세요.</p></figcaption>
               </figure>
             </article>
           </div>
@@ -152,8 +153,8 @@ image: /assets/images/app-icon.webp
       </div>
       <div class="connections-copy reveal">
         <h2 id="connections-title">연결은 필요한 만큼.<br>선택은 내가.</h2>
-        <p>기본은 기기 저장. 메일·캘린더 연결과 iCloud 동기화는 설정에서 선택하세요.</p>
-        <p class="privacy-note">AI 기능은 기기와 설정에 따라 달라집니다. 클라우드 AI를 선택하면 할 일 등의 데이터가 외부로 전송될 수 있습니다.</p>
+        <p>기본은 기기 저장과 기기 내 처리. 메일·캘린더 연결과 iCloud 동기화는 필요할 때만 선택하세요.</p>
+        <p class="privacy-note">AI 기능은 기기·운영체제·모델 설치 상태와 출시 버전에 따라 달라집니다. 앱의 무료 제공이 외부 서비스의 구독이나 무제한 AI 이용을 포함하지는 않습니다. 외부 서비스의 이용 자격·한도·약관은 별도로 확인하세요.</p>
         <a class="text-link" href="{{ '/privacy-policy.html' | relative_url }}">데이터 처리 방식 보기 <span aria-hidden="true">↗</span></a>
       </div>
     </div>
@@ -162,14 +163,15 @@ image: /assets/images/app-icon.webp
   <section class="section resources-section" aria-labelledby="resources-title">
     <div class="container">
       <div class="section-heading">
-        <h2 id="resources-title">화면 너머의 동작까지,<br>열어두었습니다.</h2>
-        <p>개발 소스의 처리 흐름과 데이터 경계, 실제 앱 화면으로 만든 소개 자료를 확인하세요.</p>
+        <h2 id="resources-title">처음이라면,<br>여기서 시작하세요.</h2>
+        <p>할 일을 정리하는 방법과 이메일 연결 순서를 안내합니다.</p>
       </div>
       <div class="resource-links">
-        <a href="{{ '/workflows.html' | relative_url }}"><strong>작동 방식과 데이터 경계 <span aria-hidden="true">↗</span></strong><span>할 일·메일·회의·루틴이 이어지는 과정을 탐색하는 도표</span></a>
-        <a href="{{ '/media.html' | relative_url }}"><strong>앱 미리보기와 소개 이미지 <span aria-hidden="true">↗</span></strong><span>한국어·영어 iPhone·iPad 이미지와 웹 미리보기 다운로드</span></a>
+        <a href="{{ '/changes.html#version-1-0-11-9' | relative_url }}"><strong>1.0.11 변경사항 <span aria-hidden="true">↗</span></strong><span>할 일 중심 설정·선택형 캘린더 분석·기억하는 회의 언어와 안정성 개선. 심사 중이며 공개 앱 1.0.10과 구분합니다.</span></a>
+        <a href="{{ '/workflows.html' | relative_url }}"><strong>SIFT 사용 안내 <span aria-hidden="true">↗</span></strong><span>할 일 기록부터 메일·일정·회의 정리까지, 필요한 기능을 차근차근</span></a>
+        <a href="{{ '/email-setup.html' | relative_url }}"><strong>이메일 연결하기 <span aria-hidden="true">↗</span></strong><span>Gmail 앱 비밀번호 준비부터 SIFT 연결까지</span></a>
       </div>
-      <p class="resources-note">현재 개발 소스는 한국어·영어·스페인어·일본어·중국어 간체·프랑스어·이탈리아어·독일어를 지원합니다. 출시 앱의 지원 범위는 App Store에서 확인하세요.</p>
+      <p class="resources-note"><a class="text-link" href="{{ '/changes.html' | relative_url }}">버전별 변경사항 보기 <span aria-hidden="true">↗</span></a></p>
     </div>
   </section>
 
@@ -177,11 +179,11 @@ image: /assets/images/app-icon.webp
     <div class="container download-inner reveal">
       <img class="download-icon" src="{{ '/assets/images/app-icon.webp' | relative_url }}" width="96" height="96" alt="SIFT 앱 아이콘" loading="lazy" decoding="async">
       <h2 id="download-title">오늘의 할 일을<br>SIFT에서.</h2>
-      <p>iPhone과 iPad에서 시작하세요.</p>
+      <p>iPhone·iPad·Mac에서 시작하세요.</p>
       <a class="store-link" href="{{ site.app_store_url }}">
         App Store에서 다운로드 <span aria-hidden="true">↗</span>
       </a>
-      <p class="download-meta">무료 · 한국어·영어 · 지원 기기는 App Store에서 확인</p>
+      <p class="download-meta">앱 무료 · iOS/iPadOS 26 이상 · macOS 26 이상<br>출시 버전의 지원 기기·언어·기능은 App Store에서 확인하세요.</p>
     </div>
   </section>
 </main>

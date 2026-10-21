@@ -11,9 +11,7 @@ final class MeetingSourceControlsUITests: SIFTUITestCase {
         let appAudio = app.switches["meeting.source.app.toggle"]
         let start = app.buttons["meeting.action.startRecording"]
         require(microphone, message: "마이크 소스 스위치가 없습니다.")
-        require(appAudio, message: "앱 오디오 소스 스위치가 없습니다.")
-        XCTAssertFalse(appAudio.isEnabled, "Simulator must not pretend to capture another app")
-        require(app.staticTexts["meeting.source.app.availability"], message: "앱 오디오 불가 안내가 없습니다.")
+        XCTAssertFalse(appAudio.exists, "Unsupported system-audio actions must be hidden rather than disabled")
 
         let consent = app.switches.containing(NSPredicate(format: "label CONTAINS %@", "녹음 고지")).firstMatch
         tap(consent, message: "녹음 동의 스위치가 없습니다.")

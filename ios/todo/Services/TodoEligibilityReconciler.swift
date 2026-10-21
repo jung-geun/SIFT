@@ -4,24 +4,18 @@ import Foundation
 @MainActor
 final class TodoEligibilityReconciler {
     typealias NotificationCanceller = @MainActor @Sendable (Todo) async -> Void
-    typealias CalendarCleaner = @MainActor @Sendable (Todo) -> Void
 
     static let shared = TodoEligibilityReconciler()
 
     private let cancelNotifications: NotificationCanceller
     private var reconciledReviewIDs: Set<UUID> = []
-    private let cleanCalendar: CalendarCleaner
 
     init(
         cancelNotifications: @escaping NotificationCanceller = { todo in
             await NotificationService.shared.cancelAndWait(todo: todo)
-        },
-        cleanCalendar: @escaping CalendarCleaner = { todo in
-            _ = CalendarService.shared.removeEmailCalendarArtifacts(for: todo)
         }
     ) {
         self.cancelNotifications = cancelNotifications
-        self.cleanCalendar = cleanCalendar
     }
 
     func setTriage(_ triage: TodoTriage, for todo: Todo) async {
@@ -32,6 +26,34 @@ final class TodoEligibilityReconciler {
         await reconcile(todo)
     }
 
+    func promoteUpcomingRecurringReviews(
+        in todos: [Todo],
+        now: Date,
+        selectedCalendarIDs: Set<String>
+    ) async {
+        var sourcesByExternalID: [String: Set<String>] = [:]
+        for todo in todos where todo.todoSource == .calendar && !todo.calendarEventExternalID.isEmpty {
+            sourcesByExternalID[todo.calendarEventExternalID, default: []].insert(todo.calendarSourceID)
+        }
+        let weekAhead = now.addingTimeInterval(7 * 24 * 3_600)
+        for todo in todos where todo.triage == .review && todo.isFixedSchedule && !todo.isCompleted {
+            guard let due = todo.dueDate, due >= now, due <= weekAhead else { continue }
+            if todo.todoSource == .calendar {
+                guard CalendarService.isTaskAnalysisTodo(todo, selectedCalendarIDs: selectedCalendarIDs),
+                      todo.calendarEventExternalID.isEmpty
+                        || sourcesByExternalID[todo.calendarEventExternalID]?.count == 1 else { continue }
+            }
+            await setTriage(.todo, for: todo)
+        }
+    }
+
+    static func isExpiredReview(_ todo: Todo, now: Date, selectedCalendarIDs: Set<String>) -> Bool {
+        guard todo.triage == .review, !todo.isCompleted,
+              let due = todo.dueDate, due < now else { return false }
+        return todo.todoSource != .calendar || todo.calendarSourceID.isEmpty
+            || selectedCalendarIDs.contains(todo.calendarSourceID)
+    }
+
     func reconcile(_ todo: Todo) async {
         guard todo.triage == .review else {
             reconciledReviewIDs.remove(todo.id)
@@ -39,8 +61,6 @@ final class TodoEligibilityReconciler {
         }
         guard reconciledReviewIDs.insert(todo.id).inserted else { return }
         await cancelNotifications(todo)
-        guard todo.todoSource == .email else { return }
-        cleanCalendar(todo)
     }
 
     func reconcileAll(_ todos: [Todo]) async {

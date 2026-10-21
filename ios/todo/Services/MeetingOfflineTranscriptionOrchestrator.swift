@@ -56,10 +56,9 @@ struct MeetingOfflineTranscriptionOrchestrator {
         self.transcribe = transcribe
     }
 
-    /// Call after persisting an Apple base (including a failed-finalization
-    /// provisional base). A failed attempt keeps that base, status, manifest and
-    /// raw Apple snapshot; only a safe failure code is persisted. A successful
-    /// attempt commits the new raw base and clears stale speaker annotations.
+    /// Call after persisting a transcript base or an empty saved-audio base.
+    /// A failed attempt preserves it; a successful attempt commits the new raw
+    /// transcript and clears stale speaker annotations.
     /// No diarization/refinement is started here: the caller runs those *after*
     /// this returns, when both the gate and Whisper's deletion lease are free.
     func run(
@@ -73,10 +72,11 @@ struct MeetingOfflineTranscriptionOrchestrator {
         let id = record.meetingID
         guard Self.runs[id] == nil else { throw Failure.busy }
         let sourceSnapshot = expectedSource ?? record.persistenceSnapshot()
+        let decoderLanguageTag = languageTag ?? (sourceSnapshot.automaticLanguageDetection ? nil : sourceSnapshot.languageTag)
         reporter?.startTranscribing(totalMilliseconds: (record.audioManifest?.totalSamples ?? 0) / 16)
         let task = Task {
             try await execute(record: record, context: context, sourceSnapshot: sourceSnapshot,
-                              languageTag: languageTag, reporter: reporter, save: save)
+                              languageTag: decoderLanguageTag, reporter: reporter, save: save)
         }
         Self.runs[id] = task
         defer { Self.runs[id] = nil }
@@ -166,7 +166,7 @@ struct MeetingOfflineTranscriptionOrchestrator {
             try record.replaceTranscriptionBase(
                 result, status: .ready, source: .offline,
                 modelRevision: MeetingWhisperManifest.modelRevision,
-                detectedLanguages: output.detectedLanguages
+                detectedLanguages: languageTag == nil ? output.detectedLanguages : []
             )
             try record.update(diarization: nil)
         }

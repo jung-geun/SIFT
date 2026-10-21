@@ -10,17 +10,35 @@ import WhisperKit
 struct MeetingOfflineTranscriptionTests {
     private typealias Service = MeetingOfflineTranscriptionService
 
+    // Independent fixtures, not values obtained from the production tokenizer.
+    private let languageTokenCodes = [50264: "ko", 50259: "en", 50266: "ja", 50302: "bn", 50276: "hi",
+                                      50272: "ar", 50260: "zh", 50358: "yue", 50356: "jw"]
+
     private func word(_ text: String, _ start: Float, _ end: Float, probability: Float = 0.9) -> WordTiming {
         WordTiming(word: text, tokens: [], start: start, end: end, probability: probability)
     }
 
-    private func result(_ segments: [TranscriptionSegment], language: String = "ko", seek: Float? = nil) -> TranscriptionResult {
-        TranscriptionResult(text: segments.map(\.text).joined(), segments: segments,
-                            language: language, timings: TranscriptionTimings(), seekTime: seek)
+    private func result(
+        _ segments: [TranscriptionSegment], promptLanguageToken: Int? = 50264,
+        languageMetadata: String = "en", seek: Float? = nil
+    ) -> TranscriptionResult {
+        var promptedSeeks = Set<Int>()
+        let segments = segments.map { source in
+            var source = source
+            if let token = promptLanguageToken, promptedSeeks.insert(source.seek).inserted {
+                // SOT, language, transcribe, initial timestamp; later slices of
+                // this decoder window retain text/timestamp tokens only.
+                source.tokens = [50258, token, 50359, 50364] + source.tokens
+            }
+            return source
+        }
+        return TranscriptionResult(text: segments.map(\.text).joined(), segments: segments,
+                                   language: languageMetadata, timings: TranscriptionTimings(), seekTime: seek)
     }
 
     private func convert(_ segment: TranscriptionSegment, totalSamples: Int64 = 160_000) throws -> MeetingSegment {
-        let output = try Service.makeOutput([result([segment])], totalSamples: totalSamples, sourceTranscriptRevision: 3)
+        let output = try Service.makeOutput([result([segment])], languageTokenCodes: languageTokenCodes,
+                                           totalSamples: totalSamples, sourceTranscriptRevision: 3)
         return try #require(output.result.segments.first)
     }
 
@@ -72,11 +90,12 @@ struct MeetingOfflineTranscriptionTests {
     @Test("Absolute SDK timestamps preserve silence and are not offset again by seek or result count")
     func absoluteTimeline() throws {
         let early = result([TranscriptionSegment(id: 7, seek: 480_000, start: 30.5, end: 31, text: "hello",
-                                                words: [word("hello", 30.5, 31)])], language: "en", seek: 30)
+                                                words: [word("hello", 30.5, 31)])], promptLanguageToken: 50259, seek: 30)
         let silence = result([], seek: 60)
         let late = result([TranscriptionSegment(id: 7, seek: 1_440_000, start: 91, end: 92, text: "안녕",
                                                words: [word("안녕", 91, 92)])], seek: 90)
-        let output = try Service.makeOutput([late, silence, early], totalSamples: 1_600_000, sourceTranscriptRevision: 8)
+        let output = try Service.makeOutput([late, silence, early], languageTokenCodes: languageTokenCodes,
+                                           totalSamples: 1_600_000, sourceTranscriptRevision: 8)
         #expect(output.result.segments.map(\.startMs) == [30_500, 91_000])
         #expect(output.result.segments.map(\.endMs) == [31_000, 92_000])
         #expect(output.result.segments.flatMap { $0.timedRuns ?? [] }.map(\.startMs) == [30_500, 91_000])
@@ -97,8 +116,9 @@ struct MeetingOfflineTranscriptionTests {
         ])
         let absolute = TranscriptionUtilities.updateSegmentTimings(segment: local, seekOffsetIndex: 480_000)
         let measured = TranscriptionSegment(start: 1, end: 2, text: "안녕", words: [word("안녕", 1, 2)])
-        let output = try Service.makeOutput([result([measured]), result([absolute], language: "en", seek: 30)],
-                                          totalSamples: 640_000, sourceTranscriptRevision: 3)
+        let output = try Service.makeOutput([result([measured]), result([absolute], promptLanguageToken: 50259, seek: 30)],
+                                           languageTokenCodes: languageTokenCodes,
+                                           totalSamples: 640_000, sourceTranscriptRevision: 3)
         #expect(output.result.segments.map(\.text) == ["안녕", "one two"])
         #expect(output.result.segments.map(\.startMs) == [1_000, 30_500])
         #expect(output.result.segments.map(\.endMs) == [2_000, 32_000])
@@ -131,24 +151,28 @@ struct MeetingOfflineTranscriptionTests {
         // the adapter must not demand a speech interval from an empty marker.
         let marker = TranscriptionSegment(start: 0, end: 0, text: "")
         let speech = TranscriptionSegment(start: 1, end: 2, text: "hello", words: [word("hello", 1, 2)])
-        let output = try Service.makeOutput([result([marker]), result([speech], language: "en")],
-                                          totalSamples: 160_000, sourceTranscriptRevision: 0)
+        let output = try Service.makeOutput([result([marker]), result([speech], promptLanguageToken: 50259)],
+                                           languageTokenCodes: languageTokenCodes,
+                                           totalSamples: 160_000, sourceTranscriptRevision: 0)
         #expect(output.result.segments.map(\.text) == ["hello"])
         #expect(output.result.segments.first?.timedRuns?.first?.startMs == 1_000)
         #expect(output.detectedLanguages == ["en"])
-        let silent = try Service.makeOutput([result([marker])], totalSamples: 0, sourceTranscriptRevision: 0)
+        let silent = try Service.makeOutput([result([marker])], languageTokenCodes: languageTokenCodes,
+                                           totalSamples: 0, sourceTranscriptRevision: 0)
         #expect(silent.result.segments.isEmpty)
         #expect(silent.detectedLanguages.isEmpty)
     }
 
     @Test("Silence stays empty without placeholder text or invented language")
     func silence() throws {
-        let output = try Service.makeOutput([result([])], totalSamples: 480_000, sourceTranscriptRevision: 0)
+        let output = try Service.makeOutput([result([])], languageTokenCodes: languageTokenCodes,
+                                           totalSamples: 480_000, sourceTranscriptRevision: 0)
         #expect(output.result.segments.isEmpty)
         #expect(output.result.summary.isEmpty)
         #expect(output.detectedLanguages.isEmpty)
         #expect(output.languageTag == nil)
-        #expect(try Service.makeOutput([], totalSamples: 0, sourceTranscriptRevision: 0).result.segments.isEmpty)
+        #expect(try Service.makeOutput([], languageTokenCodes: languageTokenCodes,
+                                       totalSamples: 0, sourceTranscriptRevision: 0).result.segments.isEmpty)
     }
 
     @Test("Detected languages are retained and UI locale tags select exact language semantics")
@@ -158,14 +182,133 @@ struct MeetingOfflineTranscriptionTests {
         #expect(try Service.languageCode(for: "en-US") == "en")
         #expect(try Service.languageCode(for: "ko") == "ko")
         let segment = TranscriptionSegment(start: 0, end: 1, text: "hello 안녕")
-        let mixed = try Service.makeOutput([result([segment], language: "ko"), result([segment], language: "en")],
+        let mixed = try Service.makeOutput([result([segment]), result([segment], promptLanguageToken: 50259)],
+                                          languageTokenCodes: languageTokenCodes,
                                           totalSamples: 16_000, sourceTranscriptRevision: 0)
         #expect(mixed.detectedLanguages == ["ko", "en"])
         #expect(mixed.languageTag == nil)
-        for (detected, tag) in [("ko", "ko-KR"), ("en", "en-US"), ("ja", "ja-JP")] {
-            let output = try Service.makeOutput([result([segment], language: detected)], totalSamples: 16_000, sourceTranscriptRevision: 0)
-            #expect(output.languageTag == tag)
+        for (token, detected) in languageTokenCodes {
+            let output = try Service.makeOutput([result([segment], promptLanguageToken: token)],
+                                               languageTokenCodes: languageTokenCodes,
+                                               totalSamples: 16_000, sourceTranscriptRevision: 0)
+            #expect(output.languageTag == detected)
         }
+    }
+
+    @Test("Korean prompt evidence survives trailing English result metadata")
+    func koreanPromptWithEnglishMetadata() throws {
+        let speech = TranscriptionSegment(start: 0, end: 1, text: "hello", words: [word("hello", 0, 1)])
+        let source = result([speech], promptLanguageToken: 50264, languageMetadata: "en")
+        let output = try Service.makeOutput([source], languageTokenCodes: languageTokenCodes,
+                                           totalSamples: 16_000, sourceTranscriptRevision: 0)
+        #expect(output.detectedLanguages == ["ko"])
+        #expect(output.languageTag == "ko")
+    }
+
+    @Test("Mixed windows retain prompt languages once in encounter order, with same-seek inheritance")
+    func mixedWindowPrompts() throws {
+        let sources = [
+            TranscriptionSegment(seek: 480_000, start: 30, end: 31, text: "first", tokens: [50258, 50264, 50359, 50364]),
+            TranscriptionSegment(seek: 0, start: 0, end: 1, text: "second", tokens: [50258, 50259, 50359, 50364]),
+            TranscriptionSegment(seek: 480_000, start: 31, end: 32, text: "third", tokens: [50364, 100, 50414]),
+            TranscriptionSegment(seek: 960_000, start: 60, end: 61, text: "fourth", tokens: [50258, 50264, 50359, 50364])
+        ]
+        let output = try Service.makeOutput([result(sources, promptLanguageToken: nil, languageMetadata: "en")],
+                                           languageTokenCodes: languageTokenCodes,
+                                           totalSamples: 976_000, sourceTranscriptRevision: 0)
+        #expect(output.detectedLanguages == ["ko", "en"])
+        #expect(output.languageTag == nil)
+
+        // An empty first slice can carry the window prompt. A later slice with
+        // actual speech contributes that language, rather than result.language.
+        let inherited = try Service.makeOutput([result([
+            TranscriptionSegment(start: 0, end: 0, text: "", tokens: [50258, 50264, 50359, 50364]),
+            TranscriptionSegment(start: 0, end: 1, text: "hello", tokens: [50364, 100, 50414])
+        ], promptLanguageToken: nil)], languageTokenCodes: languageTokenCodes,
+                                              totalSamples: 16_000, sourceTranscriptRevision: 0)
+        #expect(inherited.detectedLanguages == ["ko"])
+    }
+
+    @Test("Silent, empty, and padded-only slices do not contribute prompt languages")
+    func nonspeechPromptLanguages() throws {
+        let speech = TranscriptionSegment(start: 0, end: 1, text: "안녕", tokens: [50258, 50264, 50359, 50364])
+        let markers = [
+            TranscriptionSegment(start: 0, end: 0, text: "", tokens: [50258, 50259, 50359, 50364]),
+            TranscriptionSegment(start: 0, end: 1, text: " \n", tokens: [50258, 50259, 50359, 50364]),
+            TranscriptionSegment(start: 2, end: 30, text: "", tokens: [50258, 50259, 50359, 50364])
+        ]
+        let output = try Service.makeOutput([result([speech] + markers, promptLanguageToken: nil), result([])],
+                                           languageTokenCodes: languageTokenCodes,
+                                           totalSamples: 16_000, sourceTranscriptRevision: 0)
+        #expect(output.detectedLanguages == ["ko"])
+        #expect(output.languageTag == "ko")
+        let silent = try Service.makeOutput([result(markers, promptLanguageToken: nil)],
+                                           languageTokenCodes: languageTokenCodes,
+                                           totalSamples: 16_000, sourceTranscriptRevision: 0)
+        #expect(silent.detectedLanguages.isEmpty)
+        #expect(silent.languageTag == nil)
+        // Nonempty padded speech remains invalid, not a metadata-only segment.
+        #expect(throws: Service.Failure.invalidTimestamps) {
+            try Service.makeOutput([result([TranscriptionSegment(start: 2, end: 30, text: "padded")],
+                                           promptLanguageToken: 50259)], languageTokenCodes: languageTokenCodes,
+                                   totalSamples: 16_000, sourceTranscriptRevision: 0)
+        }
+    }
+
+    @Test("Missing or unknown exact prompt evidence stays unknown despite text and SDK metadata")
+    func unknownPromptLanguages() throws {
+        for tokens in [[], [50264], [50257, 50264], [50258], [50258, 99999], [50258, 50359, 50264]] {
+            let speech = TranscriptionSegment(start: 0, end: 1, text: "안녕 hello", tokens: tokens)
+            let output = try Service.makeOutput([result([speech], promptLanguageToken: nil, languageMetadata: "en")],
+                                               languageTokenCodes: languageTokenCodes,
+                                               totalSamples: 16_000, sourceTranscriptRevision: 0)
+            #expect(output.detectedLanguages.isEmpty)
+            #expect(output.languageTag == nil)
+        }
+        let noMap = try Service.makeOutput([result([TranscriptionSegment(start: 0, end: 1, text: "hello")])],
+                                          languageTokenCodes: [:], totalSamples: 16_000, sourceTranscriptRevision: 0)
+        #expect(noMap.detectedLanguages.isEmpty)
+        #expect(noMap.languageTag == nil)
+    }
+
+    @Test("Prompt state cannot cross a result or seek and unknown replacement prompts clear it")
+    func promptScope() throws {
+        let known = TranscriptionSegment(start: 0, end: 0, text: "", tokens: [50258, 50264, 50359, 50364])
+        let speech = TranscriptionSegment(start: 0, end: 1, text: "hello")
+        let scenarios = [
+            [result([known], promptLanguageToken: nil), result([speech], promptLanguageToken: nil)],
+            [result([known, TranscriptionSegment(seek: 16_000, start: 1, end: 2, text: "hello")], promptLanguageToken: nil)],
+            [result([known, TranscriptionSegment(start: 0, end: 0, text: "", tokens: [50258, 99999]), speech],
+                    promptLanguageToken: nil)]
+        ]
+        for sources in scenarios {
+            let output = try Service.makeOutput(sources, languageTokenCodes: languageTokenCodes,
+                                               totalSamples: 32_000, sourceTranscriptRevision: 0)
+            #expect(output.detectedLanguages.isEmpty)
+            #expect(output.languageTag == nil)
+        }
+    }
+
+    @Test("Explicit prompt language never masquerades as detected speech")
+    func manualPromptIsNotDetection() throws {
+        let source = result([TranscriptionSegment(start: 0, end: 1, text: "manual transcript")],
+                            promptLanguageToken: 50264)
+        let output = try Service.makeOutput([source], languageTokenCodes: languageTokenCodes,
+                                           totalSamples: 16_000, sourceTranscriptRevision: 0,
+                                           requestedLanguageCode: "ko")
+        #expect(output.result.segments.map(\.text) == ["manual transcript"])
+        #expect(output.detectedLanguages.isEmpty)
+        #expect(output.languageTag == nil)
+    }
+
+    @Test("A no-speech hypothesis cannot contribute a detected locale")
+    func noSpeechLanguageEvidence() throws {
+        let source = TranscriptionSegment(start: 0, end: 1, text: "hallucinated speech",
+                                          tokens: [50258, 50264, 50360], noSpeechProb: 0.9)
+        let output = try Service.makeOutput([result([source], promptLanguageToken: nil)],
+                                           languageTokenCodes: languageTokenCodes,
+                                           totalSamples: 16_000, sourceTranscriptRevision: 0)
+        #expect(output.detectedLanguages.isEmpty)
     }
 
     @Test("Non-finite, negative, reversed, and outside-decoder timestamps fail explicitly")
@@ -190,6 +333,7 @@ struct MeetingOfflineTranscriptionTests {
             }
             #expect(throws: Service.Failure.invalidTimestamps) {
                 try Service.makeOutput([result([TranscriptionSegment(start: start, end: end, text: "")])],
+                                       languageTokenCodes: languageTokenCodes,
                                        totalSamples: 160_000, sourceTranscriptRevision: 0)
             }
         }
@@ -291,12 +435,14 @@ struct MeetingOfflineTranscriptionTests {
     func invalidResultBoundary() throws {
         for revision in [-1, Int.max] {
             #expect(throws: Service.Failure.invalidRevision) {
-                try Service.makeOutput([], totalSamples: 16_000, sourceTranscriptRevision: revision)
+                try Service.makeOutput([], languageTokenCodes: languageTokenCodes,
+                                       totalSamples: 16_000, sourceTranscriptRevision: revision)
             }
         }
         for samples in [Int64(-1), Int64.max] {
             #expect(throws: Service.Failure.invalidManifest) {
-                try Service.makeOutput([], totalSamples: samples, sourceTranscriptRevision: 0)
+                try Service.makeOutput([], languageTokenCodes: languageTokenCodes,
+                                       totalSamples: samples, sourceTranscriptRevision: 0)
             }
         }
     }

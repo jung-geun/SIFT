@@ -217,7 +217,7 @@ enum Prompts {
     enum MeetingFM {
         /// 회의 전사문을 요약·결정·미해결 질문·액션 후보로 구조화하는 지시.
         /// 프라이버시 불변식: 모든 추론 온디바이스. 전사문 외부 미전송.
-        static func systemInstruction(language: AppLanguage) -> String {
+        static func systemInstruction(sourceLanguageTag: String, summaryLanguageTag: String) -> String {
             """
             # Role
             당신은 회의 전사문을 분석해 핵심을 구조화하는 '회의 분석 에이전트(Meeting Analysis Agent)'입니다.
@@ -226,29 +226,31 @@ enum Prompts {
             번호가 매겨진 [전사 구간] 목록을 근거로 회의의 제목, 요약, 결정 사항, 미해결 질문, 그리고 확인이 필요한 액션(할 일) 후보를 추출하십시오.
 
             # Instructions
-            1. title: 회의 주제를 15자 이내 \(language.outputLanguageName) 명사구로. 불명확하면 빈 문자열.
-            2. summary: 회의 흐름과 핵심을 2~4문장 \(language.outputLanguageName)로 객관적으로 요약. 추측·조언 금지.
+            1. title: 회의 주제를 15자 이내 명사구로. 불명확하면 빈 문자열.
+            2. summary: 회의 흐름과 핵심을 2~4문장으로 객관적으로 요약. 추측·조언 금지.
             3. decisions: 회의에서 실제로 합의·확정된 결정만 한 문장씩. 없으면 빈 배열.
             4. unresolvedQuestions: 답이 나오지 않았거나 후속 논의가 필요한 질문만. 없으면 빈 배열.
             5. actions: 특정인이 수행하기로 한 명시적 약속·요청·할 일만 후보로. 각 항목에 대해:
-               - title: 40자 이내 \(language.outputLanguageName) 동사형.
+               - title: 40자 이내 동사형.
                - notes: 맥락 1~2문장. 없으면 빈 문자열.
                - dueDateISO: 명시적 기한만 canonical UTC ISO8601 `yyyy-MM-dd'T'HH:mm:ss.SSSZ`(항상 `Z`, 절대시각·원문 시간대 보존). 없으면 빈 문자열. 추측 금지.
                - sourceSegmentNumber: 이 액션의 근거가 된 [전사 구간]의 번호(1-based). 반드시 목록에 존재하는 번호.
             6. 환각 금지: 전사에 없는 결정·액션·기한을 만들지 마십시오. 잡담·인사말은 제외.
             7. 페르소나·개인 관련성은 액션 근거가 아닙니다. 오직 전사 내용만 근거로 삼으십시오.
-            8. 전사문의 언어와 고유명사는 유지하고 번역하지 마십시오. 생성하는 설명·제목·액션 문구만 \(language.outputLanguageName)(으)로 작성하십시오.
+            8. Source language tag: \(sourceLanguageTag). Treat transcript text as source evidence, preserving proper nouns, quotations, and facts without rewriting the transcript.
+            9. Summary language tag: \(summaryLanguageTag). Write every generated natural-language field (title, summary, decisions, unresolvedQuestions, actions.title, actions.notes) in exactly this requested language. Use the requested summary tag even when it matches the source/UI language; never substitute another language. Preserve JSON schema keys, segment numbers, and date formats.
             """
         }
 
         /// 전사 구간 목록 뒤에 붙이는 출력 요청.
-        static func requestSuffix(language: AppLanguage) -> String {
+        static func requestSuffix(sourceLanguageTag: String, summaryLanguageTag: String) -> String {
             """
             위 전사 구간만 근거로 title, summary, decisions, unresolvedQuestions, actions를 채우세요.
             명시적 약속·요청이 없으면 actions는 빈 배열로 두고 후보를 만들지 마세요.
             각 action의 sourceSegmentNumber는 반드시 위 목록에 있는 번호여야 합니다.
             dueDateISO는 canonical UTC ISO8601 `yyyy-MM-dd'T'HH:mm:ss.SSSZ`(항상 `Z`)만 사용하고, 원문 시간대의 절대시각을 보존하세요.
-            전사문 원문은 번역하지 말고, 새로 작성하는 자연어 필드는 \(language.outputLanguageName)로 작성하세요.
+            Source language tag: \(sourceLanguageTag). Summary language tag: \(summaryLanguageTag).
+            Write title, summary, decisions, unresolvedQuestions, actions.title, and actions.notes in exactly \(summaryLanguageTag). Preserve source evidence and proper nouns; do not translate schema keys or alter date formats.
             """
         }
     }
@@ -257,7 +259,7 @@ enum Prompts {
     /// 실시간이 아닌 시점에 음성 인식 오인식·오탈자만 바로잡아 요약 품질을 높인다.
     /// 프라이버시 불변식: 모든 추론 온디바이스. 전사문 외부 미전송.
     enum MeetingCorrectionFM {
-        static func systemInstruction(language: AppLanguage) -> String {
+        static func systemInstruction(sourceLanguageTag: String) -> String {
             """
             # Role
             당신은 온디바이스 음성 전사문의 인식 오류를 바로잡는 '전사 교정 에이전트(Transcript Correction Agent)'입니다.
@@ -273,25 +275,25 @@ enum Prompts {
             5. 교정한 구간만 corrections에 담고, sourceSegmentNumber는 반드시 제시된 목록의 번호(1-based)여야 합니다.
             6. correctedText는 해당 구간 전체의 교정본이어야 합니다. 일부 조각이나 요약이 아닙니다.
             7. 환각 금지: 들리지 않은 내용을 지어내거나 문장을 새로 만들지 마십시오.
-            8. 원문의 언어와 고유명사는 유지하고 번역하지 마십시오. 설명을 추가하지 말고 교정된 전사만 반환하십시오.
-            9. 교정 결과의 새 문구가 필요한 경우에만 \(language.outputLanguageName)를 사용하십시오.
+            8. Source language tag: \(sourceLanguageTag). Preserve each segment's original language and script, including mixed-language speech (for example Bengali and Arabic in one segment). Preserve proper nouns. Never translate or rewrite into a UI language or a single target language.
+            9. 설명이나 새 문구를 추가하지 말고 교정된 전사만 반환하십시오. JSON schema keys and segment numbers must remain unchanged.
             """
         }
 
-        static func requestSuffix(language: AppLanguage) -> String {
+        static func requestSuffix(sourceLanguageTag: String) -> String {
             """
             위 [전사 구간]에서 명백한 오인식·오탈자만 교정해 corrections에 담으세요.
             고칠 것이 없으면 corrections를 빈 배열로 두세요.
             각 correctedText는 해당 구간 전체 문장이어야 하며, 내용 추가·삭제 없이 표기만 바로잡습니다.
             각 sourceSegmentNumber는 반드시 위 목록에 있는 번호여야 합니다.
-            전사 원문은 번역하지 마세요. \(language.outputLanguageName) 출력을 요구받더라도 원문 언어를 보존하세요.
+            Source language tag: \(sourceLanguageTag). Preserve each original language and script, including mixed-language speech. Never translate into the UI language or add explanatory text.
             """
         }
     }
 
     /// AFM 미가용 기기의 로컬 LLM(MLX/Qwen) 전사 교정 지시.
     enum MeetingCorrectionLocal {
-        static func systemInstruction(language: AppLanguage) -> String {
+        static func systemInstruction(sourceLanguageTag: String) -> String {
             """
             당신은 음성 전사문의 인식 오류를 바로잡는 '전사 교정 에이전트'입니다.
             번호가 매겨진 전사 구간에서 명백한 오인식·오탈자만 교정하세요.
@@ -300,9 +302,8 @@ enum Prompts {
             - 표기만 바로잡고 의미·어순·내용은 그대로 유지합니다. 확신이 없으면 원문을 유지하세요.
             - 제공된 [사용자 단어장]이 있으면 그 정규 표기를 최우선으로 적용하세요.
             - 들리지 않은 내용을 지어내지 마세요.
-            - 원문 언어와 고유명사는 유지하고 번역하지 마세요.
-            - 반드시 아래 JSON 형식만 출력하고, 다른 설명·문장은 절대 쓰지 마세요.
-            - \(language.outputLanguageName)는 출력 지시의 기준일 뿐 전사 원문을 번역하라는 뜻이 아닙니다.
+            - Source language tag: \(sourceLanguageTag). Preserve each segment's original language and script, including mixed-language speech (for example Bengali and Arabic in one segment). Preserve proper nouns. Never translate or rewrite into a UI language or a single target language.
+            - 반드시 아래 JSON 형식만 출력하고, 다른 설명·문장은 절대 쓰지 마세요. JSON schema keys and segment numbers must remain unchanged.
 
             출력 형식(JSON):
             {"corrections":[{"n":<구간 번호(1-based 정수)>,"text":"<해당 구간 전체의 교정된 문장>"}]}
@@ -311,29 +312,30 @@ enum Prompts {
             """
         }
 
-        static func requestSuffix(language: AppLanguage) -> String {
-            "위 전사 구간을 교정해 지정된 JSON 형식으로만 답하세요. 교정한 구간만 corrections에 담고 원문은 번역하지 마세요. \(language.outputLanguageName) 출력 지시가 있어도 원문의 언어를 유지합니다."
+        static func requestSuffix(sourceLanguageTag: String) -> String {
+            "Source language tag: \(sourceLanguageTag). 위 전사 구간을 교정해 지정된 JSON 형식으로만 답하세요. 교정한 구간만 corrections에 담으세요. Preserve each original language and script, including mixed-language speech. Never translate into the UI language or add explanatory text."
         }
     }
 
     /// AFM 미가용 기기의 로컬 LLM(MLX/Qwen) 회의 분석 지시.
     enum MeetingAnalysisLocal {
-        static func systemInstruction(language: AppLanguage) -> String {
+        static func systemInstruction(sourceLanguageTag: String, summaryLanguageTag: String) -> String {
             """
             당신은 회의 전사문을 분석해 핵심을 구조화하는 '회의 분석 에이전트'입니다.
             번호가 매겨진 전사 구간만 근거로 회의를 분석하세요.
 
             규칙:
-            - title: 회의 주제를 15자 이내 \(language.outputLanguageName) 명사구로. 불명확하면 "".
-            - summary: 회의 흐름과 핵심을 2~4문장 \(language.outputLanguageName)로 객관적으로 요약. 추측·조언 금지.
+            - title: 회의 주제를 15자 이내 명사구로. 불명확하면 "".
+            - summary: 회의 흐름과 핵심을 2~4문장으로 객관적으로 요약. 추측·조언 금지.
             - decisions: 실제로 합의·확정된 결정만 문장 단위로. 없으면 [].
             - questions: 답이 나오지 않았거나 후속 논의가 필요한 미해결 질문만. 없으면 [].
             - actions: 특정인이 하기로 한 명시적 약속·요청·할 일만. 각 항목:
                 n: 근거가 된 구간 번호(1-based, 반드시 목록에 있는 번호),
-                title: 40자 이내 \(language.outputLanguageName) 동사형, notes: 맥락 1~2문장(없으면 ""),
+                title: 40자 이내 동사형, notes: 맥락 1~2문장(없으면 ""),
                 due: 명시적 기한만 canonical UTC ISO8601 `yyyy-MM-dd'T'HH:mm:ss.SSSZ`(항상 `Z`, 원문 시간대의 절대시각 보존; 없으면 "").
             - 환각 금지: 전사에 없는 결정·질문·액션을 만들지 마세요. 잡담·인사말은 제외.
-            - 전사 원문과 고유명사는 번역하지 말고 유지하세요.
+            - Source language tag: \(sourceLanguageTag). Treat transcript text as source evidence, preserving proper nouns, quotations, and facts without rewriting the transcript.
+            - Summary language tag: \(summaryLanguageTag). Write every generated natural-language field (title, summary, decisions, questions, actions.title, actions.notes) in exactly this requested language. Use the requested summary tag even when it matches the source/UI language; never substitute another language. Preserve JSON schema keys, segment numbers, and date formats.
             - 반드시 아래 JSON 형식만 출력하고 다른 설명·문장은 절대 쓰지 마세요.
 
             출력 형식(JSON):
@@ -343,8 +345,8 @@ enum Prompts {
             """
         }
 
-        static func requestSuffix(language: AppLanguage) -> String {
-            "위 전사 구간만 근거로 지정된 JSON 형식으로만 답하세요. due는 canonical UTC ISO8601 `yyyy-MM-dd'T'HH:mm:ss.SSSZ`(항상 `Z`)만 사용하고 원문 시간대의 절대시각을 보존하세요. 원문은 번역하지 말고, 새로 생성하는 필드는 \(language.outputLanguageName)로 작성하세요."
+        static func requestSuffix(sourceLanguageTag: String, summaryLanguageTag: String) -> String {
+            "Source language tag: \(sourceLanguageTag). Summary language tag: \(summaryLanguageTag). 위 전사 구간만 근거로 지정된 JSON 형식으로만 답하세요. due는 canonical UTC ISO8601 `yyyy-MM-dd'T'HH:mm:ss.SSSZ`(항상 `Z`)만 사용하고 원문 시간대의 절대시각을 보존하세요. Write title, summary, decisions, questions, actions.title, and actions.notes in exactly \(summaryLanguageTag). Preserve source evidence and proper nouns; do not translate schema keys or alter date formats."
         }
     }
 

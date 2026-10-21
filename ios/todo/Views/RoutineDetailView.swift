@@ -6,6 +6,7 @@ struct RoutineDetailView: View {
     @Environment(\.modelContext) private var modelContext
     @Query private var todos: [Todo]
     @ObservedObject private var store = RoutineStore.shared
+    @ObservedObject private var regionalAvailability = OpenAIRegionalAvailability.shared
     @State private var now = Date()
     @State private var editingRoutine: LearnedRoutine?
     @State private var reviewingSuggestion: RoutineSuggestion?
@@ -22,50 +23,86 @@ struct RoutineDetailView: View {
 
     var body: some View {
         Form {
+            if !HealthHistoryReader.availableCategories.isEmpty || HealthRoutineStore.shared.hasLocalData {
+            Section {
+                NavigationLink {
+                    HealthHistorySettingsView()
+                } label: {
+                    Label(HealthCopy.text("health.title", "Health & fitness history", "건강·운동 기록"), systemImage: "heart.text.square")
+                }
+                Text(HealthCopy.text("health.entry.explanation", "Connect real HealthKit history separately. Manual task checkoffs below are not health records.", "실제 HealthKit 기록을 별도로 연결합니다. 아래의 수동 할 일 완료 기록은 건강 기록이 아닙니다."))
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            }
+
             Section {
                 Toggle(copy("routines.learning.enabled", fallback: "루틴 학습·추천 허용"), isOn: Binding(
                     get: { store.isLearningEnabled }, set: { store.setLearningEnabled($0); now = Date() }
                 ))
                 .accessibilityIdentifier("routines.enabled")
+                .fixedSize(horizontal: false, vertical: true)
                 Button(copy("routines.analyze", fallback: "완료 기록에서 루틴 후보 분석")) { refresh() }
                     .disabled(!store.isLearningEnabled)
                     .accessibilityIdentifier("routines.analyze")
                 Text(copy("routines.learning.explanation", fallback: "기기 내에서 최근 90일의 완료된 수동 할 일을 활동별 동일 제목으로 묶습니다. 최소 3일의 완료 기록이 필요합니다. 메일·회의·캘린더·등록 대기·삭제 기록은 제외합니다. 완료 시각은 실제 복약·운동·수면의 수행 시각이나 건강 상태가 아닙니다."))
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             Section(copy("routines.records.title", fallback: "루틴 후보·확인된 루틴")) {
                 if store.routines.isEmpty {
                     Text(copy("routines.records.empty", fallback: "아직 루틴 후보가 없습니다. 기록이 부족하거나 주기가 불규칙하면 추천을 만들지 않습니다."))
                         .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 ForEach(store.routines) { routine in
-                    VStack(alignment: .leading, spacing: 8) {
+                    VStack(alignment: .leading, spacing: AppTheme.Spacing.item) {
                         HStack {
-                            Text(routine.title).font(.headline)
+                            Text(routine.title)
+                                .font(.headline)
+                                .fixedSize(horizontal: false, vertical: true)
                             Spacer()
-                            if routine.isConfirmed { Image(systemName: "checkmark.seal") }
+                            if routine.isConfirmed {
+                                Image(systemName: "checkmark.seal")
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                         Text(RoutineViewCopy.evidence(routine))
-                            .font(.caption).foregroundStyle(.secondary)
+                            .font(.subheadline).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                         Text(RoutineViewCopy.format("routines.evidence.hours", fallback: "기록된 완료 시각: %@", routine.recordedCompletionHours.map { String(format: "%02d", locale: AppLanguage.current.locale, $0) }.joined(separator: ", ")))
-                            .font(.caption)
+                            .font(.subheadline)
+                            .fixedSize(horizontal: false, vertical: true)
                         Text(RoutineViewCopy.format("routines.evidence.nextOccurrence", fallback: "다음 발생 추정: %@", RoutineViewCopy.date(routine.nextOccurrence)))
-                            .font(.caption)
-                        Text(RoutineViewCopy.uncertainty(routine)).font(.caption2).foregroundStyle(.secondary)
-                        if routine.isSuppressed { Text(copy("routines.suppressed", fallback: "반복 거절로 추천 중지됨 · 수정해서 다시 확인 가능")).font(.caption).foregroundStyle(.orange) }
-                        HStack {
+                            .font(.subheadline)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Text(RoutineViewCopy.uncertainty(routine))
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        if routine.isSuppressed {
+                            Text(copy("routines.suppressed", fallback: "반복 거절로 추천 중지됨 · 수정해서 다시 확인 가능"))
+                                .font(.subheadline)
+                                .foregroundStyle(AppTheme.warning)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        VStack(alignment: .leading, spacing: AppTheme.Spacing.item) {
                             Button(copy("routines.review", fallback: "확인·주기·시간 수정")) { editingRoutine = routine }
                                 .accessibilityIdentifier("routines.review.\(routine.id.uuidString)")
-                            Spacer()
+                                .frame(minHeight: 44, alignment: .leading)
                             Button(copy("routines.delete", fallback: "삭제"), role: .destructive) {
                                 do { try store.delete(routine.id); narrative = nil }
                                 catch { errorMessage = RoutineViewCopy.errorMessage(error) }
                             }
+                            .frame(minHeight: 44, alignment: .leading)
                         }
                         .buttonStyle(.borderless)
+                        .fixedSize(horizontal: false, vertical: true)
                     }
-                    .padding(.vertical, 4)
+                    .padding(.vertical, AppTheme.Spacing.compact)
                     .accessibilityElement(children: .contain)
                     .accessibilityIdentifier("routines.record")
                 }
@@ -74,48 +111,72 @@ struct RoutineDetailView: View {
             Section(copy("routines.suggestions.title", fallback: "새 할 일 추천")) {
                 if !store.isLearningEnabled {
                     Text(copy("routines.suggestions.disabled", fallback: "학습이 꺼져 있어 추천하지 않습니다. 저장 기록은 직접 삭제할 수 있습니다."))
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 } else if suggestions.isEmpty {
                     Text(copy("routines.suggestions.empty", fallback: "확인된 신뢰 가능한 루틴의 새 발생분만 추천합니다. 이미 만든 할 일·거절한 발생분은 중복 제안하지 않습니다."))
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(.subheadline).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 ForEach(suggestions) { suggestion in
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text(suggestion.title).font(.headline)
-                        Text(RoutineViewCopy.date(suggestion.preferredStart)).font(.caption)
-                        HStack {
+                    VStack(alignment: .leading, spacing: AppTheme.Spacing.item) {
+                        Text(suggestion.title)
+                            .font(.headline)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Text(RoutineViewCopy.date(suggestion.preferredStart))
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        VStack(alignment: .leading, spacing: AppTheme.Spacing.item) {
                             Button(copy("routines.suggestions.accept", fallback: "수락·일정 검토")) { reviewingSuggestion = suggestion }
                                 .accessibilityIdentifier("routines.accept")
+                                .frame(minHeight: 44, alignment: .leading)
                             Button(copy("routines.suggestions.postpone", fallback: "미루기")) { postponingSuggestion = suggestion }
                                 .accessibilityIdentifier("routines.postpone")
+                                .frame(minHeight: 44, alignment: .leading)
                             Button(copy("routines.suggestions.reject", fallback: "거절"), role: .destructive) { reject(suggestion) }
                                 .accessibilityIdentifier("routines.reject")
+                                .frame(minHeight: 44, alignment: .leading)
                         }
                         .buttonStyle(.borderless)
+                        .fixedSize(horizontal: false, vertical: true)
                     }
-                    .padding(.vertical, 4)
+                    .padding(.vertical, AppTheme.Spacing.compact)
                 }
             }
 
-            OpenAIConsentSection(scope: .routines)
-            Section(copy("routines.remote.title", fallback: "OpenAI 해석 · 검토용 미리보기")) {
-                Button(copy("routines.remote.basic", fallback: "기초 해석 요청 · gpt-6-luna")) { requestRemote(.basic) }
-                    .disabled(store.routines.isEmpty || isAnalyzing || !store.isLearningEnabled)
-                    .accessibilityIdentifier("routines.basicRequest")
-                Button(copy("routines.remote.advanced", fallback: "고급 모델로 다시 요청 · gpt-6.1-sol")) { requestRemote(.advanced) }
-                    .disabled(store.routines.isEmpty || isAnalyzing || !store.isLearningEnabled)
-                    .accessibilityIdentifier("routines.advancedRequest")
-                if isAnalyzing {
-                    ProgressView()
-                    Button(copy("routines.remote.cancel", fallback: "요청 취소"), role: .cancel) { analysisTask?.cancel() }
+            if regionalAvailability.isAvailable {
+                OpenAIConsentSection(scope: .routines)
+                Section(copy("routines.remote.title", fallback: "OpenAI 해석 · 검토용 미리보기")) {
+                    Button(copy("routines.remote.basic", fallback: "기초 해석 요청 · gpt-6-luna")) { requestRemote(.basic) }
+                        .disabled(store.routines.isEmpty || isAnalyzing || !store.isLearningEnabled)
+                        .accessibilityIdentifier("routines.basicRequest")
+                    Button(copy("routines.remote.advanced", fallback: "고급 모델로 다시 요청 · gpt-6.1-sol")) { requestRemote(.advanced) }
+                        .disabled(store.routines.isEmpty || isAnalyzing || !store.isLearningEnabled)
+                        .accessibilityIdentifier("routines.advancedRequest")
+                    if isAnalyzing {
+                        ProgressView()
+                        Button(copy("routines.remote.cancel", fallback: "요청 취소"), role: .cancel) { analysisTask?.cancel() }
+                    }
+                    if let narrative {
+                        Text(narrative.modelID)
+                            .font(.footnote.monospaced())
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Text(narrative.summary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        ForEach(narrative.observations, id: \.self) {
+                            Text($0)
+                                .font(.subheadline)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Button(copy("routines.remote.clear", fallback: "미리보기 지우기")) { self.narrative = nil }
+                    }
+                    Text(copy("routines.remote.explanation", fallback: "외부 해석은 저장된 주기·시간·신뢰도·확인 상태를 변경하거나 할 일을 만들지 않습니다. 고급 모델은 자동으로 재호출하지 않습니다."))
+                        .font(.subheadline).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                if let narrative {
-                    Text(narrative.modelID).font(.caption.monospaced()).foregroundStyle(.secondary)
-                    Text(narrative.summary)
-                    ForEach(narrative.observations, id: \.self) { Text($0).font(.caption) }
-                    Button(copy("routines.remote.clear", fallback: "미리보기 지우기")) { self.narrative = nil }
-                }
-                Text(copy("routines.remote.explanation", fallback: "외부 해석은 저장된 주기·시간·신뢰도·확인 상태를 변경하거나 할 일을 만들지 않습니다. 고급 모델은 자동으로 재호출하지 않습니다."))
-                    .font(.caption).foregroundStyle(.secondary)
             }
 
             Section(copy("routines.feedback.title", fallback: "추천 피드백·삭제")) {
@@ -130,30 +191,49 @@ struct RoutineDetailView: View {
                     RoutineViewCopy.count("routines.feedback.accepted.count", counts.accepted, fallback: "수락 %lld건"),
                     RoutineViewCopy.count("routines.feedback.rejected.count", counts.rejected, fallback: "거절 %lld건"),
                     RoutineViewCopy.count("routines.feedback.postponed.count", counts.postponed, fallback: "미루기 %lld건")))
-                    .font(.caption)
+                    .font(.subheadline)
+                    .fixedSize(horizontal: false, vertical: true)
                 ForEach(Array(store.feedback.suffix(20).reversed())) { feedback in
-                    VStack(alignment: .leading) {
-                        Text(RoutineViewCopy.feedbackLabel(feedback.action)).font(.caption.bold())
-                        Text(RoutineViewCopy.date(feedback.recordedAt)).font(.caption2)
-                        if let applied = feedback.appliedTime { Text(RoutineViewCopy.date(applied)).font(.caption2) }
+                    VStack(alignment: .leading, spacing: AppTheme.Spacing.compact) {
+                        Text(RoutineViewCopy.feedbackLabel(feedback.action)).font(.subheadline.weight(.semibold))
+                        Text(RoutineViewCopy.date(feedback.recordedAt)).font(.subheadline).foregroundStyle(.secondary)
+                        if let applied = feedback.appliedTime {
+                            Text(RoutineViewCopy.date(applied)).font(.subheadline).foregroundStyle(.secondary)
+                        }
                     }
+                    .fixedSize(horizontal: false, vertical: true)
                 }
                 if !store.pendingAcceptances.isEmpty {
                     Text(RoutineViewCopy.count("routines.feedback.pending", store.pendingAcceptances.count, fallback: "저장 결과를 확인 중인 수락 %lld건은 중복 생성하지 않습니다."))
-                        .font(.caption).foregroundStyle(.orange)
+                        .font(.subheadline).foregroundStyle(AppTheme.warning)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 Button(copy("routines.deleteAll", fallback: "루틴·근거·피드백 모두 삭제"), role: .destructive) { confirmDeleteAll = true }
                     .accessibilityIdentifier("routines.deleteAll")
-                Text(copy("routines.storage.explanation", fallback: "기기 내 보호된 파일에만 저장하며 iCloud로 동기화하지 않습니다. 이미 승인해 만든 할 일은 따로 삭제해야 합니다. 삭제 후 다시 학습하려면 분석을 직접 실행해야 합니다."))
-                    .font(.caption).foregroundStyle(.secondary)
+                Text(copy("routines.storage.explanation", fallback: "기기 내 보호된 파일에 저장하며, 전체 iCloud 저장에 동의하면 루틴·근거·피드백·수락 예약도 동기화합니다. 이미 승인해 만든 할 일은 따로 삭제해야 합니다. 삭제 후 다시 학습하려면 분석을 직접 실행해야 합니다."))
+                    .font(.subheadline).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            if let error = store.errorMessage { Text(error).foregroundStyle(.red).font(.caption) }
+            if let error = store.errorMessage {
+                Text(error)
+                    .foregroundStyle(AppTheme.destructive)
+                    .font(.subheadline)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
+        .appFormStyle()
         .navigationTitle(copy("routines.title", fallback: "루틴 학습·추천"))
         .navigationBarTitleDisplayMode(.inline)
         .task { reconcile() }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in reconcile() }
         .onDisappear { analysisTask?.cancel() }
+        .onChange(of: regionalAvailability.isAvailable) { _, available in
+            guard !available else { return }
+            confirmRemote = false
+            analysisTask?.cancel()
+            narrative = nil
+            errorMessage = nil
+        }
         .sheet(item: $editingRoutine) { RoutineEditView(routine: $0) }
         .sheet(item: $reviewingSuggestion, onDismiss: { now = Date() }) { ScheduleApprovalView(suggestion: $0) }
         .sheet(item: $postponingSuggestion, onDismiss: { now = Date() }) { RoutinePostponeView(suggestion: $0) }
@@ -195,9 +275,13 @@ struct RoutineDetailView: View {
             now = Date()
         } catch { errorMessage = RoutineViewCopy.errorMessage(error) }
     }
-    private func requestRemote(_ tier: OpenAIAnalysisTier) { requestedTier = tier; confirmRemote = true }
+    private func requestRemote(_ tier: OpenAIAnalysisTier) {
+        guard regionalAvailability.isAvailable else { return }
+        requestedTier = tier
+        confirmRemote = true
+    }
     private func analyzeRemote() {
-        guard !isAnalyzing, store.isLearningEnabled else { return }
+        guard regionalAvailability.isAvailable, !isAnalyzing, store.isLearningEnabled else { return }
         analysisTask?.cancel()
         let records = store.routines
         let tier = requestedTier
@@ -207,10 +291,10 @@ struct RoutineDetailView: View {
             do {
                 let result = try await OpenAIAnalysisService().routines(records, tier: tier)
                 try Task.checkCancellation()
-                guard store.isLearningEnabled, records == store.routines else { return }
+                guard regionalAvailability.isAvailable, store.isLearningEnabled, records == store.routines else { return }
                 narrative = result
             } catch is CancellationError { }
-            catch { if !Task.isCancelled { errorMessage = OpenAIViewCopy.errorMessage(error) } }
+            catch { if !Task.isCancelled, regionalAvailability.isAvailable { errorMessage = OpenAIViewCopy.errorMessage(error) } }
         }
     }
     private func copy(_ key: String, fallback: String) -> String { RoutineViewCopy.copy(key, fallback: fallback) }
@@ -224,25 +308,39 @@ private struct RoutineEditView: View {
     var body: some View {
         NavigationStack {
             Form {
-                TextField(copy("routines.edit.activity", fallback: "활동 제목"), text: $draft.title)
-                Stepper(RoutineViewCopy.count("routines.edit.period", draft.periodDays, fallback: "주기: %lld일"), value: $draft.periodDays, in: 1...90)
-                Stepper(RoutineViewCopy.format("routines.edit.hour", fallback: "선호 시: %lld", Int64(draft.preferredHour)), value: $draft.preferredHour, in: 0...23)
-                Stepper(RoutineViewCopy.format("routines.edit.minute", fallback: "선호 분: %lld", Int64(draft.preferredMinute)), value: $draft.preferredMinute, in: 0...59)
-                Stepper(RoutineViewCopy.count("routines.edit.duration", draft.estimatedDurationMinutes, fallback: "소요 시간: %lld분"), value: $draft.estimatedDurationMinutes, in: 1...1440)
-                DatePicker(copy("routines.edit.nextOccurrence", fallback: "다음 발생"), selection: $draft.nextOccurrence)
-                    .environment(\.timeZone, TimeZone(identifier: draft.timeZoneIdentifier) ?? .current)
-                Text(draft.timeZoneIdentifier).font(.caption)
-                Toggle(copy("routines.edit.suppress", fallback: "추천 중지"), isOn: $draft.isSuppressed)
-                Text(copy("routines.edit.explanation", fallback: "완료 기록으로 추정한 주기·시각입니다. 실제 생활 활동이나 건강 상태를 확정하지 않습니다. 불규칙한 기록은 주기·선호 시각을 직접 수정해야 확인할 수 있습니다."))
-                    .font(.caption).foregroundStyle(.secondary)
-                if let errorMessage { Text(errorMessage).foregroundStyle(.red) }
-                Button(copy("routines.edit.save", fallback: "수정 내용 확인·저장")) {
-                    do { try RoutineStore.shared.confirm(draft); dismiss() }
-                    catch { errorMessage = RoutineViewCopy.errorMessage(error) }
+                Section {
+                    TextField(copy("routines.edit.activity", fallback: "활동 제목"), text: $draft.title)
+                    Stepper(RoutineViewCopy.count("routines.edit.period", draft.periodDays, fallback: "주기: %lld일"), value: $draft.periodDays, in: 1...90)
+                    Stepper(RoutineViewCopy.format("routines.edit.hour", fallback: "선호 시: %lld", Int64(draft.preferredHour)), value: $draft.preferredHour, in: 0...23)
+                    Stepper(RoutineViewCopy.format("routines.edit.minute", fallback: "선호 분: %lld", Int64(draft.preferredMinute)), value: $draft.preferredMinute, in: 0...59)
+                    Stepper(RoutineViewCopy.count("routines.edit.duration", draft.estimatedDurationMinutes, fallback: "소요 시간: %lld분"), value: $draft.estimatedDurationMinutes, in: 1...1440)
+                    DatePicker(copy("routines.edit.nextOccurrence", fallback: "다음 발생"), selection: $draft.nextOccurrence)
+                        .environment(\.timeZone, TimeZone(identifier: draft.timeZoneIdentifier) ?? .current)
+                    Text(draft.timeZoneIdentifier)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Toggle(copy("routines.edit.suppress", fallback: "추천 중지"), isOn: $draft.isSuppressed)
                 }
-                .accessibilityIdentifier("routines.confirm")
+                Section {
+                    Text(copy("routines.edit.explanation", fallback: "완료 기록으로 추정한 주기·시각입니다. 실제 생활 활동이나 건강 상태를 확정하지 않습니다. 불규칙한 기록은 주기·선호 시각을 직접 수정해야 확인할 수 있습니다."))
+                        .font(.subheadline).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let errorMessage {
+                        Text(errorMessage)
+                            .foregroundStyle(AppTheme.destructive)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Button(copy("routines.edit.save", fallback: "수정 내용 확인·저장")) {
+                        do { try RoutineStore.shared.confirm(draft); dismiss() }
+                        catch { errorMessage = RoutineViewCopy.errorMessage(error) }
+                    }
+                    .accessibilityIdentifier("routines.confirm")
+                }
             }
+            .appFormStyle()
             .navigationTitle(copy("routines.edit.title", fallback: "루틴 확인"))
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button(copy("action.cancel", fallback: "취소")) { dismiss() } } }
         }
     }
@@ -261,20 +359,32 @@ private struct RoutinePostponeView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Text(suggestion.title)
-                DatePicker(RoutineViewCopy.copy("routines.postpone.date", fallback: "미룰 시각"), selection: $date, in: Date()...)
-                Button(RoutineViewCopy.copy("routines.postpone.save", fallback: "미루기 저장")) {
-                    do {
-                        try RoutineStore.shared.record(RoutineFeedback(routineID: suggestion.routineID, occurrence: suggestion.occurrence,
-                                                                       action: .postponed, suggestedTime: suggestion.preferredStart,
-                                                                       appliedTime: date))
-                        dismiss()
-                    } catch { errorMessage = RoutineViewCopy.errorMessage(error) }
+                Section {
+                    Text(suggestion.title)
+                        .font(.headline)
+                        .fixedSize(horizontal: false, vertical: true)
+                    DatePicker(RoutineViewCopy.copy("routines.postpone.date", fallback: "미룰 시각"), selection: $date, in: Date()...)
                 }
-                .accessibilityIdentifier("routines.savePostpone")
-                if let errorMessage { Text(errorMessage).foregroundStyle(.red) }
+                Section {
+                    Button(RoutineViewCopy.copy("routines.postpone.save", fallback: "미루기 저장")) {
+                        do {
+                            try RoutineStore.shared.record(RoutineFeedback(routineID: suggestion.routineID, occurrence: suggestion.occurrence,
+                                                                           action: .postponed, suggestedTime: suggestion.preferredStart,
+                                                                           appliedTime: date))
+                            dismiss()
+                        } catch { errorMessage = RoutineViewCopy.errorMessage(error) }
+                    }
+                    .accessibilityIdentifier("routines.savePostpone")
+                    if let errorMessage {
+                        Text(errorMessage)
+                            .foregroundStyle(AppTheme.destructive)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
             }
+            .appFormStyle()
             .navigationTitle(RoutineViewCopy.copy("routines.postpone.title", fallback: "이번 발생분 미루기"))
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button(RoutineViewCopy.copy("action.cancel", fallback: "취소")) { dismiss() } } }
         }
     }

@@ -54,6 +54,28 @@ struct RoutedIntelligenceEngineTests {
         }
     }
 
+    @Test("approved legacy calendar tasks remain sortable without a selected analysis source")
+    func approvedCalendarTasksKeepAutomaticPriority() async throws {
+        try await AIProviderTestIsolation.shared.withLock {
+            let task = Todo(title: "Urgent tax filing", source: .calendar)
+            task.dueDate = Date().addingTimeInterval(3_600)
+            let review = Todo(title: "Pending suggestion", source: .calendar)
+            review.triageStatus = TodoTriage.review.rawValue
+            #expect(TodoPriorityScope.candidates(from: [task, review]).map(\.id) == [task.id])
+            let policy = BetaFeaturePolicy(accessReader: { .disabled }, selectionReader: { .openAI })
+            let results = try await RoutedIntelligenceEngine(policy: policy).prioritize(
+                todos: [task, review], events: [], persona: .empty
+            )
+            #expect(results.map(\.todoID) == [task.id])
+            let result = try #require(results.first)
+            #expect(result.engine == .heuristic)
+            #expect((result.axes?.urgency ?? 0) > 0)
+            #expect(TodoPriorityScope.apply(result, in: [task, review])?.id == task.id)
+            task.triageStatus = TodoTriage.review.rawValue
+            #expect(TodoPriorityScope.apply(result, in: [task, review]) == nil)
+        }
+    }
+
     @Test("router exposes only the selected beta provider for standard analysis")
     func routerUsesSingleSelectedProvider() {
         let policy = BetaFeaturePolicy(

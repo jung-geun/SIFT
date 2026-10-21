@@ -62,20 +62,23 @@ func makeVocabularyMeetingDependencies(_ service: UserVocabularyService?) -> Mee
     guard let service else { return .empty }
     return .init(
         snapshot: { await service.snapshot() },
-        refine: { meetingID, result, snapshot, language, allowModelLoad in
+        refine: { meetingID, result, snapshot, sourceLanguageTag, language, allowModelLoad in
             try await MeetingRefinementEngine().refine(
                 meetingID: meetingID,
                 result: result,
                 vocabulary: snapshot,
+                sourceLanguageTag: sourceLanguageTag,
                 language: language,
                 allowModelLoad: allowModelLoad
             )
         },
-        analyze: { meetingID, result, hint, language in
+        analyze: { meetingID, result, hint, sourceLanguageTag, summaryLanguageTag, language in
             try await MeetingAnalysisEngine().analyze(
                 meetingID: meetingID,
                 result: result,
                 glossaryHint: hint,
+                sourceLanguageTag: sourceLanguageTag,
+                summaryLanguageTag: summaryLanguageTag,
                 language: language
             )
         },

@@ -103,35 +103,30 @@ struct MeetingProcessingStatusView: View {
 
     @ViewBuilder
     private func stage(_ title: String, systemImage: String, state: StageState) -> some View {
-        VStack(spacing: 3) {
+        VStack(spacing: AppTheme.Spacing.compact) {
             ZStack {
                 Circle()
                     .fill(fill(for: state))
                     .frame(width: 30, height: 30)
                 switch state {
                 case .active:
-                    ProgressView().controlSize(.small).tint(.white)
+                    ProgressView().controlSize(.small).tint(AppTheme.accent)
                 case .done:
-                    Image(systemName: "checkmark").font(.caption.bold()).foregroundStyle(.white)
+                    Image(systemName: "checkmark").font(.caption.bold()).foregroundStyle(.secondary)
                 case .skipped:
-                    Image(systemName: "minus").font(.caption.bold()).foregroundStyle(.white)
+                    Image(systemName: "minus").font(.caption.bold()).foregroundStyle(.secondary)
                 case .pending:
-                    Image(systemName: systemImage).font(.caption2).foregroundStyle(.secondary)
+                    Image(systemName: systemImage).font(.caption).foregroundStyle(.secondary)
                 }
             }
             Text(title)
-                .font(.caption2)
+                .font(.caption)
                 .foregroundStyle(state == .pending ? .secondary : .primary)
         }
     }
 
     private func fill(for state: StageState) -> Color {
-        switch state {
-        case .done: .green
-        case .active: .accentColor
-        case .skipped: .orange
-        case .pending: Color(.systemGray5)
-        }
+        state == .active ? AppTheme.accentSoft : AppTheme.neutralFill
     }
 
     private var connector: some View {
@@ -146,14 +141,14 @@ struct MeetingProcessingStatusView: View {
         case .transcribing:
             label(offlineTranscription
                 ? AppLanguage.localized("meeting.processing.offlineTranscribing", defaultValue: AppLanguage.current == .english ? "Transcribing saved audio with on-device Whisper" : "기기 내 Whisper로 저장된 음성을 다시 전사하는 중", language: .current, comment: "WhisperKit saved audio processing stage.")
-                : AppLanguage.localized("meeting.processing.retranscribing", defaultValue: "저장된 음성을 다시 전사하는 중이에요", language: .current, comment: "Meeting processing status."), engine: "")
-        case .proofreading(let engine):
-            label(AppLanguage.localized("meeting.processing.proofreading", defaultValue: "AI가 전사를 검수하는 중이에요", language: .current, comment: "Meeting processing status."), engine: engine)
-        case .summarizing(let engine):
-            label(AppLanguage.localized("meeting.processing.summarizing", defaultValue: "요약을 정리하는 중이에요", language: .current, comment: "Meeting processing status."), engine: engine)
-        case .completed(let proofread, let analysisEngine):
+                : AppLanguage.localized("meeting.processing.retranscribing", defaultValue: "저장된 음성을 다시 전사하는 중이에요", language: .current, comment: "Meeting processing status."))
+        case .proofreading:
+            label(AppLanguage.localized("meeting.processing.proofreading", defaultValue: "AI가 전사를 검수하는 중이에요", language: .current, comment: "Meeting processing status."))
+        case .summarizing:
+            label(AppLanguage.localized("meeting.processing.summarizing", defaultValue: "요약을 정리하는 중이에요", language: .current, comment: "Meeting processing status."))
+        case .completed(let proofread, _):
             switch proofread {
-            case .changed(let count, let engine):
+            case .changed(let count, _):
                 let text = AppLanguage.localizedCount(
                     "meeting.processing.corrected",
                     count: count,
@@ -163,15 +158,15 @@ struct MeetingProcessingStatusView: View {
                     language: .current,
                     comment: "Meeting processing status."
                 )
-                label(text, engine: engine)
-            case .unchanged(let engine):
-                label(AppLanguage.localized("meeting.processing.unchanged", defaultValue: "검수 완료 · 수정할 내용이 없었어요", language: .current, comment: "Meeting processing status."), engine: engine)
+                label(text)
+            case .unchanged:
+                label(AppLanguage.localized("meeting.processing.unchanged", defaultValue: "검수 완료 · 수정할 내용이 없었어요", language: .current, comment: "Meeting processing status."))
             case .skipped(let reason):
                 Text(skipMessage(reason))
                     .font(.caption)
                     .foregroundStyle(.secondary)
-            case .failed(let engine, _):
-                label(AppLanguage.localized("meeting.processing.proofreadFailed", defaultValue: "AI 검수 실패 · 원문으로 요약 완료", language: .current, comment: "Meeting processing status."), engine: engine ?? analysisEngine)
+            case .failed:
+                label(AppLanguage.localized("meeting.processing.proofreadFailed", defaultValue: "AI 검수 실패 · 원문으로 요약 완료", language: .current, comment: "Meeting processing status."))
             }
         }
     }
@@ -190,17 +185,8 @@ struct MeetingProcessingStatusView: View {
     }
 
     @ViewBuilder
-    private func label(_ text: String, engine: String) -> some View {
-        HStack(spacing: 6) {
-            Text(text).font(.caption).foregroundStyle(.secondary)
-            if !engine.isEmpty {
-                Text(engine)
-                    .font(.caption2.weight(.medium))
-                    .padding(.horizontal, 6).padding(.vertical, 2)
-                    .background(Color.accentColor.opacity(0.12), in: Capsule())
-                    .foregroundStyle(Color.accentColor)
-            }
-        }
+    private func label(_ text: String) -> some View {
+        Text(text).font(.caption).foregroundStyle(.secondary)
     }
 }
 

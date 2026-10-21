@@ -26,6 +26,7 @@ struct LaunchScreenDetailView: View {
                 Text("'마지막 화면'은 앱 종료 시 보던 탭으로 돌아옵니다. '고정 탭'은 항상 지정한 탭으로 시작합니다.")
             }
         }
+        .appFormStyle()
         .navigationTitle("시작 화면")
         .navigationBarTitleDisplayMode(.inline)
     }

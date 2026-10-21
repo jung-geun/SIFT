@@ -24,6 +24,7 @@ enum GmailIMAPContentMigration {
 
         let rows = try context.fetch(FetchDescriptor<EmailMessage>())
             .filter { $0.provider == .gmail && $0.sourceAccountNamespace == canonicalAccount }
+        let identityKeys = try MailAnalysisLedgerKeyStore.keysChecked()
         for row in rows {
             row.subject = MIMETextDecoder.decodeRFC2047(row.subject)
             row.from = MIMETextDecoder.decodeRFC2047(row.from)
@@ -32,13 +33,15 @@ enum GmailIMAPContentMigration {
             EmailAnalysisContract.resetAnalysis(row)
 
             if let globalMessageID = globalMessageID(from: row.id) {
-                let fingerprint = MailAnalysisFingerprint.make(
-                    provider: "gmail-imap",
-                    canonicalAccount: canonicalAccount,
-                    gmailMessageID: globalMessageID,
-                    key: MailAnalysisLedgerKeyStore.key()
-                )
-                try MailAnalysisLedgerStore.shared.reset(fingerprint)
+                for identityKey in identityKeys {
+                    let fingerprint = MailAnalysisFingerprint.make(
+                        provider: "gmail-imap",
+                        canonicalAccount: canonicalAccount,
+                        gmailMessageID: globalMessageID,
+                        key: identityKey
+                    )
+                    try MailAnalysisLedgerStore.shared.reset(fingerprint)
+                }
             }
         }
 

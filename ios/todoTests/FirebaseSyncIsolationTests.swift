@@ -63,12 +63,13 @@ struct FirebaseSyncIsolationTests {
             defer {
                 FirebaseSnapshotURLProtocol.handler = nil
                 if let previousToken {
-                    KeychainStore.set(service: service, account: "id_token", value: previousToken)
+                    do { try KeychainStore.setGmailAfterExplicitSignIn(account: "id_token", value: previousToken) }
+                    catch { Issue.record(error) }
                 } else {
                     KeychainStore.deleteAny(service: service, account: "id_token")
                 }
             }
-            KeychainStore.set(service: service, account: "id_token", value: "test-google-id-token")
+            try KeychainStore.setGmailAfterExplicitSignIn(account: "id_token", value: "test-google-id-token")
 
             let probe = SnapshotRequestProbe()
             FirebaseSnapshotURLProtocol.handler = { request in
@@ -176,15 +177,18 @@ struct FirebaseEncryptedSnapshotTests {
             let previous = KeychainStore.get(service: service, account: "id_token")
             defer {
                 FirebaseSnapshotURLProtocol.handler = nil
-                if let previous { KeychainStore.set(service: service, account: "id_token", value: previous) }
+                if let previous {
+                    do { try KeychainStore.setGmailAfterExplicitSignIn(account: "id_token", value: previous) }
+                    catch { Issue.record(error) }
+                }
                 else { KeychainStore.deleteAny(service: service, account: "id_token") }
             }
-            KeychainStore.set(service: service, account: "id_token", value: "test-google-id-token")
+            try KeychainStore.setGmailAfterExplicitSignIn(account: "id_token", value: "test-google-id-token")
             let exchange = SnapshotPayloadExchange(alteration: alteration)
             FirebaseSnapshotURLProtocol.handler = exchange.response(for:)
             let configuration = URLSessionConfiguration.ephemeral
             configuration.protocolClasses = [FirebaseSnapshotURLProtocol.self]
-            let snapshot = try FirebaseSyncService(session: URLSession(configuration: configuration))
+            let snapshot = try await FirebaseSyncService(session: URLSession(configuration: configuration))
             _ = try await snapshot.uploadSnapshot(#"{"title":"로컬 할 일"}"#, passphrase: "local-passphrase")
             try await operation(snapshot)
         }

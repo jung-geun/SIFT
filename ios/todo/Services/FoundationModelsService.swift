@@ -208,10 +208,10 @@ struct FMEmailTodoDraftOutput {
 @available(iOS 26.0, *)
 @Generable
 struct FMMeetingActionItem {
-    @Guide(description: "Meeting action title, at most 40 characters, in the requested output language. Preserve source content and do not translate the transcript.")
+    @Guide(description: "Meeting action title, at most 40 characters, in exactly the requested summary language tag. Preserve source evidence and proper nouns.")
     var title: String
 
-    @Guide(description: "One or two sentence context note in the requested output language, or empty. Preserve source content and do not translate the transcript.")
+    @Guide(description: "One or two sentence context note in exactly the requested summary language tag, or empty. Preserve source evidence and proper nouns.")
     var notes: String
 
     @Guide(description: "Explicit deadline as canonical UTC ISO8601 yyyy-MM-dd'T'HH:mm:ss.SSSZ, always Z, preserving the source timezone's absolute instant. Empty when absent; never infer.")
@@ -225,16 +225,16 @@ struct FMMeetingActionItem {
 @available(iOS 26.0, *)
 @Generable
 struct FMMeetingExtractionOutput {
-    @Guide(description: "Meeting topic noun phrase, at most 15 characters, in the requested output language. Empty when unclear.")
+    @Guide(description: "Meeting topic noun phrase, at most 15 characters, in exactly the requested summary language tag. Empty when unclear.")
     var title: String
 
-    @Guide(description: "Objective two-to-four sentence meeting summary in the requested output language. Facts only; no speculation or advice.")
+    @Guide(description: "Objective two-to-four sentence meeting summary in exactly the requested summary language tag. Facts only; no speculation or advice.")
     var summary: String
 
-    @Guide(description: "Only decisions explicitly agreed or confirmed in the transcript, one sentence each. Empty when absent.")
+    @Guide(description: "Only decisions explicitly agreed or confirmed in the transcript, one sentence each in exactly the requested summary language tag. Empty when absent.")
     var decisions: [String]
 
-    @Guide(description: "Only unanswered or follow-up questions grounded in the transcript. Empty when absent.")
+    @Guide(description: "Only unanswered or follow-up questions grounded in the transcript, in exactly the requested summary language tag. Empty when absent.")
     var unresolvedQuestions: [String]
 
     @Guide(description: "Only explicit commitments, requests, or action candidates grounded in the transcript. Empty when absent.")
@@ -248,7 +248,7 @@ struct FMSegmentCorrection {
     @Guide(description: "교정한 전사 구간 번호(1-based). 반드시 제시된 목록에 있는 번호.")
     var sourceSegmentNumber: Int
 
-    @Guide(description: "해당 구간 전체의 교정된 전사 텍스트. 명백한 오인식·오탈자만 고치고 내용·어순은 유지.")
+    @Guide(description: "The entire corrected transcript segment. Fix only clear recognition errors or typos; preserve content, word order, proper nouns, and every original language and script, including mixed-language speech. Never translate into the UI language.")
     var correctedText: String
 }
 
@@ -272,9 +272,11 @@ struct FMTranscriptCorrectionOutput {
 struct FoundationModelsService {
 
     private let runtime: any FoundationModelsRuntime
+    private let policy: BetaFeaturePolicy
 
-    init(runtime: any FoundationModelsRuntime = LiveFoundationModelsRuntime()) {
+    init(runtime: any FoundationModelsRuntime = LiveFoundationModelsRuntime(), policy: BetaFeaturePolicy = BetaFeaturePolicy()) {
         self.runtime = runtime
+        self.policy = policy
     }
 
     // E-1: 배치 크기 — FM 컨텍스트 창(~4096 토큰, 입력+출력 합산)에 맞게 분할.
@@ -311,7 +313,7 @@ struct FoundationModelsService {
         persona: PersonaContext,
         language: AppLanguage = .current
     ) async throws -> [PriorityResult] {
-        guard BetaFeaturePolicy().authorizes(.foundationModels, for: .standardAnalysis) else {
+        guard policy.authorizes(.foundationModels, for: .standardAnalysis) else {
             throw IntelligenceRoutingError.backendUnavailable(
                 provider: .foundationModels,
                 reason: RuleFallbackReason.providerDisabled.rawValue
@@ -400,7 +402,7 @@ struct FoundationModelsService {
         now: Date,
         language: AppLanguage = .current
     ) async throws -> EmailExtraction? {
-        guard BetaFeaturePolicy().authorizes(.foundationModels, for: .emailAnalysis) else {
+        guard policy.authorizes(.foundationModels, for: .emailAnalysis) else {
             throw IntelligenceRoutingError.backendUnavailable(
                 provider: .foundationModels,
                 reason: RuleFallbackReason.providerDisabled.rawValue
@@ -510,7 +512,7 @@ struct FoundationModelsService {
         body: String,
         language: AppLanguage = .current
     ) async throws -> EmailSummaryResult {
-        guard BetaFeaturePolicy().authorizes(.foundationModels, for: .emailAnalysis) else {
+        guard policy.authorizes(.foundationModels, for: .emailAnalysis) else {
             throw IntelligenceRoutingError.backendUnavailable(
                 provider: .foundationModels,
                 reason: RuleFallbackReason.providerDisabled.rawValue
@@ -571,7 +573,7 @@ struct FoundationModelsService {
         behaviorProfile: BehaviorProfile,
         language: AppLanguage = .current
     ) async throws -> PersonaNarrative {
-        guard BetaFeaturePolicy().authorizes(.foundationModels, for: .standardAnalysis) else {
+        guard policy.authorizes(.foundationModels, for: .standardAnalysis) else {
             throw IntelligenceRoutingError.backendUnavailable(
                 provider: .foundationModels,
                 reason: RuleFallbackReason.providerDisabled.rawValue
@@ -624,7 +626,7 @@ struct FoundationModelsService {
         baseline: MemoryAnalysisResult,
         language: AppLanguage = .current
     ) async throws -> BehaviorNarrative {
-        guard BetaFeaturePolicy().authorizes(.foundationModels, for: .standardAnalysis) else {
+        guard policy.authorizes(.foundationModels, for: .standardAnalysis) else {
             throw IntelligenceRoutingError.backendUnavailable(
                 provider: .foundationModels,
                 reason: RuleFallbackReason.providerDisabled.rawValue
@@ -675,15 +677,24 @@ struct FoundationModelsService {
         meetingID: String,
         segments: [MeetingSegment],
         glossaryHint: String = "",
+        sourceLanguageTag: String,
+        summaryLanguageTag: String,
         language: AppLanguage,
-        transcriptCharCap: Int = 6_000
+        transcriptCharCap: Int = 6_000,
+        supportsLocale: (Locale) -> Bool = { SystemLanguageModel.default.supportsLocale($0) }
     ) async throws -> ProviderMeetingExtraction {
-        guard BetaFeaturePolicy().authorizes(.foundationModels, for: .meetingAnalysis) else {
+        guard policy.authorizes(.foundationModels, for: .meetingAnalysis) else {
             throw IntelligenceRoutingError.backendUnavailable(
                 provider: .foundationModels,
                 reason: RuleFallbackReason.providerDisabled.rawValue
             )
         }
+        try MeetingSummaryLanguages.requireSupport(
+            provider: .foundationModels,
+            sourceLanguageTag: sourceLanguageTag,
+            summaryLanguageTag: summaryLanguageTag,
+            supportsLocale: supportsLocale
+        )
         // 컨텍스트 창(~4096토큰) 방어: 문자 예산 안에서만 구간을 전달한다.
         var numbered = [String]()
         var included = [MeetingSegment]()   // 1-based 번호 → segment 매핑
@@ -703,8 +714,12 @@ struct FoundationModelsService {
         \(glossaryBlock)[전사 구간]
         \(numbered.joined(separator: "\n"))
 
-        \(Prompts.MeetingFM.requestSuffix(language: language))
+        \(Prompts.MeetingFM.requestSuffix(sourceLanguageTag: sourceLanguageTag, summaryLanguageTag: summaryLanguageTag))
         """
+        let instructions = Prompts.MeetingFM.systemInstruction(
+            sourceLanguageTag: sourceLanguageTag,
+            summaryLanguageTag: summaryLanguageTag
+        )
         LLMDebugLogger.request(
             provider: "AFM",
             operation: "analyzeMeeting",
@@ -713,11 +728,11 @@ struct FoundationModelsService {
                 "includedSegments: \(included.count)",
                 "transcriptCharCap: \(transcriptCharCap)"
             ],
-            systemPrompt: Prompts.MeetingFM.systemInstruction(language: language),
+            systemPrompt: instructions,
             userPrompt: prompt
         )
         let output = try await runtime.analyzeMeeting(
-            instructions: Prompts.MeetingFM.systemInstruction(language: language),
+            instructions: instructions,
             userPrompt: prompt
         )
         LLMDebugLogger.response(
@@ -766,15 +781,23 @@ struct FoundationModelsService {
     func correctTranscript(
         segments: [MeetingSegment],
         glossaryHint: String = "",
+        sourceLanguageTag: String,
         language: AppLanguage,
-        batchCharCap: Int = 2_000
+        batchCharCap: Int = 2_000,
+        supportsLocale: (Locale) -> Bool = { SystemLanguageModel.default.supportsLocale($0) }
     ) async throws -> TranscriptCorrectionBatchResult {
-        guard BetaFeaturePolicy().authorizes(.foundationModels, for: .transcriptRefinement) else {
+        guard policy.authorizes(.foundationModels, for: .transcriptRefinement) else {
             throw IntelligenceRoutingError.backendUnavailable(
                 provider: .foundationModels,
                 reason: RuleFallbackReason.providerDisabled.rawValue
             )
         }
+        try MeetingSummaryLanguages.requireSupport(
+            provider: .foundationModels,
+            sourceLanguageTag: sourceLanguageTag,
+            summaryLanguageTag: sourceLanguageTag,
+            supportsLocale: supportsLocale
+        )
         guard !segments.isEmpty else {
             return TranscriptCorrectionBatchResult(
                 segments: segments,
@@ -802,6 +825,7 @@ struct FoundationModelsService {
         var failedBatchCount = 0
         let glossaryBlock = Self.glossaryBlock(glossaryHint, language: language)
         let genOptions = GenerationOptions(maximumResponseTokens: 1_500)
+        let instructions = Prompts.MeetingCorrectionFM.systemInstruction(sourceLanguageTag: sourceLanguageTag)
 
         for batch in batches {
             let numbered = batch.enumerated()
@@ -811,7 +835,7 @@ struct FoundationModelsService {
             \(glossaryBlock)[전사 구간]
             \(numbered)
 
-            \(Prompts.MeetingCorrectionFM.requestSuffix(language: language))
+            \(Prompts.MeetingCorrectionFM.requestSuffix(sourceLanguageTag: sourceLanguageTag))
             """
             let operation = "correctTranscript batch \(succeededBatchCount + failedBatchCount + 1)/\(batches.count)"
             LLMDebugLogger.request(
@@ -822,12 +846,12 @@ struct FoundationModelsService {
                     "batchCharCap: \(batchCharCap)",
                     "maximumResponseTokens: 1500"
                 ],
-                systemPrompt: Prompts.MeetingCorrectionFM.systemInstruction(language: language),
+                systemPrompt: instructions,
                 userPrompt: prompt
             )
             do {
                 let output = try await runtime.correctTranscript(
-                    instructions: Prompts.MeetingCorrectionFM.systemInstruction(language: language),
+                    instructions: instructions,
                     userPrompt: prompt,
                     options: genOptions
                 )
@@ -885,7 +909,7 @@ struct FoundationModelsService {
         now: Date,
         language: AppLanguage = .current
     ) async throws -> EmailTodoDraft {
-        guard BetaFeaturePolicy().authorizes(.foundationModels, for: .emailAnalysis) else {
+        guard policy.authorizes(.foundationModels, for: .emailAnalysis) else {
             throw IntelligenceRoutingError.backendUnavailable(
                 provider: .foundationModels,
                 reason: RuleFallbackReason.providerDisabled.rawValue
@@ -1101,11 +1125,13 @@ extension FoundationModelsService: MeetingRefinementProvider {
     func correct(
         segments: [MeetingSegment],
         glossaryHint: String,
+        sourceLanguageTag: String,
         language: AppLanguage
     ) async throws -> TranscriptCorrectionBatchResult {
         try await correctTranscript(
             segments: segments,
             glossaryHint: glossaryHint,
+            sourceLanguageTag: sourceLanguageTag,
             language: language
         )
     }

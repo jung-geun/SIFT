@@ -18,7 +18,7 @@ struct AppInfoDetailView: View {
                 if let updateInfo = appUpdate.updateInfo {
                     LabeledContent("업데이트") {
                         Text("최신 \(updateInfo.latestVersion)")
-                            .foregroundStyle(AppTheme.accent)
+                            .foregroundStyle(.secondary)
                     }
                     Button {
                         appUpdate.openAppStore()
@@ -30,6 +30,13 @@ struct AppInfoDetailView: View {
                 NavigationLink(destination: LaunchScreenDetailView()) {
                     Label("시작 화면", systemImage: "rectangle.on.rectangle")
                 }
+                NavigationLink(destination: FeedbackView()) {
+                    Label(
+                        AppLanguage.localized("feedback.title", defaultValue: "의견 보내기", language: .current),
+                        systemImage: "bubble.left.and.text.bubble.right"
+                    )
+                }
+                .accessibilityIdentifier("appInfo.feedback")
                 NavigationLink(destination: DiagnosticReportView()) {
                     Label(
                         AppLanguage.localized(
@@ -71,6 +78,7 @@ struct AppInfoDetailView: View {
                 .accessibilityIdentifier("appInfo.licenses")
             }
         }
+        .appFormStyle()
         .navigationTitle("앱 정보")
         .navigationBarTitleDisplayMode(.inline)
     }
@@ -91,12 +99,14 @@ private struct ThirdPartyNoticesView: View {
                 List(notices) { notice in
                     NavigationLink {
                         LicenseNoticesTextView(notice: notice)
+                            .appScreenStyle()
                             .navigationTitle(notice.title)
                             .navigationBarTitleDisplayMode(.inline)
                     } label: {
                         Text(notice.title)
                     }
                 }
+                .appListStyle()
             } else if loadFailed {
                 Text(AppLanguage.localized(
                     "appInfo.licenses.loadError",
@@ -108,6 +118,7 @@ private struct ThirdPartyNoticesView: View {
                 ProgressView().padding()
             }
         }
+        .appScreenStyle()
         .navigationTitle(AppLanguage.localized(
             "appInfo.licenses.title", defaultValue: "오픈소스 라이선스", language: .current
         ))

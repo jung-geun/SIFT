@@ -7,8 +7,41 @@ import Testing
 @Suite("Grouped capture persistence")
 @MainActor
 struct MeetingAudioTrackPersistenceTests {
-    @Test("group and independent source namespaces survive disk reopen")
-    func groupedDiskReopen() throws {
+    @Test("deferred capture recovery preserves chosen languages without fabricating Apple evidence", arguments: [false, true])
+    func deferredLanguageRecovery(automatic: Bool) throws {
+        let root = try temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let artifact = try capture(root: root)
+        let child = artifact.tracks[0]
+        let recovery = PendingMeetingCaptureRecovery(
+            meetingID: child.meetingID, languageTag: "bn-BD", timezoneIdentifier: "UTC",
+            manifest: child.audioManifest, provisionalResult: MeetingResult(segments: []), errorMessage: nil,
+            parentMeetingID: artifact.meetingID, sourceKind: child.sourceKind,
+            sourceLabel: child.sourceLabel, sessionStartSample: child.sessionStartSample,
+            summaryLanguageTag: "ar-SA", deferredTranscription: true, automaticLanguageDetection: automatic)
+        try MeetingCaptureRecoveryStore.write(recovery, rootURL: root)
+        let restored = try #require(MeetingCaptureRecoveryStore.scan(rootURL: root).recoveries.first)
+        #expect(restored.automaticLanguageDetection == automatic)
+        let store = root.appendingPathComponent("deferred.store")
+        do {
+            let context = ModelContext(try diskContainer(at: store))
+            try MeetingCaptureRecoveryPersister.persist(restored, in: context, rootURL: root)
+        }
+        let context = ModelContext(try diskContainer(at: store))
+        let saved = try record(child.meetingID, in: context)
+        #expect(saved.languageTag == "bn-BD")
+        #expect(saved.summaryLanguageTag == "ar-SA")
+        #expect(saved.automaticLanguageDetection == automatic)
+        #expect(try record(artifact.meetingID, in: context).automaticLanguageDetection == automatic)
+        #expect(saved.asrSource == .savedAudio)
+        #expect(saved.appleRawResult == nil)
+        #expect(saved.result?.segments.isEmpty == true)
+        #expect(saved.audioManifest == child.audioManifest)
+        #expect(saved.status == .transcriptFinalizationFailed)
+    }
+
+    @Test("group and independent source namespaces preserve language mode across disk reopen", arguments: [false, true])
+    func groupedDiskReopen(automatic: Bool) throws {
         let root = try temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let artifact = try capture(root: root)
@@ -17,17 +50,21 @@ struct MeetingAudioTrackPersistenceTests {
             let container = try diskContainer(at: store)
             let context = ModelContext(container)
             context.autosaveEnabled = false
-            let parent = try persist(artifact, in: context)
+            let parent = try persist(artifact, automatic: automatic, in: context)
             #expect(parent.audioManifest == nil)
             #expect(parent.rawResult == nil)
             #expect(parent.result?.segments.isEmpty == true)
             #expect(parent.diarization == nil)
-            #expect(parent.status == .finalizingTranscript)
+            #expect(parent.status == (automatic ? .transcriptFinalizationFailed : .finalizingTranscript))
         }
         let reopened = try diskContainer(at: store)
         let context = ModelContext(reopened)
         let parent = try record(artifact.meetingID, in: context)
         let children = try MeetingAudioTrackStore.tracks(for: parent, in: context)
+        #expect(parent.automaticLanguageDetection == automatic)
+        #expect(children.allSatisfy { $0.automaticLanguageDetection == automatic })
+        #expect(children.allSatisfy { $0.asrSource == (automatic ? .savedAudio : .apple) })
+        if automatic { #expect(children.allSatisfy { $0.appleRawResultData == nil }) }
         #expect(children.map(\.meetingID) == artifact.tracks.map(\.meetingID))
         #expect(children.map(\.audioTrackKind) == [.microphone, .application])
         #expect(children.map(\.audioTrackStartSample) == [0, 8_000])
@@ -167,9 +204,14 @@ struct MeetingAudioTrackPersistenceTests {
         let pending = try #require(scan.recoveries.first)
         #expect(scan.unreadableMarkerNames.isEmpty)
         #expect(pending.parentMeetingID == nil && pending.sourceKind == nil && pending.sessionStartSample == nil)
+        #expect(!pending.automaticLanguageDetection)
         let container = try memoryContainer()
         let context = ModelContext(container)
         let row = MeetingRecord(meetingID: child.meetingID)
+        #expect(!row.automaticLanguageDetection)
+        // A current record's mode and detected evidence outrank the legacy journal.
+        row.automaticLanguageDetection = true
+        row.asrDetectedLanguages = ["en", "ko"]
         try row.update(result: child.provisionalResult, status: .ready)
         try row.update(audioManifest: child.audioManifest)
         #expect(row.rawResult == nil)
@@ -290,6 +332,48 @@ struct MeetingAudioTrackPersistenceTests {
         #expect(MeetingCaptureRecoveryStore.scan(rootURL: root).recoveries.isEmpty)
     }
 
+    @Test("automatic and legacy active/stopped journals preserve mode and locales durably", arguments: [false, true], [false, true])
+    func automaticJournalRoundtrip(stopped: Bool, automatic: Bool) throws {
+        let root = try temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let artifact = try capture(root: root)
+        let child = artifact.tracks[0]
+        try MeetingCaptureRecoveryStore.markActive(meetingID: child.meetingID, parentMeetingID: artifact.meetingID,
+            sourceKind: child.sourceKind, sourceLabel: child.sourceLabel, sessionStartSample: child.sessionStartSample,
+            languageTag: "ko-KR", timezoneIdentifier: "UTC", directoryURL: child.directoryURL,
+            summaryLanguageTag: "fr-FR", deferredTranscription: !automatic, automaticLanguageDetection: true, rootURL: root)
+        if !automatic {
+            // Simulate the old wire shape, not a current marker with false set.
+            let markerURL = root.appendingPathComponent(child.meetingID).appendingPathComponent("active-capture.json")
+            var legacy = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: markerURL)) as? [String: Any])
+            legacy.removeValue(forKey: "automaticLanguageDetection")
+            try JSONSerialization.data(withJSONObject: legacy).write(to: markerURL)
+        }
+        if stopped {
+            let marker = try MeetingCaptureRecoveryStore.markStopped(meetingID: child.meetingID,
+                audioManifest: child.audioManifest, provisionalResult: MeetingResult(), rootURL: root)
+            #expect(marker.automaticLanguageDetection == automatic)
+        }
+        let pending = try #require(MeetingCaptureRecoveryStore.scan(rootURL: root).recoveries.first)
+        #expect(pending.automaticLanguageDetection == automatic)
+        let store = root.appendingPathComponent("automatic.store")
+        do {
+            let context = ModelContext(try diskContainer(at: store))
+            try MeetingCaptureRecoveryPersister.persist(pending, in: context, rootURL: root)
+        }
+        let context = ModelContext(try diskContainer(at: store))
+        let saved = try record(child.meetingID, in: context)
+        #expect(saved.automaticLanguageDetection == automatic)
+        #expect(saved.languageTag == "ko-KR")
+        #expect(saved.summaryLanguageTag == "fr-FR")
+        #expect(saved.asrSource == .savedAudio)
+        #expect(saved.appleRawResultData == nil)
+        #expect(saved.status == .transcriptFinalizationFailed)
+        #expect(saved.audioManifest == pending.manifest)
+        #expect(try record(artifact.meetingID, in: context).automaticLanguageDetection == automatic)
+        #expect(MeetingCaptureRecoveryStore.scan(rootURL: root).recoveries.isEmpty)
+    }
+
     @Test("active recovery stops at unreadable full-boundary tail and does not bridge a partial part")
     func activeTailAndGap() throws {
         let root = try temporaryRoot()
@@ -309,6 +393,20 @@ struct MeetingAudioTrackPersistenceTests {
             let pending = try #require(MeetingCaptureRecoveryStore.scan(rootURL: root).recoveries.first { $0.meetingID == childID })
             #expect(pending.manifest.parts.count == 1)
             #expect(pending.manifest.totalSamples == Int64(chunks) * 16_000)
+            #expect((pending.errorMessage != nil) == fullFirstPart)
+            let tail = audio.appendingPathComponent("part-01.flac")
+            #expect(try Data(contentsOf: tail) == Data("unfinished FLAC header".utf8))
+            #expect(FileManager.default.fileExists(atPath: root.appendingPathComponent(childID)
+                .appendingPathComponent("active-capture.json").path))
+            if fullFirstPart {
+                // The readable prefix may be saved, but its native tail failure
+                // must survive the active -> stopped journal transition.
+                try MeetingCaptureRecoveryStore.write(pending, rootURL: root)
+                let saved = try #require(MeetingCaptureRecoveryStore.scan(rootURL: root).recoveries
+                    .first { $0.meetingID == childID })
+                #expect(saved.errorMessage == pending.errorMessage)
+                #expect(try Data(contentsOf: tail) == Data("unfinished FLAC header".utf8))
+            }
         }
     }
 
@@ -451,8 +549,9 @@ struct MeetingAudioTrackPersistenceTests {
         try #require(context.fetch(FetchDescriptor<MeetingRecord>(predicate: #Predicate { $0.meetingID == id })).first)
     }
 
-    private func persist(_ artifact: MeetingCaptureArtifact, in context: ModelContext) throws -> MeetingRecord {
-        try MeetingInitialCapturePersister.persist(artifact: artifact, languageTag: "en-US", timezoneIdentifier: "UTC", in: context)
+    private func persist(_ artifact: MeetingCaptureArtifact, automatic: Bool = false, in context: ModelContext) throws -> MeetingRecord {
+        try MeetingInitialCapturePersister.persist(artifact: artifact, languageTag: "en-US", timezoneIdentifier: "UTC",
+            automaticLanguageDetection: automatic, in: context)
     }
 
     private func capture(root: URL) throws -> MeetingCaptureArtifact {

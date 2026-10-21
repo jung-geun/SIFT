@@ -11,16 +11,17 @@ export interface MeetingAuthVerifier {
 }
 
 export class FirebaseAdminAuthVerifier implements MeetingAuthVerifier {
-  private readonly auth: { verifyIdToken(token: string): Promise<{ uid: string }> };
+  private readonly auth: { verifyIdToken(token: string, checkRevoked: boolean): Promise<{ uid: string }> };
   private readonly appCheck: { verifyToken(token: string): Promise<unknown> };
 
-  constructor(firebaseAuth: { verifyIdToken(token: string): Promise<{ uid: string }> }, firebaseAppCheck: { verifyToken(token: string): Promise<unknown> }) {
+  constructor(firebaseAuth: { verifyIdToken(token: string, checkRevoked: boolean): Promise<{ uid: string }> }, firebaseAppCheck: { verifyToken(token: string): Promise<unknown> }) {
     this.auth = firebaseAuth;
     this.appCheck = firebaseAppCheck;
   }
 
   async verifyIdToken(token: string): Promise<VerifiedIdentity> {
-    const decoded = await this.auth.verifyIdToken(token);
+    // Signature/expiry verification alone still accepts revoked or disabled sessions.
+    const decoded = await this.auth.verifyIdToken(token, true);
     if (!decoded.uid) throw new Error('AUTH_INVALID');
     return { uid: decoded.uid };
   }

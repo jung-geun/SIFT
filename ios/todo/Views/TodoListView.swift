@@ -1,5 +1,8 @@
 import SwiftUI
 import SwiftData
+#if targetEnvironment(macCatalyst)
+import UIKit
+#endif
 
 // MARK: - Todo Row
 
@@ -10,14 +13,15 @@ private struct TodoRowView: View {
     var onPromote: (() -> Void)? = nil
 
     @State private var isHovered = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 5) {
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 8) {
                 Text(todo.title.isEmpty
                      ? AppLanguage.localized("todo.noTitle", defaultValue: "(제목 없음)", language: .current, comment: "Untitled to-do placeholder.")
                      : todo.title)
-                    .font(.body)
+                    .font(.body.weight(.medium))
                     .strikethrough(todo.isCompleted)
                     .foregroundStyle(todo.isCompleted ? .secondary : .primary)
 
@@ -44,8 +48,8 @@ private struct TodoRowView: View {
 
             if todo.hasSuccessfulAIAnalysis {
                 Image(systemName: "sparkles")
-                    .font(.caption2)
-                    .foregroundStyle(AppTheme.accent)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                     .accessibilityLabel("AI 정리 완료")
                     .accessibilityIdentifier("todo.row.aiAnalyzed")
             }
@@ -55,20 +59,20 @@ private struct TodoRowView: View {
                 Menu {
                     rowMenuActions
                 } label: {
-                    Image(systemName: "ellipsis.circle.fill")
-                        .font(.system(size: 16))
-                        .foregroundStyle(.secondary)
-                        .padding(4)
+                    Image(systemName: "ellipsis")
+                        .font(.body)
+                        .frame(minWidth: 44, minHeight: 44)
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
-                .transition(.opacity.animation(.easeInOut(duration: 0.15)))
+                .buttonStyle(.borderless)
+                .accessibilityLabel(AppLanguage.localized("todo.moreActions", defaultValue: "더 보기", language: .current, comment: "Secondary to-do toolbar menu accessibility label."))
+                .transition(reduceMotion ? .identity : .opacity)
             }
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 10)
         .contentShape(Rectangle())
         .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.15)) {
+            withAnimation(AppTheme.motion(reduceMotion: reduceMotion)) {
                 isHovered = hovering
             }
         }
@@ -271,6 +275,7 @@ enum TodoListOrdering {
 struct TodoListView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Query(sort: \Todo.createdAt, order: .reverse) private var todos: [Todo]
     @Query(sort: \Persona.updatedAt, order: .reverse) private var personas: [Persona]
     @Query private var auditEvents: [TaskAuditEvent]
@@ -300,7 +305,6 @@ struct TodoListView: View {
     let globalSearchMailAccess: MailboxCachedProviderAccess?
 
     @State private var showAddTodo = false
-    @State private var showSettings = false
     @State private var filter: TodoFilter = .active
     @State private var isPrioritizing = false
     @State private var showPrioritizingIndicator = false
@@ -314,7 +318,6 @@ struct TodoListView: View {
     @State private var showAFMError = false
     @State private var saveError: String?
     @State private var lastNotificationSignature = ""
-    @State private var replayTutorialAfterSettingsDismiss = false
 
     @State private var globalSearchText = ""
 #if DEBUG
@@ -441,6 +444,7 @@ struct TodoListView: View {
 
     var body: some View {
         NavigationStack {
+        AppTutorialObserving {
             Group {
                 if horizontalSizeClass == .regular && isBoardMode {
                     TodoBoardView(
@@ -492,16 +496,21 @@ struct TodoListView: View {
                 .navigationTitle("할 일")
                 .toolbar { toolbarContent }
                 .disableNavigationBarMinimization()
+                .safeAreaInset(edge: .top, spacing: 0) {
+                    if let tutorial {
+                        AppTutorialTipHost(tutorial: tutorial, screen: .todoList)
+                    }
+                }
             .overlay(alignment: .bottom) {
                 VStack(spacing: 8) {
                     if let updateInfo = appUpdate.updateInfo {
                         appUpdateBanner(updateInfo)
-                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                            .transition(reduceMotion ? .identity : .opacity)
                     }
                     VStack(spacing: 8) {
                         if syncMonitor.phase != .idle {
                             iCloudSyncBanner
-                                .transition(.move(edge: .bottom).combined(with: .opacity))
+                                .transition(reduceMotion ? .identity : .opacity)
                         }
                         if showPrioritizingIndicator || emailAutomation.isRunning {
                             prioritizingBanner
@@ -511,6 +520,7 @@ struct TodoListView: View {
                 }
                 .padding(.bottom, 8)
             }
+        }
         }
         .background {
             Button("실행 취소 (Control)") {
@@ -550,28 +560,10 @@ struct TodoListView: View {
         }) {
             AddTodoView()
         }
-        .sheet(isPresented: $showSettings, onDismiss: {
-            guard replayTutorialAfterSettingsDismiss else { return }
-            replayTutorialAfterSettingsDismiss = false
-            DispatchQueue.main.async {
-                NotificationCenter.default.post(name: .appTutorialRequested, object: nil)
-            }
-        }) {
-            NavigationStack { PersonaSettingsView() }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .settingsDismissRequested)) { _ in
-            replayTutorialAfterSettingsDismiss = true
-            showSettings = false
-        }
         .onReceive(NotificationCenter.default.publisher(for: .tutorialRunPrioritizeRequested)) { _ in
             let activeTodos = TodoPriorityScope.candidates(from: todos)
             guard !isPrioritizing, !activeTodos.isEmpty else { return }
             Task { await runPrioritize() }
-        }
-        .safeAreaInset(edge: .bottom, spacing: 12) {
-            if let tutorial {
-                AppTutorialTipHost(tutorial: tutorial, screen: .todoList)
-            }
         }
         .onAppear {
             tutorial?.handleTodoListAppeared()
@@ -581,20 +573,18 @@ struct TodoListView: View {
             await TodoEligibilityReconciler.shared.reconcileAll(todos)
             // 등록 대기열 만료 항목 자동 제거
             let now = Date()
-            for todo in todos where todo.triage == .review && !todo.isCompleted {
-                if let due = todo.dueDate, due < now {
-                    await TodoEligibilityReconciler.shared.reconcile(todo)
-                    TaskBehaviorRecorder.recordDeletion(of: todo, actor: .system, in: modelContext)
-                    modelContext.delete(todo)
-                }
+            let analysisCalendarIDs = CalendarService.taskAnalysisCalendarIDs()
+            for todo in todos where TodoEligibilityReconciler.isExpiredReview(
+                todo, now: now, selectedCalendarIDs: analysisCalendarIDs
+            ) {
+                await TodoEligibilityReconciler.shared.reconcile(todo)
+                TaskBehaviorRecorder.recordDeletion(of: todo, actor: .system, in: modelContext)
+                modelContext.delete(todo)
             }
-            // 반복 일정 자동 승급: 1주일 이내 마감 → 진행중으로
-            let weekAhead = now.addingTimeInterval(7 * 24 * 3600)
-            for todo in todos where todo.triage == .review && todo.isFixedSchedule && !todo.isCompleted {
-                if let due = todo.dueDate, due >= now, due <= weekAhead {
-                    await TodoEligibilityReconciler.shared.setTriage(.todo, for: todo)
-                }
-            }
+            // Only selected, unambiguous calendar suggestions can auto-promote.
+            await TodoEligibilityReconciler.shared.promoteUpcomingRecurringReviews(
+                in: todos, now: now, selectedCalendarIDs: analysisCalendarIDs
+            )
             await rescheduleNotificationsIfNeeded(force: true)
             // 앱 레벨에서 initialCount: 0으로 startObserving한 경우 기준치 보정
             syncMonitor.updateBaseline(totalSyncedCount)
@@ -606,8 +596,8 @@ struct TodoListView: View {
             syncMonitor.updateCount(totalSyncedCount)
         }
         .onChange(of: syncMonitor.phase) { _, newPhase in
-            guard SettingsStore.supportsICloud && iCloudSyncEnabled else { return }
-            // 첫 동기화 완료/타임아웃 후 페르소나 유무 판정
+            guard UserCloudSyncPolicy.isRequested, FullCloudSyncService.shared.hasFinishedInitialRestore else { return }
+            // Only confirmed import plus local restore may trigger post-sync setup.
             if (newPhase == .idle || newPhase == .completed) && !initialSyncDone {
                 initialSyncDone = true
                 DispatchQueue.main.async {
@@ -663,48 +653,35 @@ struct TodoListView: View {
                 }
             }
             .padding(.horizontal, 16)
-            .padding(.vertical, 10)
+            .padding(.vertical, 8)
         }
     }
 
     private func filterChip(_ f: TodoFilter) -> some View {
         let isSelected = filter == f
         return Button {
-            withAnimation(.easeInOut(duration: 0.15)) { filter = f }
+            withAnimation(AppTheme.motion(reduceMotion: reduceMotion)) { filter = f }
         } label: {
-            HStack(spacing: 4) {
+            HStack(spacing: 6) {
                 Text(f.localizedTitle)
                 if f == .overdue && overdueCount > 0 {
                     Text("\(overdueCount)")
-                        .font(.caption2.bold())
-                        .padding(.horizontal, 5)
-                        .background(AppTheme.destructive, in: Capsule())
-                        .foregroundStyle(.white)
+                        .monospacedDigit()
+                        .foregroundStyle(AppTheme.destructive)
                 }
                 if f == .review && reviewCount > 0 {
                     Text("\(reviewCount)")
-                        .font(.caption2.bold())
-                        .padding(.horizontal, 5)
-                        .background(AppTheme.warning, in: Capsule())
-                        .foregroundStyle(.white)
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
                 }
             }
             .font(.subheadline.weight(isSelected ? .semibold : .regular))
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(
-                isSelected ? AppTheme.accentSoft : AppTheme.neutralFill,
-                in: Capsule()
-            )
-            .foregroundStyle(isSelected ? AppTheme.accent : .secondary)
-
-            .overlay {
-                if isSelected {
-                    Capsule().stroke(AppTheme.accentStroke, lineWidth: 1)
-                }
-            }
+            .frame(minHeight: 32)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.bordered)
+        .buttonBorderShape(.roundedRectangle(radius: AppTheme.controlRadius))
+        .tint(isSelected ? AppTheme.accent : .secondary)
+        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
         .accessibilityIdentifier("todo.filter.\(f.rawValue)")
     }
 
@@ -713,7 +690,8 @@ struct TodoListView: View {
             Section {
                 filterBar
                     .listRowInsets(EdgeInsets())
-                    .listRowBackground(Color(uiColor: .systemGroupedBackground))
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
             }
 
             if filteredTodos.isEmpty {
@@ -745,7 +723,7 @@ struct TodoListView: View {
                 }
             }
         }
-        .listStyle(.insetGrouped)
+        .appListStyle()
         .refreshable {
             await CalendarService.shared.syncCalendarWithTodos(context: modelContext)
 #if DEBUG
@@ -767,16 +745,16 @@ struct TodoListView: View {
     }
 
     private var emptyState: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 16) {
             Image(systemName: emptyIcon)
-                .font(.system(size: 38, weight: .light))
+                .font(.largeTitle.weight(.light))
                 .foregroundStyle(.tertiary)
                 .accessibilityHidden(true)
             Text(emptyTitle)
                 .font(.title3.weight(.semibold))
             if !emptyDescription.isEmpty {
                 Text(emptyDescription)
-                    .font(.subheadline)
+                    .font(.body)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
             }
@@ -784,24 +762,22 @@ struct TodoListView: View {
                 Button {
                     openAddTodoIfAllowed()
                 } label: {
-                    Label(
-                        AppLanguage.localized("todo.add", defaultValue: "할 일 추가", language: .current, comment: "Add to-do button"),
-                        systemImage: "plus"
+                    Text(
+                        AppLanguage.localized("todo.add", defaultValue: "할 일 추가", language: .current, comment: "Add to-do button")
                     )
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 12)
-                    .background(AppTheme.accent, in: Capsule())
+                    .font(.body.weight(.semibold))
+                    .frame(minHeight: 32)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .buttonBorderShape(.roundedRectangle(radius: AppTheme.controlRadius))
                 .padding(.top, 8)
                 .disabled(!canOpenAddTodoDuringTutorial)
-                .appTutorialGlow(tutorial?.currentStep == .addTodoOpen)
             }
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 24)
+        .frame(maxWidth: 420)
+        .padding(.horizontal, 24)
+        .padding(.vertical, 32)
     }
 
     private var emptyTitle: String {
@@ -838,7 +814,7 @@ struct TodoListView: View {
     }
 
     private var prioritizingBanner: some View {
-        HStack(spacing: 10) {
+        HStack(alignment: .top, spacing: 12) {
             Group {
                 if let prioritizingProgressValue {
                     ProgressView(value: prioritizingProgressValue)
@@ -849,10 +825,10 @@ struct TodoListView: View {
                 }
             }
             .frame(width: 28)
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 6) {
                 Text(prioritizingStatusText)
                     .font(.subheadline.weight(.medium))
-                    .lineLimit(1)
+                    .fixedSize(horizontal: false, vertical: true)
                 Text(
                     AppLanguage.localized(
                         "todo.priority.backgroundWarning",
@@ -861,58 +837,58 @@ struct TodoListView: View {
                         comment: "Background analysis warning."
                     )
                 )
-                    .font(.caption2)
+                    .font(.caption)
                     .foregroundStyle(.secondary)
             }
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
-        .shadow(color: .black.opacity(0.15), radius: 8, y: 4)
+        .padding(.vertical, 16)
+        .frame(maxWidth: 560, alignment: .leading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous))
         .padding(.horizontal, 24)
     }
 
     private func appUpdateBanner(_ updateInfo: AppUpdateInfo) -> some View {
-        HStack(spacing: 10) {
+        HStack(alignment: .top, spacing: 12) {
             Image(systemName: "arrow.down.circle.fill")
                 .foregroundStyle(AppTheme.accent)
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 6) {
                 Text(updateInfo.title)
                     .font(.subheadline.weight(.medium))
-                    .lineLimit(1)
+                    .fixedSize(horizontal: false, vertical: true)
                 Text(updateInfo.message)
-                    .font(.caption2)
+                    .font(.caption)
                     .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 8)
             Button("업데이트") {
                 appUpdate.openAppStore()
             }
-            .font(.caption.weight(.semibold))
+            .font(.subheadline.weight(.semibold))
             .buttonStyle(.borderedProminent)
-            .controlSize(.small)
+            .controlSize(.large)
             Button {
                 appUpdate.dismissCurrentUpdate()
             } label: {
                 Image(systemName: "xmark")
-                    .font(.caption.weight(.bold))
+                    .font(.body)
+                    .frame(minWidth: 44, minHeight: 44)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.borderless)
             .foregroundStyle(.secondary)
             .accessibilityLabel("업데이트 알림 닫기")
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 9)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
-        .shadow(color: .black.opacity(0.12), radius: 8, y: 4)
-        .padding(.horizontal, 20)
+        .padding(16)
+        .frame(maxWidth: 560, alignment: .leading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous))
+        .padding(.horizontal, 24)
     }
 
     // MARK: - iCloud Sync Banner
 
     private var iCloudSyncBanner: some View {
-        HStack(spacing: 10) {
+        HStack(alignment: .top, spacing: 12) {
             Group {
                 switch syncMonitor.phase {
                 case .importing:
@@ -926,7 +902,7 @@ struct TodoListView: View {
                     EmptyView()
                 }
             }
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 6) {
                 switch syncMonitor.phase {
                 case .importing:
                     Text(AppLanguage.localized("todo.icloud.importing", defaultValue: "iCloud 데이터 동기화 중…", language: .current, comment: "iCloud sync progress."))
@@ -943,15 +919,15 @@ struct TodoListView: View {
                                 comment: "iCloud sync progress."
                             )
                         )
-                            .font(.caption2)
+                            .font(.caption)
                             .foregroundStyle(.secondary)
                     } else {
                         Text(AppLanguage.localized("todo.icloud.empty", defaultValue: "할 일, 페르소나, 설정 정보를 불러오고 있습니다", language: .current, comment: "iCloud sync progress."))
-                            .font(.caption2)
+                            .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                 case .completed:
-                    Text(AppLanguage.localized("todo.icloud.completed", defaultValue: "동기화 완료", language: .current, comment: "iCloud sync progress."))
+                    Text(AppLanguage.localized("todo.icloud.completed", defaultValue: "저장된 데이터 불러오기 완료", language: .current, comment: "Confirmed local restoration, not a promise that every upload completed."))
                         .font(.subheadline.weight(.medium))
                 case .idle:
                     EmptyView()
@@ -959,9 +935,9 @@ struct TodoListView: View {
             }
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
-        .shadow(color: .black.opacity(0.15), radius: 8, y: 4)
+        .padding(.vertical, 16)
+        .frame(maxWidth: 560, alignment: .leading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous))
         .padding(.horizontal, 24)
     }
 
@@ -969,7 +945,7 @@ struct TodoListView: View {
 
     private func completeButton(_ todo: Todo) -> some View {
         Button {
-            withAnimation { toggleComplete(todo) }
+            withAnimation(AppTheme.motion(reduceMotion: reduceMotion)) { toggleComplete(todo) }
         } label: {
             Label(
                 AppLanguage.localized(
@@ -986,7 +962,7 @@ struct TodoListView: View {
 
     private func deleteButton(_ todo: Todo) -> some View {
         Button(role: .destructive) {
-            withAnimation { deleteTodo(todo) }
+            withAnimation(AppTheme.motion(reduceMotion: reduceMotion)) { _ = deleteTodo(todo) }
         } label: {
             Label(
                 AppLanguage.localized("action.delete", defaultValue: "삭제", language: .current, comment: "Delete to-do action."),
@@ -998,7 +974,7 @@ struct TodoListView: View {
         undoStack.append(.promote(todoID: todo.id, previousTriage: todo.triageStatus))
         Task { @MainActor in
             await TodoEligibilityReconciler.shared.setTriage(.todo, for: todo)
-            _ = withAnimation {
+            _ = withAnimation(AppTheme.motion(reduceMotion: reduceMotion)) {
                 CalendarService.shared.applyAutoRegistration(for: todo)
             }
         }
@@ -1040,19 +1016,57 @@ struct TodoListView: View {
         return settingsButtonNeedsTutorialGlow
     }
 
-    private var prioritizeToolbarPlacement: ToolbarItemPlacement {
-        #if targetEnvironment(macCatalyst)
-        .primaryAction
-        #else
-        .navigationBarLeading
-        #endif
-    }
-
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        if horizontalSizeClass == .regular {
+        if horizontalSizeClass == .regular || tutorial?.currentStep == .autoSort {
             ToolbarItem(placement: .topBarTrailing) {
-                Menu {
+                #if targetEnvironment(macCatalyst)
+                // A UIKit host keeps the disabled control alive; native toolbar
+                // unboxing replaces its button with an image and leaves stale constraints.
+                CatalystToolbarButton(
+                    title: AppLanguage.localized("action.prioritize", defaultValue: "AI 정리", language: .current, comment: "Prioritize with AI action."),
+                    systemImage: "sparkles", accessibilityIdentifier: "todo.prioritizeButton"
+                ) {
+                    tutorial?.handlePrioritizeTriggered()
+                    Task { await runPrioritize() }
+                }
+                .disabled(isPrioritizing || !todos.contains { !$0.isCompleted && $0.triage == .todo })
+                .appTutorialGlow(tutorial?.currentStep == .autoSort)
+                #else
+                Button {
+                    tutorial?.handlePrioritizeTriggered()
+                    Task { await runPrioritize() }
+                } label: {
+                    Label(
+                        AppLanguage.localized("action.prioritize", defaultValue: "AI 정리", language: .current, comment: "Prioritize with AI action."),
+                        systemImage: "sparkles"
+                    )
+                    .appTutorialGlow(tutorial?.currentStep == .autoSort)
+                }
+                .disabled(isPrioritizing || !todos.contains { !$0.isCompleted && $0.triage == .todo })
+                .accessibilityIdentifier("todo.prioritizeButton")
+                #endif
+            }
+        }
+        ToolbarItem(placement: .topBarTrailing) {
+            Button {
+                openAddTodoIfAllowed()
+            } label: {
+                Label {
+                    Text(AppLanguage.localized("todo.add.accessibilityLabel", defaultValue: "새 할 일 추가", language: .current, comment: "Add to-do button."))
+                } icon: {
+                    Image(systemName: "plus")
+                        .appTutorialGlow(tutorial?.currentStep == .addTodoOpen)
+                }
+                .labelStyle(.iconOnly)
+            }
+            .disabled(!canOpenAddTodoDuringTutorial)
+            .accessibilityLabel(AppLanguage.localized("todo.add.accessibilityLabel", defaultValue: "새 할 일 추가", language: .current, comment: "Add to-do button."))
+            .accessibilityIdentifier("todo.addButton")
+        }
+        ToolbarItem(placement: .topBarTrailing) {
+            Menu {
+                if horizontalSizeClass == .regular {
                     if isBoardMode {
                         Section(AppLanguage.localized("board.columns.title", defaultValue: "보드 컬럼 표시", language: .current, comment: "Board columns")) {
                             Toggle(isOn: $showActiveColumn) {
@@ -1081,7 +1095,7 @@ struct TodoListView: View {
 
                     Section(AppLanguage.localized("board.viewMode.title", defaultValue: "보기 방식", language: .current, comment: "View mode toggle")) {
                         Button {
-                            withAnimation { isBoardMode = true }
+                            withAnimation(AppTheme.motion(reduceMotion: reduceMotion)) { isBoardMode = true }
                         } label: {
                             Label(
                                 AppLanguage.localized("board.viewMode.board", defaultValue: "보드 보기", language: .current, comment: "Board view mode"),
@@ -1090,7 +1104,7 @@ struct TodoListView: View {
                         }
 
                         Button {
-                            withAnimation { isBoardMode = false }
+                            withAnimation(AppTheme.motion(reduceMotion: reduceMotion)) { isBoardMode = false }
                         } label: {
                             Label(
                                 AppLanguage.localized("board.viewMode.list", defaultValue: "목록 보기", language: .current, comment: "List view mode"),
@@ -1102,7 +1116,7 @@ struct TodoListView: View {
                     if isBoardMode && !areAllColumnsVisible {
                         Section {
                             Button(AppLanguage.localized("board.columns.showAll", defaultValue: "모든 컬럼 표시", language: .current, comment: "Show all columns")) {
-                                withAnimation {
+                                withAnimation(AppTheme.motion(reduceMotion: reduceMotion)) {
                                     showActiveColumn = true
                                     showOverdueColumn = true
                                     showReviewColumn = true
@@ -1111,54 +1125,12 @@ struct TodoListView: View {
                             }
                         }
                     }
-                } label: {
-                    Image(systemName: (areAllColumnsVisible && !autoHideEmpty) ? "eye" : "eye.slash")
-                        .fontWeight(.medium)
+                    Divider()
                 }
-                .accessibilityLabel(AppLanguage.localized("board.visibility.label", defaultValue: "컬럼 표시 설정", language: .current, comment: "Column visibility menu"))
-                .accessibilityIdentifier("todo.boardVisibilityMenu")
-            }
-        }
 
-        ToolbarItem(placement: .topBarTrailing) {
-            Button {
-                openAddTodoIfAllowed()
-            } label: {
-                Label {
-                    Text(AppLanguage.localized("todo.add.accessibilityLabel", defaultValue: "새 할 일 추가", language: .current, comment: "Add to-do button."))
-                } icon: {
-                    Image(systemName: "plus.circle.fill")
-                        .font(.title3)
-                        .foregroundStyle(AppTheme.accent)
-                        .appTutorialGlow(tutorial?.currentStep == .addTodoOpen)
-                }
-                .labelStyle(.iconOnly)
-            }
-            .disabled(!canOpenAddTodoDuringTutorial)
-            .accessibilityLabel(AppLanguage.localized("todo.add.accessibilityLabel", defaultValue: "새 할 일 추가", language: .current, comment: "Add to-do button."))
-            .accessibilityIdentifier("todo.addButton")
-        }
-        if horizontalSizeClass == .regular || tutorial?.currentStep == .autoSort {
-            ToolbarItem(placement: prioritizeToolbarPlacement) {
-                Button {
-                    tutorial?.handlePrioritizeTriggered()
-                    Task { await runPrioritize() }
-                } label: {
-                    Label(
-                        AppLanguage.localized("action.prioritize", defaultValue: "AI 정리", language: .current, comment: "Prioritize with AI action."),
-                        systemImage: "sparkles"
-                    )
-                    .appTutorialGlow(tutorial?.currentStep == .autoSort)
-                }
-                .disabled(isPrioritizing || !todos.contains { !$0.isCompleted && $0.triage == .todo })
-                .accessibilityIdentifier("todo.prioritizeButton")
-            }
-        }
-        ToolbarItem(placement: .topBarTrailing) {
-            Menu {
                 Button {
                     guard canOpenSettingsDuringTutorial else { return }
-                    showSettings = true
+                    NotificationCenter.default.post(name: .settingsRequested, object: nil)
                 } label: {
                     Label(
                         AppLanguage.localized("todo.settings.accessibilityLabel", defaultValue: "설정", language: .current, comment: "Settings button."),
@@ -1185,6 +1157,7 @@ struct TodoListView: View {
                 Image(systemName: "ellipsis.circle")
                     .appTutorialGlow(settingsButtonNeedsTutorialGlow)
             }
+            .toggleStyle(.automatic) // Menus retain native checkmarks, not form switches.
             .disabled(tutorial?.isActive == true && !canOpenSettingsDuringTutorial)
             .accessibilityLabel(AppLanguage.localized("todo.moreActions", defaultValue: "더 보기", language: .current, comment: "Secondary to-do toolbar menu accessibility label."))
             .accessibilityIdentifier("todo.moreActionsMenu")
@@ -1201,7 +1174,7 @@ struct TodoListView: View {
 
     private func undoLastAction() {
         guard let lastAction = undoStack.popLast() else { return }
-        withAnimation {
+        withAnimation(AppTheme.motion(reduceMotion: reduceMotion)) {
             switch lastAction {
             case .toggleComplete(let todoID, let wasCompleted, let previousCompletedAt):
                 if let todo = todos.first(where: { $0.id == todoID }) {
@@ -1231,7 +1204,7 @@ struct TodoListView: View {
         let snapshot = TodoUndoSnapshot(from: todo)
         undoStack.append(.restore(snapshot: snapshot))
 
-        withAnimation {
+        withAnimation(AppTheme.motion(reduceMotion: reduceMotion)) {
             switch col {
             case .active:
                 if todo.isCompleted {
@@ -1240,7 +1213,7 @@ struct TodoListView: View {
                 if todo.triage != .todo {
                     Task { @MainActor in
                         await TodoEligibilityReconciler.shared.setTriage(.todo, for: todo)
-                        _ = withAnimation {
+                        _ = withAnimation(AppTheme.motion(reduceMotion: reduceMotion)) {
                             CalendarService.shared.applyAutoRegistration(for: todo)
                         }
                     }
@@ -1317,7 +1290,7 @@ struct TodoListView: View {
             actor: result.engine == .heuristic ? .system : .artificialIntelligence,
             in: modelContext
         )
-        guard result.needsNotification,
+        guard todo.aiNeedsNotification,
               let dueDate = todo.dueDate,
               todo.reminderOffsets.isEmpty,
               todo.manualPriority == nil else {
@@ -1355,20 +1328,19 @@ struct TodoListView: View {
         #if DEBUG
         print("[TodoListView] priority rules tapped, route=\(routingName), activeTodos=\(activeTodos.count)")
         #endif
-        withAnimation { showPrioritizingIndicator = true }
+        withAnimation(AppTheme.motion(reduceMotion: reduceMotion)) { showPrioritizingIndicator = true }
         defer {
             isPrioritizing = false
             prioritizingProgressValue = nil
-            withAnimation { showPrioritizingIndicator = false }
+            withAnimation(AppTheme.motion(reduceMotion: reduceMotion)) { showPrioritizingIndicator = false }
         }
 
         let persona = PersonaContext(
             types: personas.first?.personaTypes ?? [],
             description: personas.first?.descriptionText ?? ""
         )
-        let events = CalendarService.shared.isAuthorized
-            ? CalendarService.shared.upcomingEvents()
-            : []
+        let analysisSelection = CalendarService.taskAnalysisCalendarIDs()
+        let events = CalendarService.shared.taskAnalysisEvents()
 
         var appliedResultIDs = Set<UUID>()
         let service = RoutedIntelligenceEngine()
@@ -1379,6 +1351,7 @@ struct TodoListView: View {
                 events: events,
                 persona: persona,
                 progress: { event in
+                    guard CalendarService.taskAnalysisCalendarIDs() == analysisSelection else { return }
                     switch event {
                     case .preparing(let total, let provider):
                         prioritizingProgressValue = total > 0 ? 0 : nil
@@ -1407,6 +1380,7 @@ struct TodoListView: View {
                     }
                 }
             )
+            guard CalendarService.taskAnalysisCalendarIDs() == analysisSelection else { return }
             for result in results where !appliedResultIDs.contains(result.todoID) {
                 applyPriorityResult(result, in: activeTodos)
                 appliedResultIDs.insert(result.todoID)

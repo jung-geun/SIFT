@@ -7,7 +7,7 @@ import Foundation
 /// Pure and deterministic — testable without AFM/MLX.
 enum MeetingProofread {
     /// One inline diff token for display.
-    enum Token: Equatable {
+    nonisolated enum Token: Equatable {
         case same(String)
         case removed(String)
         case added(String)
@@ -15,7 +15,7 @@ enum MeetingProofread {
 
     /// A single segment the model corrected: original text, corrected text, and
     /// the word-level inline diff between them.
-    struct SegmentCorrection: Identifiable, Equatable {
+    nonisolated struct SegmentCorrection: Identifiable, Equatable {
         let id: String
         let startMs: Int64
         let before: String
@@ -23,7 +23,7 @@ enum MeetingProofread {
         let tokens: [Token]
     }
 
-    enum InlinePresentation: Equatable {
+    nonisolated enum InlinePresentation: Equatable {
         case hidden
         case unchanged(engineLabel: String)
         case changed(engineLabel: String, correctionsBySegmentID: [String: SegmentCorrection])

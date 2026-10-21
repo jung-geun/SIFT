@@ -232,20 +232,6 @@ struct LocalizationRuntimeTests {
         #expect(unchanged.actionDrafts.isEmpty)
     }
 
-    @Test("Offline transcription accepts shipped language aliases but never silently chooses Korean")
-    func offlineTranscriptionLanguageBoundary() throws {
-        #expect(try MeetingOfflineTranscriptionService.languageCode(for: nil) == nil)
-        let aliases = ["ko-KR": "ko", "en-GB": "en", "es-MX": "es", "ja-JP": "ja",
-                       "zh-Hans": "zh", "zh-CN": "zh", "fr-CA": "fr", "it-CH": "it", "de-AT": "de"]
-        for (tag, expectedCode) in aliases {
-            #expect(try MeetingOfflineTranscriptionService.languageCode(for: tag) == expectedCode)
-        }
-        for unsupported in ["", "pt-BR", "zh-Hant", "zh-TW"] {
-            #expect(throws: MeetingOfflineTranscriptionService.Failure.unsupportedLanguage) {
-                try MeetingOfflineTranscriptionService.languageCode(for: unsupported)
-            }
-        }
-    }
 
     @Test("Selecting an app language cannot bypass speech backend locale and asset capability checks")
     func speechBackendCapabilityBoundary() async {

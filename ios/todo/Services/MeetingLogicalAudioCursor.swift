@@ -1,9 +1,15 @@
 @preconcurrency import AVFoundation
 import Foundation
 
+/// Queue-confined readers used by both playback scheduling and waveform generation.
+nonisolated protocol MeetingPCMStreamCursor: AnyObject {
+    func seek(toLogicalSample logicalSample: Int64) throws
+    func nextPCMBuffer(maxFrames: Int64, outputFormat: AVAudioFormat) throws -> AVAudioPCMBuffer?
+}
+
 /// Independent overlap-trimmed reader for playback, waveform, and export.
 /// Each consumer creates its own cursor, so file positions never race.
-nonisolated final class MeetingLogicalAudioCursor {
+nonisolated final class MeetingLogicalAudioCursor: MeetingPCMStreamCursor {
     let manifest: MeetingAudioManifest
     private let directory: URL
     private var partOffset = 0
@@ -15,14 +21,7 @@ nonisolated final class MeetingLogicalAudioCursor {
     private let logicalStarts: [Int64]
 
     init(manifest: MeetingAudioManifest, rootURL: URL = AppDataContainer.meetingDirectory()) throws {
-        let ordered = manifest.parts.sorted { $0.partIndex < $1.partIndex }
-        guard ordered.enumerated().allSatisfy({ $0.element.partIndex == $0.offset }),
-              Set(ordered.map(\.partIndex)).count == ordered.count,
-              ordered.allSatisfy({ $0.ownedStartSample >= 0 && $0.ownedEndSample > $0.ownedStartSample && $0.partStartSample >= 0 }),
-              ordered.reduce(Int64(0), { total, part in total + (part.ownedEndSample - part.ownedStartSample) }) == manifest.totalSamples
-        else {
-            throw CursorError.invalidManifest(-1)
-        }
+        let ordered = try Self.validatedParts(for: manifest)
         self.manifest = manifest
         self.parts = ordered
         var starts = [Int64]()
@@ -32,8 +31,42 @@ nonisolated final class MeetingLogicalAudioCursor {
             acc += part.ownedEndSample - part.ownedStartSample
         }
         self.logicalStarts = starts
-        self.directory = rootURL
-            .appendingPathComponent(manifest.relativeDirectory, isDirectory: true)
+        let directory = rootURL.appendingPathComponent(manifest.relativeDirectory, isDirectory: true)
+        guard directory.resolvingSymlinksInPath().path.hasPrefix(rootURL.resolvingSymlinksInPath().path + "/") else {
+            throw CursorError.invalidManifest(-1)
+        }
+        self.directory = directory
+    }
+
+    deinit { file?.close() }
+
+    /// Validate before doing arithmetic or opening files. Owned ranges are contiguous;
+    /// physical parts may overlap, but each logical sample has exactly one owner.
+    static func validatedParts(for manifest: MeetingAudioManifest) throws -> [MeetingAudioPartManifest] {
+        let ordered = manifest.parts.sorted { $0.partIndex < $1.partIndex }
+        let components = manifest.relativeDirectory.split(separator: "/", omittingEmptySubsequences: false)
+        guard manifest.sampleRate > 0, manifest.sampleRate <= 384_000,
+              manifest.totalSamples >= 0,
+              !components.isEmpty, components.allSatisfy({ safePathComponent(String($0)) }) else {
+            throw CursorError.invalidManifest(-1)
+        }
+        var end: Int64 = 0
+        for (index, part) in ordered.enumerated() {
+            guard part.partIndex == index, safePathComponent(part.fileName),
+                  part.partStartSample >= 0, part.partStartSample <= part.ownedStartSample,
+                  part.ownedStartSample == end, part.ownedEndSample > end,
+                  part.ownedEndSample <= manifest.totalSamples else {
+                throw CursorError.invalidManifest(part.partIndex)
+            }
+            end = part.ownedEndSample
+        }
+        guard end == manifest.totalSamples else { throw CursorError.invalidManifest(-1) }
+        return ordered
+    }
+
+    private static func safePathComponent(_ value: String) -> Bool {
+        !value.isEmpty && value != "." && value != ".." &&
+            !value.contains("/") && !value.contains("\\") && !value.contains("\0")
     }
 
     /// Repositions the cursor to `logicalSample` in the concatenated owned
@@ -41,6 +74,7 @@ nonisolated final class MeetingLogicalAudioCursor {
     /// the cursor exhausted so `nextPCMBuffer` returns nil.
     func seek(toLogicalSample logicalSample: Int64) throws {
         let target = min(max(logicalSample, 0), manifest.totalSamples)
+        file?.close()
         file = nil
         remainingInPart = 0
         if target >= manifest.totalSamples {
@@ -60,12 +94,13 @@ nonisolated final class MeetingLogicalAudioCursor {
     /// `ownedFrameOffset` frames into the part's owned range.
     private func openPart(_ index: Int, ownedFrameOffset: Int64) throws {
         let part = parts[index]
-        let opened: AVAudioFile
-        do {
-            opened = try AVAudioFile(forReading: directory.appendingPathComponent(part.fileName))
-        } catch {
+        let url = directory.appendingPathComponent(part.fileName)
+        guard url.resolvingSymlinksInPath().path.hasPrefix(directory.resolvingSymlinksInPath().path + "/") else {
             throw CursorError.invalidManifest(part.partIndex)
         }
+        // Metadata errors belong to the cursor; native parse/open errors retain
+        // their original domain, code and userInfo for diagnosis and retry.
+        let opened = try AVAudioFile(forReading: url)
         guard opened.processingFormat.channelCount == 1,
               opened.processingFormat.sampleRate == Double(manifest.sampleRate) else {
             throw CursorError.invalidManifest(part.partIndex)
@@ -89,7 +124,7 @@ nonisolated final class MeetingLogicalAudioCursor {
                 try openPart(partOffset, ownedFrameOffset: 0)
             }
             guard let file else { continue }
-            let frames = min(maxFrames, remainingInPart)
+            let frames = min(maxFrames, remainingInPart, 65_536)
             guard let decoded = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(frames)) else {
                 throw CursorError.bufferAllocation
             }
@@ -97,6 +132,7 @@ nonisolated final class MeetingLogicalAudioCursor {
             guard Int64(decoded.frameLength) == frames else { throw CursorError.shortRead(partOffset) }
             remainingInPart -= frames
             if remainingInPart == 0 {
+                file.close()
                 self.file = nil
                 partOffset += 1
             }

@@ -11,8 +11,14 @@ class ReminderReceiver : BroadcastReceiver() {
         val todoId = intent.getStringExtra(EXTRA_TODO_ID).orEmpty()
         if (todoId.isBlank()) return
 
-        val title = intent.getStringExtra(EXTRA_TODO_TITLE).orEmpty()
         val dueAt = intent.getLongExtra(EXTRA_DUE_AT, -1L)
-        ReminderNotificationService(context).showReminderNotification(todoId, title, dueAt)
+        val pending = goAsync()
+        Thread {
+            try {
+                ReminderNotificationService(context.applicationContext).showReminderNotification(todoId, dueAt)
+            } finally {
+                pending.finish()
+            }
+        }.start()
     }
 }

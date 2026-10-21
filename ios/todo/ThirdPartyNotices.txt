@@ -9,6 +9,32 @@ every component or optional feature is active in this iOS app.
 
 
 ===== SIFT-LICENSE-SECTION =====
+Google Mobile Ads 13.11.0 / User Messaging Platform 3.1.0
+
+Google SDK binaries are not relicensed under SIFT's Apache-2.0 license.
+Google Mobile Ads SDK use is subject to the terms governing AdMob:
+https://developers.google.com/admob/terms
+https://adsense.google.com/adsense/terms
+
+The Swift Package Manager wrapper sources are Copyright 2021 Google LLC.
+They are licensed under the Apache License, Version 2.0; the complete
+Apache-2.0 license text appears in the SIFT LICENSE section below.
+Sources:
+https://github.com/googleads/swift-package-manager-google-mobile-ads/tree/13.11.0
+https://github.com/googleads/swift-package-manager-google-user-messaging-platform/tree/3.1.0
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use these wrapper sources except in compliance with the License.
+You may obtain a copy of the License at
+http://www.apache.org/licenses/LICENSE-2.0
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+
+===== SIFT-LICENSE-SECTION =====
 SIFT — LICENSE
 
 
@@ -231,12 +257,16 @@ modify the Apache License or replace any upstream license or notice.
 
 Third-party software
 --------------------
-Swift package sources and exact versions/revisions are recorded in:
+Remote Swift package sources and exact versions/revisions are recorded in:
   ios/todo.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
-These include FluidAudio, WhisperKit, MLX Swift, MLX Swift LM, Apple Swift
-packages, Hugging Face Swift packages, EventSource, and yyjson. Their own
-LICENSE/NOTICE files remain applicable. An SDK license does not establish the
-license of model weights downloaded through that SDK.
+Locally patched MLX Swift 0.32.3 and MLX Swift LM 3.32.3 sources, original
+licenses, upstream revisions and modification records are retained in:
+  ios/Vendor/mlx-swift/SIFT-PROVENANCE.json
+  ios/Vendor/mlx-swift-lm/SIFT-PROVENANCE.json
+Other dependencies include FluidAudio, WhisperKit, Apple Swift packages,
+Hugging Face Swift packages, EventSource, and yyjson. Their own LICENSE/NOTICE
+files remain applicable. An SDK license does not establish the license of
+model weights downloaded through that SDK.
 The iOS app includes full pinned SDK license and notice texts, including
 vendored and embedded-library attributions, in ios/todo/ThirdPartyNotices.txt.
 Open them in the app via Settings > App Info > Open-Source Licenses.
@@ -1259,8 +1289,8 @@ THE SOFTWARE.
 
 ===== SIFT-LICENSE-SECTION =====
 mlx-swift/LICENSE
-Version: 0.31.4
-Source: https://github.com/ml-explore/mlx-swift/tree/dc43e62d7055353c7f99fa071a4e71d29dfddc44
+Version: 0.32.3 (SIFT deployment/concurrency/index-width patches; source and provenance in ios/Vendor/mlx-swift)
+Source: https://github.com/ml-explore/mlx-swift/tree/19601207e9a0de51e03ee6ec0c3c5f3784275075
 
 MIT License
 
@@ -1287,8 +1317,8 @@ SOFTWARE.
 
 ===== SIFT-LICENSE-SECTION =====
 mlx-swift/Source/Cmlx/mlx-c/LICENSE
-Version: 0.31.4
-Source: https://github.com/ml-explore/mlx-swift/tree/dc43e62d7055353c7f99fa071a4e71d29dfddc44
+Version: 0.32.3
+Source: https://github.com/ml-explore/mlx-swift/tree/19601207e9a0de51e03ee6ec0c3c5f3784275075
 
 MIT License
 
@@ -1315,8 +1345,8 @@ SOFTWARE.
 
 ===== SIFT-LICENSE-SECTION =====
 mlx-swift/Source/Cmlx/mlx/LICENSE
-Version: 0.31.4
-Source: https://github.com/ml-explore/mlx-swift/tree/dc43e62d7055353c7f99fa071a4e71d29dfddc44
+Version: 0.32.3
+Source: https://github.com/ml-explore/mlx-swift/tree/19601207e9a0de51e03ee6ec0c3c5f3784275075
 
 MIT License
 
@@ -1343,8 +1373,8 @@ SOFTWARE.
 
 ===== SIFT-LICENSE-SECTION =====
 mlx-swift/Source/Cmlx/metal-cpp/LICENSE.txt
-Version: 0.31.4
-Source: https://github.com/ml-explore/mlx-swift/tree/dc43e62d7055353c7f99fa071a4e71d29dfddc44
+Version: 0.32.3
+Source: https://github.com/ml-explore/mlx-swift/tree/19601207e9a0de51e03ee6ec0c3c5f3784275075
 
 
                                  Apache License
@@ -1552,8 +1582,8 @@ Source: https://github.com/ml-explore/mlx-swift/tree/dc43e62d7055353c7f99fa071a4
 
 ===== SIFT-LICENSE-SECTION =====
 mlx-swift/Source/Cmlx/json/LICENSE.MIT
-Version: 0.31.4
-Source: https://github.com/ml-explore/mlx-swift/tree/dc43e62d7055353c7f99fa071a4e71d29dfddc44
+Version: 0.32.3
+Source: https://github.com/ml-explore/mlx-swift/tree/19601207e9a0de51e03ee6ec0c3c5f3784275075
 
 MIT License 
 
@@ -1580,8 +1610,8 @@ SOFTWARE.
 
 ===== SIFT-LICENSE-SECTION =====
 mlx-swift/Source/Cmlx/fmt/LICENSE
-Version: 0.31.4
-Source: https://github.com/ml-explore/mlx-swift/tree/dc43e62d7055353c7f99fa071a4e71d29dfddc44
+Version: 0.32.3
+Source: https://github.com/ml-explore/mlx-swift/tree/19601207e9a0de51e03ee6ec0c3c5f3784275075
 
 Copyright (c) 2012 - present, Victor Zverovich and {fmt} contributors
 
@@ -1614,8 +1644,8 @@ without including the above copyright and permission notices.
 
 ===== SIFT-LICENSE-SECTION =====
 mlx-swift-lm/LICENSE
-Version: 3.31.3
-Source: https://github.com/ml-explore/mlx-swift-lm/tree/1c05248bb0899e2a7a4962b84d319cf12f4e12aa
+Version: 3.32.3 (SIFT deployment/text-decoding patches; source and provenance in ios/Vendor/mlx-swift-lm)
+Source: https://github.com/ml-explore/mlx-swift-lm/tree/3b339ad6e3b3f44c8121ecff5131c7fd55e075e6
 
 MIT License
 
@@ -3230,8 +3260,8 @@ Source: https://github.com/apple/swift-numerics/tree/0c0290ff6b24942dadb83a929ff
 
 ===== SIFT-LICENSE-SECTION =====
 swift-syntax/LICENSE.txt
-Version: 600.0.1
-Source: https://github.com/swiftlang/swift-syntax/tree/0687f71944021d616d34d922343dcef086855920
+Version: 603.0.2
+Source: https://github.com/swiftlang/swift-syntax/tree/79e4b74a295b6eb74a8b585e3a39d29e70c1dbd1
 
                                  Apache License
                            Version 2.0, January 2004

@@ -9,8 +9,6 @@ import com.google.android.gms.auth.api.signin.GoogleSignInClient
 import com.google.android.gms.auth.api.signin.GoogleSignInOptions
 import com.google.android.gms.common.api.ApiException
 import org.json.JSONObject
-import java.net.HttpURLConnection
-import java.net.URL
 import java.security.SecureRandom
 import java.time.Instant
 import javax.crypto.Cipher
@@ -18,6 +16,9 @@ import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.PBEKeySpec
 import javax.crypto.spec.SecretKeySpec
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -41,12 +42,13 @@ private data class FirebaseSession(
     val email: String,
 )
 
-private data class EncryptedSnapshot(
+internal data class EncryptedSnapshot(
     val ciphertext: String,
     val iv: String,
     val salt: String,
     val iterations: Int,
-    val kdf: String = "PBKDF2WithHmacSHA256"
+    val kdf: String = "PBKDF2WithHmacSHA256",
+    val version: Int = 1,
 )
 
 object FirebaseSyncService {
@@ -58,8 +60,8 @@ object FirebaseSyncService {
 
     fun signInIntent(context: Context): Intent = client(context).signInIntent
 
-    fun signOut(context: Context) {
-        client(context).signOut()
+    suspend fun signOut(context: Context) {
+        client(context).signOutAndAwait()
     }
 
     fun handleSignInIntent(data: Intent?): Result<String> = runCatching {
@@ -76,6 +78,11 @@ object FirebaseSyncService {
             ?.takeIf { !it.idToken.isNullOrBlank() }
             ?.email
 
+    fun signedInAccountId(context: Context): String? =
+        GoogleSignIn.getLastSignedInAccount(context)
+            ?.takeIf { !it.idToken.isNullOrBlank() }
+            ?.let { it.id ?: it.email }
+
     fun hasFirebaseAccess(context: Context): Boolean =
         GoogleSignIn.getLastSignedInAccount(context)?.idToken?.isNotBlank() == true
 
@@ -83,41 +90,46 @@ object FirebaseSyncService {
         context: Context,
         snapshotJson: String,
         passphrase: String,
-    ): FirebaseSyncResult = withContext(Dispatchers.IO) {
-        val session = firebaseSession(context)
-        val encrypted = encrypt(snapshotJson, passphrase)
-        val body = firestorePayload(session, encrypted)
-        val url = firestoreDocumentUrl(projectId(context), session.uid)
-        val connection = authorizedJsonConnection(url, session.idToken, "PATCH")
-        connection.outputStream.bufferedWriter().use { it.write(body.toString()) }
-        drainSuccess(connection, "Firebase Firestore 업로드 실패")
-        FirebaseSyncResult(email = session.email, syncedAt = System.currentTimeMillis())
+    ): FirebaseSyncResult {
+        currentCoroutineContext().ensureActive()
+        val account = requireAccount(context)
+        val accountId = requireNotNull(account.id ?: account.email) { "Google 계정 정보를 찾을 수 없습니다." }
+        return withContext(Dispatchers.IO) {
+            ensureAccount(context, accountId)
+            val session = firebaseSession(context, account)
+            ensureAccount(context, accountId)
+            val encrypted = encrypt(snapshotJson, passphrase)
+            ensureAccount(context, accountId)
+            val body = firestorePayload(session, encrypted)
+            val url = firestoreDocumentUrl(projectId(context), session.uid)
+            GoogleServiceHttp.request(
+                url, "PATCH", "Firebase Firestore 업로드 실패", session.idToken, body.toString(), readResponse = false,
+            )
+            ensureAccount(context, accountId)
+            FirebaseSyncResult(email = session.email, syncedAt = System.currentTimeMillis())
+        }
     }
 
     suspend fun downloadSnapshot(
         context: Context,
         passphrase: String,
-    ): String? = withContext(Dispatchers.IO) {
-        val session = firebaseSession(context)
-        val url = firestoreDocumentUrl(projectId(context), session.uid)
-        val connection = authorizedJsonConnection(url, session.idToken, "GET")
-        val code = connection.responseCode
-        if (code == 404) return@withContext null
-        val payload = if (code in 200..299) {
-            connection.inputStream.bufferedReader().use { it.readText() }
-        } else {
-            val error = connection.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
-            error("Firebase Firestore 다운로드 실패 ($code): $error")
+    ): String? {
+        currentCoroutineContext().ensureActive()
+        val account = requireAccount(context)
+        val accountId = requireNotNull(account.id ?: account.email) { "Google 계정 정보를 찾을 수 없습니다." }
+        return withContext(Dispatchers.IO) {
+            ensureAccount(context, accountId)
+            val session = firebaseSession(context, account)
+            ensureAccount(context, accountId)
+            val url = firestoreDocumentUrl(projectId(context), session.uid)
+            val payload = GoogleServiceHttp.request(
+                url, "GET", "Firebase Firestore 다운로드 실패", session.idToken, allowNotFound = true,
+            )
+            ensureAccount(context, accountId)
+            if (payload == null) return@withContext null
+            val encrypted = parseEncryptedSnapshot(JSONObject(payload).getJSONObject("fields"))
+            decrypt(encrypted, passphrase).also { ensureAccount(context, accountId) }
         }
-        val fields = JSONObject(payload).optJSONObject("fields") ?: return@withContext null
-        val encrypted = EncryptedSnapshot(
-            ciphertext = fields.getJSONObject("ciphertext").getString("stringValue"),
-            iv = fields.getJSONObject("iv").getString("stringValue"),
-            salt = fields.getJSONObject("salt").getString("stringValue"),
-            iterations = fields.getJSONObject("iterations").optInt("integerValue", FIREBASE_ENCRYPTION_ITERATIONS),
-            kdf = fields.optJSONObject("kdf")?.getString("stringValue").takeUnless { it.isNullOrBlank() } ?: "PBKDF2WithHmacSHA256"
-        )
-        return@withContext decrypt(encrypted, passphrase)
     }
 
     private fun signInOptions(context: Context): GoogleSignInOptions {
@@ -148,14 +160,28 @@ object FirebaseSyncService {
         return context.getString(resourceId)
     }
 
-    private suspend fun firebaseSession(context: Context): FirebaseSession = withContext(Dispatchers.IO) {
+    private suspend fun ensureAccount(context: Context, expectedId: String) {
+        currentCoroutineContext().ensureActive()
+        if (signedInAccountId(context) != expectedId) throw CancellationException("Google account changed")
+    }
+
+    private fun requireAccount(context: Context): GoogleSignInAccount =
+        requireNotNull(GoogleSignIn.getLastSignedInAccount(context)?.takeIf { !it.idToken.isNullOrBlank() }) {
+            "Google ID 토큰이 없습니다. 다시 로그인해 주세요."
+        }
+
+    private suspend fun firebaseSession(context: Context, account: GoogleSignInAccount): FirebaseSession {
+        val accountId = requireNotNull(account.id ?: account.email) { "Google 계정 정보를 찾을 수 없습니다." }
+        ensureAccount(context, accountId)
         require(isConfigured(context)) {
             "Firebase Google 로그인 설정이 없어 동기화를 시작할 수 없습니다. google-services.json 에 OAuth client 와 SHA-1 등록이 필요합니다."
         }
-        val account = requireNotNull(GoogleSignIn.getLastSignedInAccount(context)) {
-            "Google 계정이 연결되지 않았습니다."
+        val refreshedAccount = awaitGoogleTask(client(context).silentSignIn())
+        ensureAccount(context, accountId)
+        if ((refreshedAccount.id ?: refreshedAccount.email) != accountId) {
+            throw CancellationException("Google account changed during token refresh")
         }
-        val googleIdToken = requireNotNull(account.idToken?.takeIf { it.isNotBlank() }) {
+        val googleIdToken = requireNotNull(refreshedAccount.idToken?.takeIf { it.isNotBlank() }) {
             "Google ID 토큰이 없습니다. 다시 로그인해 주세요."
         }
 
@@ -167,13 +193,15 @@ object FirebaseSyncService {
         }
 
         val endpoint = "$FIREBASE_SIGN_IN_ENDPOINT?key=${apiKey(context)}"
-        val connection = jsonConnection(endpoint, "POST")
-        connection.outputStream.bufferedWriter().use { it.write(body.toString()) }
-        val response = readJson(connection, "Firebase Auth 로그인 실패")
-        FirebaseSession(
+        ensureAccount(context, accountId)
+        val response = JSONObject(requireNotNull(GoogleServiceHttp.request(
+            endpoint, "POST", "Firebase Auth 로그인 실패", body = body.toString(),
+        )))
+        ensureAccount(context, accountId)
+        return FirebaseSession(
             uid = response.getString("localId"),
             idToken = response.getString("idToken"),
-            email = response.optString("email", account.email.orEmpty()),
+            email = response.optString("email", refreshedAccount.email.orEmpty()),
         )
     }
 
@@ -183,7 +211,7 @@ object FirebaseSyncService {
     private fun firestorePayload(session: FirebaseSession, encrypted: EncryptedSnapshot): JSONObject =
         JSONObject().apply {
             put("fields", JSONObject().apply {
-                put("version", JSONObject().put("integerValue", "1"))
+                put("version", JSONObject().put("integerValue", encrypted.version.toString()))
                 put("provider", JSONObject().put("stringValue", "firebase-google"))
                 put("email", JSONObject().put("stringValue", session.email))
                 put("updatedAt", JSONObject().put("timestampValue", Instant.now().toString()))
@@ -195,7 +223,7 @@ object FirebaseSyncService {
             })
         }
 
-    private fun encrypt(plainText: String, passphrase: String): EncryptedSnapshot {
+    internal fun encrypt(plainText: String, passphrase: String): EncryptedSnapshot {
         require(passphrase.length >= 8) { "암호화 비밀번호는 8자 이상이어야 합니다." }
         val salt = ByteArray(FIREBASE_SALT_BYTES).also { SecureRandom().nextBytes(it) }
         val iv = ByteArray(FIREBASE_GCM_IV_BYTES).also { SecureRandom().nextBytes(it) }
@@ -212,59 +240,43 @@ object FirebaseSyncService {
         )
     }
 
-    private fun decrypt(encrypted: EncryptedSnapshot, passphrase: String): String {
+    internal fun parseEncryptedSnapshot(fields: JSONObject): EncryptedSnapshot = EncryptedSnapshot(
+        ciphertext = fields.getJSONObject("ciphertext").getString("stringValue"),
+        iv = fields.getJSONObject("iv").getString("stringValue"),
+        salt = fields.getJSONObject("salt").getString("stringValue"),
+        iterations = fields.getJSONObject("iterations").getString("integerValue").toInt(),
+        kdf = fields.getJSONObject("kdf").getString("stringValue"),
+        version = fields.getJSONObject("version").getString("integerValue").toInt(),
+    )
+
+    internal fun decrypt(encrypted: EncryptedSnapshot, passphrase: String): String {
         require(passphrase.length >= 8) { "암호화 비밀번호는 8자 이상이어야 합니다." }
+        require(encrypted.version == 1 && encrypted.kdf == "PBKDF2WithHmacSHA256" &&
+            encrypted.iterations == FIREBASE_ENCRYPTION_ITERATIONS) { "지원하지 않는 Firebase 암호화 형식입니다." }
         val salt = base64Decode(encrypted.salt)
         val iv = base64Decode(encrypted.iv)
-        val key = deriveKey(passphrase, salt, encrypted.iterations)
+        val ciphertext = base64Decode(encrypted.ciphertext)
+        require(salt.size == FIREBASE_SALT_BYTES && iv.size == FIREBASE_GCM_IV_BYTES &&
+            ciphertext.size >= FIREBASE_GCM_TAG_BITS / 8) { "잘못된 Firebase 암호화 데이터입니다." }
+        val key = deriveKey(passphrase, salt, FIREBASE_ENCRYPTION_ITERATIONS)
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(FIREBASE_GCM_TAG_BITS, iv))
-        val plaintext = cipher.doFinal(base64Decode(encrypted.ciphertext))
+        val plaintext = cipher.doFinal(ciphertext)
         return plaintext.toString(Charsets.UTF_8)
     }
 
     private fun deriveKey(passphrase: String, salt: ByteArray, iterations: Int): SecretKeySpec {
         val factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
         val spec = PBEKeySpec(passphrase.toCharArray(), salt, iterations, FIREBASE_KEY_LENGTH)
-        return SecretKeySpec(factory.generateSecret(spec).encoded, "AES")
+        return try {
+            SecretKeySpec(factory.generateSecret(spec).encoded, "AES")
+        } finally {
+            spec.clearPassword()
+        }
     }
 
     private fun base64(bytes: ByteArray): String = Base64.encodeToString(bytes, Base64.NO_WRAP)
 
     private fun base64Decode(value: String): ByteArray = Base64.decode(value, Base64.DEFAULT)
 
-    private fun authorizedJsonConnection(url: String, bearerToken: String, method: String): HttpURLConnection =
-        jsonConnection(url, method).apply {
-            setRequestProperty("Authorization", "Bearer $bearerToken")
-        }
-
-    private fun jsonConnection(url: String, method: String): HttpURLConnection =
-        (URL(url).openConnection() as HttpURLConnection).apply {
-            requestMethod = method
-            doInput = true
-            doOutput = method != "GET"
-            setRequestProperty("Accept", "application/json")
-            setRequestProperty("Content-Type", "application/json; charset=UTF-8")
-        }
-
-    private fun readJson(connection: HttpURLConnection, label: String): JSONObject {
-        val code = connection.responseCode
-        val text = if (code in 200..299) {
-            connection.inputStream.bufferedReader().use { it.readText() }
-        } else {
-            val errorText = connection.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
-            error("$label ($code): $errorText")
-        }
-        return JSONObject(text)
-    }
-
-    private fun drainSuccess(connection: HttpURLConnection, label: String) {
-        val code = connection.responseCode
-        if (code in 200..299) {
-            connection.inputStream.bufferedReader().use { it.readText() }
-            return
-        }
-        val errorText = connection.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
-        error("$label ($code): $errorText")
-    }
 }

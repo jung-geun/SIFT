@@ -12,7 +12,6 @@ private struct MailConnectionValidation: Sendable {
 struct EmailDetailView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.appTutorialState) private var tutorial
-    @AppStorage("pieroot.todo.iCloudSyncEnabled") private var iCloudSyncEnabled = false
     @AppStorage("pieroot.todo.lastEmailFetchDate") private var lastEmailFetchTimestamp: Double = 0
 
     @State private var isGmailAuthenticated = false
@@ -387,7 +386,6 @@ struct EmailDetailView: View {
                             .font(.caption)
                             .buttonStyle(.bordered)
                             .controlSize(.small)
-                            .tint(.orange)
                         }
                     }
                 } header: {
@@ -397,6 +395,7 @@ struct EmailDetailView: View {
                 }
             }
         }
+        .appFormStyle()
         .navigationTitle("이메일 연동")
         .navigationBarTitleDisplayMode(.inline)
         .task {
@@ -440,7 +439,7 @@ struct EmailDetailView: View {
         .onDisappear {
             tutorial?.handleEmailDetailClosed()
         }
-        .safeAreaInset(edge: .bottom, spacing: 12) {
+        .safeAreaInset(edge: .top, spacing: 0) {
             if let tutorial {
                 AppTutorialTipHost(tutorial: tutorial, screen: .emailDetail)
             }
@@ -490,7 +489,7 @@ struct EmailDetailView: View {
             )
         HStack {
             Label(localizedTitle, systemImage: icon)
-                .symbolRenderingMode(.multicolor)
+                .symbolRenderingMode(.monochrome)
             Spacer()
             if isValidating {
                 ProgressView().controlSize(.small)
@@ -581,12 +580,7 @@ struct EmailDetailView: View {
     }
 
     private func saveSetting<T>(key: String, value: T, onChange: ((T) -> Void)? = nil) {
-        let isLocal = !SettingsStore.supportsICloud || !iCloudSyncEnabled || SettingsStore.shared.isLocal(key: key)
-        if isLocal {
-            SettingsStore.shared.setLocal(key, value: value)
-        } else {
-            SettingsStore.shared.setGlobal(key, value: value)
-        }
+        SettingsStore.shared.set(key, value: value)
         onChange?(value)
     }
 

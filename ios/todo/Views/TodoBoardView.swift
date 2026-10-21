@@ -43,28 +43,23 @@ enum BoardColumnType: String, CaseIterable, Identifiable {
     }
 }
 
-// MARK: - Notion Style Board Card
+// MARK: - Board Card
 
 private struct TodoDragPreview: View {
     let todo: Todo
     let col: BoardColumnType
 
     var body: some View {
-        HStack(spacing: 8) {
-            Circle()
-                .fill(col.themeColor)
-                .frame(width: 8, height: 8)
+        Label {
             Text(todo.title.isEmpty ? AppLanguage.localized("todo.noTitle", defaultValue: "(제목 없음)", language: .current, comment: "Untitled to-do placeholder.") : todo.title)
-                .font(.subheadline.weight(.semibold))
+                .font(.headline)
                 .lineLimit(1)
+        } icon: {
+            Image(systemName: col.iconName)
+                .foregroundStyle(.secondary)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .background(
-            RoundedRectangle(cornerRadius: 10)
-                .fill(Color(uiColor: .secondarySystemGroupedBackground))
-                .shadow(color: .black.opacity(0.25), radius: 8, y: 4)
-        )
+        .padding(AppTheme.Spacing.item)
+        .background(AppTheme.surface, in: RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous))
     }
 }
 
@@ -75,85 +70,75 @@ struct TodoBoardCardView: View {
     var onPromote: (() -> Void)? = nil
 
     @State private var isHovered = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .top, spacing: 8) {
-                RoundedRectangle(cornerRadius: 2)
-                    .fill(priorityColor)
-                    .frame(width: 3.5, height: 16)
-                    .padding(.top, 2)
+        // Keep navigation and the action menu as sibling controls, not nested buttons.
+        HStack(alignment: .top, spacing: 0) {
+            NavigationLink(value: todo) {
+                VStack(alignment: .leading, spacing: AppTheme.Spacing.compact) {
+                    Text(todo.title.isEmpty
+                         ? AppLanguage.localized("todo.noTitle", defaultValue: "(제목 없음)", language: .current, comment: "Untitled to-do placeholder.")
+                         : todo.title)
+                        .font(.headline)
+                        .strikethrough(todo.isCompleted)
+                        .foregroundStyle(todo.isCompleted ? .secondary : .primary)
+                        .lineLimit(3)
+                        .multilineTextAlignment(.leading)
 
-                Text(todo.title.isEmpty
-                     ? AppLanguage.localized("todo.noTitle", defaultValue: "(제목 없음)", language: .current, comment: "Untitled to-do placeholder.")
-                     : todo.title)
-                    .font(.subheadline.weight(.medium))
-                    .strikethrough(todo.isCompleted)
-                    .foregroundStyle(todo.isCompleted ? .secondary : .primary)
-                    .lineLimit(2)
-                    .multilineTextAlignment(.leading)
+                    if hasMetadata {
+                        VStack(alignment: .leading, spacing: 6) {
+                            if let label = todo.dueDateLabel {
+                                Label(label, systemImage: "clock")
+                                    .foregroundStyle(todo.isOverdue ? AppTheme.destructive : .secondary)
+                            }
 
-                Spacer(minLength: 4)
+                            sourceMetadata
 
-                sourceBadge
+                            if todo.todoSource == .email, !todo.sourceSender.isEmpty {
+                                Text(todo.sourceSender)
+                                    .lineLimit(2)
+                            }
 
-                Menu {
-                    cardMenuActions
-                } label: {
-                    Image(systemName: "ellipsis")
-                        .font(.system(size: 13, weight: .bold))
+                            if !todo.tags.isEmpty {
+                                Label(todo.tags.joined(separator: ", "), systemImage: "tag")
+                                    .lineLimit(2)
+                            }
+                        }
+                        .font(.subheadline)
                         .foregroundStyle(.secondary)
-                        .padding(4)
-                        .background(Color.primary.opacity(isHovered ? 0.08 : 0), in: Circle())
-                }
-                .buttonStyle(.plain)
-                .opacity(isHovered ? 1.0 : 0.0)
-                .animation(.easeInOut(duration: 0.15), value: isHovered)
-            }
-
-            if todo.todoSource == .email, !todo.sourceSender.isEmpty {
-                Label(todo.sourceSender, systemImage: "person.crop.circle")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-
-            HStack(spacing: 6) {
-                if let label = todo.dueDateLabel {
-                    Label(label, systemImage: "clock")
-                        .font(.caption2)
-                        .foregroundStyle(todo.isOverdue ? AppTheme.destructive : .secondary)
-                }
-                if !todo.tags.isEmpty {
-                    Label(todo.tags.prefix(1).joined(), systemImage: "tag")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-
-                Spacer()
-
-                if !todo.priorityReason.isEmpty && todo.manualPriority == nil {
-                    if todo.aiPersonaFit {
-                        Image(systemName: "sparkles")
-                            .font(.caption2)
-                            .foregroundStyle(AppTheme.accent)
+                        .multilineTextAlignment(.leading)
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.leading, 16)
+                .padding(.vertical, 12)
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+
+            Menu {
+                cardMenuActions
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.body)
+                    .foregroundStyle(.secondary)
+                    .frame(minWidth: 44, minHeight: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .menuIndicator(.hidden)
+            .accessibilityLabel(AppLanguage.localized("todo.moreActions", defaultValue: "더 보기", language: .current, comment: "Secondary to-do toolbar menu accessibility label."))
+            .padding(.trailing, 4)
         }
-        .padding(12)
+        .frame(minHeight: 52)
         .background(
-            RoundedRectangle(cornerRadius: 10)
-                .fill(Color(uiColor: .secondarySystemGroupedBackground))
+            isHovered ? AppTheme.insetSurface : AppTheme.surface,
+            in: RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous)
         )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(isHovered ? AppTheme.accent.opacity(0.35) : Color.primary.opacity(0.06), lineWidth: 1)
-        )
-        .shadow(color: .black.opacity(isHovered ? 0.08 : 0.02), radius: isHovered ? 4 : 1, y: 1)
-        .contentShape(Rectangle())
+        .contentShape(RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous))
         .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.15)) {
+            withAnimation(AppTheme.motion(reduceMotion: reduceMotion)) {
                 isHovered = hovering
             }
         }
@@ -162,8 +147,22 @@ struct TodoBoardCardView: View {
         }
     }
 
+    private var hasMetadata: Bool {
+        todo.dueDate != nil || todo.todoSource != .manual || !todo.tags.isEmpty
+    }
+
     @ViewBuilder
     private var cardMenuActions: some View {
+        NavigationLink(value: todo) {
+            Label(
+                AppLanguage.localized("action.details", defaultValue: "세부 정보", language: .current, comment: "Open to-do details for viewing and editing."),
+                systemImage: "info.circle"
+            )
+        }
+        .accessibilityIdentifier("todo.board.openDetails")
+
+        Divider()
+
         if todo.triage == .review {
             Button {
                 onPromote?()
@@ -199,47 +198,22 @@ struct TodoBoardCardView: View {
         }
     }
 
-    private var priorityColor: Color {
-        if todo.triage == .review { return deadlineColor }
-        switch todo.effectivePriority {
-        case 0.8...: return AppTheme.destructive
-        case 0.6...: return AppTheme.warning
-        case 0.4...: return AppTheme.accent
-        default:     return .gray.opacity(0.4)
-        }
-    }
-
-    private var deadlineColor: Color {
-        guard let due = todo.dueDate else { return .gray.opacity(0.4) }
-        let days = due.timeIntervalSinceNow / 86400
-        if days < 1 { return AppTheme.destructive }
-        if days < 3 { return AppTheme.warning }
-        if days < 7 { return AppTheme.accent }
-        return .gray.opacity(0.4)
-    }
-
     @ViewBuilder
-    private var sourceBadge: some View {
+    private var sourceMetadata: some View {
         switch todo.todoSource {
         case .email:
-            Image(systemName: "envelope.fill")
-                .font(.caption2)
-                .foregroundStyle(AppTheme.accent)
+            Label("이메일", systemImage: "envelope")
         case .calendar:
-            Image(systemName: todo.isFixedSchedule ? "arrow.triangle.2.circlepath" : "calendar")
-                .font(.caption2)
-                .foregroundStyle(AppTheme.accent)
+            Label("캘린더", systemImage: todo.isFixedSchedule ? "arrow.triangle.2.circlepath" : "calendar")
         case .meeting:
-            Image(systemName: "person.2.fill")
-                .font(.caption2)
-                .foregroundStyle(AppTheme.accent)
+            Label("회의", systemImage: "person.2")
         case .manual:
             EmptyView()
         }
     }
 }
 
-// MARK: - Notion Style Board View
+// MARK: - Board View
 
 struct TodoBoardView: View {
     let todos: [Todo]
@@ -256,6 +230,7 @@ struct TodoBoardView: View {
     let canOpenAddTodo: Bool
 
     @State private var isDropTargeted: [BoardColumnType: Bool] = [:]
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private func isColumnVisible(_ col: BoardColumnType) -> Bool {
         switch col {
@@ -267,7 +242,7 @@ struct TodoBoardView: View {
     }
 
     private func toggleColumn(_ col: BoardColumnType) {
-        withAnimation(.easeInOut(duration: 0.2)) {
+        withAnimation(AppTheme.motion(reduceMotion: reduceMotion)) {
             switch col {
             case .active: showActiveColumn.toggle()
             case .overdue: showOverdueColumn.toggle()
@@ -329,69 +304,66 @@ struct TodoBoardView: View {
                 } description: {
                     Text(AppLanguage.localized("board.empty.desc", defaultValue: "상단의 눈 버튼을 눌러 컬럼을 활성화해주세요.", language: .current, comment: "No columns visible description"))
                 } actions: {
-                    Button(AppLanguage.localized("board.columns.showAll", defaultValue: "모든 컬럼 표시", language: .current, comment: "Show all columns")) {
-                        withAnimation {
+                    Button {
+                        withAnimation(AppTheme.motion(reduceMotion: reduceMotion)) {
                             showActiveColumn = true
                             showOverdueColumn = true
                             showReviewColumn = true
                             showCompletedColumn = true
+                            autoHideEmpty = false
                         }
+                    } label: {
+                        Text(AppLanguage.localized("board.columns.showAll", defaultValue: "모든 컬럼 표시", language: .current, comment: "Show all columns"))
+                            .frame(minHeight: 44)
+                            .padding(.horizontal, AppTheme.Spacing.item)
                     }
+                    .buttonStyle(.bordered)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                let availableWidth = geometry.size.width - 40 - CGFloat(visibleColumns.count - 1) * 16
+                let availableWidth = geometry.size.width - AppTheme.Spacing.section * 2 - CGFloat(visibleColumns.count - 1) * AppTheme.Spacing.section
                 let dynamicWidth = max(280, min(350, availableWidth / CGFloat(max(1, visibleColumns.count))))
 
                 ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(alignment: .top, spacing: 16) {
+                    HStack(alignment: .top, spacing: AppTheme.Spacing.section) {
                         ForEach(visibleColumns) { col in
                             boardColumn(col)
                                 .frame(width: dynamicWidth)
-                                .frame(maxHeight: max(200, geometry.size.height - 32))
+                                .frame(maxHeight: max(200, geometry.size.height - AppTheme.Spacing.section * 2))
                         }
                     }
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 16)
+                    .padding(AppTheme.Spacing.section)
                 }
             }
         }
-        .background(Color(uiColor: .systemGroupedBackground))
+        .background(AppTheme.canvas)
     }
 
     private func boardColumn(_ col: BoardColumnType) -> some View {
         let items = todosForColumn(col)
 
-        return VStack(alignment: .leading, spacing: 12) {
-            // Column Header
-            HStack {
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(col.themeColor)
-                        .frame(width: 7, height: 7)
+        return VStack(alignment: .leading, spacing: AppTheme.Spacing.compact) {
+            HStack(spacing: AppTheme.Spacing.compact) {
+                HStack(spacing: AppTheme.Spacing.compact) {
                     Text(col.title)
-                        .font(.subheadline.weight(.semibold))
+                        .font(.headline)
                         .foregroundStyle(.primary)
                     Text("\(items.count)")
-                        .font(.caption2.bold())
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(col.themeColor.opacity(0.15), in: Capsule())
-                        .foregroundStyle(col.themeColor)
+                        .font(.subheadline.monospacedDigit())
+                        .foregroundStyle(.secondary)
                 }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 6))
+                .accessibilityElement(children: .combine)
 
-                Spacer()
+                Spacer(minLength: 0)
 
                 Button {
                     toggleColumn(col)
                 } label: {
                     Image(systemName: "eye.slash")
-                        .font(.caption.weight(.medium))
+                        .font(.body)
                         .foregroundStyle(.secondary)
-                        .padding(6)
+                        .frame(minWidth: 44, minHeight: 44)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .help(AppLanguage.localized("board.column.hide", defaultValue: "이 컬럼 숨기기", language: .current, comment: "Hide column"))
@@ -401,44 +373,37 @@ struct TodoBoardView: View {
                     onAddTodo()
                 } label: {
                     Image(systemName: "plus")
-                        .font(.caption.weight(.bold))
+                        .font(.body)
                         .foregroundStyle(.secondary)
-                        .padding(6)
+                        .frame(minWidth: 44, minHeight: 44)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .disabled(!canOpenAddTodo)
+                .accessibilityLabel(AppLanguage.localized("todo.add", defaultValue: "새 할 일", language: .current, comment: "Add task"))
             }
-            .padding(.horizontal, 4)
 
-            // Column Cards
             ScrollView(.vertical, showsIndicators: false) {
-                LazyVStack(spacing: 10) {
+                LazyVStack(spacing: AppTheme.Spacing.compact) {
                     if items.isEmpty {
-                        VStack(spacing: 6) {
+                        VStack(spacing: AppTheme.Spacing.item) {
                             Image(systemName: col.iconName)
                                 .font(.title2)
-                                .foregroundStyle(col.themeColor.opacity(0.35))
+                                .foregroundStyle(.secondary)
                             Text(AppLanguage.localized("board.column.empty", defaultValue: "항목 없음", language: .current, comment: "Empty column"))
-                                .font(.caption)
+                                .font(.subheadline)
                                 .foregroundStyle(.secondary)
                         }
                         .frame(maxWidth: .infinity, minHeight: 100)
-                        .background(
-                            RoundedRectangle(cornerRadius: 10)
-                                .strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
-                                .foregroundStyle(Color.primary.opacity(0.08))
-                        )
+                        .padding(AppTheme.Spacing.item)
                     } else {
                         ForEach(items) { todo in
-                            NavigationLink(value: todo) {
-                                TodoBoardCardView(
-                                    todo: todo,
-                                    onToggleComplete: { onToggleComplete(todo) },
-                                    onDelete: { onDelete(todo) },
-                                    onPromote: { onPromote(todo) }
-                                )
-                            }
-                            .buttonStyle(.plain)
+                            TodoBoardCardView(
+                                todo: todo,
+                                onToggleComplete: { onToggleComplete(todo) },
+                                onDelete: { onDelete(todo) },
+                                onPromote: { onPromote(todo) }
+                            )
                             .draggable(todo.id.uuidString) {
                                 TodoDragPreview(todo: todo, col: col)
                             }
@@ -448,43 +413,35 @@ struct TodoBoardView: View {
                     Button {
                         onAddTodo()
                     } label: {
-                        HStack(spacing: 6) {
+                        HStack(spacing: AppTheme.Spacing.compact) {
                             Image(systemName: "plus")
-                                .font(.caption.bold())
                             Text(AppLanguage.localized("todo.add", defaultValue: "새 할 일", language: .current, comment: "Add task"))
-                                .font(.caption.weight(.medium))
-                            Spacer()
                         }
+                        .font(.subheadline)
                         .foregroundStyle(.secondary)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 8)
-                        .background(Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 8))
+                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                        .padding(.horizontal, 16)
+                        .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .disabled(!canOpenAddTodo)
                 }
-                .padding(.vertical, 2)
+                .padding(.bottom, AppTheme.Spacing.item)
             }
         }
-        .padding(12)
-        .background(
-            RoundedRectangle(cornerRadius: 14)
-                .fill((isDropTargeted[col] == true) ? col.themeColor.opacity(0.12) : Color(uiColor: .tertiarySystemGroupedBackground).opacity(0.6))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 14)
-                .stroke(
-                    (isDropTargeted[col] == true) ? col.themeColor : Color.clear,
-                    lineWidth: (isDropTargeted[col] == true) ? 2 : 0
-                )
-        )
-        .animation(.easeInOut(duration: 0.15), value: isDropTargeted[col])
+        .padding(AppTheme.Spacing.item)
+        .background(AppTheme.canvas, in: RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous)
+                .strokeBorder(isDropTargeted[col] == true ? col.themeColor : Color.clear, lineWidth: 2)
+                .allowsHitTesting(false)
+        }
         .dropDestination(for: String.self) { droppedIDs, location in
             guard let idString = droppedIDs.first, let uuid = UUID(uuidString: idString) else { return false }
             onMoveTodoToColumn(uuid, col)
             return true
         } isTargeted: { targeted in
-            withAnimation(.easeInOut(duration: 0.15)) {
+            withAnimation(AppTheme.motion(reduceMotion: reduceMotion)) {
                 isDropTargeted[col] = targeted
             }
         }

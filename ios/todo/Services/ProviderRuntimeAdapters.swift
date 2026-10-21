@@ -160,10 +160,13 @@ struct UnavailableOnDeviceModelRuntime: OnDeviceModelRuntime {
     }
 }
 
+/// Corrects recognition errors without translating the source language or script.
+/// `sourceLanguageTag` describes the transcript; `language` is only for labels.
 protocol MeetingRefinementProvider: Sendable {
     func correct(
         segments: [MeetingSegment],
         glossaryHint: String,
+        sourceLanguageTag: String,
         language: AppLanguage
     ) async throws -> TranscriptCorrectionBatchResult
 }

@@ -224,23 +224,15 @@ struct FMEmailSummaryAdapterTests {
         guard #available(iOS 26.0, *) else { return }
         try await AIProviderTestIsolation.shared.withLock {
             let defaults = UserDefaults.standard
-            let enabledKey = SettingsStore.betaFoundationModelsEnabledKey
             let selectedKey = SettingsStore.betaSelectedProviderKey
-            let originalEnabled = defaults.object(forKey: enabledKey)
             let originalSelection = defaults.object(forKey: selectedKey)
             defer {
-                if let originalEnabled {
-                    defaults.set(originalEnabled, forKey: enabledKey)
-                } else {
-                    defaults.removeObject(forKey: enabledKey)
-                }
                 if let originalSelection {
                     defaults.set(originalSelection, forKey: selectedKey)
                 } else {
                     defaults.removeObject(forKey: selectedKey)
                 }
             }
-            defaults.set(true, forKey: enabledKey)
             defaults.set(PersonaAIProvider.foundationModels.rawValue, forKey: selectedKey)
 
             let body = String(repeating: "x", count: 1_500) + "TRUNCATED"
@@ -251,7 +243,7 @@ struct FMEmailSummaryAdapterTests {
                     actionItems: [" Reply with the final proposal ", ""]
                 )
             )
-            let service = FoundationModelsService(runtime: runtime)
+            let service = FoundationModelsService(runtime: runtime, policy: BetaFeaturePolicy(selectionReader: { .foundationModels }))
             let result = try await service.summarizeEmail(
                 subject: "Proposal review",
                 sender: "Product team <product@example.com>",
@@ -279,17 +271,12 @@ struct FMEmailSummaryAdapterTests {
         guard #available(iOS 26.0, *) else { return }
         try await AIProviderTestIsolation.shared.withLock {
             let defaults = UserDefaults.standard
-            let enabledKey = SettingsStore.betaFoundationModelsEnabledKey
             let selectedKey = SettingsStore.betaSelectedProviderKey
-            let originalEnabled = defaults.object(forKey: enabledKey)
             let originalSelection = defaults.object(forKey: selectedKey)
             defer {
-                if let originalEnabled { defaults.set(originalEnabled, forKey: enabledKey) }
-                else { defaults.removeObject(forKey: enabledKey) }
                 if let originalSelection { defaults.set(originalSelection, forKey: selectedKey) }
                 else { defaults.removeObject(forKey: selectedKey) }
             }
-            defaults.set(true, forKey: enabledKey)
             defaults.set(PersonaAIProvider.foundationModels.rawValue, forKey: selectedKey)
 
             let runtime = NarrativeRuntime(
@@ -302,7 +289,7 @@ struct FMEmailSummaryAdapterTests {
                     insights: ["Observed insight."]
                 )
             )
-            let service = FoundationModelsService(runtime: runtime)
+            let service = FoundationModelsService(runtime: runtime, policy: BetaFeaturePolicy(selectionReader: { .foundationModels }))
             let baseline = MemoryService.computeAnalysis(todos: [], language: .english)
             let persona = try await service.generatePersonaNarrative(
                 existingPersona: "",

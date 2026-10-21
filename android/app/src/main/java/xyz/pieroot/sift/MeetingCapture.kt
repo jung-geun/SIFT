@@ -14,18 +14,16 @@ import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.os.Build
 import android.os.IBinder
+import android.os.Handler
+import android.os.Looper
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import java.io.File
 import java.io.RandomAccessFile
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
-import java.time.Instant
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
-import kotlin.math.max
 
 /** Capture configuration selected for one meeting. Cloud modes are intentionally unavailable until configured. */
 data class MeetingCaptureConfig(
@@ -57,6 +55,20 @@ class MeetingCaptureRepository private constructor(private val appContext: Conte
     private var lastProgressPersistMillis = 0L
     private var lastProgressStatus: MeetingStatus? = null
 
+    init {
+        // START_NOT_STICKY never resumes a microphone after process death.
+        // Persisted active/processing states therefore belong to an interrupted session.
+        meetingStore.list().forEach { record ->
+            when (record.status) {
+                MeetingStatus.RECORDING, MeetingStatus.PAUSED, MeetingStatus.INTERRUPTED,
+                MeetingStatus.STOPPING, MeetingStatus.FINALIZING_TRANSCRIPT, MeetingStatus.EXTRACTING_ACTIONS ->
+                    meetingStore.save(record.copy(status = MeetingStatus.FAILED, updatedAtEpochMillis = System.currentTimeMillis()))
+                else -> Unit
+            }
+        }
+    }
+
+    @Synchronized
     fun start(config: MeetingCaptureConfig): Result<Unit> {
         if (config.mode != MeetingProcessingMode.ON_DEVICE) {
             return Result.failure(IllegalStateException("클라우드 제공자 설정이 없어 온디바이스 모드만 사용할 수 있습니다."))
@@ -65,7 +77,8 @@ class MeetingCaptureRepository private constructor(private val appContext: Conte
         if (!hasRecordPermission(appContext)) return Result.failure(SecurityException("마이크 권한이 필요합니다."))
         val readiness = MeetingOnDeviceModelGate.readiness(appContext)
         if (!readiness.ready) return Result.failure(IllegalStateException(readiness.reason))
-        val id = MeetingRecord.requireMeetingID(config.meetingId)
+        val id = runCatching { MeetingRecord.requireMeetingID(config.meetingId) }.getOrElse { return Result.failure(it) }
+        if (meetingStore.directory(id).exists()) return Result.failure(IllegalStateException("이미 저장된 회의 ID입니다."))
         val record = MeetingRecord(
             meetingId = id,
             mode = config.mode,
@@ -78,7 +91,9 @@ class MeetingCaptureRepository private constructor(private val appContext: Conte
             createdAtEpochMillis = System.currentTimeMillis(),
             updatedAtEpochMillis = System.currentTimeMillis(),
         )
-        meetingStore.save(record)
+        runCatching { meetingStore.save(record) }.onFailure { return Result.failure(it) }
+        lastProgressPersistMillis = 0L
+        lastProgressStatus = null
         mutableState.value = MeetingCaptureState(id, MeetingStatus.RECORDING, mode = config.mode)
         val intent = Intent(appContext, MeetingCaptureService::class.java).apply {
             action = MeetingCaptureService.ACTION_START
@@ -96,69 +111,52 @@ class MeetingCaptureRepository private constructor(private val appContext: Conte
     fun resume(): Result<Unit> = sendCommand(MeetingCaptureService.ACTION_RESUME)
     fun stop(): Result<Unit> = sendCommand(MeetingCaptureService.ACTION_STOP)
 
+    @Synchronized
     fun delete(meetingId: String): Boolean {
         if (mutableState.value.meetingId == meetingId && mutableState.value.isActive) return false
         return meetingStore.delete(meetingId)
     }
 
-    fun refresh() {
-        val current = mutableState.value.meetingId ?: return
-        meetingStore.load(current)?.let { record ->
-            mutableState.value = MeetingCaptureState(current, record.status, record.artifact.meetingSampleCount * 1000 / SAMPLE_RATE, record.artifact.meetingSampleCount, record.mode)
-        }
+    @Synchronized
+    fun deleteAll(): Result<Int> = runCatching {
+        check(!mutableState.value.isActive) { "녹음 중인 회의는 중지한 뒤 삭제할 수 있습니다." }
+        meetingStore.deleteAll().also { mutableState.value = MeetingCaptureState() }
     }
 
+    @Synchronized
+    fun refresh() {
+        val current = mutableState.value.meetingId ?: return
+        val record = meetingStore.load(current) ?: run {
+            if (!mutableState.value.isActive) mutableState.value = MeetingCaptureState()
+            return
+        }
+        // Disk progress is throttled. Never roll live samples/status back to that older checkpoint.
+        if (!mutableState.value.isActive) mutableState.value = MeetingCaptureState(current, record.status, record.artifact.meetingSampleCount * 1000 / SAMPLE_RATE, record.artifact.meetingSampleCount, record.mode)
+    }
+
+    @Synchronized
     internal fun onServiceProgress(meetingId: String, status: MeetingStatus, samples: Long) {
-        val record = meetingStore.load(meetingId) ?: return
+        val current = mutableState.value
+        if (current.meetingId != meetingId || !current.isActive) return
         val now = System.currentTimeMillis()
         if (status != lastProgressStatus || now - lastProgressPersistMillis >= 5_000L) {
+            val record = meetingStore.load(meetingId) ?: return
             val artifact = record.artifact.copy(meetingSampleCount = samples)
             meetingStore.save(record.copy(status = status, artifact = artifact, updatedAtEpochMillis = now))
             lastProgressPersistMillis = now
             lastProgressStatus = status
         }
-        mutableState.value = MeetingCaptureState(meetingId, status, samples * 1000 / SAMPLE_RATE, samples, record.mode)
+        mutableState.value = MeetingCaptureState(meetingId, status, samples * 1000 / SAMPLE_RATE, samples, current.mode)
     }
 
+    @Synchronized
     internal fun onServiceFinished(meetingId: String, artifact: MeetingArtifact, error: String? = null) {
         val record = meetingStore.load(meetingId) ?: return
-        if (error != null) {
-            meetingStore.save(record.copy(status = MeetingStatus.FAILED, artifact = artifact, updatedAtEpochMillis = System.currentTimeMillis()))
-            mutableState.value = MeetingCaptureState(meetingId, MeetingStatus.FAILED, artifact.meetingSampleCount * 1000 / SAMPLE_RATE, artifact.meetingSampleCount, record.mode, error)
-            return
-        }
-        val readiness = MeetingOnDeviceModelGate.readiness(appContext)
-        if (!readiness.ready) {
-            meetingStore.save(record.copy(
-                status = MeetingStatus.FAILED,
-                artifact = artifact,
-                updatedAtEpochMillis = System.currentTimeMillis(),
-            ))
-            mutableState.value = MeetingCaptureState(
-                meetingId,
-                MeetingStatus.FAILED,
-                artifact.meetingSampleCount * 1000 / SAMPLE_RATE,
-                artifact.meetingSampleCount,
-                record.mode,
-                readiness.reason,
-            )
-            return
-        }
-        meetingStore.save(record.copy(status = MeetingStatus.FINALIZING_TRANSCRIPT, artifact = artifact, updatedAtEpochMillis = System.currentTimeMillis()))
-        val deterministicResult = MeetingResult(
-            transcriptRevision = record.transcriptRevision,
-            title = "회의 녹음",
-            summary = "",
-            decisions = emptyList(),
-            unresolvedQuestions = emptyList(),
-            segments = emptyList(),
-            actionDrafts = emptyList(),
-        )
-        meetingStore.save(record.copy(status = MeetingStatus.EXTRACTING_ACTIONS, result = deterministicResult, artifact = artifact, updatedAtEpochMillis = System.currentTimeMillis()))
-        if (!record.retentionEnabled) meetingStore.deleteAudio(meetingId)
-        val savedArtifact = if (record.retentionEnabled) artifact else artifact.copy(parts = emptyList())
-        meetingStore.save(record.copy(status = MeetingStatus.READY, result = deterministicResult, artifact = savedArtifact, updatedAtEpochMillis = System.currentTimeMillis()))
-        mutableState.value = MeetingCaptureState(meetingId, MeetingStatus.READY, artifact.meetingSampleCount * 1000 / SAMPLE_RATE, artifact.meetingSampleCount, record.mode)
+        // This build has no transcription implementation. Never fabricate a READY result,
+        // or delete the only audio behind a successful-looking empty transcript.
+        val reason = error ?: MeetingOnDeviceModelGate.readiness(appContext).reason
+        meetingStore.save(record.copy(status = MeetingStatus.FAILED, artifact = artifact, updatedAtEpochMillis = System.currentTimeMillis()))
+        mutableState.value = MeetingCaptureState(meetingId, MeetingStatus.FAILED, artifact.meetingSampleCount * 1000 / SAMPLE_RATE, artifact.meetingSampleCount, record.mode, reason)
     }
 
     private fun sendCommand(action: String): Result<Unit> {
@@ -184,8 +182,8 @@ class MeetingCaptureRepository private constructor(private val appContext: Conte
 /** Foreground microphone capture. The service is non-exported and only accepts app-local commands. */
 class MeetingCaptureService : Service() {
     private val stopping = AtomicBoolean(false)
-    private var worker: Thread? = null
-    private var recorder: AudioRecord? = null
+    @Volatile private var worker: Thread? = null
+    @Volatile private var recorder: AudioRecord? = null
     private var writer: MeetingFlacPartWriter? = null
     private var meetingId: String? = null
     @Volatile private var sampleCount = 0L
@@ -205,12 +203,27 @@ class MeetingCaptureService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val requestedId = intent?.getStringExtra(EXTRA_MEETING_ID)
-        if (requestedId != null) meetingId = requestedId
-        when (intent?.action) {
-            ACTION_START -> if (worker == null) beginCapture()
-            ACTION_PAUSE -> pauseCapture()
-            ACTION_RESUME -> resumeCapture()
-            ACTION_STOP -> stopCapture(null)
+        if (worker == null) {
+            if (intent?.action != ACTION_START || requestedId == null || runCatching { MeetingRecord.requireMeetingID(requestedId) }.isFailure) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf(startId)
+                return START_NOT_STICKY
+            }
+            val repository = MeetingCaptureRepository.get(this)
+            val record = MeetingStore(this).load(requestedId)
+            if (record?.status != MeetingStatus.RECORDING || repository.state.value.meetingId != requestedId || !repository.state.value.isActive) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf(startId)
+                return START_NOT_STICKY
+            }
+            meetingId = requestedId
+            beginCapture()
+        } else if (requestedId == meetingId) {
+            when (intent?.action) {
+                ACTION_PAUSE -> pauseCapture()
+                ACTION_RESUME -> resumeCapture()
+                ACTION_STOP -> stopCapture()
+            }
         }
         return START_NOT_STICKY
     }
@@ -218,6 +231,8 @@ class MeetingCaptureService : Service() {
     private fun beginCapture() {
         val id = meetingId ?: return failStart("회의 ID가 없습니다.")
         if (!MeetingCaptureRepository.hasRecordPermission(this)) return failStart("마이크 권한이 없습니다.")
+        val readiness = MeetingOnDeviceModelGate.readiness(this)
+        if (!readiness.ready) return failStart(readiness.reason)
         val minBuffer = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT)
         if (minBuffer <= 0) return failStart("이 기기에서 PCM 녹음을 사용할 수 없습니다.")
         val bufferBytes = maxOf(minBuffer.toLong(), SAMPLE_RATE * 2L / 2L).toInt()
@@ -236,6 +251,7 @@ class MeetingCaptureService : Service() {
         timeline = MeetingTimeline()
         timeline.start()
         stopping.set(false)
+        paused = false
         sampleCount = 0L
         partIndex = 0
         partStart = 0L
@@ -257,14 +273,22 @@ class MeetingCaptureService : Service() {
     }
 
     private fun captureLoop(id: String, audio: AudioRecord, bufferSamples: Int) {
+        var failure: String? = null
         try {
             playChime()
+            if (stopping.get()) return
             audio.startRecording()
+            getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification("회의 녹음 중"))
             openPart(id, partOwnedStart)
             val buffer = ShortArray(bufferSamples.coerceIn(256, 16_384))
             while (!stopping.get()) {
                 if (paused) {
-                    audio.read(buffer, 0, buffer.size, AudioRecord.READ_NON_BLOCKING)
+                    if (audio.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
+                        audio.stop()
+                        timeline.pause("pause")
+                        MeetingCaptureRepository.get(this).onServiceProgress(id, MeetingStatus.PAUSED, sampleCount)
+                        getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification("회의 녹음 일시정지"))
+                    }
                     timeline.enforcePauseLimit()
                     if (timeline.status == MeetingStatus.STOPPING) {
                         stopping.set(true)
@@ -273,11 +297,19 @@ class MeetingCaptureService : Service() {
                     Thread.sleep(20)
                     continue
                 }
+                if (audio.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+                    timeline.resume()
+                    audio.startRecording()
+                    MeetingCaptureRepository.get(this).onServiceProgress(id, MeetingStatus.RECORDING, sampleCount)
+                    getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification("회의 녹음 중"))
+                }
                 val read = audio.read(buffer, 0, buffer.size, AudioRecord.READ_BLOCKING)
+                if (stopping.get()) break
+                if (paused) continue // Never write a buffer read across a pause request.
                 if (read < 0) throw IllegalStateException("오디오 캡처가 중단되었습니다.")
                 if (read == 0) continue
                 var offset = 0
-                while (offset < read) {
+                while (offset < read && !stopping.get() && !paused) {
                     if (sampleCount - partOwnedStart >= MeetingPartLayout.OWNED_PART_SAMPLES) {
                         closePart()
                         partIndex += 1
@@ -285,9 +317,9 @@ class MeetingCaptureService : Service() {
                         partStart = maxOf(0L, partOwnedStart - MeetingPartLayout.OVERLAP_SAMPLES)
                     }
                     if (writer == null) openPart(id, partOwnedStart)
-                    val remaining = MeetingPartLayout.OWNED_PART_SAMPLES - (sampleCount - partOwnedStart)
+                    val remaining = minOf(MeetingPartLayout.OWNED_PART_SAMPLES - (sampleCount - partOwnedStart), MeetingPartLayout.MAX_MEETING_SAMPLES - sampleCount)
                     val count = minOf(read - offset, remaining.toInt())
-                    if (count <= 0) continue
+                    if (count <= 0) { stopping.set(true); break }
                     writer?.write(buffer, offset, count)
                     appendOverlapRing(buffer, offset, count)
                     offset += count
@@ -298,26 +330,34 @@ class MeetingCaptureService : Service() {
                     if (timeline.status == MeetingStatus.STOPPING) stopping.set(true)
                 }
             }
+            timeline.stop()
             closePart()
-            MeetingCaptureRepository.get(this).onServiceFinished(id, MeetingArtifact(parts = parts, meetingSampleCount = sampleCount, discontinuities = timeline.discontinuities.toList()))
         } catch (error: Throwable) {
+            failure = error.message ?: "녹음에 실패했습니다."
             runCatching { closePart() }
-            MeetingCaptureRepository.get(this).onServiceFinished(id, MeetingArtifact(parts = parts, meetingSampleCount = sampleCount, discontinuities = timeline.discontinuities.toList()), error.message ?: "녹음에 실패했습니다.")
         } finally {
             runCatching { audio.stop() }
-            audio.release()
-            recorder = null
-            worker = null
+            runCatching { audio.release() }
+            val artifact = MeetingArtifact(parts = parts.toList(), meetingSampleCount = sampleCount, discontinuities = timeline.discontinuities.toList())
             playChime()
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
+            Handler(Looper.getMainLooper()).post {
+                recorder = null
+                worker = null
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+                MeetingCaptureRepository.get(this).onServiceFinished(id, artifact, failure)
+            }
         }
     }
     private fun playChime() {
         runCatching {
             val tone = ToneGenerator(AudioManager.STREAM_NOTIFICATION, 80)
-            tone.startTone(ToneGenerator.TONE_PROP_BEEP, 120)
-            tone.release()
+            try {
+                tone.startTone(ToneGenerator.TONE_PROP_BEEP, 120)
+                Thread.sleep(140) // Releasing immediately cancels the disclosure tone.
+            } finally {
+                tone.release()
+            }
         }
     }
 
@@ -335,7 +375,7 @@ class MeetingCaptureService : Service() {
     private fun appendOverlapRing(values: ShortArray, offset: Int, length: Int) {
         if (length >= overlapRing.size) {
             values.copyInto(overlapRing, 0, offset + length - overlapRing.size, offset + length)
-            return
+            overlapCount = overlapRing.size
             return
         }
         val total = overlapCount + length
@@ -360,22 +400,13 @@ class MeetingCaptureService : Service() {
         writer = null
     }
 
-    private fun pauseCapture() {
-        if (!paused) timeline.pause("pause")
-        paused = true
-        meetingId?.let { MeetingCaptureRepository.get(this).onServiceProgress(it, MeetingStatus.PAUSED, sampleCount) }
-    }
-    private fun resumeCapture() {
-        if (paused) timeline.resume()
-        paused = false
-        meetingId?.let { MeetingCaptureRepository.get(this).onServiceProgress(it, MeetingStatus.RECORDING, sampleCount) }
-    }
-    private fun stopCapture(error: String?) {
-        timeline.stop()
-        if (!stopping.compareAndSet(false, true)) return
-        if (error != null) meetingId?.let {
-            MeetingCaptureRepository.get(this).onServiceFinished(it, MeetingArtifact(parts = parts, meetingSampleCount = sampleCount, discontinuities = timeline.discontinuities.toList()), error)
-        }
+    // The capture worker alone owns recorder/timeline transitions. UI state changes only
+    // after the microphone is actually stopped/restarted, not when a command is queued.
+    private fun pauseCapture() { paused = true }
+    private fun resumeCapture() { paused = false }
+    private fun stopCapture() {
+        stopping.set(true)
+        recorder?.let { runCatching { it.stop() } }
     }
 
     private fun notification(text: String): Notification = NotificationCompat.Builder(this, CHANNEL_ID)
@@ -443,7 +474,16 @@ private class MeetingFlacPartWriter(val file: File) {
     }
 
     fun closeAndGetSampleCount(): Long {
-        if (!closed) { if (pendingCount > 0) flushFrame(); patchTotalSamples(); closed = true; random.fd.sync(); random.close() }
+        if (!closed) {
+            try {
+                if (pendingCount > 0) flushFrame()
+                patchTotalSamples()
+                random.fd.sync()
+            } finally {
+                closed = true
+                random.close()
+            }
+        }
         return samples
     }
 

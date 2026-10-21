@@ -82,20 +82,16 @@ private struct UncalledFoundationRuntime: FoundationModelsRuntime {
 @MainActor
 struct ProviderOptInTests {
 
-    private func reset() {
-        UserDefaults.standard.removeObject(forKey: SettingsStore.betaSelectedProviderKey)
-        UserDefaults.standard.removeObject(forKey: SettingsStore.betaFoundationModelsEnabledKey)
-        UserDefaults.standard.removeObject(forKey: SettingsStore.betaOnDeviceModelEnabledKey)
-    }
 
 
-    @Test("Disabled on-device provider performs zero load/generate calls")
+    @Test("Routing that excludes on-device performs zero load/generate calls")
     func disabledOnDeviceMakesNoCalls() async throws {
         await AIProviderTestIsolation.shared.withLock {
-            reset()
-            defer { reset() }
             let runtime = CountingOnDeviceRuntime()
-            let service = OnDeviceLLMService(runtime: runtime)
+            let service = OnDeviceLLMService(
+                runtime: runtime,
+                policy: BetaFeaturePolicy(accessReader: { .disabled }, selectionReader: { .onDevice })
+            )
             await service.loadModelIfNeeded(use: .standardAnalysis)
             do {
                 _ = try await service.generate(
@@ -112,14 +108,14 @@ struct ProviderOptInTests {
             #expect(counts.generations == 0)
         }
     }
-    @Test("Disabled Foundation Models performs zero runtime calls")
+    @Test("Routing that excludes Foundation Models performs zero runtime calls")
     @available(iOS 26.0, *)
     func disabledFoundationModelsMakesNoCalls() async throws {
         await AIProviderTestIsolation.shared.withLock {
-            reset()
-            defer { reset() }
-            UserDefaults.standard.set(false, forKey: SettingsStore.betaFoundationModelsEnabledKey)
-            let service = FoundationModelsService(runtime: UncalledFoundationRuntime())
+            let service = FoundationModelsService(
+                runtime: UncalledFoundationRuntime(),
+                policy: BetaFeaturePolicy(accessReader: { .disabled }, selectionReader: { .foundationModels })
+            )
             do {
                 _ = try await service.rankTodos(
                     todos: [],

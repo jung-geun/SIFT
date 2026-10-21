@@ -125,6 +125,7 @@ enum MeetingTranscriptionError: LocalizedError, Sendable, Equatable {
     }
 }
 
+typealias MeetingTranscriptionLocaleProvider = @Sendable (MeetingTranscriptionBackend) async -> [Locale]
 typealias MeetingTranscriptionCapabilityProbe = @Sendable (MeetingTranscriptionBackend, Locale) async -> MeetingTranscriptionCapability
 typealias MeetingTranscriptionSessionBuilder = @Sendable (MeetingTranscriptionBackend, Locale, MeetingTranscriptionPurpose, UserVocabularySnapshot) async throws -> any MeetingTranscriptionSession
 
@@ -152,6 +153,9 @@ struct DefaultMeetingTranscriptionSessionFactory: MeetingTranscriptionSessionFac
     }
 
     func make(languageTag: String, purpose: MeetingTranscriptionPurpose) async throws -> any MeetingTranscriptionSession {
+        guard MeetingLanguageCatalog.isLanguageTag(languageTag) else {
+            throw MeetingTranscriptionError.unsupportedLocale(languageTag)
+        }
         let requestedLocale = Locale(identifier: languageTag)
         if let forcedBackend {
             return try await make(
@@ -232,7 +236,18 @@ struct DefaultMeetingTranscriptionSessionFactory: MeetingTranscriptionSessionFac
         return .backendUnavailable
     }
 
-    private static let liveCapabilityProbe: MeetingTranscriptionCapabilityProbe = { backend, requestedLocale in
+    nonisolated static let liveSupportedLocales: MeetingTranscriptionLocaleProvider = { backend in
+        switch backend {
+        case .speechTranscriber:
+            return SpeechTranscriber.isAvailable ? await SpeechTranscriber.supportedLocales : []
+        case .dictationTranscriber:
+            // DictationTranscriber has no isAvailable API. An unsupported
+            // device/backend reports an empty runtime supportedLocales list.
+            return await DictationTranscriber.supportedLocales
+        }
+    }
+
+    nonisolated static let liveCapabilityProbe: MeetingTranscriptionCapabilityProbe = { backend, requestedLocale in
         if backend == .speechTranscriber, !SpeechTranscriber.isAvailable {
             return .unavailable
         }

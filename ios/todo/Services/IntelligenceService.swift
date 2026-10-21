@@ -740,6 +740,8 @@ final class RoutedIntelligenceEngine: IntelligenceService {
         persona: PersonaContext,
         progress: IntelligenceProgressHandler?
     ) async throws -> [PriorityResult] {
+        let selectedIDs = CalendarService.taskAnalysisCalendarIDs()
+        let events = events.filter { CalendarService.isTaskAnalysisEvent($0, selectedCalendarIDs: selectedIDs) }
         let activeTodos = todos.filter { !$0.isCompleted }
         let decision = IntelligenceProviderRouting.decision(policy: policy)
         let requestedName: String
@@ -784,6 +786,7 @@ final class RoutedIntelligenceEngine: IntelligenceService {
                 let annotatedProgress: IntelligenceProgressHandler?
                 if let progress {
                     annotatedProgress = { event in
+                        guard CalendarService.taskAnalysisCalendarIDs() == selectedIDs else { return }
                         guard case .result(var result, let index, let total, let title) = event else {
                             progress(event)
                             return
@@ -801,6 +804,7 @@ final class RoutedIntelligenceEngine: IntelligenceService {
                     persona: persona,
                     progress: annotatedProgress
                 )
+                guard CalendarService.taskAnalysisCalendarIDs() == selectedIDs else { throw CancellationError() }
                 let annotated = results.map { result in
                     var result = result
                     result.requestedProviderRawValue = provider.rawValue
@@ -812,6 +816,7 @@ final class RoutedIntelligenceEngine: IntelligenceService {
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
+                guard CalendarService.taskAnalysisCalendarIDs() == selectedIDs else { throw CancellationError() }
                 return try await heuristicResults(
                     for: ProviderErrorMapper.fallbackReason(for: error) ?? .providerExecutionFailed
                 )

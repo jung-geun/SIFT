@@ -13,14 +13,13 @@ nonisolated struct MeetingOfflineTranscriptionService: Sendable {
     struct Output: Sendable {
         let result: MeetingResult
         let sourceTranscriptRevision: Int
-        /// SDK language codes, in encounter order, without collapsing mixed speech
-        /// to a single selected app language. Empty for silent audio.
+        /// Prompt-evidenced SDK language codes in speech encounter order, without
+        /// collapsing mixed speech. Empty for silence or missing token evidence.
         let detectedLanguages: [String]
 
         var languageTag: String? {
             guard detectedLanguages.count == 1 else { return nil }
-            let code = detectedLanguages[0]
-            return AppLanguage.supportedLanguage(for: code)?.speechLanguageTag ?? code
+            return detectedLanguages[0]
         }
     }
 
@@ -68,8 +67,9 @@ nonisolated struct MeetingOfflineTranscriptionService: Sendable {
         self.store = store
     }
 
-    /// `nil` detects language (including mixed-language recordings). Explicit
-    /// supported app tags and regional aliases request that language, not an automatic hint.
+    /// `nil` requests language detection for each decoder window, not each speaker
+    /// or phrase; mixed-language accuracy is not guaranteed. Explicit supported
+    /// Whisper tags/aliases request that language, not an automatic hint.
     /// The result has the next revision and fresh IDs, with no inherited speakers
     /// or extraction metadata. Silence is a valid empty result, not fallback text.
     @concurrent
@@ -88,20 +88,15 @@ nonisolated struct MeetingOfflineTranscriptionService: Sendable {
                 // The pinned loader initializes SDK logging; disable it after loading
                 // and before decoding, including SDK error logs containing tokens.
                 Logging.updateLogLevel(.none)
+                let options = try Self.decodingOptions(
+                    languageCode: language, tokenizer: model.tokenizer,
+                    isMultilingual: model.textDecoder.isModelMultilingual,
+                    logitsSize: model.textDecoder.logitsSize
+                )
                 progress(.init(.preparingAudio, completedMilliseconds: 0))
                 return try await Self.withExportedWAV(manifest: manifest, rootURL: rootURL, progress: { samples in
                     progress(.init(.preparingAudio, completedMilliseconds: samples * 1_000 / MeetingMediaTimeline.sampleRate))
                 }) { wav in
-                    let options = DecodingOptions(
-                        verbose: false,
-                        task: .transcribe,
-                        language: language,
-                        detectLanguage: language == nil,
-                        skipSpecialTokens: true,
-                        withoutTimestamps: false,
-                        wordTimestamps: true,
-                        concurrentWorkerCount: 1
-                    )
                     let results: [TranscriptionResult]
                     progress(.init(.recognizing, completedMilliseconds: 0))
                     model.segmentDiscoveryCallback = { segments in
@@ -130,8 +125,9 @@ nonisolated struct MeetingOfflineTranscriptionService: Sendable {
                     try Task.checkCancellation()
                     progress(.init(.validating))
                     return try await Self.makeOutput(
-                        results, totalSamples: manifest.totalSamples,
-                        sourceTranscriptRevision: sourceTranscriptRevision
+                        results, languageTokenCodes: model.languageTokenCodes,
+                        totalSamples: manifest.totalSamples, sourceTranscriptRevision: sourceTranscriptRevision,
+                        requestedLanguageCode: language
                     )
                 }
             }
@@ -147,11 +143,35 @@ nonisolated struct MeetingOfflineTranscriptionService: Sendable {
 
     static func languageCode(for tag: String?) throws -> String? {
         guard let tag else { return nil }
-        guard let language = AppLanguage.supportedLanguage(for: tag),
-              let code = language.locale.language.languageCode?.identifier else {
+        guard let code = MeetingLanguageCatalog.whisperLanguageCode(for: tag) else {
             throw Failure.unsupportedLanguage
         }
         return code
+    }
+
+    /// WhisperKit 1.1.0 TextDecoder.prepareDecoderInputs silently substitutes
+    /// englishToken when token lookup fails. Reject before decode instead.
+    static func decodingOptions(
+        languageCode: String?, tokenizer: (any WhisperTokenizer)?,
+        isMultilingual: Bool, logitsSize: Int?
+    ) throws -> DecodingOptions {
+        if let code = languageCode {
+            guard MeetingLanguageCatalog.whisperLanguageCodes.contains(code),
+                  isMultilingual || code == "en" else { throw Failure.unsupportedLanguage }
+            if isMultilingual {
+                let token = "<|\(code)|>"
+                guard let tokenizer, let size = logitsSize,
+                      let id = tokenizer.convertTokenToId(token), id >= 0, id < size,
+                      tokenizer.allLanguageTokens.contains(id),
+                      tokenizer.convertIdToToken(id) == token else { throw Failure.unsupportedLanguage }
+            }
+        }
+        return DecodingOptions(
+            verbose: false, task: .transcribe, language: languageCode,
+            detectLanguage: languageCode == nil,
+            skipSpecialTokens: true, withoutTimestamps: false,
+            wordTimestamps: true, windowClipTime: 0, concurrentWorkerCount: 1
+        )
     }
 
     private static func validateRevision(_ revision: Int) throws {
@@ -160,16 +180,32 @@ nonisolated struct MeetingOfflineTranscriptionService: Sendable {
         }
     }
 
+    /// Shared with live transcription. Distinguish no prompt (inherit the window)
+    /// from an explicit prompt with unknown language (clear the window evidence).
+    static func promptLanguage(
+        in tokens: [Int], languageTokenCodes: [Int: String]
+    ) -> (hasPrompt: Bool, code: String?) {
+        guard let sot = tokens.firstIndex(of: 50258) else { return (false, nil) }
+        let next = tokens.index(after: sot)
+        let code = next < tokens.endIndex ? languageTokenCodes[tokens[next]] : nil
+        return (true, code.flatMap { $0.isEmpty ? nil : $0 })
+    }
+
     /// SDK incremental transcription has already applied sample-derived offsets
     /// to both segments and words. Do not add seekTime, seek, or callback counts.
     /// WhisperKit 1.1.0 SegmentSeeker can retain zero-duration DTW words when
     /// there is no gap to expand them (updateSegmentsWithWordTimings). They are
     /// not measured intervals: preserve the segment text without timed runs.
+    /// Language comes only from an exact SOT (50258) plus mapped language token.
+    /// Prompt state is scoped to a seek within one SDK result; result.language is
+    /// trailing-window metadata and cannot describe earlier or mixed speech.
     @MainActor
     static func makeOutput(
         _ results: [TranscriptionResult],
+        languageTokenCodes: [Int: String],
         totalSamples: Int64,
-        sourceTranscriptRevision: Int
+        sourceTranscriptRevision: Int,
+        requestedLanguageCode: String? = nil
     ) throws -> Output {
         try validateRevision(sourceTranscriptRevision)
         guard totalSamples >= 0, totalSamples <= MeetingMediaTimeline.maximumSamples else {
@@ -180,7 +216,7 @@ nonisolated struct MeetingOfflineTranscriptionService: Sendable {
         var segments: [MeetingSegment] = []
         var languages: [String] = []
         for result in results {
-            var hasSpeech = false
+            var windowLanguages: [Int: String] = [:]
             for source in result.segments {
                 // Decoder timestamps can include the padded tail of a 30-second
                 // window. Clip that tail, but never accept arbitrary finite ends.
@@ -198,6 +234,10 @@ nonisolated struct MeetingOfflineTranscriptionService: Sendable {
                 for word in source.words ?? [] {
                     try validateTimes(start: word.start, end: word.end, windowEnd: windowEnd)
                 }
+                let prompt = promptLanguage(in: source.tokens, languageTokenCodes: languageTokenCodes)
+                if prompt.hasPrompt {
+                    windowLanguages[source.seek] = prompt.code
+                }
                 // Timestamp/special-token-only slices decode to empty text with
                 // skipSpecialTokens. No app interval is needed for these markers.
                 guard !source.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
@@ -212,10 +252,10 @@ nonisolated struct MeetingOfflineTranscriptionService: Sendable {
                     startMs: startMs, endMs: endMs, speakerIDs: [],
                     text: source.text, isFinal: true, timedRuns: runs
                 ))
-                hasSpeech = true
-            }
-            if hasSpeech, !result.language.isEmpty, !languages.contains(result.language) {
-                languages.append(result.language)
+                if requestedLanguageCode == nil, source.noSpeechProb.isFinite, source.noSpeechProb < 0.6,
+                   let code = windowLanguages[source.seek], !languages.contains(code) {
+                    languages.append(code)
+                }
             }
         }
         segments.sort { ($0.startMs, $0.endMs, $0.id) < ($1.startMs, $1.endMs, $1.id) }

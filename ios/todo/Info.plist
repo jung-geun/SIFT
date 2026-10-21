@@ -2,6 +2,23 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>GADApplicationIdentifier</key>
+	<string>$(ADMOB_APP_ID)</string>
+	<key>ADMOBBannerAdUnitID</key>
+	<string>ca-app-pub-6070999186513755/4627223216</string>
+	<key>SKAdNetworkItems</key>
+	<array>
+		<dict>
+			<key>SKAdNetworkIdentifier</key>
+			<string>cstr6suwn9.skadnetwork</string>
+		</dict>
+	</array>
+	<key>SIFTFeedbackBaseURL</key>
+	<string>https://sift-feedback-api.jgbong0306.workers.dev</string>
+	<key>NSHealthShareUsageDescription</key>
+	<string>With your permission, SIFT reads recent workout and medication history to suggest routines on this device. Each category and source requires your approval; no health data is written.</string>
+	<key>NSHealthUpdateUsageDescription</key>
+	<string>SIFT never writes or changes data in Health. It only reads the workout and medication history you choose to connect.</string>
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
 		<string>pieroot.todo.emailRefresh</string>

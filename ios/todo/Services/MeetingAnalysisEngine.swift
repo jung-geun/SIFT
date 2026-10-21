@@ -1,7 +1,7 @@
 import Foundation
 
 /// Analyzes transcripts only with a selected, enabled on-device provider.
-/// A remote task-priority selection falls back to the local keyword heuristic.
+/// Unsupported/unavailable providers return source excerpts, never a fake translation.
 @MainActor
 struct MeetingAnalysisEngine {
 
@@ -26,6 +26,11 @@ struct MeetingAnalysisEngine {
             }
         }
     }
+    enum SummaryKind: String, Sendable {
+        case generated
+        case sourceExcerpts
+    }
+
 
     struct Outcome {
         let result: MeetingResult
@@ -35,6 +40,7 @@ struct MeetingAnalysisEngine {
         let usedOnDeviceLLM: Bool
         let engineSource: AnalysisSource?
         let executionPath: AnalysisExecutionPath
+        var summaryKind: SummaryKind { usedOnDeviceLLM ? .generated : .sourceExcerpts }
 
         init(
             result: MeetingResult,
@@ -52,14 +58,23 @@ struct MeetingAnalysisEngine {
     }
 
     private let heuristic = MeetingTranscriptAnalysisService()
+    private let localLLM: OnDeviceLLMService
+    private let policy: BetaFeaturePolicy
+
+    init(localLLM: OnDeviceLLMService? = nil, policy: BetaFeaturePolicy = BetaFeaturePolicy()) {
+        self.localLLM = localLLM ?? .shared
+        self.policy = policy
+    }
 
     func analyze(
         meetingID: String,
         result: MeetingResult,
         glossaryHint: String = "",
-        language: AppLanguage
+        sourceLanguageTag: String,
+        summaryLanguageTag: String,
+        language: AppLanguage = .current
     ) async throws -> Outcome {
-        let decision = BetaFeaturePolicy().routingDecision(for: .meetingAnalysis)
+        let decision = policy.routingDecision(for: .meetingAnalysis)
         guard case .providers(let providers) = decision, let provider = providers.first else {
             let reason: RuleFallbackReason
             if case .rules(let fallback) = decision {
@@ -81,6 +96,8 @@ struct MeetingAnalysisEngine {
                 meetingID: meetingID,
                 result: result,
                 glossaryHint: glossaryHint,
+                sourceLanguageTag: sourceLanguageTag,
+                summaryLanguageTag: summaryLanguageTag,
                 language: language
             ) {
                 return outcome
@@ -107,8 +124,18 @@ struct MeetingAnalysisEngine {
         language: AppLanguage,
         reason: RuleFallbackReason
     ) -> Outcome {
-        Outcome(
-            result: heuristic.analyze(meetingID: meetingID, result: result, language: language),
+        var excerpts = heuristic.analyze(meetingID: meetingID, result: result, language: language)
+        excerpts.title = result.segments.first.map { String($0.text.prefix(80)) } ?? ""
+        excerpts.summary = result.segments.prefix(8).map(\.text).joined(separator: "\n")
+        excerpts.decisions = []
+        excerpts.unresolvedQuestions = []
+        // Rule action candidates retain their source evidence, without UI-language prose.
+        for index in excerpts.actionDrafts.indices {
+            let sourceID = excerpts.actionDrafts[index].sourceSegmentIDs.first
+            excerpts.actionDrafts[index].notes = result.segments.first { $0.id == sourceID }?.text ?? ""
+        }
+        return Outcome(
+            result: excerpts,
             engineLabel: AnalysisSource.heuristic.displayName(language: language),
             usedOnDeviceLLM: false,
             engineSource: .heuristic,
@@ -121,6 +148,8 @@ struct MeetingAnalysisEngine {
         meetingID: String,
         result: MeetingResult,
         glossaryHint: String,
+        sourceLanguageTag: String,
+        summaryLanguageTag: String,
         language: AppLanguage
     ) async throws -> Outcome? {
         switch provider {
@@ -129,12 +158,16 @@ struct MeetingAnalysisEngine {
                 meetingID: meetingID,
                 result: result,
                 glossaryHint: glossaryHint,
+                sourceLanguageTag: sourceLanguageTag,
+                summaryLanguageTag: summaryLanguageTag,
                 language: language
             )
         case .onDevice:
             guard let extraction = try await analyzeViaLocalLLM(
                 segments: result.segments,
                 glossaryHint: glossaryHint,
+                sourceLanguageTag: sourceLanguageTag,
+                summaryLanguageTag: summaryLanguageTag,
                 language: language
             ) else { return nil }
             return Outcome(
@@ -152,6 +185,8 @@ struct MeetingAnalysisEngine {
         meetingID: String,
         result: MeetingResult,
         glossaryHint: String,
+        sourceLanguageTag: String,
+        summaryLanguageTag: String,
         language: AppLanguage
     ) async throws -> Outcome {
         guard #available(iOS 26.0, *), FoundationModelsAvailability.isAvailable else {
@@ -165,6 +200,8 @@ struct MeetingAnalysisEngine {
                 meetingID: meetingID,
                 segments: result.segments,
                 glossaryHint: glossaryHint,
+                sourceLanguageTag: sourceLanguageTag,
+                summaryLanguageTag: summaryLanguageTag,
                 language: language
             )
         return Outcome(
@@ -185,16 +222,23 @@ struct MeetingAnalysisEngine {
     private func analyzeViaLocalLLM(
         segments: [MeetingSegment],
         glossaryHint: String,
+        sourceLanguageTag: String,
+        summaryLanguageTag: String,
         language: AppLanguage
     ) async throws -> ProviderMeetingExtraction? {
-        let llm = OnDeviceLLMService.shared
-        guard llm.isModelLoaded else {
+        let llm = localLLM
+        guard llm.isModelLoaded, let loadedModelID = llm.loadedModelIdentifier,
+              loadedModelID == llm.modelID else {
             throw OnDeviceLLMService.LLMError.modelNotLoaded
         }
+        try MeetingSummaryLanguages.requireLocalModelSupport(
+            modelID: loadedModelID,
+            sourceLanguageTag: sourceLanguageTag,
+            summaryLanguageTag: summaryLanguageTag
+        )
         guard let context = buildTranscriptContext(
             segments: segments,
             glossaryHint: glossaryHint,
-            language: language,
             transcriptCharCap: 3_000
         ) else {
             throw IntelligenceRoutingError.parseFailed(
@@ -204,13 +248,13 @@ struct MeetingAnalysisEngine {
         }
 
         let userPrompt = """
-        \(context.glossaryBlock)[전사 구간]
+        \(context.glossaryBlock)[Transcript segments]
         \(context.numbered.joined(separator: "\n"))
 
-        \(Prompts.MeetingAnalysisLocal.requestSuffix(language: language))
+        \(Prompts.MeetingAnalysisLocal.requestSuffix(sourceLanguageTag: sourceLanguageTag, summaryLanguageTag: summaryLanguageTag))
         """
         let raw = try await llm.generate(
-            systemPrompt: Prompts.MeetingAnalysisLocal.systemInstruction(language: language),
+            systemPrompt: Prompts.MeetingAnalysisLocal.systemInstruction(sourceLanguageTag: sourceLanguageTag, summaryLanguageTag: summaryLanguageTag),
             userPrompt: userPrompt,
             maxTokens: 900,
             use: .meetingAnalysis
@@ -234,7 +278,6 @@ struct MeetingAnalysisEngine {
     private func buildTranscriptContext(
         segments: [MeetingSegment],
         glossaryHint: String,
-        language: AppLanguage,
         transcriptCharCap: Int
     ) -> TranscriptContext? {
         var numbered = [String]()
@@ -253,13 +296,7 @@ struct MeetingAnalysisEngine {
         if glossaryHint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             glossaryBlock = ""
         } else {
-            let label = AppLanguage.localized(
-                "meeting.glossary.label",
-                defaultValue: language == .english ? "User Vocabulary" : "사용자 단어장",
-                language: language,
-                comment: "Meeting prompt glossary section label"
-            )
-            glossaryBlock = "[\(label)]\n\(glossaryHint.trimmingCharacters(in: .whitespacesAndNewlines))\n\n"
+            glossaryBlock = "[User vocabulary]\n\(glossaryHint.trimmingCharacters(in: .whitespacesAndNewlines))\n\n"
         }
 
         return TranscriptContext(numbered: numbered, included: included, glossaryBlock: glossaryBlock)
@@ -360,11 +397,11 @@ struct MeetingAnalysisEngine {
         let deduped = Array(Dictionary(uniqueKeysWithValues: drafts.map { ($0.id, $0) }).values)
             .sorted { $0.id < $1.id }
         var copy = result
-        copy.title = extraction.title.isEmpty ? result.title : extraction.title
+        copy.title = extraction.title
         copy.summary = extraction.summary
         copy.decisions = extraction.decisions
         copy.unresolvedQuestions = extraction.unresolvedQuestions
         copy.actionDrafts = deduped
-        return copy
+        return MeetingActionAttribution.applying(to: copy, meetingID: meetingID)
     }
 }

@@ -20,7 +20,7 @@ struct MeetingWaveformView: View {
     private var effectiveProgress: Double { dragProgress ?? min(max(progress, 0), 1) }
 
     var body: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: AppTheme.Spacing.compact) {
             timeline
             Slider(
                 value: Binding(get: { effectiveProgress }, set: { dragProgress = $0 }),
@@ -30,6 +30,8 @@ struct MeetingWaveformView: View {
                 }
             )
             .disabled(onSeek == nil || totalMs <= 0)
+            .frame(minHeight: 44)
+            .accessibilityIdentifier("meeting.waveform.scrubber")
             .accessibilityLabel("전체 녹음 탐색")
             .accessibilityValue("\(timeLabel(Int64(effectiveProgress * Double(totalMs)))) / \(timeLabel(totalMs))")
         }
@@ -37,7 +39,7 @@ struct MeetingWaveformView: View {
     }
 
     private var timeline: some View {
-        VStack(spacing: 6) {
+        VStack(spacing: AppTheme.Spacing.item) {
             GeometryReader { geometry in
                 let viewport = geometry.size.width
                 let layout = MeetingWaveformViewport(
@@ -80,19 +82,23 @@ struct MeetingWaveformView: View {
             .font(.caption.monospacedDigit())
             .foregroundStyle(.secondary)
         }
-        .accessibilityElement()
-        .accessibilityLabel("음성 트랙")
-        .accessibilityValue("\(timeLabel(Int64(effectiveProgress * Double(totalMs)))) / \(timeLabel(totalMs))")
-        .accessibilityHint("위나 아래로 쓸어 5초씩 이동")
-        .accessibilityAdjustableAction { direction in
-            switch direction {
-            case .increment:
-                onSeek?(Self.adjustedProgress(progress, totalMs: totalMs, increment: true))
-            case .decrement:
-                onSeek?(Self.adjustedProgress(progress, totalMs: totalMs, increment: false))
-            @unknown default:
-                break
-            }
+        .accessibilityRepresentation {
+            Slider(value: Binding(get: { effectiveProgress }, set: { onSeek?($0) }), in: 0...1)
+                .disabled(onSeek == nil || totalMs <= 0)
+                .accessibilityLabel("음성 트랙")
+                .accessibilityValue("\(timeLabel(Int64(effectiveProgress * Double(totalMs)))) / \(timeLabel(totalMs))")
+                .accessibilityIdentifier("meeting.waveform.timeline")
+                .accessibilityHint("위나 아래로 쓸어 5초씩 이동")
+                .accessibilityAdjustableAction { direction in
+                    switch direction {
+                    case .increment:
+                        onSeek?(Self.adjustedProgress(progress, totalMs: totalMs, increment: true))
+                    case .decrement:
+                        onSeek?(Self.adjustedProgress(progress, totalMs: totalMs, increment: false))
+                    @unknown default:
+                        break
+                    }
+                }
         }
     }
 

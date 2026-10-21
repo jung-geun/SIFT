@@ -14,7 +14,7 @@ enum PersonaAIProvider: String, CaseIterable, Identifiable, Sendable {
         displayName(language: .current)
     }
 
-    func displayName(language: AppLanguage) -> String {
+    nonisolated func displayName(language: AppLanguage) -> String {
         switch self {
         case .foundationModels:
             return AppLanguage.localized("beta.foundationModels.toggle", defaultValue: "Apple Foundation Models (AFM)", language: language)
@@ -38,7 +38,7 @@ enum PersonaAIProvider: String, CaseIterable, Identifiable, Sendable {
 }
 
 
-struct PersonaRuleDraft: Equatable, Sendable {
+nonisolated struct PersonaRuleDraft: Equatable, Sendable {
     let personaTypes: [PersonaType]
     let descriptionText: String
     let evidence: [String]
@@ -62,7 +62,7 @@ struct PersonaGenerationService {
         _ behaviorProfile: BehaviorProfile,
         _ language: AppLanguage
     ) async throws -> PersonaNarrative
-    typealias RoutingDecisionProvider = @Sendable () -> ProviderRoutingDecision
+    typealias RoutingDecisionProvider = @MainActor @Sendable () -> ProviderRoutingDecision
     typealias AvailabilityProvider = () -> Bool
 
     private let narrativeProvider: NarrativeProvider
@@ -144,6 +144,8 @@ struct PersonaGenerationService {
 
     }
 
+    /// Both snapshots and the derived profile must come from the provenance-filtered context builder.
+    /// Raw Todos are deliberately ignored so neither evidence nor narrative inputs bypass that boundary.
     func generateRuleBased(
         existingPersona: String,
         todos _: [Todo],
@@ -205,9 +207,10 @@ struct PersonaGenerationService {
             now: now,
             language: language
         )
-        let activeCount = todos.filter { !$0.isCompleted && $0.triage == .todo }.count
+        // These direct aggregates bypass the provenance-filtered behavior context.
+        let activeCount = todos.filter { !$0.isHealthRelated && !$0.isCompleted && $0.triage == .todo }.count
         var tagCounts: [String: Int] = [:]
-        for todo in todos where todo.triage == .todo {
+        for todo in todos where !todo.isHealthRelated && todo.triage == .todo {
             for tag in todo.tags where !tag.isEmpty {
                 tagCounts[tag, default: 0] += 1
             }

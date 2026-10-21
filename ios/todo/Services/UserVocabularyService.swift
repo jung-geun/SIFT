@@ -3,28 +3,153 @@ import Foundation
 import Security
 import SwiftData
 
+/// Immutable per-key portable entries prevent last-writer-wins key loss.
+nonisolated struct HMACIdentityKeyFamily {
+    private static let lock = NSLock()
+    let service: String
+    let primaryAccount: String
+
+    nonisolated struct Authorization: Sendable {
+        let isEnabled: Bool
+        private let lease: @Sendable () -> Bool
+
+        init() {
+            #if DEBUG
+            let capture = HMACIdentityKeyFamily.captureAuthorizationForTesting
+                ?? { UserCloudSyncPolicy.captureAuthorization() }
+            #else
+            let capture = { UserCloudSyncPolicy.captureAuthorization() }
+            #endif
+            let captured = capture()
+            lease = captured
+            isEnabled = captured()
+        }
+
+        func requireCurrent() throws {
+            if isEnabled { try KeychainStore.requirePortableAuthorization(lease) }
+        }
+    }
+
+    #if DEBUG
+    // Fixtures hold AIProviderTestIsolation for the entire override lifetime.
+    nonisolated(unsafe) static var captureAuthorizationForTesting: (@Sendable () -> @Sendable () -> Bool)?
+    #endif
+    private var cacheAccount: String { primaryAccount + ".family-v1" }
+    private var portablePrefix: String { primaryAccount + ".member-v1." }
+
+    static func identifier(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    func keys(
+        createIfMissing: Bool,
+        legacyKeys: ((Authorization) throws -> [Data])? = nil,
+        authorization: Authorization = Authorization()
+    ) throws -> [Data] {
+        Self.lock.lock()
+        defer { Self.lock.unlock() }
+        let primary = try KeychainStore.getDeviceOnly(service: service, account: primaryAccount)
+        let cached = try KeychainStore.getDeviceOnly(service: service, account: cacheAccount)
+        var keys: [Data] = []
+        func append(_ key: Data) throws {
+            guard key.count == 32 else { throw VocabularyServiceError.invalidKey }
+            if !keys.contains(key) { keys.append(key) }
+        }
+        if let primary { try append(primary) }
+        if let cached {
+            for key in try JSONDecoder().decode([Data].self, from: cached) { try append(key) }
+        }
+        for legacy in try legacyKeys?(authorization) ?? [] { try append(legacy) }
+        var portable: [String: Data] = [:]
+        if authorization.isEnabled {
+            try authorization.requireCurrent()
+            for account in try KeychainStore.synchronizableAccounts(service: service) where account.hasPrefix(portablePrefix) {
+                try authorization.requireCurrent()
+                guard let key = try KeychainStore.getSynchronizable(service: service, account: account) else {
+                    // Enumeration and reads are not an atomic Keychain snapshot.
+                    throw KeychainStoreError.security(errSecItemNotFound)
+                }
+                guard account == portablePrefix + Self.identifier(key) else { throw VocabularyServiceError.invalidKey }
+                try append(key)
+                portable[account] = key
+            }
+        }
+        // A revoked read must not turn into absence or a replacement identity.
+        try authorization.requireCurrent()
+        if keys.isEmpty && createIfMissing {
+            var bytes = [UInt8](repeating: 0, count: 32)
+            guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {
+                throw VocabularyServiceError.keyGeneration
+            }
+            keys.append(Data(bytes))
+        }
+        guard let first = keys.first else {
+            try authorization.requireCurrent()
+            return []
+        }
+        // Finish reads and publication before importing portable data locally.
+        let encoded = try JSONEncoder().encode(keys)
+        if authorization.isEnabled {
+            for key in keys {
+                let account = portablePrefix + Self.identifier(key)
+                if portable[account] == nil {
+                    try authorization.requireCurrent()
+                    try KeychainStore.setSynchronizable(service: service, account: account, data: key)
+                }
+            }
+        }
+        if cached != encoded {
+            try authorization.requireCurrent()
+            try KeychainStore.setDeviceOnly(service: service, account: cacheAccount, data: encoded)
+        }
+        if primary == nil {
+            try authorization.requireCurrent()
+            try KeychainStore.setDeviceOnly(service: service, account: primaryAccount, data: first)
+        }
+        try authorization.requireCurrent()
+        return keys
+    }
+
+    func applyFullSyncPolicy(legacyKeys: ((Authorization) throws -> [Data])? = nil,
+                             authorization: Authorization = .init()) throws {
+        guard authorization.isEnabled else { return }
+        _ = try keys(createIfMissing: false, legacyKeys: legacyKeys, authorization: authorization)
+        try authorization.requireCurrent()
+    }
+}
+
 actor VocabularyHMACKeyStore {
-    private let service = "pieroot.todo.vocabulary"
-    private let account = "hmac-key-v1"
+    private let family = HMACIdentityKeyFamily(service: "pieroot.todo.vocabulary", primaryAccount: "hmac-key-v1")
 
     func readOrCreate() throws -> Data {
-        if let data = try KeychainStore.getDeviceOnly(service: service, account: account) {
-            guard data.count == 32 else { throw VocabularyServiceError.invalidKey }
-            return data
+        try keys().first!
+    }
+
+    func keys(matching verifiers: [String] = [], authorization: HMACIdentityKeyFamily.Authorization = .init()) throws -> [Data] {
+        var keys = try family.keys(createIfMissing: verifiers.allSatisfy(\.isEmpty), authorization: authorization)
+        guard !keys.isEmpty else { throw VocabularyServiceError.originalKeyUnavailable }
+        if let index = keys.firstIndex(where: { verifiers.contains(Self.verifier($0)) }) {
+            let matching = keys.remove(at: index)
+            keys.insert(matching, at: 0)
         }
-        var bytes = [UInt8](repeating: 0, count: 32)
-        guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {
-            throw VocabularyServiceError.keyGeneration
-        }
-        let data = Data(bytes)
-        try KeychainStore.setDeviceOnly(service: service, account: account, data: data)
-        return data
+        return keys
+    }
+
+    /// Disabling full sync never deletes a portable or local key.
+    func applyFullSyncPolicy(authorization: HMACIdentityKeyFamily.Authorization = .init()) async throws {
+        try family.applyFullSyncPolicy(authorization: authorization)
+    }
+
+    nonisolated static func verifier(_ key: Data) -> String {
+        HMAC<SHA256>.authenticationCode(for: Data("SIFT User Vocabulary v1".utf8), using: SymmetricKey(data: key))
+            .map { String(format: "%02x", $0) }.joined()
     }
 }
 
 enum VocabularyServiceError: Error, Equatable {
     case invalidKey
     case keyGeneration
+    case originalKeyUnavailable
     case invalidDraft
     case missingTerm
 }
@@ -36,14 +161,16 @@ actor UserVocabularyService {
     private let now: @Sendable () -> Date = Date.init
     private let makeGeneration: @Sendable () -> UUID = UUID.init
     private var initialized = false
-    private var hmacKey: Data?
+    private var hmacKeys: [Data] = []
     func observe(_ document: VocabularySourceDocument, forceEnrichment: Bool = false) async throws -> VocabularyEnrichmentRequest? {
         try await ensureInitialized()
         let candidates = await UserVocabularyExtractor().extract(from: document)
-        let sourceKey = hmac(document.stableID)
-        let evidenceKey = hmac(document.evidenceGroupID)
-        let descriptor = FetchDescriptor<VocabularySourceState>(predicate: #Predicate { $0.sourceKey == sourceKey })
-        let existing = try modelContext.fetch(descriptor).first
+        let sourceKeys = provenanceKeys(for: document.stableID)
+        let states = try modelContext.fetch(FetchDescriptor<VocabularySourceState>())
+        let existing = states.first { sourceKeys.contains($0.sourceKey) }
+        let originalKey = existing.flatMap { state in hmacKeys.first { hmac(document.stableID, key: $0) == state.sourceKey } }
+        let sourceKey = existing?.sourceKey ?? hmac(document.stableID)
+        let evidenceKey = hmac(document.evidenceGroupID, key: originalKey)
         if let existing, existing.contentFingerprint == document.contentFingerprint, existing.extractorVersion == UserVocabularyExtractor.version {
             if existing.enrichmentStatusRaw == VocabularyEnrichmentStatus.failed.rawValue,
                forceEnrichment || (now().timeIntervalSince(existing.lastEnrichmentAttemptAt ?? .distantPast) >= 86_400) {
@@ -198,7 +325,8 @@ actor UserVocabularyService {
             fields: pairs.flatMap { [VocabularyTextField(.transcript, $0.from), VocabularyTextField(.transcript, $0.to)] }
         )
         _ = try await observe(document, forceEnrichment: false)
-        guard let state = try modelContext.fetch(FetchDescriptor<VocabularySourceState>()).first(where: { $0.sourceKey == hmac(id) }) else { return }
+        let sourceKeys = provenanceKeys(for: id)
+        guard let state = try modelContext.fetch(FetchDescriptor<VocabularySourceState>()).first(where: { sourceKeys.contains($0.sourceKey) }) else { return }
         for pair in pairs where validSurface(pair.from) && validSurface(pair.to) && Self.normalizedKey(pair.from) != Self.normalizedKey(pair.to) {
             let observation = VocabularyObservation()
             observation.canonicalKey = Self.normalizedKey(pair.to)
@@ -330,25 +458,36 @@ actor UserVocabularyService {
         try modelContext.save()
     }
 
-    private func ensureInitialized() async throws {
-        guard !initialized else { return }
-        hmacKey = try await keyStore.readOrCreate()
+    /// Call after a policy change or delayed Keychain delivery.
+    func applyFullSyncPolicy() async throws {
+        let authorization = HMACIdentityKeyFamily.Authorization()
+        guard authorization.isEnabled else { return }
+        try await keyStore.applyFullSyncPolicy(authorization: authorization)
+        try authorization.requireCurrent()
+        initialized = false
+        try await ensureInitialized(authorization: authorization)
+        try authorization.requireCurrent()
+    }
+
+    private func ensureInitialized(authorization: HMACIdentityKeyFamily.Authorization = .init()) async throws {
+        guard !initialized || authorization.isEnabled else { return }
+        let rows = try modelContext.fetch(FetchDescriptor<VocabularyStoreMetadata>())
+        let resolvedKeys = try await keyStore.keys(matching: rows.map(\.hmacVerifier), authorization: authorization)
+        try authorization.requireCurrent()
+        hmacKeys = resolvedKeys
         let metadata = try metadata()
         if metadata.schemaRepairVersion < 1 {
             try repairLegacyTerms()
             metadata.schemaRepairVersion = 1
         }
-        let verifier = hmac("SIFT User Vocabulary v1")
-        if !metadata.hmacVerifier.isEmpty, metadata.hmacVerifier != verifier {
-            try modelContext.delete(model: VocabularyObservation.self)
-            try modelContext.delete(model: VocabularySourceState.self)
-            let terms = try modelContext.fetch(FetchDescriptor<MeetingGlossaryTerm>())
-            for term in terms where term.userConfirmedAt == nil && !term.confirmedLegacy {
-                modelContext.delete(term)
-            }
+        // Foreign metadata can arrive before its original key. Preserve both the
+        // verifier and learned rows for later Keychain delivery, never reset them.
+        if metadata.hmacVerifier.isEmpty, let key = hmacKeys.first {
+            metadata.hmacVerifier = VocabularyHMACKeyStore.verifier(key)
         }
-        metadata.hmacVerifier = verifier
+        try authorization.requireCurrent()
         try modelContext.save()
+        try authorization.requireCurrent()
         initialized = true
     }
 
@@ -456,9 +595,13 @@ actor UserVocabularyService {
         .init(canonical: term.canonical, canonicalKey: term.canonicalKey, category: VocabularyCategory(rawValue: term.category) ?? .other, isPromoted: isPromoted(term), isRejected: term.rejectedAt != nil, aliases: term.userSpeechAliases.map { .init(value: $0, role: .speechAlias, origin: .user, active: true) } + term.userCanonicalizationAliases.map { .init(value: $0, role: .canonicalizationAlias, origin: .user, active: true) }, variants: term.variants, evidenceGroupCount: term.exactEvidenceGroupCount + term.correctionEvidenceGroupCount, sourceKinds: [], lastSeenAt: term.lastSeenAt)
     }
 
-    private func hmac(_ raw: String) -> String {
-        guard let hmacKey else { return "" }
-        return Self.hex(HMAC<SHA256>.authenticationCode(for: Data(raw.utf8), using: SymmetricKey(data: hmacKey)))
+    private func hmac(_ raw: String, key: Data? = nil) -> String {
+        guard let key = key ?? hmacKeys.first else { return "" }
+        return Self.hex(HMAC<SHA256>.authenticationCode(for: Data(raw.utf8), using: SymmetricKey(data: key)))
+    }
+
+    private func provenanceKeys(for raw: String) -> Set<String> {
+        Set(hmacKeys.map { hmac(raw, key: $0) })
     }
 
     private func validSurface(_ value: String) -> Bool {

@@ -131,8 +131,8 @@ struct OutlookIMAPServiceTests {
     }
 
     @Test("rejects legacy auth when server advertises LOGINDISABLED or only modern OAuth mechs")
-    func legacyAuthDiagnostics() async throws {
-        try await AIProviderTestIsolation.shared.withLock {
+    func legacyAuthDiagnostics() async {
+        await AIProviderTestIsolation.shared.withLock {
             // Case 1: LOGINDISABLED
             let transport1 = ScriptedIMAPTransport()
             transport1.addRoute(matching: "CONNECT_PREAUTH", response: [

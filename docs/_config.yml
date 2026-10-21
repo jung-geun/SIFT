@@ -1,8 +1,9 @@
 title: "SIFT: To-Do List"
-description: "난잡한 일정을 채로 걸러 중요한 것을 추려주는 TODO 관리 시스템"
+description: "iPhone·iPad·Mac에서 사용하는 무료 할 일 관리. 기본 처리는 기기 안에서, 외부 연결은 사용자가 선택합니다."
 theme: jekyll-theme-cayman
 url: "https://sift.pieroot.xyz"
 app_store_url: "https://apps.apple.com/kr/app/sift-to-do-list/id6782752844"
+feedback_api_url: "https://sift-feedback-api.jgbong0306.workers.dev"
 
 github:
   is_project_page: false

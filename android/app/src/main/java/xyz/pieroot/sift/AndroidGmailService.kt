@@ -2,7 +2,6 @@ package xyz.pieroot.sift
 
 import android.content.Context
 import android.content.Intent
-import android.content.IntentSender
 import com.google.android.gms.auth.GoogleAuthUtil
 import com.google.android.gms.auth.UserRecoverableAuthException
 import com.google.android.gms.auth.api.signin.GoogleSignIn
@@ -11,11 +10,12 @@ import com.google.android.gms.auth.api.signin.GoogleSignInClient
 import com.google.android.gms.auth.api.signin.GoogleSignInOptions
 import com.google.android.gms.common.api.ApiException
 import com.google.android.gms.common.api.Scope
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
-import java.net.HttpURLConnection
-import java.net.URL
 
 private const val GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
 private const val GMAIL_MESSAGES_ENDPOINT = "https://gmail.googleapis.com/gmail/v1/users/me/messages"
@@ -38,10 +38,6 @@ object AndroidGmailService {
 
     fun signInIntent(context: Context): Intent = client(context).signInIntent
 
-    fun signOut(context: Context) {
-        client(context).signOut()
-    }
-
     fun handleSignInIntent(data: Intent?): Result<String> = runCatching {
         val task = GoogleSignIn.getSignedInAccountFromIntent(data)
         val account = task.getResult(ApiException::class.java)
@@ -59,11 +55,26 @@ object AndroidGmailService {
             ?.takeIf { GoogleSignIn.hasPermissions(it, gmailScope) }
             ?.email
 
-    suspend fun fetchRecentMessages(context: Context, maxResults: Int = 10): List<AndroidMailPreview> = withContext(Dispatchers.IO) {
+    fun signedInAccountId(context: Context): String? =
+        GoogleSignIn.getLastSignedInAccount(context)
+            ?.takeIf { GoogleSignIn.hasPermissions(it, gmailScope) }
+            ?.let { it.id ?: it.email }
+
+    suspend fun fetchRecentMessages(context: Context, maxResults: Int = 10): List<AndroidMailPreview> {
+        currentCoroutineContext().ensureActive()
         val account = requireAccount(context)
-        val accessToken = accessToken(context, account)
-        val ids = listMessageIds(accessToken, maxResults)
-        ids.mapNotNull { fetchMessage(accessToken, it) }
+        val accountId = requireNotNull(account.id ?: account.email) { "Google 계정 정보를 찾을 수 없습니다." }
+        return withContext(Dispatchers.IO) {
+            ensureAccount(context, accountId)
+            val accessToken = accessToken(context, account)
+            ensureAccount(context, accountId)
+            val ids = listMessageIds(accessToken, maxResults)
+            ensureAccount(context, accountId)
+            ids.map { id ->
+                ensureAccount(context, accountId)
+                fetchMessage(accessToken, id).also { ensureAccount(context, accountId) }
+            }
+        }
     }
 
     private fun signInOptions(context: Context): GoogleSignInOptions {
@@ -96,12 +107,18 @@ object AndroidGmailService {
         return GoogleAuthUtil.getToken(context, coreAccount, "oauth2:$GMAIL_SCOPE")
     }
 
-    private fun listMessageIds(accessToken: String, maxResults: Int): List<String> {
-        val connection = authorizedConnection(
-            "$GMAIL_MESSAGES_ENDPOINT?maxResults=${maxResults.coerceIn(1, 25)}&q=-in:spam%20-in:trash%20newer_than:14d",
-            accessToken,
-        )
-        val payload = readJson(connection, "Gmail 목록 조회 실패")
+    private suspend fun ensureAccount(context: Context, expectedId: String) {
+        currentCoroutineContext().ensureActive()
+        if (signedInAccountId(context) != expectedId) throw CancellationException("Google account changed")
+    }
+
+    private suspend fun listMessageIds(accessToken: String, maxResults: Int): List<String> {
+        val payload = JSONObject(requireNotNull(GoogleServiceHttp.request(
+            url = "$GMAIL_MESSAGES_ENDPOINT?maxResults=${maxResults.coerceIn(1, 25)}&q=-in:spam%20-in:trash%20newer_than:14d",
+            method = "GET",
+            label = "Gmail 목록 조회 실패",
+            bearerToken = accessToken,
+        )))
         val messages = payload.optJSONArray("messages") ?: return emptyList()
         return buildList {
             for (index in 0 until messages.length()) {
@@ -110,12 +127,13 @@ object AndroidGmailService {
         }
     }
 
-    private fun fetchMessage(accessToken: String, id: String): AndroidMailPreview? {
-        val connection = authorizedConnection(
-            "$GMAIL_MESSAGES_ENDPOINT/$id?format=metadata&metadataHeaders=Subject&metadataHeaders=From",
-            accessToken,
-        )
-        val payload = readJson(connection, "Gmail 메시지 조회 실패")
+    private suspend fun fetchMessage(accessToken: String, id: String): AndroidMailPreview {
+        val payload = JSONObject(requireNotNull(GoogleServiceHttp.request(
+            url = "$GMAIL_MESSAGES_ENDPOINT/$id?format=metadata&metadataHeaders=Subject&metadataHeaders=From",
+            method = "GET",
+            label = "Gmail 메시지 조회 실패",
+            bearerToken = accessToken,
+        )))
         val headers = payload.optJSONObject("payload")?.optJSONArray("headers")
         var subject = "(제목 없음)"
         var from = "알 수 없는 발신자"
@@ -136,22 +154,4 @@ object AndroidGmailService {
         )
     }
 
-    private fun authorizedConnection(rawUrl: String, accessToken: String): HttpURLConnection =
-        (URL(rawUrl).openConnection() as HttpURLConnection).apply {
-            requestMethod = "GET"
-            doInput = true
-            setRequestProperty("Authorization", "Bearer $accessToken")
-            setRequestProperty("Accept", "application/json")
-        }
-
-    private fun readJson(connection: HttpURLConnection, label: String): JSONObject {
-        val code = connection.responseCode
-        val text = if (code in 200..299) {
-            connection.inputStream.bufferedReader().use { it.readText() }
-        } else {
-            val errorText = connection.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
-            error("$label ($code): $errorText")
-        }
-        return JSONObject(text)
-    }
 }

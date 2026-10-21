@@ -6,7 +6,7 @@ import SwiftData
 /// 삭제된 todo는 SwiftData에서 hard-delete되어 기록이 사라진다.
 /// TaskAuditEvent는 삭제 시점의 lifecycle 정보를 보존해 페르소나·패턴 분석에 활용한다.
 ///
-/// 기록 범위: **사용자 주도 삭제만** (TodoListView.deleteTodo choke point).
+/// 기록 범위: **사용자 주도 비건강 태스크 삭제만** (TodoMutations.delete choke point).
 /// 자동 만료 sweep(TodoListView 기동 시 마감 경과분 삭제, CalendarService 만료 sweep)에는
 /// 기록하지 않는다 — 자동 정리는 사용자 의도가 아니라 관리 노이즈이기 때문.
 ///
@@ -99,6 +99,7 @@ enum TaskBehaviorActor: String, Codable, Sendable {
 /// A typed, content-free record of a meaningful Todo state transition.
 ///
 /// Titles, notes, tags, and external identifiers are deliberately excluded.
+/// Health-related tasks are excluded by TaskBehaviorRecorder before construction.
 /// CloudKit compatibility requires defaults for nonoptional stored properties.
 @Model
 final class TaskBehaviorEvent {
@@ -150,6 +151,7 @@ final class TaskBehaviorEvent {
 
 /// Single insertion point for behavior telemetry. Callers mutate Todo first,
 /// then record the transition with the captured before value.
+/// Health provenance excludes every event kind, including restored calendar-origin rows.
 @MainActor
 enum TaskBehaviorRecorder {
     static func recordCreation(
@@ -158,6 +160,7 @@ enum TaskBehaviorRecorder {
         in context: ModelContext,
         at occurredAt: Date = Date()
     ) {
+        guard !todo.isHealthRelated else { return }
         let event = TaskBehaviorEvent(todo: todo, type: .created, actor: actor, occurredAt: occurredAt)
         event.afterCompletion = todo.isCompleted
         event.afterDueDate = todo.dueDate
@@ -174,7 +177,7 @@ enum TaskBehaviorRecorder {
         in context: ModelContext,
         at occurredAt: Date = Date()
     ) {
-        guard before != after else { return }
+        guard !todo.isHealthRelated, before != after else { return }
         let event = TaskBehaviorEvent(todo: todo, type: .completionChanged, actor: actor, occurredAt: occurredAt)
         event.beforeCompletion = before
         event.afterCompletion = after
@@ -189,7 +192,7 @@ enum TaskBehaviorRecorder {
         in context: ModelContext,
         at occurredAt: Date = Date()
     ) {
-        guard before != after else { return }
+        guard !todo.isHealthRelated, before != after else { return }
         let event = TaskBehaviorEvent(todo: todo, type: .dueDateChanged, actor: actor, occurredAt: occurredAt)
         event.beforeDueDate = before
         event.afterDueDate = after
@@ -204,7 +207,7 @@ enum TaskBehaviorRecorder {
         in context: ModelContext,
         at occurredAt: Date = Date()
     ) {
-        guard before != after else { return }
+        guard !todo.isHealthRelated, before != after else { return }
         let event = TaskBehaviorEvent(todo: todo, type: .priorityChanged, actor: actor, occurredAt: occurredAt)
         event.beforeManualPriority = before
         event.afterManualPriority = after
@@ -219,7 +222,7 @@ enum TaskBehaviorRecorder {
         in context: ModelContext,
         at occurredAt: Date = Date()
     ) {
-        guard before != after else { return }
+        guard !todo.isHealthRelated, before != after else { return }
         let event = TaskBehaviorEvent(todo: todo, type: .priorityChanged, actor: actor, occurredAt: occurredAt)
         event.beforeComputedPriority = before
         event.afterComputedPriority = after
@@ -232,6 +235,7 @@ enum TaskBehaviorRecorder {
         in context: ModelContext,
         at occurredAt: Date = Date()
     ) {
+        guard !todo.isHealthRelated else { return }
         let event = TaskBehaviorEvent(todo: todo, type: .deleted, actor: actor, occurredAt: occurredAt)
         event.beforeCompletion = todo.isCompleted
         event.beforeDueDate = todo.dueDate

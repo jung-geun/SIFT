@@ -7,18 +7,25 @@ struct MeetingSpeakerDisplay: Equatable {
     /// Unlabeled segments without word timing that contain several speakers.
     var mixedSegmentIDs: Set<String> = []
     var statusText: String?
+    var attribution: MeetingTranscriptAttribution?
+    var segments: [MeetingSegment] = []
 
     init() {}
 
     init(record: MeetingRecord) {
+        let result = record.result
+        segments = result?.segments ?? []
+        attribution = MeetingTranscriptAttribution(meetingID: record.meetingID, result: result ?? MeetingResult(),
+            profiles: record.diarization?.profiles ?? [])
         guard let payload = record.diarization else {
             if record.diarizationData != nil {
                 statusText = MeetingDiarizationPostProcessor.Outcome.unreadablePayload.userMessage
             }
             return
         }
-        profiles = Dictionary(payload.profiles.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        sortedProfiles = payload.profiles.sorted { ($0.ordinal, $0.id) < ($1.ordinal, $1.id) }
+        let resolved = attribution?.applyingNames(to: payload.profiles) ?? payload.profiles
+        profiles = Dictionary(resolved.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        sortedProfiles = resolved.sorted { ($0.ordinal, $0.id) < ($1.ordinal, $1.id) }
         if let result = record.result, !payload.intervals.isEmpty {
             let perMillisecond = MeetingSpeakerAlignment.samplesPerMillisecond
             for segment in result.segments where segment.speakerIDs.isEmpty && (segment.timedRuns?.isEmpty ?? true) {
@@ -63,8 +70,8 @@ struct MeetingSpeakerDisplay: Equatable {
             statusText = AppLanguage.localized(
                 "meeting.diarization.modelUnavailableState",
                 defaultValue: english
-                    ? "The speaker model was not installed. Install it in Beta Features, then detect speakers again."
-                    : "화자 모델이 없어 분석하지 못했습니다. 베타 기능에서 설치한 뒤 다시 분석하세요.",
+                    ? "The speaker model was not installed. Install it in Settings → Beta features, then detect speakers again."
+                    : "화자 모델이 없어 분석하지 못했습니다. 설정 → 베타 기능에서 설치한 뒤 다시 분석하세요.",
                 language: .current, comment: "Saved-audio speaker analysis skipped without an installed model."
             )
         case .notProcessed, .runningLive:
@@ -109,9 +116,8 @@ struct MeetingSpeakerAssignmentSheet: View {
             List {
                 Section {
                     Text(segment.text)
-                        .font(.caption)
+                        .font(.body)
                         .foregroundStyle(.secondary)
-                        .lineLimit(3)
                 }
                 Section(copy("meeting.speaker.sheet.assigned", korean: "이 구간의 화자", english: "Speakers in this segment")) {
                     if profiles.isEmpty {
@@ -149,6 +155,7 @@ struct MeetingSpeakerAssignmentSheet: View {
                     .disabled(newSpeakerName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
+            .appListStyle()
             .navigationTitle(copy("meeting.speaker.sheet.title", korean: "화자 수정", english: "Edit Speakers"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

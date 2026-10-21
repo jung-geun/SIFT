@@ -30,7 +30,7 @@ struct BehaviorNarrationService {
         _ baseline: MemoryAnalysisResult,
         _ language: AppLanguage
     ) async throws -> BehaviorNarrative
-    typealias RoutingDecisionProvider = @Sendable () -> ProviderRoutingDecision
+    typealias RoutingDecisionProvider = @MainActor @Sendable () -> ProviderRoutingDecision
     typealias AvailabilityProvider = () -> Bool
 
     private let narrativeProvider: NarrativeProvider
@@ -127,8 +127,12 @@ enum BehaviorAnalysisContextBuilder {
         behaviorProfile: BehaviorProfile = .empty(),
         personaTypes: [PersonaType] = []
     ) -> BehaviorAnalysisContext {
-        let liveSnapshots = todos.map { todo in
-            BehaviorTodoSnapshot(
+        // Apply the source boundary before snapshots discard provenance. Health
+        // transitions/deletions are never recorded, so deleted tasks need no flag.
+        let excludedTodoIDs = Set(todos.lazy.filter(\.isHealthRelated).map(\.id))
+        let liveSnapshots = todos.compactMap { todo -> BehaviorTodoSnapshot? in
+            guard !excludedTodoIDs.contains(todo.id) else { return nil }
+            return BehaviorTodoSnapshot(
                 id: todo.id,
                 createdAt: todo.createdAt,
                 completedAt: todo.completedAt,
@@ -140,8 +144,9 @@ enum BehaviorAnalysisContextBuilder {
                 isDeleted: false
             )
         }
-        let deletedSnapshots = auditEvents.map { event in
-            BehaviorTodoSnapshot(
+        let deletedSnapshots = auditEvents.compactMap { event -> BehaviorTodoSnapshot? in
+            guard !excludedTodoIDs.contains(event.todoID) else { return nil }
+            return BehaviorTodoSnapshot(
                 id: event.todoID,
                 createdAt: event.createdAt,
                 completedAt: event.completedAt,
@@ -153,8 +158,9 @@ enum BehaviorAnalysisContextBuilder {
                 isDeleted: true
             )
         }
-        let eventSnapshots = behaviorEvents.map { event in
-            BehaviorEventSnapshot(
+        let eventSnapshots = behaviorEvents.compactMap { event -> BehaviorEventSnapshot? in
+            guard !excludedTodoIDs.contains(event.todoID) else { return nil }
+            return BehaviorEventSnapshot(
                 todoID: event.todoID,
                 kind: event.eventType,
                 timestamp: event.occurredAt,

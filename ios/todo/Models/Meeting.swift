@@ -23,6 +23,7 @@ enum MeetingASRSource: String, Sendable {
     case apple, offline
     /// Audio is saved, but no ASR has committed a transcript yet.
     case importedAudio
+    case savedAudio
 }
 
 enum MeetingOfflineASRFailure: String, Sendable {
@@ -41,7 +42,7 @@ struct MeetingSegment: Codable, Hashable, Sendable, Identifiable {
     /// Offsets address `text` in UTF-16 units. Legacy segments decode as nil.
     var timedRuns: [MeetingTimedTextRun]?
 
-    init(id: String = UUID().uuidString.lowercased(), lineageID: String? = nil,
+    nonisolated init(id: String = UUID().uuidString.lowercased(), lineageID: String? = nil,
          startMs: Int64, endMs: Int64, speakerIDs: [String] = [], text: String,
          isFinal: Bool = true, confidence: Double? = nil, timedRuns: [MeetingTimedTextRun]? = nil) {
         self.id = id
@@ -132,7 +133,7 @@ struct MeetingResult: nonisolated Codable, Hashable, Sendable {
     var segments: [MeetingSegment]
     var actionDrafts: [MeetingActionDraft]
 
-    init(transcriptRevision: Int = 0, title: String = "", summary: String = "",
+    nonisolated init(transcriptRevision: Int = 0, title: String = "", summary: String = "",
          decisions: [String] = [], unresolvedQuestions: [String] = [], segments: [MeetingSegment] = [],
          actionDrafts: [MeetingActionDraft] = []) {
         self.transcriptRevision = transcriptRevision
@@ -260,7 +261,7 @@ enum MeetingCanonicalID {
         return digest(bytes)
     }
 
-    static func validateMeetingID(_ value: String) throws {
+    nonisolated static func validateMeetingID(_ value: String) throws {
         guard value.range(of: "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", options: .regularExpression) != nil else {
             throw MeetingModelError.invalidMeetingID
         }
@@ -447,7 +448,7 @@ struct MeetingRevisionEditor: Sendable {
     }
 }
 
-struct MeetingAudioPartManifest: nonisolated Codable, nonisolated Equatable, Sendable {
+nonisolated struct MeetingAudioPartManifest: Codable, Equatable, Sendable {
     let fileName: String
     let partIndex: Int
     let partStartSample: Int64
@@ -455,7 +456,7 @@ struct MeetingAudioPartManifest: nonisolated Codable, nonisolated Equatable, Sen
     let ownedEndSample: Int64
 }
 
-struct MeetingAudioManifest: nonisolated Codable, nonisolated Equatable, Sendable {
+nonisolated struct MeetingAudioManifest: Codable, Equatable, Sendable {
     let relativeDirectory: String
     let sampleRate: Int64
     let totalSamples: Int64
@@ -481,6 +482,13 @@ final class MeetingRecord {
     var updatedAt: Date = Date()
     var modeRaw: String = MeetingProcessingMode.onDevice.rawValue
     var languageTag: String = "en-US"
+    var automaticLanguageDetection: Bool = false
+    /// Empty on legacy records: summarize in the source language, not the UI language.
+    var summaryLanguageTag: String = ""
+    var summaryKindRaw: String?
+    var summaryEngineLabel: String = ""
+    var summaryFallbackReasonRaw: String?
+    var summaryResultLanguageTag: String?
     var timezoneIdentifier: String = "UTC"
     var statusRaw: String = MeetingStatus.ready.rawValue
     var transcriptRevision: Int = 0
@@ -518,15 +526,39 @@ final class MeetingRecord {
     var importedAudioFileName: String? = nil
 
     init(meetingID: String = UUID().uuidString.lowercased(), mode: MeetingProcessingMode = .onDevice,
-         languageTag: String = "en-US", timezoneIdentifier: String = "UTC") {
+         languageTag: String = "en-US", automaticLanguageDetection: Bool = false,
+         timezoneIdentifier: String = "UTC", summaryLanguageTag: String = "") {
         self.meetingID = meetingID.lowercased()
         self.modeRaw = mode.rawValue
         self.languageTag = languageTag
+        self.automaticLanguageDetection = automaticLanguageDetection
+        self.summaryLanguageTag = summaryLanguageTag
         self.timezoneIdentifier = timezoneIdentifier
         self.statusRaw = MeetingStatus.recording.rawValue
     }
 
     var mode: MeetingProcessingMode { MeetingProcessingMode(rawValue: modeRaw) ?? .onDevice }
+    var effectiveSummaryLanguageTag: String { summaryLanguageTag.isEmpty ? languageTag : summaryLanguageTag }
+
+    /// Processing follows detected speech in automatic mode, never the saved
+    /// manual preference. Canonical language-only codes do not invent a region.
+    /// Invalid evidence is unknown; repeated evidence for one language is not mixed.
+    var processingSourceLanguageTag: String {
+        guard automaticLanguageDetection else { return languageTag }
+        var detectedTag: String?
+        var isMixed = false
+        for evidence in asrDetectedLanguages {
+            guard let code = MeetingLanguageCatalog.whisperLanguageCode(for: evidence) else { return "und" }
+            let tag = Locale(identifier: code).identifier(.bcp47)
+            if let detectedTag {
+                if detectedTag != tag { isMixed = true }
+            } else {
+                detectedTag = tag
+            }
+        }
+        return isMixed ? "mul" : (detectedTag ?? "und")
+    }
+
     var status: MeetingStatus { MeetingStatus(rawValue: statusRaw) ?? .failed }
     var isAudioTrackGroup: Bool { !audioTrackIDs.isEmpty }
     var audioTrackKind: MeetingAudioTrackKind? {
@@ -593,6 +625,12 @@ final class MeetingRecord {
     func update(result: MeetingResult, status: MeetingStatus = .ready) throws {
         resultData = try JSONEncoder().encode(result.validated())
         transcriptRevision = result.transcriptRevision
+        if result.summary.isEmpty {
+            summaryKindRaw = nil
+            summaryEngineLabel = ""
+            summaryFallbackReasonRaw = nil
+            summaryResultLanguageTag = nil
+        }
         statusRaw = status.rawValue
         updatedAt = Date()
     }
@@ -618,9 +656,20 @@ final class MeetingRecord {
         offlineASRFailureRaw = nil
         refinementEngineLabel = ""
         refinementFallbackReasonRaw = nil
+        summaryKindRaw = nil
+        summaryEngineLabel = ""
+        summaryFallbackReasonRaw = nil
+        summaryResultLanguageTag = nil
     }
 
     struct PersistenceSnapshot: Equatable {
+        let languageTag: String
+        let automaticLanguageDetection: Bool
+        let summaryLanguageTag: String
+        let summaryKindRaw: String?
+        let summaryEngineLabel: String
+        let summaryFallbackReasonRaw: String?
+        let summaryResultLanguageTag: String?
         let parentMeetingID: String?
         let audioTrackIDs: [String]
         let audioTrackKindRaw: String?
@@ -645,6 +694,13 @@ final class MeetingRecord {
 
     func persistenceSnapshot() -> PersistenceSnapshot {
         PersistenceSnapshot(
+            languageTag: languageTag,
+            automaticLanguageDetection: automaticLanguageDetection,
+            summaryLanguageTag: summaryLanguageTag,
+            summaryKindRaw: summaryKindRaw,
+            summaryEngineLabel: summaryEngineLabel,
+            summaryFallbackReasonRaw: summaryFallbackReasonRaw,
+            summaryResultLanguageTag: summaryResultLanguageTag,
             parentMeetingID: parentMeetingID,
             audioTrackIDs: audioTrackIDs,
             audioTrackKindRaw: audioTrackKindRaw,
@@ -669,6 +725,13 @@ final class MeetingRecord {
     }
 
     func restore(_ snapshot: PersistenceSnapshot) {
+        languageTag = snapshot.languageTag
+        automaticLanguageDetection = snapshot.automaticLanguageDetection
+        summaryLanguageTag = snapshot.summaryLanguageTag
+        summaryKindRaw = snapshot.summaryKindRaw
+        summaryEngineLabel = snapshot.summaryEngineLabel
+        summaryFallbackReasonRaw = snapshot.summaryFallbackReasonRaw
+        summaryResultLanguageTag = snapshot.summaryResultLanguageTag
         parentMeetingID = snapshot.parentMeetingID
         audioTrackIDs = snapshot.audioTrackIDs
         audioTrackKindRaw = snapshot.audioTrackKindRaw

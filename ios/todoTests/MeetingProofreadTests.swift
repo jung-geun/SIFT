@@ -272,7 +272,7 @@ struct MeetingProofreadTests {
         var analyzedText = ""
         let dependencies = MeetingPostProcessor.Dependencies(
             snapshot: { .empty },
-            refine: { _, _, _, _, _ in
+            refine: { _, _, _, _, _, _ in
                 .applied(
                     result: corrected,
                     changed: true,
@@ -281,7 +281,7 @@ struct MeetingProofreadTests {
                     providerRan: true
                 )
             },
-            analyze: { _, input, _, _ in
+            analyze: { _, input, _, _, _, _ in
                 analyzedText = input.segments.first?.text ?? ""
                 var analyzed = input
                 analyzed.summary = "원문 요약"
@@ -350,7 +350,7 @@ struct MeetingProofreadTests {
         var learnedCount = 0
         let dependencies = MeetingPostProcessor.Dependencies(
             snapshot: { .empty },
-            refine: { _, _, _, _, _ in
+            refine: { _, _, _, _, _, _ in
                 .applied(
                     result: corrected,
                     changed: true,
@@ -359,7 +359,7 @@ struct MeetingProofreadTests {
                     providerRan: true
                 )
             },
-            analyze: { _, input, _, _ in
+            analyze: { _, input, _, _, _, _ in
                 var analyzed = input
                 analyzed.summary = "저장 실패 요약"
                 return MeetingAnalysisEngine.Outcome(
@@ -410,8 +410,8 @@ struct MeetingProofreadTests {
 
         let dependencies = MeetingPostProcessor.Dependencies(
             snapshot: { .empty },
-            refine: { _, _, _, _, _ in .skipped(.disabled) },
-            analyze: { _, input, _, _ in
+            refine: { _, _, _, _, _, _ in .skipped(.disabled) },
+            analyze: { _, input, _, _, _, _ in
                 MeetingAnalysisEngine.Outcome(result: input, engineLabel: "테스트", usedOnDeviceLLM: false)
             },
             save: { _ in throw ProofreadTestError.saveFailed },
@@ -431,48 +431,61 @@ struct MeetingProofreadTests {
         }
         #expect(reporter.phase == .idle)
     }
-    @Test("meeting language tag propagates to refinement and analysis dependencies")
+    @Test("non-UI source and selected summary languages reach dependencies", arguments: ["bn-BD", "ar-SA"])
     @MainActor
-    func meetingLanguagePropagation() async throws {
-        let meetingID = "123e4567-e89b-12d3-a456-426614174000"
-        let base = result([MeetingSegment(id: "raw", startMs: 0, endMs: 1_000, text: "We will send it.")])
-        let configuration = ModelConfiguration(
-            schema: AppDataContainer.meetingSchema,
-            isStoredInMemoryOnly: true,
-            cloudKitDatabase: .none
-        )
-        let container = try ModelContainer(for: AppDataContainer.meetingSchema, configurations: configuration)
-        let context = ModelContext(container)
-        let record = MeetingRecord(meetingID: meetingID, languageTag: "en-US", timezoneIdentifier: "UTC")
-        try record.replaceTranscriptionBase(base, status: .ready)
-        context.insert(record)
-        try context.save()
+    func meetingLanguagePropagation(sourceLanguageTag: String) async throws {
+        let selections = ["", "pt-BR"]
+        for savedSummaryLanguageTag in selections {
+            let meetingID = "123e4567-e89b-12d3-a456-426614174000"
+            let text = sourceLanguageTag == "bn-BD" ? "আমরা প্রতিবেদন পাঠাব।" : "سنرسل التقرير."
+            let base = result([MeetingSegment(id: "raw", startMs: 0, endMs: 1_000, text: text)])
+            let configuration = ModelConfiguration(
+                schema: AppDataContainer.meetingSchema,
+                isStoredInMemoryOnly: true,
+                cloudKitDatabase: .none
+            )
+            let container = try ModelContainer(for: AppDataContainer.meetingSchema, configurations: configuration)
+            let context = ModelContext(container)
+            let record = MeetingRecord(meetingID: meetingID, languageTag: sourceLanguageTag, timezoneIdentifier: "UTC")
+            try record.replaceTranscriptionBase(base, status: .ready)
+            record.summaryLanguageTag = savedSummaryLanguageTag
+            context.insert(record)
+            try context.save()
 
-        var refinementLanguage: AppLanguage?
-        var analysisLanguage: AppLanguage?
-        let dependencies = MeetingPostProcessor.Dependencies(
-            snapshot: { .empty },
-            refine: { _, _, _, language, _ in
-                refinementLanguage = language
-                return .skipped(.unavailable)
-            },
-            analyze: { _, input, _, language in
-                analysisLanguage = language
-                return MeetingAnalysisEngine.Outcome(result: input, engineLabel: "Test", usedOnDeviceLLM: false)
-            },
-            save: { try $0.save() },
-            learnCorrections: { _, _ in }
-        )
+            var refinementLanguageTag: String?
+            var analysisSourceTag: String?
+            var analysisOutputTag: String?
+            let dependencies = MeetingPostProcessor.Dependencies(
+                snapshot: { .empty },
+                refine: { _, input, _, sourceTag, uiLanguage, _ in
+                    refinementLanguageTag = sourceTag
+                    #expect(uiLanguage == .current)
+                    #expect(input.segments == base.segments)
+                    return .skipped(.unavailable)
+                },
+                analyze: { _, input, _, sourceTag, outputTag, uiLanguage in
+                    analysisSourceTag = sourceTag
+                    analysisOutputTag = outputTag
+                    #expect(uiLanguage == .current)
+                    return MeetingAnalysisEngine.Outcome(result: input, engineLabel: "Test", usedOnDeviceLLM: false)
+                },
+                save: { try $0.save() },
+                learnCorrections: { _, _ in }
+            )
 
-        _ = try await MeetingPostProcessor.refineAndAnalyze(
-            record: record,
-            context: context,
-            allowRefine: true,
-            allowModelLoad: false,
-            dependencies: dependencies
-        )
-        #expect(refinementLanguage == .english)
-        #expect(analysisLanguage == .english)
+            _ = try await MeetingPostProcessor.refineAndAnalyze(
+                record: record, context: context, allowRefine: true, allowModelLoad: false,
+                dependencies: dependencies
+            )
+            #expect(refinementLanguageTag == sourceLanguageTag)
+            #expect(analysisSourceTag == sourceLanguageTag)
+            #expect(analysisOutputTag == (savedSummaryLanguageTag.isEmpty ? sourceLanguageTag : savedSummaryLanguageTag))
+            #expect(record.summaryLanguageTag == savedSummaryLanguageTag)
+            #expect(record.result?.segments == base.segments)
+            #expect(record.summaryKindRaw == MeetingAnalysisEngine.SummaryKind.sourceExcerpts.rawValue)
+            #expect(record.summaryResultLanguageTag == sourceLanguageTag)
+            #expect(record.summaryFallbackReasonRaw == RuleFallbackReason.noProviderOptIn.rawValue)
+        }
     }
 
     @Test("base replacement resets provenance while summary updates preserve it")
@@ -512,46 +525,6 @@ struct MeetingProofreadTests {
         #expect(record.status == .transcriptFinalizationFailed)
     }
 
-    @Test("refinement provenance stores stable IDs and maps legacy labels per language")
-    @MainActor
-    func stableSourceDisplayMapping() {
-        let record = MeetingRecord(languageTag: "en-US")
-        record.refinementEngineLabel = MeetingRefinementEngine.Source.appleIntelligence.rawValue
-        let englishDisplay = record.refinementEngineDisplayName(language: .english)
-        #expect(englishDisplay == "Apple Intelligence (On Device)", "English display: \(englishDisplay)")
-        let koreanDisplay = record.refinementEngineDisplayName(language: .korean)
-        #expect(koreanDisplay == "Apple Intelligence 온디바이스", "Korean display: \(koreanDisplay)")
-
-        record.refinementEngineLabel = "온디바이스 LLM(Qwen)"
-        #expect(record.refinementEngineDisplayName(language: .english) == "On-Device LLM (Qwen)")
-        record.refinementEngineLabel = "legacy-provider"
-        #expect(record.refinementEngineDisplayName(language: .english) == "Unknown Engine")
-    }
-    @Test("compact completion copy only supplements failed and skipped proofread")
-    func compactCompletionCopy() {
-        #expect(
-            MeetingProcessingStatusView.compactCompletionText(
-                for: .changed(count: 1, engine: "AFM")
-            ) == nil
-        )
-        #expect(
-            MeetingProcessingStatusView.compactCompletionText(
-                for: .unchanged(engine: "AFM")
-            ) == nil
-        )
-        #expect(
-            MeetingProcessingStatusView.compactCompletionText(
-                for: .failed(engine: "AFM", message: "failure"),
-                language: .korean
-            ) == "AI 검수 실패 · 원문으로 요약 완료"
-        )
-        #expect(
-            MeetingProcessingStatusView.compactCompletionText(
-                for: .skipped(reason: .disabled),
-                language: .korean
-            ) == "AI 검수를 건너뜀 · 요약 완료"
-        )
-    }
     @Test("refinement cancellation propagates without analysis")
     @MainActor
     func refinementCancellationPropagates() async throws {
@@ -571,8 +544,8 @@ struct MeetingProofreadTests {
         var analysisCalled = false
         let dependencies = MeetingPostProcessor.Dependencies(
             snapshot: { .empty },
-            refine: { _, _, _, _, _ in throw CancellationError() },
-            analyze: { _, input, _, _ in
+            refine: { _, _, _, _, _, _ in throw CancellationError() },
+            analyze: { _, input, _, _, _, _ in
                 analysisCalled = true
                 return MeetingAnalysisEngine.Outcome(result: input, engineLabel: "test", usedOnDeviceLLM: false)
             },
@@ -600,7 +573,7 @@ struct MeetingProofreadTests {
         var analyzed = false
         let dependencies = MeetingPostProcessor.Dependencies(
             snapshot: { .empty },
-            refine: { _, input, _, _, _ in
+            refine: { _, input, _, _, _, _ in
                 await gate.pause()
                 var corrected = input
                 corrected.segments[0].text = "Automated correction"
@@ -608,7 +581,7 @@ struct MeetingProofreadTests {
                 return .applied(result: corrected, changed: true, source: .appleIntelligence,
                                 correctionPairs: [], providerRan: true)
             },
-            analyze: { _, input, _, _ in
+            analyze: { _, input, _, _, _, _ in
                 analyzed = true
                 return MeetingAnalysisEngine.Outcome(result: input, engineLabel: "test", usedOnDeviceLLM: false)
             },
@@ -642,8 +615,8 @@ struct MeetingProofreadTests {
         let gate = SuspendedProofreadEngine()
         let dependencies = MeetingPostProcessor.Dependencies(
             snapshot: { .empty },
-            refine: { _, _, _, _, _ in .skipped(.disabled) },
-            analyze: { _, input, _, _ in
+            refine: { _, _, _, _, _, _ in .skipped(.disabled) },
+            analyze: { _, input, _, _, _, _ in
                 await gate.pause()
                 var analyzed = input
                 analyzed.summary = "Outdated automated summary"
@@ -669,6 +642,140 @@ struct MeetingProofreadTests {
         #expect(record.persistenceSnapshot() == edited)
     }
 
+    @Test("changing output language during generation keeps the new selection and rejects stale output")
+    @MainActor
+    func summaryLanguageChangeWins() async throws {
+        let (context, record) = try persistedMeeting()
+        record.summaryLanguageTag = "pt-BR"
+        try context.save()
+        let gate = SuspendedProofreadEngine()
+        let dependencies = MeetingPostProcessor.Dependencies(
+            snapshot: { .empty },
+            refine: { _, _, _, _, _, _ in .skipped(.disabled) },
+            analyze: { _, input, _, _, summaryTag, _ in
+                #expect(summaryTag == "pt-BR")
+                await gate.pause()
+                var output = input
+                output.summary = "Resumo antigo"
+                return MeetingAnalysisEngine.Outcome(result: output, engineLabel: "test", usedOnDeviceLLM: true,
+                    engineSource: .qwen, executionPath: .beta(.onDevice))
+            },
+            save: { try $0.save() },
+            learnCorrections: { _, _ in }
+        )
+        let run = Task {
+            try await MeetingPostProcessor.refineAndAnalyze(
+                record: record, context: context, allowRefine: false, allowModelLoad: false,
+                dependencies: dependencies
+            )
+        }
+        await gate.waitUntilPaused()
+        record.summaryLanguageTag = "ar-SA"
+        try context.save()
+        let selected = record.persistenceSnapshot()
+        await gate.resume()
+        await #expect(throws: MeetingPostProcessor.Failure.superseded) { try await run.value }
+        #expect(record.persistenceSnapshot() == selected)
+        #expect(record.summaryLanguageTag == "ar-SA")
+    }
+
+    @Test("automatic processing language canonicalizes evidence without changing preferences")
+    @MainActor
+    func processingSourceLanguageEvidence() {
+        let record = MeetingRecord(languageTag: "fr-FR", automaticLanguageDetection: true, summaryLanguageTag: "ar-SA")
+        let cases: [([String], String)] = [
+            ([], "und"), ([""], "und"), (["not-a-language"], "und"), (["und"], "und"),
+            (["mul"], "und"), (["ko", "invalid"], "und"), (["en", "ko", "invalid"], "und"),
+            (["KO", "ko-KR"], "ko"), (["en-US", "en-GB"], "en"), (["jv", "jw"], "jv"),
+            (["ko", "en", "ko"], "mul"), (["zh", "yue"], "mul")
+        ]
+        for (evidence, expected) in cases {
+            record.asrDetectedLanguages = evidence
+            #expect(record.processingSourceLanguageTag == expected)
+            #expect(record.asrDetectedLanguages == evidence)
+            #expect(record.languageTag == "fr-FR")
+            #expect(record.summaryLanguageTag == "ar-SA")
+        }
+        record.automaticLanguageDetection = false
+        #expect(record.processingSourceLanguageTag == "fr-FR")
+    }
+
+    @Test("mode and evidence changes reject suspended proofreading and summary commits",
+          arguments: ["mode", "same-language-evidence", "different-language", "mixed-evidence"], [false, true])
+    @MainActor
+    func processingLanguageChangeWins(change: String, refining: Bool) async throws {
+        let (context, record) = try persistedMeeting()
+        record.languageTag = "en"
+        record.automaticLanguageDetection = true
+        record.asrDetectedLanguages = change == "mixed-evidence" ? ["en", "ko"] : ["en"]
+        record.summaryLanguageTag = "ar-SA"
+        try context.save()
+        let original = try #require(record.result)
+        let originalRaw = record.rawResultData
+        let originalSourceTag = record.processingSourceLanguageTag
+        let gate = SuspendedProofreadEngine()
+        var analyzed = false
+        var learned = false
+        var processingSaves = 0
+        let reporter = MeetingProcessingReporter()
+        let dependencies = MeetingPostProcessor.Dependencies(
+            snapshot: { .empty },
+            refine: { _, input, _, _, _, _ in
+                await gate.pause()
+                var corrected = input
+                corrected.segments[0].text = "Stale automated correction"
+                corrected.transcriptRevision += 1
+                return .applied(result: corrected, changed: true, source: .qwen,
+                                correctionPairs: [(from: "Original words", to: "Stale automated correction")], providerRan: true)
+            },
+            analyze: { _, input, _, _, _, _ in
+                analyzed = true
+                await gate.pause()
+                var output = input
+                output.summary = "Stale generated summary"
+                return MeetingAnalysisEngine.Outcome(result: output, engineLabel: "test", usedOnDeviceLLM: true,
+                    engineSource: .qwen, executionPath: .beta(.onDevice))
+            },
+            save: { processingSaves += 1; try $0.save() },
+            learnCorrections: { _, _ in learned = true }
+        )
+        let run = Task {
+            try await MeetingPostProcessor.refineAndAnalyze(
+                record: record, context: context, allowRefine: refining, allowModelLoad: false,
+                reporter: reporter, dependencies: dependencies
+            )
+        }
+        await gate.waitUntilPaused()
+        switch change {
+        case "mode": record.automaticLanguageDetection = false
+        case "same-language-evidence": record.asrDetectedLanguages = ["en", "en"]
+        case "different-language": record.asrDetectedLanguages = ["ko"]
+        default: record.asrDetectedLanguages = ["ko", "en", "ko"]
+        }
+        if change != "different-language" {
+            #expect(record.processingSourceLanguageTag == originalSourceTag)
+        }
+        try context.save()
+        let selected = record.persistenceSnapshot()
+        await gate.resume()
+        await #expect(throws: MeetingPostProcessor.Failure.superseded) { try await run.value }
+        #expect(record.persistenceSnapshot() == selected)
+        #expect(record.result == original)
+        #expect(record.rawResultData == originalRaw)
+        #expect(record.summaryLanguageTag == "ar-SA")
+        #expect(record.refinementEngineLabel.isEmpty)
+        #expect(record.summaryKindRaw == nil)
+        #expect(processingSaves == 0)
+        #expect(!learned)
+        #expect(analyzed == !refining)
+        #expect(reporter.phase == .idle)
+        let id = record.meetingID
+        let persisted = try #require(ModelContext(context.container).fetch(
+            FetchDescriptor<MeetingRecord>(predicate: #Predicate { $0.meetingID == id })
+        ).first)
+        #expect(persisted.persistenceSnapshot() == selected)
+    }
+
     @Test("deleting a meeting during refinement or analysis never resurrects it")
     @MainActor
     func deletionWins() async throws {
@@ -679,12 +786,12 @@ struct MeetingProofreadTests {
             var analyzed = false
             let dependencies = MeetingPostProcessor.Dependencies(
                 snapshot: { .empty },
-                refine: { _, input, _, _, _ in
+                refine: { _, input, _, _, _, _ in
                     await gate.pause()
                     return .applied(result: input, changed: false, source: .appleIntelligence,
                                     correctionPairs: [], providerRan: true)
                 },
-                analyze: { _, input, _, _ in
+                analyze: { _, input, _, _, _, _ in
                     analyzed = true
                     if !refining { await gate.pause() }
                     var output = input

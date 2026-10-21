@@ -3,11 +3,13 @@
 package xyz.pieroot.sift
 
 import android.Manifest
+import android.app.Activity
 import android.app.DatePickerDialog
 import android.app.TimePickerDialog
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -31,6 +33,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.CalendarMonth
+import androidx.compose.material.icons.rounded.ChevronRight
+import androidx.compose.material.icons.rounded.ExpandLess
+import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Checklist
 import androidx.compose.material.icons.rounded.Delete
@@ -53,6 +58,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -70,6 +76,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -81,6 +88,9 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -89,6 +99,10 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import java.text.DecimalFormat
 import java.text.SimpleDateFormat
@@ -116,12 +130,15 @@ fun SiftApp(
     onOpenTodoHandled: () -> Unit = {},
 ) {
     val context = LocalContext.current
-    val store = remember(context) { SiftStore(context) }
+    val store = remember(context.applicationContext) { SiftStore.get(context) }
     val meetingStore = remember(context) { MeetingStore(context) }
     val meetingCapture = remember(context) { MeetingCaptureRepository.get(context) }
     val snapshot = store.snapshot
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
+    DisposableEffect(store) {
+        onDispose { store.cancelCloudSync() }
+    }
     val calendarPermissions = arrayOf(
         Manifest.permission.READ_CALENDAR,
         Manifest.permission.WRITE_CALENDAR,
@@ -168,6 +185,11 @@ fun SiftApp(
 
 
     LaunchedEffect(snapshot.todos) {
+        for (todo in snapshot.todos) {
+            if (todo.source == TodoSource.CALENDAR || (todo.triage == TodoTriage.TODO && todo.dueAt != null)) continue
+            val eventId = todo.calendarEventId ?: continue
+            if (DeviceCalendarStore.deleteEvent(context, eventId)) store.updateTodoCalendarLink(todo.id, null)
+        }
         reminderService.rescheduleForTodos(snapshot.todos)
     }
 
@@ -193,6 +215,7 @@ fun SiftApp(
     ) { result ->
         FirebaseSyncService.handleSignInIntent(result.data)
             .onSuccess {
+                cloudSyncPassphrase = ""
                 store.refreshDriveSyncState()
                 store.setCloudSyncMode(CloudSyncMode.FIREBASE)
                 showMessage("클라우드 동기화 계정을 연결했습니다. 이제 암호화 비밀번호를 입력한 뒤 수동 동기화를 실행하세요.")
@@ -204,6 +227,7 @@ fun SiftApp(
     }
 
     fun requestDriveSignIn() {
+        if (store.isSigningOut) return
         if (!FirebaseSyncService.isConfigured(context)) {
             showMessage("google-services.json 에 Android OAuth client 와 SHA-1 등록이 없어 Firebase 로그인을 시작할 수 없습니다.")
             return
@@ -212,10 +236,18 @@ fun SiftApp(
     }
 
     fun signOutDrive() {
-        FirebaseSyncService.signOut(context)
-        store.setCloudSyncMode(CloudSyncMode.LOCAL)
-        store.refreshDriveSyncState()
-        showMessage("Firebase 연결을 해제했습니다.")
+        store.cancelCloudSync()
+        cloudSyncPassphrase = ""
+        scope.launch {
+            try {
+                store.signOutGoogleAccount()
+                showMessage("Google 계정 연결을 해제했습니다.")
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                showMessage("Google 계정 연결 해제에 실패했습니다.")
+            }
+        }
     }
 
     fun requestCalendarPermissions() {
@@ -249,11 +281,11 @@ fun SiftApp(
     }
 
     fun handleCompletionCalendar(todo: TodoItem) {
+        if (todo.source == TodoSource.CALENDAR || todo.triage != TodoTriage.TODO) return
         val eventId = todo.calendarEventId ?: return
         when (store.snapshot.settings.calendarCompletionAction) {
             CalendarCompletionAction.REMOVE -> {
-                DeviceCalendarStore.deleteEvent(context, eventId)
-                store.updateTodoCalendarLink(todo.id, null)
+                if (DeviceCalendarStore.deleteEvent(context, eventId)) store.updateTodoCalendarLink(todo.id, null)
             }
             CalendarCompletionAction.SILENCE -> DeviceCalendarStore.clearEventReminders(context, eventId)
         }
@@ -261,7 +293,7 @@ fun SiftApp(
     }
 
     fun deleteTodo(todo: TodoItem) {
-        if (!todo.isCompleted && todo.triage == TodoTriage.TODO) {
+        if (todo.source != TodoSource.CALENDAR && !todo.isCompleted && todo.triage == TodoTriage.TODO) {
             todo.calendarEventId?.let { eventId ->
                 when (store.snapshot.settings.calendarCompletionAction) {
                     CalendarCompletionAction.REMOVE -> DeviceCalendarStore.deleteEvent(context, eventId)
@@ -292,7 +324,7 @@ fun SiftApp(
     }
 
     LaunchedEffect(Unit) {
-        store.markMailOAuthBlocked()
+        store.refreshMailAvailability()
         store.refreshDriveSyncState()
         refreshCalendarEvents()
     }
@@ -350,7 +382,6 @@ fun SiftApp(
         SettingsSurface(
             destination = settingsDestination ?: SettingsDestination.ROOT,
             snapshot = snapshot,
-            calendarEvents = calendarEvents,
             driveSyncState = store.driveSyncState,
             calendarPermissionGranted = DeviceCalendarStore.hasReadPermission(context),
             notificationPermissionGranted = notificationPermissionGranted(context),
@@ -400,8 +431,6 @@ fun SiftApp(
             onSetCalendarCompletionAction = store::setCalendarCompletionAction,
             onSetEmailAutoAnalysis = store::setEmailAutoAnalysisEnabled,
             onSetProviderEmailAnalysis = store::setProviderEmailAnalysisEnabled,
-            onSetEmailRefreshHour = store::setEmailRefreshHour,
-            onSetEmailLookbackDays = store::setEmailLookbackDays,
             onSetCloudSyncMode = store::setCloudSyncMode,
             syncPassphrase = cloudSyncPassphrase,
             onSyncPassphraseChange = { cloudSyncPassphrase = it },
@@ -435,7 +464,7 @@ fun SiftApp(
                 store.resetTutorial()
             },
             onMarkMailBlocked = {
-                store.markMailOAuthBlocked()
+                store.refreshMailAvailability()
                 showMessage(store.snapshot.mail.lastSyncMessage)
             },
         )
@@ -550,8 +579,18 @@ fun SiftApp(
                 AppTab.MAIL -> MailScreen(
                     modifier = Modifier.padding(innerPadding),
                     snapshot = snapshot,
+                    isSigningOut = store.isSigningOut,
+                    onGoogleSignOut = {
+                        cloudSyncPassphrase = ""
+                        store.signOutGoogleAccount()
+                    },
+                    onGoogleAccountChanged = {
+                        store.refreshDriveSyncState()
+                        store.refreshMailAvailability()
+                        if (store.driveSyncState.signedInEmail == null) store.setCloudSyncMode(CloudSyncMode.LOCAL)
+                    },
                     onCheckOAuth = {
-                        store.markMailOAuthBlocked()
+                        store.refreshMailAvailability()
                         showMessage(store.snapshot.mail.lastSyncMessage)
                     },
                 )
@@ -1055,6 +1094,9 @@ private fun MailScreen(
     modifier: Modifier = Modifier,
     snapshot: SiftSnapshot,
     onCheckOAuth: () -> Unit,
+    onGoogleAccountChanged: () -> Unit,
+    isSigningOut: Boolean,
+    onGoogleSignOut: suspend () -> Unit,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -1062,6 +1104,10 @@ private fun MailScreen(
     var messages by remember { mutableStateOf(emptyList<AndroidMailPreview>()) }
     var isLoading by remember { mutableStateOf(false) }
     var errorText by remember { mutableStateOf<String?>(null) }
+    var requestJob by remember { mutableStateOf<Job?>(null) }
+    var requestGeneration by remember { mutableLongStateOf(0L) }
+    var recoveryGeneration by remember { mutableLongStateOf(-1L) }
+    var recoveryAttempted by remember { mutableStateOf(false) }
 
     lateinit var refreshMessages: () -> Unit
 
@@ -1070,35 +1116,65 @@ private fun MailScreen(
     ) { result ->
         AndroidGmailService.handleSignInIntent(result.data)
             .onSuccess {
-                gmailEmail = it
+                requestGeneration += 1
+                requestJob?.cancel()
+                messages = emptyList()
+                errorText = null
+                gmailEmail = AndroidGmailService.signedInEmail(context)
+                onGoogleAccountChanged()
+                recoveryAttempted = false
                 refreshMessages()
             }
-            .onFailure {
-                if (gmailEmail != null) {
-                    refreshMessages()
-                } else {
-                    errorText = it.message ?: "Gmail 로그인에 실패했습니다."
-                }
-            }
+            .onFailure { errorText = "Gmail 로그인에 실패했습니다." }
+    }
+
+    // GoogleAuthUtil recovery returns an activity result, not a GoogleSignInAccount intent.
+    val recoveryLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        if (recoveryGeneration == requestGeneration && gmailEmail != null) {
+            if (result.resultCode == Activity.RESULT_OK) refreshMessages()
+            else errorText = "Gmail 읽기 권한 승인이 취소되었습니다."
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            requestGeneration += 1
+            requestJob?.cancel()
+        }
     }
 
     refreshMessages = {
-        scope.launch {
-            isLoading = true
-            runCatching { AndroidGmailService.fetchRecentMessages(context) }
-                .onSuccess {
-                    messages = it
-                    errorText = null
+        requestJob?.cancel()
+        val generation = ++requestGeneration
+        val accountId = AndroidGmailService.signedInAccountId(context)
+        messages = emptyList()
+        errorText = null
+        isLoading = true
+        requestJob = scope.launch {
+            try {
+                val fetched = AndroidGmailService.fetchRecentMessages(context)
+                currentCoroutineContext().ensureActive()
+                if (generation == requestGeneration && accountId == AndroidGmailService.signedInAccountId(context)) {
+                    messages = fetched
                 }
-                .onFailure {
-                    val recoverable = AndroidGmailService.recoverableIntent(it)
-                    if (recoverable != null) {
-                        gmailLauncher.launch(recoverable)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                if (generation == requestGeneration && accountId == AndroidGmailService.signedInAccountId(context)) {
+                    val recoverable = AndroidGmailService.recoverableIntent(error)
+                    if (recoverable != null && !recoveryAttempted) {
+                        recoveryAttempted = true
+                        recoveryGeneration = generation
+                        recoveryLauncher.launch(recoverable)
                     } else {
-                        errorText = it.message ?: "Gmail 메시지를 가져오지 못했습니다."
+                        errorText = "Gmail 메시지를 가져오지 못했습니다. 다시 연결하거나 새로고침해 주세요."
                     }
                 }
-            isLoading = false
+            } finally {
+                if (generation == requestGeneration) isLoading = false
+            }
         }
     }
 
@@ -1127,18 +1203,34 @@ private fun MailScreen(
                                     }
                                 },
                                 modifier = Modifier.weight(1f),
+                                enabled = !isSigningOut,
                             ) {
                                 Text("Gmail 연결")
                             }
                         } else {
-                            Button(onClick = { refreshMessages() }, modifier = Modifier.weight(1f), enabled = !isLoading) {
+                            Button(onClick = { recoveryAttempted = false; refreshMessages() }, modifier = Modifier.weight(1f), enabled = !isLoading && !isSigningOut) {
                                 Text(if (isLoading) "불러오는 중…" else "최근 메일 확인")
                             }
                             OutlinedButton(
                                 onClick = {
-                                    AndroidGmailService.signOut(context)
+                                    requestGeneration += 1
+                                    requestJob?.cancel()
                                     gmailEmail = null
                                     messages = emptyList()
+                                    errorText = null
+                                    isLoading = false
+                                    scope.launch {
+                                        try {
+                                            onGoogleSignOut()
+                                        } catch (error: CancellationException) {
+                                            throw error
+                                        } catch (error: Exception) {
+                                            errorText = "Google 계정 연결 해제에 실패했습니다."
+                                        } finally {
+                                            gmailEmail = AndroidGmailService.signedInEmail(context)
+                                            onGoogleAccountChanged()
+                                        }
+                                    }
                                 },
                                 modifier = Modifier.weight(1f),
                             ) {
@@ -1156,7 +1248,7 @@ private fun MailScreen(
                 item {
                     EmptyStateCard(
                         title = "가져온 메일이 없습니다",
-                        body = "최근 14일의 Gmail 받은편지함을 조회합니다. 권한 승인 후 다시 새로고침해 보세요.",
+                        body = "최근 14일의 Gmail에서 스팸·휴지통을 제외한 메일을 최대 10개 미리 봅니다. 권한 승인 후 새로고침해 보세요.",
                     )
                 }
             } else {
@@ -1181,7 +1273,6 @@ private fun MailScreen(
 private fun SettingsSurface(
     destination: SettingsDestination,
     snapshot: SiftSnapshot,
-    calendarEvents: List<DeviceCalendarEvent>,
     driveSyncState: DriveSyncUiState,
     calendarPermissionGranted: Boolean,
     notificationPermissionGranted: Boolean,
@@ -1201,8 +1292,6 @@ private fun SettingsSurface(
     onSetCalendarCompletionAction: (CalendarCompletionAction) -> Unit,
     onSetEmailAutoAnalysis: (Boolean) -> Unit,
     onSetProviderEmailAnalysis: (Boolean) -> Unit,
-    onSetEmailRefreshHour: (Int) -> Unit,
-    onSetEmailLookbackDays: (Int) -> Unit,
     onSetCloudSyncMode: (CloudSyncMode) -> Unit,
     syncPassphrase: String,
     onSyncPassphraseChange: (String) -> Unit,
@@ -1217,6 +1306,10 @@ private fun SettingsSurface(
     onReplayOnboarding: () -> Unit,
     onMarkMailBlocked: () -> Unit,
 ) {
+    var advancedExpanded by rememberSaveable { mutableStateOf(false) }
+    BackHandler {
+        if (destination == SettingsDestination.ROOT) onClose() else onBack()
+    }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -1226,11 +1319,11 @@ private fun SettingsSurface(
                             SettingsDestination.ROOT -> "설정"
                             SettingsDestination.PERSONA -> "나의 페르소나"
                             SettingsDestination.MEMORY -> "행동 패턴 분석"
-                            SettingsDestination.INTELLIGENCE -> "TODO 자동 정렬 및 AI"
+                            SettingsDestination.INTELLIGENCE -> "우선순위 자동화"
                             SettingsDestination.EMAIL -> "이메일 연동"
                             SettingsDestination.CALENDAR -> "캘린더 설정"
-                            SettingsDestination.CLOUD_SYNC -> "클라우드 동기화"
-                            SettingsDestination.SYSTEM -> "시스템 권한 및 상태"
+                            SettingsDestination.CLOUD_SYNC -> "클라우드 백업·동기화"
+                            SettingsDestination.SYSTEM -> "권한"
                             SettingsDestination.APP_INFO -> "앱 정보"
                         }
                     )
@@ -1247,6 +1340,8 @@ private fun SettingsSurface(
             SettingsDestination.ROOT -> SettingsRoot(
                 modifier = Modifier.padding(innerPadding),
                 onNavigate = onNavigate,
+                advancedExpanded = advancedExpanded,
+                onToggleAdvanced = { advancedExpanded = !advancedExpanded },
             )
             SettingsDestination.PERSONA -> PersonaSettingsScreen(
                 modifier = Modifier.padding(innerPadding),
@@ -1267,7 +1362,6 @@ private fun SettingsSurface(
             SettingsDestination.INTELLIGENCE -> IntelligenceSettingsScreen(
                 modifier = Modifier.padding(innerPadding),
                 snapshot = snapshot,
-                calendarEvents = calendarEvents,
                 onSetAiAutomation = onSetAiAutomation,
                 onRunPrioritize = onRunPrioritize,
             )
@@ -1276,8 +1370,6 @@ private fun SettingsSurface(
                 snapshot = snapshot,
                 onSetEmailAutoAnalysis = onSetEmailAutoAnalysis,
                 onSetProviderEmailAnalysis = onSetProviderEmailAnalysis,
-                onSetEmailRefreshHour = onSetEmailRefreshHour,
-                onSetEmailLookbackDays = onSetEmailLookbackDays,
                 onMarkMailBlocked = onMarkMailBlocked,
             )
             SettingsDestination.CALENDAR -> CalendarSettingsScreen(
@@ -1319,29 +1411,51 @@ private fun SettingsSurface(
 }
 
 @Composable
-private fun SettingsRoot(modifier: Modifier = Modifier, onNavigate: (SettingsDestination) -> Unit) {
-    LazyColumn(modifier = modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        item { Spacer(modifier = Modifier.height(4.dp)) }
-        item { SettingsNavCard("나의 페르소나", "온보딩·AI 페르소나 문장 관리", onClick = { onNavigate(SettingsDestination.PERSONA) }) }
-        item { SettingsNavCard("행동 패턴 분석", "완료 이력 기반 인사이트", onClick = { onNavigate(SettingsDestination.MEMORY) }) }
-        item { SettingsNavCard("TODO 자동 정렬 및 AI", "휴리스틱 우선순위와 자동화 설정", onClick = { onNavigate(SettingsDestination.INTELLIGENCE) }) }
-        item { SettingsNavCard("이메일 연동", "Gmail/Outlook Android 준비 상태", onClick = { onNavigate(SettingsDestination.EMAIL) }) }
-        item { SettingsNavCard("캘린더 설정", "기기 캘린더 권한과 자동 등록", onClick = { onNavigate(SettingsDestination.CALENDAR) }) }
-        item { SettingsNavCard("클라우드 동기화", "Android 클라우드 동기화 설정과 수동 복원", onClick = { onNavigate(SettingsDestination.CLOUD_SYNC) }) }
-        item { SettingsNavCard("시스템 권한 및 상태", "알림·캘린더 권한 확인", onClick = { onNavigate(SettingsDestination.SYSTEM) }) }
-        item { SettingsNavCard("앱 정보", "시작 탭 동작과 안드로이드 포트 정보", onClick = { onNavigate(SettingsDestination.APP_INFO) }) }
+private fun SettingsRoot(
+    modifier: Modifier = Modifier,
+    advancedExpanded: Boolean,
+    onToggleAdvanced: () -> Unit,
+    onNavigate: (SettingsDestination) -> Unit,
+) {
+    LazyColumn(modifier = modifier.fillMaxSize()) {
+        item { SettingsNavRow("이메일", onClick = { onNavigate(SettingsDestination.EMAIL) }) }
+        item { SettingsNavRow("캘린더", onClick = { onNavigate(SettingsDestination.CALENDAR) }) }
+        item { SettingsNavRow("클라우드 백업·동기화", onClick = { onNavigate(SettingsDestination.CLOUD_SYNC) }) }
+        item { SettingsNavRow("권한", onClick = { onNavigate(SettingsDestination.SYSTEM) }) }
+        item { SettingsNavRow("앱 정보", onClick = { onNavigate(SettingsDestination.APP_INFO) }) }
+        item {
+            HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
+            SettingsNavRow("고급 설정", onClick = onToggleAdvanced, expanded = advancedExpanded)
+        }
+        if (advancedExpanded) {
+            item { SettingsNavRow("나의 페르소나", onClick = { onNavigate(SettingsDestination.PERSONA) }) }
+            item { SettingsNavRow("행동 패턴 분석", onClick = { onNavigate(SettingsDestination.MEMORY) }) }
+            item { SettingsNavRow("우선순위 자동화", onClick = { onNavigate(SettingsDestination.INTELLIGENCE) }) }
+        }
         item { Spacer(modifier = Modifier.height(24.dp)) }
     }
 }
 
 @Composable
-private fun SettingsNavCard(title: String, subtitle: String, onClick: () -> Unit) {
-    OutlinedCard(modifier = Modifier.padding(horizontal = 16.dp).fillMaxWidth().clickable(onClick = onClick)) {
-        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-            Text(subtitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-    }
+private fun SettingsNavRow(title: String, onClick: () -> Unit, expanded: Boolean? = null) {
+    ListItem(
+        headlineContent = { Text(title) },
+        trailingContent = {
+            Icon(
+                imageVector = when (expanded) {
+                    true -> Icons.Rounded.ExpandLess
+                    false -> Icons.Rounded.ExpandMore
+                    null -> Icons.Rounded.ChevronRight
+                },
+                contentDescription = null,
+            )
+        },
+        modifier = Modifier.fillMaxWidth()
+            .clickable(role = Role.Button, onClick = onClick)
+            .semantics {
+                if (expanded != null) stateDescription = if (expanded) "펼쳐짐" else "접힘"
+            },
+    )
 }
 
 @Composable
@@ -1409,7 +1523,7 @@ private fun MemorySettingsScreen(
                 Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text("행동 패턴 분석", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                     Text(
-                        "완료한 할 일 메타데이터로 시간대, 태그, 기한 준수 패턴을 분석합니다. 결과는 적용을 눌러야 저장됩니다.",
+                        "완료 기록에서 행동 패턴을 찾습니다. 결과는 ‘적용’을 눌러야 저장됩니다.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -1491,7 +1605,6 @@ private fun MemorySettingsScreen(
 private fun IntelligenceSettingsScreen(
     modifier: Modifier = Modifier,
     snapshot: SiftSnapshot,
-    calendarEvents: List<DeviceCalendarEvent>,
     onSetAiAutomation: (Boolean) -> Unit,
     onRunPrioritize: () -> Unit,
 ) {
@@ -1500,13 +1613,11 @@ private fun IntelligenceSettingsScreen(
             Card(modifier = Modifier.padding(16.dp).fillMaxWidth()) {
                 Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     SettingToggleRow(
-                        title = "AI 자동화",
+                        title = "우선순위 자동 정렬",
                         checked = snapshot.settings.aiAutomationEnabled,
                         onCheckedChange = onSetAiAutomation,
                     )
-                    Text("현재 안드로이드 포트는 iOS의 Foundation Models 대신 휴리스틱 엔진으로 TODO 우선순위를 다시 계산합니다.")
-                    Text("캘린더 일정 ${calendarEvents.size}건과 페르소나 키워드를 함께 반영합니다.", style = MaterialTheme.typography.bodySmall)
-                    Button(onClick = onRunPrioritize) { Text("지금 TODO 정렬") }
+                    Button(onClick = onRunPrioritize) { Text("지금 할 일 정렬") }
                 }
             }
         }
@@ -1519,8 +1630,6 @@ private fun EmailSettingsScreen(
     snapshot: SiftSnapshot,
     onSetEmailAutoAnalysis: (Boolean) -> Unit,
     onSetProviderEmailAnalysis: (Boolean) -> Unit,
-    onSetEmailRefreshHour: (Int) -> Unit,
-    onSetEmailLookbackDays: (Int) -> Unit,
     onMarkMailBlocked: () -> Unit,
 ) {
     LazyColumn(modifier = modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -1537,20 +1646,8 @@ private fun EmailSettingsScreen(
                         checked = snapshot.settings.providerEmailAnalysisEnabled,
                         onCheckedChange = onSetProviderEmailAnalysis,
                     )
-                    NumberSettingRow(
-                        title = "자동 동기화 시각",
-                        value = "${snapshot.settings.emailRefreshHour}:00",
-                        onDecrease = { onSetEmailRefreshHour(snapshot.settings.emailRefreshHour - 1) },
-                        onIncrease = { onSetEmailRefreshHour(snapshot.settings.emailRefreshHour + 1) },
-                    )
-                    NumberSettingRow(
-                        title = "동기화 조회 기간",
-                        value = "${snapshot.settings.emailLookbackDays}일",
-                        onDecrease = { onSetEmailLookbackDays(snapshot.settings.emailLookbackDays - 1) },
-                        onIncrease = { onSetEmailLookbackDays(snapshot.settings.emailLookbackDays + 1) },
-                    )
                     Text(snapshot.mail.lastSyncMessage, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    OutlinedButton(onClick = onMarkMailBlocked) { Text("연동 준비 상태 다시 확인") }
+                    OutlinedButton(onClick = onMarkMailBlocked) { Text("연결 상태 확인") }
                 }
             }
         }
@@ -1575,7 +1672,7 @@ private fun CalendarSettingsScreen(
                         checked = snapshot.settings.calendarAutoRegister,
                         onCheckedChange = onSetCalendarAutoRegister,
                     )
-                    Text(if (permissionGranted) "캘린더 권한이 허용되어 있습니다." else "캘린더 권한이 아직 없습니다.")
+                    Text(if (permissionGranted) "캘린더 권한 허용됨" else "캘린더 권한 필요")
                     if (!permissionGranted) {
                         Button(onClick = onRequestPermission) { Text("권한 허용") }
                     }
@@ -1613,15 +1710,18 @@ private fun CloudSyncSettingsScreen(
         item {
             Card(modifier = Modifier.padding(16.dp).fillMaxWidth()) {
                 Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text("Android 클라우드 동기화는 Firebase + Firestore + Google 로그인을 사용합니다.", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                     Text(
-                        if (driveSyncState.configured) {
-                            "사용자 데이터는 Firebase Auth uid 기준으로 users/{uid}/... 아래에 격리되며, 스냅샷은 암호화 비밀번호로 AES-GCM 암호화 후 Firestore에 저장됩니다."
-                        } else {
-                            "현재 google-services.json 에 Android OAuth 클라이언트가 없어 Firebase Google 로그인을 시작할 수 없습니다."
-                        },
+                        "데이터는 암호화해 내 Google 계정에 저장합니다. 8자 이상의 비밀번호가 필요하며, 분실하면 복원할 수 없습니다. 다른 기기에서도 같은 비밀번호를 사용하세요.",
+                        style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    if (!driveSyncState.configured) {
+                        Text(
+                            "Google 로그인 설정이 없어 클라우드 동기화를 사용할 수 없습니다.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
                     RadioSettingRow(
                         title = "이 기기에만 저장",
                         selected = settings.cloudSyncMode == CloudSyncMode.LOCAL,
@@ -1636,7 +1736,7 @@ private fun CloudSyncSettingsScreen(
                         value = syncPassphrase,
                         onValueChange = onSyncPassphraseChange,
                         label = { Text("암호화 비밀번호") },
-                        placeholder = { Text("다른 기기에서도 같은 비밀번호로 복호화합니다") },
+                        placeholder = { Text("8자 이상") },
                         visualTransformation = PasswordVisualTransformation(),
                         modifier = Modifier.fillMaxWidth(),
                     )
@@ -1654,7 +1754,7 @@ private fun CloudSyncSettingsScreen(
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                             if (driveSyncState.signedInEmail == null) {
                                 Button(onClick = onDriveSignIn, modifier = Modifier.weight(1f)) {
-                                    Text("Firebase 로그인")
+                                    Text("Google 로그인")
                                 }
                             } else {
                                 Button(
@@ -1674,10 +1774,10 @@ private fun CloudSyncSettingsScreen(
                             }
                         }
                         if (driveSyncState.signedInEmail != null) {
-                            OutlinedButton(onClick = onDriveSignOut) { Text("Firebase 연결 해제") }
+                            OutlinedButton(onClick = onDriveSignOut) { Text("Google 연결 해제") }
                         }
                     } else {
-                        OutlinedButton(onClick = onDriveSignIn) { Text("OAuth 설정 필요") }
+                        OutlinedButton(onClick = onDriveSignIn) { Text("로그인 설정 확인") }
                     }
                 }
             }
@@ -1758,8 +1858,6 @@ private fun AppInfoScreen(
                         }
                     }
                     HorizontalDivider()
-                    Text("안드로이드 포트 정보", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                    Text("이 포트는 iOS SIFT의 핵심 탭 구조(할 일/캘린더/메일), 페르소나 설정, 패턴 분석, 휴리스틱 기반 AI 정렬을 안드로이드 스튜디오에서 바로 열 수 있는 Compose 앱으로 옮겼습니다.")
                     OutlinedButton(onClick = onReplayOnboarding) { Text("온보딩 다시 보기") }
                 }
             }
@@ -1772,16 +1870,6 @@ private fun SettingToggleRow(title: String, checked: Boolean, onCheckedChange: (
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
         Text(title, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
         Switch(checked = checked, onCheckedChange = onCheckedChange, enabled = enabled)
-    }
-}
-
-@Composable
-private fun NumberSettingRow(title: String, value: String, onDecrease: () -> Unit, onIncrease: () -> Unit) {
-    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-        Text(title, modifier = Modifier.weight(1f))
-        OutlinedButton(onClick = onDecrease) { Text("-") }
-        Text(value, modifier = Modifier.padding(horizontal = 8.dp))
-        OutlinedButton(onClick = onIncrease) { Text("+") }
     }
 }
 

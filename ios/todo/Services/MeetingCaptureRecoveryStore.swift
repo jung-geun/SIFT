@@ -14,13 +14,43 @@ struct PendingMeetingCaptureRecovery: Codable, Identifiable, Sendable {
     var sourceKind: MeetingAudioTrackKind? = nil
     var sourceLabel: String? = nil
     var sessionStartSample: Int64? = nil
+    var summaryLanguageTag: String? = nil
+    var deferredTranscription: Bool? = nil
+    var automaticLanguageDetection: Bool = false
 
     var id: String { meetingID }
+}
+
+extension PendingMeetingCaptureRecovery {
+    private enum CodingKeys: String, CodingKey {
+        case meetingID, languageTag, timezoneIdentifier, manifest, provisionalResult, errorMessage
+        case parentMeetingID, sourceKind, sourceLabel, sessionStartSample, summaryLanguageTag, deferredTranscription
+        case automaticLanguageDetection
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        meetingID = try values.decode(String.self, forKey: .meetingID)
+        languageTag = try values.decode(String.self, forKey: .languageTag)
+        timezoneIdentifier = try values.decode(String.self, forKey: .timezoneIdentifier)
+        manifest = try values.decode(MeetingAudioManifest.self, forKey: .manifest)
+        provisionalResult = try values.decode(MeetingResult.self, forKey: .provisionalResult)
+        errorMessage = try values.decodeIfPresent(String.self, forKey: .errorMessage)
+        parentMeetingID = try values.decodeIfPresent(String.self, forKey: .parentMeetingID)
+        sourceKind = try values.decodeIfPresent(MeetingAudioTrackKind.self, forKey: .sourceKind)
+        sourceLabel = try values.decodeIfPresent(String.self, forKey: .sourceLabel)
+        sessionStartSample = try values.decodeIfPresent(Int64.self, forKey: .sessionStartSample)
+        summaryLanguageTag = try values.decodeIfPresent(String.self, forKey: .summaryLanguageTag)
+        deferredTranscription = try values.decodeIfPresent(Bool.self, forKey: .deferredTranscription)
+        automaticLanguageDetection = try values.decodeIfPresent(Bool.self, forKey: .automaticLanguageDetection) ?? false
+    }
 }
 
 struct MeetingCaptureRecoveryScan: Sendable {
     let recoveries: [PendingMeetingCaptureRecovery]
     let unreadableMarkerNames: [String]
+    /// Original native errors for unreadable journals; files and markers stay intact.
+    var unreadableMarkerErrors: [String: String] = [:]
 }
 
 enum MeetingCaptureRecoveryStore {
@@ -37,16 +67,23 @@ enum MeetingCaptureRecoveryStore {
         let languageTag: String
         let timezoneIdentifier: String
         let relativeDirectory: String
+        var summaryLanguageTag: String? = nil
+        var deferredTranscription: Bool? = nil
+        var automaticLanguageDetection: Bool? = nil
     }
 
     static func markActive(
         meetingID: String, parentMeetingID: String, sourceKind: MeetingAudioTrackKind,
         sourceLabel: String?, sessionStartSample: Int64, languageTag: String,
-        timezoneIdentifier: String, directoryURL: URL,
+        timezoneIdentifier: String, directoryURL: URL, summaryLanguageTag: String? = nil,
+        deferredTranscription: Bool = false, automaticLanguageDetection: Bool = false,
         rootURL: URL = AppDataContainer.meetingDirectory()
     ) throws {
         try MeetingCanonicalID.validateMeetingID(meetingID)
         try MeetingCanonicalID.validateMeetingID(parentMeetingID)
+        guard try !MeetingDeletionFence.isDeleted(meetingID: meetingID, parentMeetingID: parentMeetingID, rootURL: rootURL) else {
+            throw RecoveryError.invalidManifest
+        }
         let root = rootURL.standardizedFileURL.resolvingSymlinksInPath()
         let parent = try meetingDirectory(meetingID: meetingID, rootURL: root)
         let directory = directoryURL.standardizedFileURL.resolvingSymlinksInPath()
@@ -58,7 +95,9 @@ enum MeetingCaptureRecoveryStore {
         let relative = String(directory.path.dropFirst(root.path.count + 1))
         let active = ActiveCapture(meetingID: meetingID, parentMeetingID: parentMeetingID,
             sourceKind: sourceKind, sourceLabel: sourceLabel, sessionStartSample: sessionStartSample,
-            languageTag: languageTag, timezoneIdentifier: timezoneIdentifier, relativeDirectory: relative)
+            languageTag: languageTag, timezoneIdentifier: timezoneIdentifier, relativeDirectory: relative,
+            summaryLanguageTag: summaryLanguageTag, deferredTranscription: deferredTranscription,
+            automaticLanguageDetection: automaticLanguageDetection)
         try writeMarker(try JSONEncoder().encode(active), name: activeMarkerName, directory: parent)
     }
 
@@ -70,8 +109,12 @@ enum MeetingCaptureRecoveryStore {
     ) throws -> PendingMeetingCaptureRecovery {
         try MeetingCanonicalID.validateMeetingID(meetingID)
         let directory = try meetingDirectory(meetingID: meetingID, rootURL: rootURL)
-        let active = try JSONDecoder().decode(ActiveCapture.self,
-            from: Data(contentsOf: directory.appendingPathComponent(activeMarkerName)))
+        let marker = directory.appendingPathComponent(activeMarkerName)
+        guard marker.resolvingSymlinksInPath().path == marker.path else { throw RecoveryError.invalidPath }
+        try Task.checkCancellation()
+        let data = try Data(contentsOf: marker)
+        try Task.checkCancellation()
+        let active = try JSONDecoder().decode(ActiveCapture.self, from: data)
         guard active.meetingID == meetingID, active.relativeDirectory == audioManifest.relativeDirectory else {
             throw RecoveryError.invalidManifest
         }
@@ -79,7 +122,9 @@ enum MeetingCaptureRecoveryStore {
             languageTag: active.languageTag, timezoneIdentifier: active.timezoneIdentifier,
             manifest: audioManifest, provisionalResult: provisionalResult, errorMessage: errorMessage,
             parentMeetingID: active.parentMeetingID, sourceKind: active.sourceKind,
-            sourceLabel: active.sourceLabel, sessionStartSample: active.sessionStartSample)
+            sourceLabel: active.sourceLabel, sessionStartSample: active.sessionStartSample,
+            summaryLanguageTag: active.summaryLanguageTag, deferredTranscription: active.deferredTranscription,
+            automaticLanguageDetection: active.automaticLanguageDetection ?? false)
         try write(recovery, rootURL: rootURL)
         return recovery
     }
@@ -90,6 +135,8 @@ enum MeetingCaptureRecoveryStore {
         rootURL: URL = AppDataContainer.meetingDirectory()
     ) throws {
         try MeetingCanonicalID.validateMeetingID(recovery.meetingID)
+        guard try !MeetingDeletionFence.isDeleted(meetingID: recovery.meetingID,
+            parentMeetingID: recovery.parentMeetingID, rootURL: rootURL) else { throw RecoveryError.invalidManifest }
         if let parentID = recovery.parentMeetingID {
             try MeetingCanonicalID.validateMeetingID(parentID)
             guard parentID != recovery.meetingID, recovery.sourceKind != nil,
@@ -134,6 +181,7 @@ enum MeetingCaptureRecoveryStore {
         let parts = manifest.parts.sorted { $0.partIndex < $1.partIndex }
         var expectedOwnedStart: Int64 = 0
         for (expectedIndex, part) in parts.enumerated() {
+            try Task.checkCancellation()
             guard part.partIndex == expectedIndex,
                   part.ownedStartSample == expectedOwnedStart,
                   part.ownedEndSample > part.ownedStartSample,
@@ -148,6 +196,7 @@ enum MeetingCaptureRecoveryStore {
             let partURL = audioDirectory.appendingPathComponent(part.fileName).standardizedFileURL.resolvingSymlinksInPath()
             guard isDescendant(partURL, of: audioDirectory) else { throw RecoveryError.invalidPath }
             let file = try AVAudioFile(forReading: partURL)
+            try Task.checkCancellation()
             let skip = part.ownedStartSample - part.partStartSample
             let owned = part.ownedEndSample - part.ownedStartSample
             guard file.processingFormat.sampleRate == Double(MeetingMediaTimeline.sampleRate),
@@ -186,28 +235,66 @@ enum MeetingCaptureRecoveryStore {
         }
         var recoveries = [PendingMeetingCaptureRecovery]()
         var unreadable = [String]()
+        var unreadableErrors = [String: String]()
         for directory in directories {
+            guard !Task.isCancelled else { break }
             let marker = directory.appendingPathComponent(markerName)
             let activeMarker = directory.appendingPathComponent(activeMarkerName)
             guard FileManager.default.fileExists(atPath: marker.path)
                 || FileManager.default.fileExists(atPath: activeMarker.path) else { continue }
             do {
-                let recovery: PendingMeetingCaptureRecovery
-                if FileManager.default.fileExists(atPath: marker.path) {
-                    recovery = try JSONDecoder().decode(PendingMeetingCaptureRecovery.self, from: Data(contentsOf: marker))
-                } else {
-                    let active = try JSONDecoder().decode(ActiveCapture.self, from: Data(contentsOf: activeMarker))
-                    recovery = try recoverActive(active, directory: directory, rootURL: root)
+                try Task.checkCancellation()
+                let id = directory.lastPathComponent
+                guard UUID(uuidString: id) != nil else { continue }
+                if try MeetingDeletionFence.isDeleted(meetingID: id, rootURL: root) {
+                    try MeetingDeletionFence.removeDeletedContent(meetingID: id, rootURL: root)
+                    continue
                 }
-                try validate(recovery, markerDirectory: directory, rootURL: root)
-                recoveries.append(recovery)
+                // Resolve the marker before reading identity metadata, not only
+                // later during manifest validation.
+                let expected = try meetingDirectory(meetingID: id, rootURL: root)
+                let source = FileManager.default.fileExists(atPath: marker.path) ? marker : activeMarker
+                guard source.resolvingSymlinksInPath().path == source.standardizedFileURL.path,
+                      directory.standardizedFileURL.path == expected.path else { throw RecoveryError.invalidPath }
+                let data = try Data(contentsOf: source)
+                try Task.checkCancellation()
+                let parentID = try MeetingDeletionFence.markerParent(data, meetingID: id)
+                if try MeetingDeletionFence.isDeleted(meetingID: id, parentMeetingID: parentID, rootURL: root) {
+                    try MeetingDeletionFence.recordDeletion(meetingID: id, rootURL: root)
+                    try MeetingDeletionFence.removeDeletedContent(meetingID: id, rootURL: root)
+                    continue
+                }
+                let recovery: PendingMeetingCaptureRecovery?
+                if FileManager.default.fileExists(atPath: marker.path) {
+                    let decoded = try JSONDecoder().decode(PendingMeetingCaptureRecovery.self, from: data)
+                    let audio = root.appendingPathComponent(decoded.manifest.relativeDirectory, isDirectory: true)
+                    recovery = try MeetingFLACPartWriter.withRecoveryAccess(to: audio) {
+                        try validate(decoded, markerDirectory: directory, rootURL: root)
+                        return decoded
+                    }
+                } else {
+                    let active = try JSONDecoder().decode(ActiveCapture.self, from: data)
+                    let audio = root.appendingPathComponent(active.relativeDirectory, isDirectory: true)
+                    recovery = try MeetingFLACPartWriter.withRecoveryAccess(to: audio) {
+                        let recovered = try recoverActive(active, directory: directory, rootURL: root)
+                        try validate(recovered, markerDirectory: directory, rootURL: root)
+                        return recovered
+                    }
+                }
+                // A view can scan before it filters the current capture's ID.
+                // Do not decode or report a live writer as a damaged recovery.
+                if let recovery { recoveries.append(recovery) }
+            } catch is CancellationError {
+                break
             } catch {
                 unreadable.append(directory.lastPathComponent)
+                unreadableErrors[directory.lastPathComponent] = String(reflecting: error)
             }
         }
         return MeetingCaptureRecoveryScan(
             recoveries: recoveries.sorted { $0.meetingID < $1.meetingID },
-            unreadableMarkerNames: unreadable.sorted()
+            unreadableMarkerNames: unreadable.sorted(),
+            unreadableMarkerErrors: unreadableErrors
         )
     }
 
@@ -220,6 +307,7 @@ enum MeetingCaptureRecoveryStore {
         var removedMarker = false
         for name in [markerName, activeMarkerName] {
             do {
+                try Task.checkCancellation()
                 try FileManager.default.removeItem(at: directory.appendingPathComponent(name))
                 removedMarker = true
             } catch let error as CocoaError where error.code == .fileNoSuchFile {
@@ -234,11 +322,14 @@ enum MeetingCaptureRecoveryStore {
         let temporary = directory.appendingPathComponent(".\(name).\(UUID().uuidString).tmp")
         var renamed = false
         defer { if !renamed { try? FileManager.default.removeItem(at: temporary) } }
+        try Task.checkCancellation()
         try data.write(to: temporary, options: .withoutOverwriting)
+        try Task.checkCancellation()
         try FileManager.default.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: temporary.path)
         let handle = try FileHandle(forUpdating: temporary)
         try handle.synchronize()
         try handle.close()
+        try Task.checkCancellation()
         guard Darwin.rename(temporary.path, marker.path) == 0 else {
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
@@ -249,6 +340,7 @@ enum MeetingCaptureRecoveryStore {
     /// A process killed during capture has no final transcript journal. Recover
     /// only physically readable owned frames; never infer speech or pad a tail.
     private static func recoverActive(_ active: ActiveCapture, directory: URL, rootURL: URL) throws -> PendingMeetingCaptureRecovery {
+        try Task.checkCancellation()
         let expected = try meetingDirectory(meetingID: active.meetingID, rootURL: rootURL)
         guard directory.standardizedFileURL.path == expected.path else { throw RecoveryError.invalidPath }
         try MeetingCanonicalID.validateMeetingID(active.parentMeetingID)
@@ -270,47 +362,76 @@ enum MeetingCaptureRecoveryStore {
         }
         var parts = [MeetingAudioPartManifest]()
         var ownedStart: Int64 = 0
+        var recoveryError: (any Error)?
         for (index, url) in files.enumerated() {
+            try Task.checkCancellation()
             let partStart = max(0, ownedStart - MeetingMediaTimeline.overlapSamples)
             let overlap = ownedStart - partStart
             let limit = min(MeetingMediaTimeline.ownedSamplesPerPart,
                 MeetingMediaTimeline.maximumSamples - active.sessionStartSample - ownedStart)
             guard limit > 0 else { break }
-            let owned = readableSamples(at: url, limit: overlap + limit) - overlap
-            guard owned > 0 else { break }
+            let readable: (samples: Int64, failure: (any Error)?)
+            do {
+                readable = try readableSamples(at: url, limit: overlap + limit)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                recoveryError = error
+                break
+            }
+            recoveryError = readable.failure
+            let owned = readable.samples - overlap
+            guard owned > 0 else {
+                recoveryError = recoveryError ?? RecoveryError.invalidAudioSamples
+                break
+            }
             parts.append(MeetingAudioPartManifest(fileName: url.lastPathComponent, partIndex: index,
                 partStartSample: partStart, ownedStartSample: ownedStart, ownedEndSample: ownedStart + owned))
             ownedStart += owned
             // Later parts begin at fixed writer boundaries. Do not splice
             // speech across a partial or missing owned range.
-            if owned < MeetingMediaTimeline.ownedSamplesPerPart { break }
+            if recoveryError != nil || owned < MeetingMediaTimeline.ownedSamplesPerPart { break }
         }
-        guard !parts.isEmpty else { throw RecoveryError.invalidAudioSamples }
+        guard !parts.isEmpty else { throw recoveryError ?? RecoveryError.invalidAudioSamples }
         let manifest = MeetingAudioManifest(relativeDirectory: active.relativeDirectory,
             sampleRate: MeetingMediaTimeline.sampleRate, totalSamples: ownedStart, parts: parts)
         return PendingMeetingCaptureRecovery(meetingID: active.meetingID,
             languageTag: active.languageTag, timezoneIdentifier: active.timezoneIdentifier,
             manifest: manifest,
-            provisionalResult: MeetingProvisionalResultBuilder.make(meetingID: active.meetingID, entries: []), errorMessage: nil,
+            provisionalResult: MeetingProvisionalResultBuilder.make(meetingID: active.meetingID, entries: []),
+            errorMessage: recoveryError.map { String(reflecting: $0) },
             parentMeetingID: active.parentMeetingID, sourceKind: active.sourceKind,
-            sourceLabel: active.sourceLabel, sessionStartSample: active.sessionStartSample)
+            sourceLabel: active.sourceLabel, sessionStartSample: active.sessionStartSample,
+            summaryLanguageTag: active.summaryLanguageTag, deferredTranscription: active.deferredTranscription,
+            automaticLanguageDetection: active.automaticLanguageDetection ?? false)
     }
 
-    private static func readableSamples(at url: URL, limit: Int64) -> Int64 {
-        guard let file = try? AVAudioFile(forReading: url),
-              file.processingFormat.sampleRate == Double(MeetingMediaTimeline.sampleRate),
+    private static func readableSamples(at url: URL, limit: Int64) throws -> (samples: Int64, failure: (any Error)?) {
+        let file = try AVAudioFile(forReading: url)
+        defer { file.close() }
+        guard file.processingFormat.sampleRate == Double(MeetingMediaTimeline.sampleRate),
               file.processingFormat.channelCount == 1,
-              let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: 4_096) else { return 0 }
+              let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: 4_096) else {
+            throw RecoveryError.invalidAudioSamples
+        }
         let end = min(file.length, limit)
         var decoded: Int64 = 0
         while decoded < end {
+            try Task.checkCancellation()
             let count = AVAudioFrameCount(min(Int64(buffer.frameCapacity), end - decoded))
-            do { try file.read(into: buffer, frameCount: count) } catch { break }
-            guard buffer.frameLength > 0 else { break }
+            do {
+                try file.read(into: buffer, frameCount: count)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                return (decoded, error)
+            }
+            try Task.checkCancellation()
+            guard buffer.frameLength > 0 else { return (decoded, RecoveryError.invalidAudioSamples) }
             decoded += Int64(buffer.frameLength)
-            if buffer.frameLength < count { break }
+            if buffer.frameLength < count { return (decoded, RecoveryError.invalidAudioSamples) }
         }
-        return decoded
+        return (decoded, nil)
     }
 
     private static func synchronizeDirectory(_ directory: URL) throws {
@@ -509,6 +630,15 @@ enum MeetingCaptureRecoveryPersister {
         rootURL: URL = AppDataContainer.meetingDirectory(),
         save: @MainActor (ModelContext) throws -> Void = { try $0.save() }
     ) throws {
+        try Task.checkCancellation()
+        if try MeetingDeletionFence.isDeleted(meetingID: recovery.meetingID,
+            parentMeetingID: recovery.parentMeetingID, rootURL: rootURL) {
+            // A cached recovery may predate the tombstone even when its marker
+            // has already been removed by a foreground scan.
+            try MeetingDeletionFence.recordDeletion(meetingID: recovery.meetingID, rootURL: rootURL)
+            try MeetingDeletionFence.removeDeletedContent(meetingID: recovery.meetingID, rootURL: rootURL)
+            return
+        }
         let directory = rootURL.appendingPathComponent(recovery.meetingID, isDirectory: true)
         try MeetingCaptureRecoveryStore.validate(recovery, markerDirectory: directory, rootURL: rootURL)
         let descriptor = FetchDescriptor<MeetingRecord>(
@@ -542,7 +672,9 @@ enum MeetingCaptureRecoveryPersister {
             record = MeetingRecord(
                 meetingID: recovery.meetingID,
                 languageTag: recovery.languageTag,
-                timezoneIdentifier: recovery.timezoneIdentifier
+                automaticLanguageDetection: recovery.automaticLanguageDetection,
+                timezoneIdentifier: recovery.timezoneIdentifier,
+                summaryLanguageTag: recovery.summaryLanguageTag ?? ""
             )
             context.insert(record)
             inserted = true
@@ -561,7 +693,9 @@ enum MeetingCaptureRecoveryPersister {
                     insertedParent = false
                 } else {
                     let group = MeetingRecord(meetingID: parentID, languageTag: recovery.languageTag,
-                                              timezoneIdentifier: recovery.timezoneIdentifier)
+                                              automaticLanguageDetection: recovery.automaticLanguageDetection,
+                                              timezoneIdentifier: recovery.timezoneIdentifier,
+                                              summaryLanguageTag: recovery.summaryLanguageTag ?? "")
                     context.insert(group)
                     parent = group
                     insertedParent = true
@@ -578,7 +712,8 @@ enum MeetingCaptureRecoveryPersister {
 
         do {
             if !committed {
-                try record.replaceTranscriptionBase(recovery.provisionalResult, status: .transcriptFinalizationFailed)
+                try record.replaceTranscriptionBase(recovery.provisionalResult, status: .transcriptFinalizationFailed,
+                    source: recovery.deferredTranscription == true || recovery.automaticLanguageDetection ? .savedAudio : .apple)
                 try record.update(audioManifest: recovery.manifest)
             }
             if let parent {
@@ -622,10 +757,12 @@ enum MeetingCaptureRecoveryPersister {
 enum MeetingInitialCapturePersister {
     static func persist(
         artifact: MeetingCaptureArtifact,
-        languageTag: String, timezoneIdentifier: String,
+        languageTag: String, timezoneIdentifier: String, summaryLanguageTag: String = "", deferredTranscription: Bool = false,
+        automaticLanguageDetection: Bool = false,
         in context: ModelContext,
         save: @MainActor (ModelContext) throws -> Void = { try $0.save() }
     ) throws -> MeetingRecord {
+        let awaitsOfflineTranscription = deferredTranscription || automaticLanguageDetection
         try MeetingCanonicalID.validateMeetingID(artifact.meetingID)
         guard !artifact.tracks.isEmpty else { throw MeetingCaptureRecoveryStore.RecoveryError.invalidManifest }
         var namespaces: Set<String> = [artifact.meetingID]
@@ -642,24 +779,33 @@ enum MeetingInitialCapturePersister {
         // SwiftData does not enforce unique meeting IDs. Reject all occupied
         // namespaces before inserting, rather than relying on a save upsert.
         for id in namespaces {
+            if let root {
+                guard try !MeetingDeletionFence.isDeleted(meetingID: id, rootURL: root) else {
+                    throw MeetingCaptureRecoveryStore.RecoveryError.invalidManifest
+                }
+            }
             let existing = try context.fetch(FetchDescriptor<MeetingRecord>(predicate: #Predicate { $0.meetingID == id }))
             guard existing.isEmpty else { throw MeetingCaptureRecoveryStore.RecoveryError.invalidManifest }
         }
         let parent = MeetingRecord(meetingID: artifact.meetingID,
-            languageTag: languageTag, timezoneIdentifier: timezoneIdentifier)
+            languageTag: languageTag, automaticLanguageDetection: automaticLanguageDetection,
+            timezoneIdentifier: timezoneIdentifier, summaryLanguageTag: summaryLanguageTag)
         var inserted = [MeetingRecord]()
         context.insert(parent)
         do {
             for track in artifact.tracks {
                 let child = MeetingRecord(meetingID: track.meetingID,
-                    languageTag: languageTag, timezoneIdentifier: timezoneIdentifier)
+                    languageTag: languageTag, automaticLanguageDetection: automaticLanguageDetection,
+                    timezoneIdentifier: timezoneIdentifier, summaryLanguageTag: summaryLanguageTag)
                 context.insert(child)
                 inserted.append(child)
                 child.parentMeetingID = parent.meetingID
                 child.audioTrackKindRaw = track.sourceKind.rawValue
                 child.audioTrackSourceLabel = track.sourceLabel
                 child.audioTrackStartSample = track.sessionStartSample
-                try child.replaceTranscriptionBase(track.provisionalResult, status: .finalizingTranscript)
+                try child.replaceTranscriptionBase(track.provisionalResult,
+                    status: awaitsOfflineTranscription ? .transcriptFinalizationFailed : .finalizingTranscript,
+                    source: awaitsOfflineTranscription ? .savedAudio : .apple)
                 try child.update(audioManifest: track.audioManifest)
                 parent.audioTrackIDs.append(child.meetingID)
             }

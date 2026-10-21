@@ -22,7 +22,7 @@ import Foundation
         let listener = try NWListener(using: parameters, on: .any)
         self.listener = listener
         listener.stateUpdateHandler = { [weak self] state in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 guard let self, !self.stopped else { return }
                 switch state {
                 case .ready:
@@ -39,7 +39,7 @@ import Foundation
             }
         }
         listener.newConnectionHandler = { [weak self] connection in
-            Task { @MainActor in self?.accept(connection) }
+            Task { @MainActor [weak self] in self?.accept(connection) }
         }
         timeout = Task { [weak self] in
             do { try await Task.sleep(for: .seconds(180)) } catch { return }
@@ -90,7 +90,7 @@ import Foundation
 
     private func receive(_ connection: NWConnection, id: UUID, buffer: Data) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 16384) { [weak self] data, _, complete, error in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 guard let self, self.connections[id] != nil else { return }
                 var bytes = buffer
                 if let data { bytes.append(data) }
@@ -127,7 +127,7 @@ import Foundation
     }
 
     private func respond(_ status: String, body: String, connection: NWConnection,
-                         completion: @escaping @MainActor () -> Void) {
+                         completion: @escaping @MainActor @Sendable () -> Void) {
         let response = "HTTP/1.1 \(status)\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: \(body.utf8.count)\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nConnection: close\r\n\r\n\(body)"
         connection.send(content: Data(response.utf8), completion: .contentProcessed { _ in
             Task { @MainActor in completion() }

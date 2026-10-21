@@ -272,6 +272,17 @@ nonisolated final class MeetingAppAudioInputSink: @unchecked Sendable {
 
 @MainActor
 final class MeetingCaptureCoordinator: ObservableObject {
+    private static let syncParticipants = NSHashTable<MeetingCaptureCoordinator>.weakObjects()
+    static var hasActiveCaptureForCloudSync: Bool {
+        syncParticipants.allObjects.contains { coordinator in
+            if coordinator.starting { return true }
+            switch coordinator.status {
+            case .recording, .paused, .stopping, .finalizingTranscript, .extractingActions: return true
+            default: return false
+            }
+        }
+    }
+
     @Published private(set) var status: MeetingStatus = .ready
     @Published private(set) var elapsedMediaMs: Int64 = 0
     @Published private(set) var failure: String?
@@ -365,6 +376,9 @@ final class MeetingCaptureCoordinator: ObservableObject {
     private var thermalObserver: NSObjectProtocol?
     private var activeMeetingID: String?
     private var activeLanguageTag = ""
+    private var activeSummaryLanguageTag: String?
+    private(set) var recordingDefersTranscription = false
+    private(set) var recordingAutomaticLanguageDetection = false
     private var activeTimezoneIdentifier = ""
     private var terminalIntent: TerminalIntent?
     private var terminalArtifact: MeetingCaptureArtifact?
@@ -374,6 +388,7 @@ final class MeetingCaptureCoordinator: ObservableObject {
 
     init(transcriptionSessionFactory: (any MeetingTranscriptionSessionFactory)? = nil) {
         self.transcriptionSessionFactory = transcriptionSessionFactory ?? DefaultMeetingTranscriptionSessionFactory()
+        Self.syncParticipants.add(self)
     }
 
     func setVocabularySnapshotProvider(_ provider: @escaping @Sendable () async -> UserVocabularySnapshot) {
@@ -382,7 +397,8 @@ final class MeetingCaptureCoordinator: ObservableObject {
 
     func start(
         meetingID: String, languageTag: String, microphoneEnabled: Bool = true,
-        appAudioEnabled: Bool = false, consentConfirmed: Bool = false
+        appAudioEnabled: Bool = false, consentConfirmed: Bool = false, summaryLanguageTag: String? = nil,
+        deferTranscription: Bool = false, automaticLanguageDetection: Bool = false
     ) async throws {
         guard !starting, status == .ready || status == .cancelled || status == .failed else { throw CaptureError.invalidState }
         guard microphoneEnabled || appAudioEnabled else { throw CaptureError.noAudioSource }
@@ -418,6 +434,11 @@ final class MeetingCaptureCoordinator: ObservableObject {
         monitorMicrophoneInterruptions(sink: appSink, generation: generation)
         #endif
         do {
+            if automaticLanguageDetection {
+                // Validate pinned local bytes before accepting any audio. This
+                // lease never downloads, and hashing runs on the model actor.
+                try await MeetingWhisperModelStore.shared.withVerifiedModel { _, _ in () }
+            }
             // No writer, analyzer, microphone permission, or retained audio exists
             // until the system picker has consented and the app stream has started.
             if appAudioEnabled { try await capture.selectSourceAndWait(consentConfirmed: consentConfirmed) }
@@ -430,7 +451,9 @@ final class MeetingCaptureCoordinator: ObservableObject {
             }
             try Task.checkCancellation()
             guard captureGeneration == generation else { throw CancellationError() }
-            try await startPrepared(meetingID: meetingID, languageTag: languageTag,
+            try await startPrepared(meetingID: meetingID, languageTag: languageTag, summaryLanguageTag: summaryLanguageTag,
+                                    deferTranscription: deferTranscription,
+                                    automaticLanguageDetection: automaticLanguageDetection,
                                     microphoneEnabled: usesSystemPickerMicrophone ? appSink.microphoneConsent.isPermitted : microphoneEnabled,
                                     appAudioEnabled: appAudioEnabled,
                                     generation: generation, appSink: appSink)
@@ -460,13 +483,17 @@ final class MeetingCaptureCoordinator: ObservableObject {
     }
 
     private func startPrepared(
-        meetingID: String, languageTag: String, microphoneEnabled: Bool,
+        meetingID: String, languageTag: String, summaryLanguageTag: String?, deferTranscription: Bool,
+        automaticLanguageDetection: Bool, microphoneEnabled: Bool,
         appAudioEnabled: Bool, generation: UUID, appSink: MeetingAppAudioInputSink
     ) async throws {
         voiceProcessingRequested = SettingsStore.shared.effectiveMeetingVoiceProcessingEnabled
         recordingDiarizationEnabled = SettingsStore.shared.effectiveMeetingDiarizationEnabled
         activeMeetingID = meetingID
         activeLanguageTag = languageTag
+        activeSummaryLanguageTag = summaryLanguageTag
+        recordingDefersTranscription = deferTranscription
+        recordingAutomaticLanguageDetection = automaticLanguageDetection
         activeTimezoneIdentifier = TimeZone.current.identifier
         let microphoneSetup = microphoneEnabled && !usesSystemPickerMicrophone && appSink.microphoneConsent.isPermitted
             ? try await prepareMicrophone() : nil
@@ -564,7 +591,9 @@ final class MeetingCaptureCoordinator: ObservableObject {
         tracks[track.meetingID] = track
         trackOrder.append(track.meetingID)
         await track.prepare(factory: transcriptionSessionFactory, languageTag: activeLanguageTag,
-                            diarizationEnabled: recordingDiarizationEnabled, groupID: groupID)
+                            diarizationEnabled: recordingDiarizationEnabled, groupID: groupID,
+                            deferTranscription: recordingDefersTranscription,
+                            automaticLanguageDetection: recordingAutomaticLanguageDetection)
         guard generation == captureGeneration, terminalIntent == nil, !Task.isCancelled else {
             await discardTrack(track)
             throw CancellationError()
@@ -581,7 +610,9 @@ final class MeetingCaptureCoordinator: ObservableObject {
             meetingID: track.meetingID, parentMeetingID: parentMeetingID, sourceKind: track.sourceKind,
             sourceLabel: track.sourceLabel, sessionStartSample: track.sessionStartSample,
             languageTag: activeLanguageTag, timezoneIdentifier: activeTimezoneIdentifier,
-            directoryURL: track.directoryURL)
+            directoryURL: track.directoryURL, summaryLanguageTag: activeSummaryLanguageTag,
+            deferredTranscription: recordingDefersTranscription || recordingAutomaticLanguageDetection,
+            automaticLanguageDetection: recordingAutomaticLanguageDetection)
     }
 
     private func publishTracks() {
