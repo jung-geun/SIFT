@@ -19,7 +19,7 @@ on:
 
 jobs:
   build-test:
-    runs-on: macos-26
+    runs-on: xcode-27
 
     steps:
       - uses: actions/checkout@v4
@@ -38,10 +38,11 @@ jobs:
       - name: Build and test deterministic unit suite
         run: |
           set -euo pipefail
+          DEVICE_ID=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"]; runtimes=sorted((r for r in d if ".iOS-" in r),key=lambda r:tuple(map(int,r.rsplit("iOS-",1)[1].split("-"))),reverse=True); print(next(v["udid"] for r in runtimes for v in d[r] if v["name"].startswith("iPhone") and v["isAvailable"]))')
           xcodebuild test \
             -project ios/todo.xcodeproj \
             -scheme todo-QA \
-            -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=latest' \
+            -destination "platform=iOS Simulator,id=$DEVICE_ID" \
             -only-testing:todoTests \
             -resultBundlePath "$RUNNER_TEMP/unit-tests.xcresult" \
             CODE_SIGNING_ALLOWED=NO
