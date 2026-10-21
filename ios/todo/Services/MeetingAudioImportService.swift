@@ -53,14 +53,18 @@ nonisolated enum MeetingAudioImportService {
     static func importFile(
         at sourceURL: URL,
         languageTag: String,
+        automaticLanguageDetection: Bool = false,
         timezoneIdentifier: String = TimeZone.current.identifier,
+        summaryLanguageTag: String = "",
         in context: ModelContext,
         rootURL: URL = AppDataContainer.meetingDirectory(),
         progress: @escaping @Sendable (Double) -> Void = { _ in },
         save: @MainActor (ModelContext) throws -> Void = { try $0.save() }
     ) async throws -> MeetingRecord {
-        // Keep the same explicit language contract as saved-audio Whisper.
-        _ = try MeetingOfflineTranscriptionService.languageCode(for: languageTag)
+        // Automatic mode keeps the locale for summaries, not as a decoder hint.
+        if !automaticLanguageDetection {
+            _ = try MeetingOfflineTranscriptionService.languageCode(for: languageTag)
+        }
         try Task.checkCancellation()
         let id = UUID().uuidString.lowercased()
         let coordinatedRead = CoordinatedRead()
@@ -80,7 +84,9 @@ nonisolated enum MeetingAudioImportService {
             try Task.checkCancellation()
             let occupied = try context.fetch(FetchDescriptor<MeetingRecord>(predicate: #Predicate { $0.meetingID == id }))
             guard occupied.isEmpty else { throw Failure.storageFailed }
-            let record = MeetingRecord(meetingID: id, languageTag: languageTag, timezoneIdentifier: timezoneIdentifier)
+            let record = MeetingRecord(meetingID: id, languageTag: languageTag,
+                automaticLanguageDetection: automaticLanguageDetection,
+                timezoneIdentifier: timezoneIdentifier, summaryLanguageTag: summaryLanguageTag)
             record.importedAudioFileName = sourceURL.lastPathComponent
             let title = sourceURL.deletingPathExtension().lastPathComponent.trimmingCharacters(in: .whitespacesAndNewlines)
             try record.replaceTranscriptionBase(

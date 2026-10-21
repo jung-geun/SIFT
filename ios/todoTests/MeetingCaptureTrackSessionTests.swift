@@ -7,6 +7,22 @@ import Testing
 @Suite("Independent capture track lifecycle")
 @MainActor
 struct MeetingCaptureTrackSessionTests {
+    @Test("deferred language records lossless audio without invoking Apple ASR")
+    func deferredLanguageKeepsOriginal() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let child = try track(root: root, kind: .microphone)
+        await child.prepare(factory: FailingFactory(), languageTag: "bn", diarizationEnabled: false,
+                            groupID: UUID().uuidString.lowercased(), deferTranscription: true)
+        try child.input.append(pcm(value: 12_000))
+        let artifact = try child.finishAudio(metadata: nil)
+        await child.finalize(timeout: .seconds(1))
+        #expect(child.transcriptionError == nil)
+        #expect(artifact.provisionalResult.segments.isEmpty)
+        #expect(artifact.audioManifest.totalSamples == 16_000)
+        #expect(try savedPCM(artifact).allSatisfy { $0 == 12_000 })
+    }
+
     @Test("mute during suspended speech preparation cannot reopen an old microphone request", arguments: [false, true])
     func mutedPreparationCannotReopen(renewConsent: Bool) async throws {
         let root = temporaryRoot()
@@ -14,7 +30,7 @@ struct MeetingCaptureTrackSessionTests {
         let mic = try track(root: root, kind: .microphone)
         let app = try track(root: root, kind: .application)
         let inputs = TrackInputs(microphone: mic.input, application: app.input)
-        let router = try MeetingAudioSourceRouter(consume: { source, buffer in
+        let router = try MeetingAudioSourceRouter(automaticallyRenders: false, consume: { source, buffer in
             try inputs.append(buffer, source: source)
         }, failed: { _, _ in Issue.record("Unexpected router failure") })
         router.start(hostTime: 100, microphoneEnabled: false)
@@ -53,7 +69,7 @@ struct MeetingCaptureTrackSessionTests {
         await app.cancel(removeAudio: false)
     }
 
-    @Test("colliding ASR ranges retain each child's text, finality and segment namespace")
+    @Test("colliding ASR ranges retain each child's text, finality and segment namespace", .timeLimit(.minutes(1)))
     func transcriptNamespacesDoNotCollide() async throws {
         let root = temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -71,6 +87,15 @@ struct MeetingCaptureTrackSessionTests {
         micSpeech.emit("microphone final", final: true)
         micSpeech.emit("late volatile replacement", final: false)
         appSpeech.emit("application final", final: true)
+        // This scenario has emitted its complete scripted ASR result stream.
+        // Drain those results before starting the independent finalization timer.
+        micSpeech.finishResults()
+        appSpeech.finishResults()
+        while mic.snapshot.liveTranscriptRows.map(\.text) != ["microphone final"]
+            || app.snapshot.liveTranscriptRows.map(\.text) != ["application final"] {
+            try Task.checkCancellation()
+            await Task.yield()
+        }
         _ = try mic.finishAudio(metadata: nil)
         _ = try app.finishAudio(metadata: nil)
         await mic.finalize(timeout: .seconds(2))
@@ -93,7 +118,7 @@ struct MeetingCaptureTrackSessionTests {
         let mic = try track(root: root, kind: .microphone, offset: 0)
         let app = try track(root: root, kind: .application, offset: 0)
         let inputs = TrackInputs(microphone: mic.input, application: app.input)
-        let router = try MeetingAudioSourceRouter(consume: { source, buffer in
+        let router = try MeetingAudioSourceRouter(automaticallyRenders: false, consume: { source, buffer in
             try inputs.append(buffer, source: source)
         }, failed: { _, _ in Issue.record("Unexpected router failure") })
         router.start(hostTime: 100, microphoneEnabled: true)
@@ -270,6 +295,8 @@ private final class ScriptedTrackSpeechSession: MeetingTranscriptionSession, @un
             range: CMTimeRange(start: .zero, duration: CMTime(value: 1, timescale: 1)),
             text: AttributedString(text), alternatives: [], isFinal: final, confidence: nil))
     }
+
+    func finishResults() { continuation.finish() }
 
     func analyze(_ input: AsyncStream<AnalyzerInput>) async throws {
         for await _ in input { try Task.checkCancellation() }

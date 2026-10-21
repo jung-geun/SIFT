@@ -11,15 +11,30 @@ modify the Apache License or replace any upstream license or notice.
 
 Third-party software
 --------------------
-Swift package sources and exact versions/revisions are recorded in:
+Remote Swift package sources and exact versions/revisions are recorded in:
   ios/todo.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
-These include FluidAudio, WhisperKit, MLX Swift, MLX Swift LM, Apple Swift
-packages, Hugging Face Swift packages, EventSource, and yyjson. Their own
-LICENSE/NOTICE files remain applicable. An SDK license does not establish the
-license of model weights downloaded through that SDK.
+Locally patched MLX Swift 0.32.3 and MLX Swift LM 3.32.3 sources, original
+licenses, upstream revisions and modification records are retained in:
+  ios/Vendor/mlx-swift/SIFT-PROVENANCE.json
+  ios/Vendor/mlx-swift-lm/SIFT-PROVENANCE.json
+Other dependencies include FluidAudio, WhisperKit, Apple Swift packages,
+Hugging Face Swift packages, EventSource, and yyjson. Their own LICENSE/NOTICE
+files remain applicable. An SDK license does not establish the license of
+model weights downloaded through that SDK.
 The iOS app includes full pinned SDK license and notice texts, including
 vendored and embedded-library attributions, in ios/todo/ThirdPartyNotices.txt.
 Open them in the app via Settings > App Info > Open-Source Licenses.
+
+Google Mobile Ads 13.11.0 and User Messaging Platform 3.1.0
+--------------------------------------------------------
+The Google advertising/consent SDK binaries retain Google's terms, not SIFT's
+Apache-2.0 license. Use of Google Mobile Ads is governed by the AdMob terms:
+  https://developers.google.com/admob/terms
+  https://adsense.google.com/adsense/terms
+Their Swift Package Manager wrapper sources are Copyright 2021 Google LLC,
+licensed under Apache-2.0 (the full license is included in the app notices):
+  https://github.com/googleads/swift-package-manager-google-mobile-ads
+  https://github.com/googleads/swift-package-manager-google-user-messaging-platform
 
 Backend, Android, and Python dependencies likewise retain their own licenses.
 Their manifests and lockfiles identify the dependencies; a license field on

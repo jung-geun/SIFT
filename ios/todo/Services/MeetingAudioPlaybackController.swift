@@ -15,30 +15,79 @@ final class MeetingAudioPlaybackController: ObservableObject {
                 outputLevelPercent = clamped
             }
             let mix = Self.outputMix(for: clamped)
-            node.volume = mix.volume
-            equalizer.globalGain = mix.gainDB
+            graph?.node.volume = mix.volume
+            graph?.equalizer.globalGain = mix.gainDB
         }
     }
 
-    private let engine = AVAudioEngine()
+    /// Device-rendering graphs belong to one activated playback attempt, never
+    /// to the controller's lifetime (which can begin under a record-only session).
+    private struct PlaybackGraph {
+        let engine: AVAudioEngine
+        let node = AVAudioPlayerNode()
+        let equalizer = AVAudioUnitEQ(numberOfBands: 0)
+
+        init(engine: AVAudioEngine) {
+            self.engine = engine
+            engine.attach(node)
+            engine.attach(equalizer)
+        }
+    }
+
+    struct OutputRoute: Equatable, Sendable {
+        let sampleRate: Double
+        let channelCount: AVAudioChannelCount
+
+        var isAvailable: Bool {
+            sampleRate.isFinite && sampleRate > 0 && channelCount > 0
+        }
+    }
+
+    enum OutputRouteError: LocalizedError {
+        case unavailable(OutputRoute)
+
+        var errorDescription: String? {
+            switch self {
+            case .unavailable(let route):
+                return "Playback output unavailable: \(route.channelCount) channels at \(route.sampleRate) Hz."
+            }
+        }
+    }
+
+    private var graph: PlaybackGraph?
+    private var configurationObserver: NSObjectProtocol?
     @Published private(set) var playbackProgress = 0.0
     private var logicalTotalSamples: Int64 = 0
     @Published private(set) var playbackMilliseconds: Int64 = 0
     private var playbackSampleRate: Int64 = 0
     @Published private(set) var isPaused = false
-    private let node = AVAudioPlayerNode()
-    private let equalizer = AVAudioUnitEQ(numberOfBands: 0)
+    private let makeEngine: @MainActor () -> AVAudioEngine
+    private let outputRoute: @MainActor (AVAudioEngine) -> OutputRoute
     private let logger = Logger(subsystem: "pieroot.todo", category: "MeetingPlayback")
     private var scheduler: MeetingPlaybackStreamScheduler?
     private var pendingStartProgress: Double?
-    private var isStartingPlayback = false
+    private(set) var isPreparingPlayback = false
+    var hasPlaybackResources: Bool { scheduler != nil || graph != nil }
+    private var preparationGeneration: UInt64 = 0
+    private let activateSession: @MainActor () async throws -> Void
     /// The logical sample the current schedule started from. node.playerTime
     /// resets to 0 on every (re)schedule, so progress = base + node.sampleTime.
     private var baseLogicalSample: Int64 = 0
-    init() {
-        engine.attach(node)
-        engine.attach(equalizer)
-        equalizer.globalGain = 0
+    init(
+        activateSession: @escaping @MainActor () async throws -> Void = {
+            try await MeetingAudioSessionController.shared.activateForPlayback()
+        },
+        makeEngine: @escaping @MainActor () -> AVAudioEngine = { AVAudioEngine() },
+        outputRoute: @escaping @MainActor (AVAudioEngine) -> OutputRoute = { engine in
+            // AVAudioEngine's documented availability check is the output node's
+            // hardware-side format, not a preferred rate or the source PCM format.
+            let format = engine.outputNode.outputFormat(forBus: 0)
+            return OutputRoute(sampleRate: format.sampleRate, channelCount: format.channelCount)
+        }
+    ) {
+        self.activateSession = activateSession
+        self.makeEngine = makeEngine
+        self.outputRoute = outputRoute
     }
 
     nonisolated static func outputMix(for percent: Int) -> (volume: Float, gainDB: Float) {
@@ -66,36 +115,67 @@ final class MeetingAudioPlaybackController: ObservableObject {
     }
 
     func play(manifest: MeetingAudioManifest) async throws {
-        guard !isStartingPlayback else { return }
-        if isPaused {
-            node.play()
-            isPaused = false
-            isPlaying = true
-            return
-        }
-        isStartingPlayback = true
-        defer { isStartingPlayback = false }
-        // Keep the armed seek until it is resolved after session activation below.
+        guard !manifest.parts.isEmpty else { throw PlaybackError.noAudio }
+        let plan: MeetingGroupAudioPlaybackPlan
+        do { plan = try .single(manifest: manifest) }
+        catch { throw PlaybackError.operation("openTimeline", error) }
+        try await play(plan: plan)
+    }
+
+    func play(plan: MeetingGroupAudioPlaybackPlan) async throws {
+        guard !isPreparingPlayback else { return }
+        // stop() invalidates every suspended request, but keeps an armed seek.
         stop(resetProgress: false)
+        let generation = preparationGeneration
+        isPreparingPlayback = true
+        var playbackStarted = false
+        defer {
+            // A stale completion must not clear the state of a newer request.
+            if generation == preparationGeneration {
+                isPreparingPlayback = false
+                if !playbackStarted { stop() }
+            }
+        }
         do {
-            try await MeetingAudioSessionController.shared.activateForPlayback()
+            try await activateSession()
         } catch {
+            guard generation == preparationGeneration else { throw CancellationError() }
             throw PlaybackError.operation("activateSession", error)
+        }
+        guard generation == preparationGeneration else { throw CancellationError() }
+        try Task.checkCancellation()
+        // There are no suspension points from this fence through graph startup.
+        // A zero hardware format must fail before mainMixerNode is accessed:
+        // that accessor itself creates the mixer -> output connection and may
+        // raise an Objective-C exception when output is disabled.
+        let engine = makeEngine()
+        let route = outputRoute(engine)
+        guard route.isAvailable else {
+            throw PlaybackError.operation("outputRoute", OutputRouteError.unavailable(route))
+        }
+        let graph = PlaybackGraph(engine: engine)
+        self.graph = graph
+        let node = graph.node
+        let equalizer = graph.equalizer
+        let mix = Self.outputMix(for: outputLevelPercent)
+        node.volume = mix.volume
+        equalizer.globalGain = mix.gainDB
+        configurationObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil
+        ) { [weak self, weak engine] _ in
+            // The SDK forbids disposing the engine on its notification queue.
+            // Hop to the main actor, and ignore events from a replaced graph.
+            Task { @MainActor [weak self, weak engine] in
+                guard let self, let engine else { return }
+                self.handleConfigurationChange(for: engine)
+            }
         }
         let startProgress = Self.resolvedStartProgress(
             pending: pendingStartProgress,
             current: playbackProgress
         )
-        var playbackStarted = false
-        defer {
-            if !playbackStarted {
-                stop()
-                Task { await MeetingAudioSessionController.shared.deactivate() }
-            }
-        }
-        guard !manifest.parts.isEmpty else { throw PlaybackError.noAudio }
-        logicalTotalSamples = manifest.totalSamples
-        playbackSampleRate = manifest.sampleRate
+        logicalTotalSamples = plan.totalSamples
+        playbackSampleRate = plan.sampleRate
         let startSample = Int64(startProgress * Double(logicalTotalSamples))
         playbackProgress = startProgress
         playbackMilliseconds = Self.milliseconds(
@@ -106,17 +186,19 @@ final class MeetingAudioPlaybackController: ObservableObject {
 
         guard let playbackFormat = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
-            sampleRate: Double(manifest.sampleRate),
+            sampleRate: Double(plan.sampleRate),
             channels: 1,
             interleaved: false
         ) else {
             throw PlaybackError.invalidManifest
         }
         engine.connect(node, to: equalizer, format: playbackFormat)
+        // Keep the default mixer -> output connection implicit: the engine
+        // tracks the hardware rate/channels there, independent of mono source PCM.
         engine.connect(equalizer, to: engine.mainMixerNode, format: playbackFormat)
-        let cursor: MeetingLogicalAudioCursor
+        let cursor: MeetingGroupAudioCursor
         do {
-            cursor = try MeetingLogicalAudioCursor(manifest: manifest)
+            cursor = try MeetingGroupAudioCursor(plan: plan)
         } catch {
             throw PlaybackError.operation("openTimeline", error)
         }
@@ -158,6 +240,15 @@ final class MeetingAudioPlaybackController: ObservableObject {
         isPlaying = true
     }
 
+    /// Configuration notifications stop the hardware engine but leave scheduled
+    /// buffers/old formats attached. Dispose that graph off the notification
+    /// queue; the next explicit play (not an automatic retry) reactivates/rebuilds.
+    func handleConfigurationChange(for engine: AVAudioEngine) {
+        guard graph?.engine === engine else { return }
+        refreshPlaybackProgress()
+        stop(resetProgress: false)
+    }
+
     private func handlePlaybackFinished() {
         completePlayback(totalSamples: logicalTotalSamples, sampleRate: playbackSampleRate)
     }
@@ -173,10 +264,12 @@ final class MeetingAudioPlaybackController: ObservableObject {
     }
 
     func refreshPlaybackProgress() {
-        guard isPlaying,
+        guard isPlaying, let node = graph?.node,
               logicalTotalSamples > 0,
               let renderTime = node.lastRenderTime,
-              let playerTime = node.playerTime(forNodeTime: renderTime)
+              renderTime.isSampleTimeValid || renderTime.isHostTimeValid,
+              let playerTime = node.playerTime(forNodeTime: renderTime),
+              playerTime.isSampleTimeValid
         else { return }
         let logical = baseLogicalSample + playerTime.sampleTime
         playbackProgress = min(1, max(0, Double(logical) / Double(logicalTotalSamples)))
@@ -222,6 +315,8 @@ final class MeetingAudioPlaybackController: ObservableObject {
     }
 
     func pause() {
+        guard scheduler != nil, isPlaying, let node = graph?.node else { return }
+        refreshPlaybackProgress()
         node.pause()
         isPaused = true
         isPlaying = false
@@ -278,11 +373,18 @@ final class MeetingAudioPlaybackController: ObservableObject {
     }
 
     func stop(resetProgress: Bool = true) {
+        preparationGeneration &+= 1
+        isPreparingPlayback = false
+        if let configurationObserver {
+            NotificationCenter.default.removeObserver(configurationObserver)
+            self.configurationObserver = nil
+        }
         scheduler?.cancel()
         scheduler = nil
-        node.stop()
-        engine.disconnectNodeOutput(node)
-        engine.stop()
+        graph?.node.stop()
+        graph?.engine.stop()
+        // A later play/resume builds from the newly activated hardware route.
+        graph = nil
         if resetProgress {
             playbackProgress = 0
             playbackMilliseconds = 0
@@ -295,9 +397,11 @@ final class MeetingAudioPlaybackController: ObservableObject {
         isPlaying = false
     }
 
-    deinit {
-        node.stop()
-        engine.stop()
+    isolated deinit {
+        if let configurationObserver { NotificationCenter.default.removeObserver(configurationObserver) }
+        scheduler?.cancel()
+        graph?.node.stop()
+        graph?.engine.stop()
     }
 
     enum PlaybackError: LocalizedError {

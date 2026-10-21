@@ -94,6 +94,7 @@ struct ScheduleApprovalView: View {
                     if let errorMessage { Text(errorMessage).foregroundStyle(.red).font(.caption) }
                 }
             }
+            .appFormStyle()
             .navigationTitle(copy("schedule.title", fallback: "일정 승인"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -245,6 +246,9 @@ struct ScheduleApprovalView: View {
     }
 
     private func uiErrorMessage(_ error: Error) -> String {
+        if let error = error as? CalendarError {
+            return error.errorDescription(language: .current)
+        }
         if let error = error as? ScheduleApprovalError {
             return error.errorDescription ?? copy("schedule.error.failed", fallback: "일정 처리를 완료하지 못했습니다. 다시 시도하세요.")
         }

@@ -2,20 +2,9 @@ import Foundation
 import Testing
 @testable import todo
 
-@Suite("SettingsStore syncable keys")
+@Suite("SettingsStore legacy data migration")
 @MainActor
 struct SettingsStoreTests {
-    @Test("tutorial completion flag stays device local")
-    func tutorialCompletionFlagIsNotSyncable() {
-        #expect(SettingsStore.syncableKeys.contains("pieroot.todo.hasCompletedTutorial") == false)
-    }
-
-    @Test("legacy memory keys are no longer syncable")
-    func legacyMemoryKeysAreNotSyncable() {
-        for key in SettingsStore.legacyMemoryKeys {
-            #expect(SettingsStore.syncableKeys.contains(key) == false)
-        }
-    }
 
     @Test("legacy memory payload maps into MemoryAnalysis")
     func legacyMemoryPayloadMapsIntoMemoryAnalysis() {
@@ -39,42 +28,89 @@ struct SettingsStoreTests {
         #expect(analysis?.productiveHour == 10)
     }
 
-    #if SIFT_LOCAL_ONLY
-    @Test("local-only provider selection preserves local writes despite stale cloud preference")
-    func localOnlyProviderSelectionPreservesLocalWrites() async {
-        await AIProviderTestIsolation.shared.withLock {
+    @Test("obsolete local provider flags cannot disable platform or installed-model routing", arguments: [false, true])
+    func obsoleteLocalOptOutCannotDisableImplicitProviders(restoredFromFullStorage: Bool) async throws {
+        try await AIProviderTestIsolation.shared.withLock {
             let defaults = UserDefaults.standard
-            let key = "selectedAIProvider"
-            let markerKey = "\(key).isLocal"
-            let cloudKey = "pieroot.todo.testCloud.\(key)"
-            let syncKey = "pieroot.todo.iCloudSyncEnabled"
-            let keys = [key, markerKey, cloudKey, syncKey]
-            let previous = keys.map { defaults.object(forKey: $0) }
+            let keys = [
+                "pieroot.todo.beta.foundationModelsEnabled",
+                "pieroot.todo.beta.onDeviceModelEnabled",
+                SettingsStore.betaOpenAIEnabledKey,
+                SettingsStore.betaLayaEnabledKey
+            ]
+            let originals = keys.map { defaults.object(forKey: $0) }
             defer {
-                for (savedKey, value) in zip(keys, previous) {
-                    if let value {
-                        defaults.set(value, forKey: savedKey)
-                    } else {
-                        defaults.removeObject(forKey: savedKey)
-                    }
+                for (key, original) in zip(keys, originals) {
+                    if let original { defaults.set(original, forKey: key) }
+                    else { defaults.removeObject(forKey: key) }
+                }
+            }
+            keys.forEach { defaults.set(false, forKey: $0) }
+            if restoredFromFullStorage {
+                let payload = try JSONEncoder().encode(CloudPreferenceValue.boolean(false))
+                for key in keys.prefix(2) {
+                    defaults.removeObject(forKey: key)
+                    try CloudPreferenceStore.apply(
+                        key: CloudPreferenceStore.prefix + key,
+                        payload: payload,
+                        expectedDigest: nil,
+                        defaults: defaults
+                    )
                 }
             }
 
-            // An existing shared setting must remain visible even when the
-            // persisted preference and an old cloud value disagree with it.
-            defaults.set(true, forKey: syncKey)
-            defaults.set(false, forKey: markerKey)
-            defaults.set(PersonaAIProvider.openAI.rawValue, forKey: key)
-            SettingsStore.setTestCloudValue(PersonaAIProvider.foundationModels.rawValue, forKey: key)
-            #expect(SettingsStore.selectedProvider() == .openAI)
+            let access = SettingsStore.betaProviderAccess()
+            let readyLocal = BetaProviderReadiness(
+                foundationModelsAvailable: true, onDeviceModelUsable: true,
+                openAIAccountConnected: true, openAIPlanPermitted: true, layaModelUsable: false
+            )
+            #expect(readyLocal.selectableProviders(access: access) == [.foundationModels, .onDevice])
+            #expect(readyLocal.normalizedSelection(.onDevice, access: access) == .onDevice)
+            #expect(readyLocal.normalizedSelection(.openAI, access: access) == .foundationModels)
+            let unavailable = BetaProviderReadiness(
+                foundationModelsAvailable: false, onDeviceModelUsable: false,
+                openAIAccountConnected: true, openAIPlanPermitted: true, layaModelUsable: false
+            )
+            #expect(unavailable.selectableProviders(access: access).isEmpty)
 
-            // Explicit cloud callers must still commit a usable local setting.
-            SettingsStore.shared.setGlobal(key, value: PersonaAIProvider.onDevice.rawValue)
-            #expect(SettingsStore.selectedProvider() == .onDevice)
-            SettingsStore.shared.set(key, value: PersonaAIProvider.openAI.rawValue)
-            #expect(SettingsStore.selectedProvider() == .openAI)
-            #expect(defaults.bool(forKey: syncKey))
+            let policy = BetaFeaturePolicy(selectionReader: { .foundationModels })
+            #expect(policy.routingDecision(for: .emailAnalysis) == .providers([.foundationModels]))
+            #expect(policy.routingDecision(for: .transcriptRefinement) == .providers([.foundationModels, .onDevice]))
+            #expect(policy.authorizes(.onDevice, for: .modelManagement))
+            #expect(!policy.authorizes(.openAI, for: .standardAnalysis))
         }
     }
-    #endif
+
+    @Test("beta audio preferences default independently and retain explicit choices")
+    func betaAudioPreferencesRetainChoices() async {
+        await AIProviderTestIsolation.shared.withLock {
+            let defaults = UserDefaults.standard
+            let keys = [SettingsStore.betaMeetingVoiceProcessingEnabledKey, SettingsStore.meetingAutoRefineKey]
+            let originals = keys.map { defaults.object(forKey: $0) }
+            defer {
+                for (key, original) in zip(keys, originals) {
+                    if let original { defaults.set(original, forKey: key) }
+                    else { defaults.removeObject(forKey: key) }
+                }
+            }
+            keys.forEach(defaults.removeObject(forKey:))
+            let settings = SettingsStore.shared
+            #expect(!settings.meetingVoiceProcessingEnabled)
+            #expect(!settings.effectiveMeetingVoiceProcessingEnabled)
+            #expect(settings.meetingAutoRefineEnabled)
+
+            settings.meetingVoiceProcessingEnabled = true
+            settings.meetingAutoRefineEnabled = false
+            #expect(defaults.bool(forKey: SettingsStore.betaMeetingVoiceProcessingEnabledKey))
+            #expect(defaults.object(forKey: SettingsStore.meetingAutoRefineKey) as? Bool == false)
+            #expect(settings.effectiveMeetingVoiceProcessingEnabled)
+            #expect(!settings.meetingAutoRefineEnabled)
+
+            settings.meetingVoiceProcessingEnabled = false
+            settings.meetingAutoRefineEnabled = true
+            #expect(!settings.effectiveMeetingVoiceProcessingEnabled)
+            #expect(settings.meetingAutoRefineEnabled)
+        }
+    }
+
 }

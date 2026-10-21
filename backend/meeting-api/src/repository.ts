@@ -4,30 +4,39 @@ import type { FinalizeManifest, MeetingCreate, MeetingProcessingMode, MeetingSeg
 export type JobStatus = 'uploading' | 'queued' | 'transcribing' | 'awaiting_client_extraction' | 'extracting' | 'ready' | 'failed' | 'deleting';
 
 export interface MeetingBlobStore {
+  /** Returns an immutable, unique reference per write; rejects writes after deleteMeeting. */
   put(ownerUid: string, meetingId: string, partIndex: number, digest: string, bytes: Buffer): Promise<string>;
   deleteObject(objectRef: string): Promise<void>;
+  /** Permanently fences subsequent writes for this owner/meeting before removing objects. */
   deleteMeeting(ownerUid: string, meetingId: string): Promise<void>;
 }
 
 export class InMemoryMeetingBlobStore implements MeetingBlobStore {
-  readonly objects = new Map<string, Buffer>();
+  private readonly storedObjects = new Map<string, Buffer>();
+  private readonly deletedMeetings = new Set<string>();
+
+  get objects(): Map<string, Buffer> {
+    return new Map([...this.storedObjects].map(([ref, bytes]) => [ref, Buffer.from(bytes)]));
+  }
 
   async put(ownerUid: string, meetingId: string, partIndex: number, digest: string, bytes: Buffer): Promise<string> {
-    const ownerHash = createHash('sha256').update(ownerUid, 'utf8').digest('hex').slice(0, 32);
-    const objectRef = `meetings/${ownerHash}/${meetingId}/parts/${partIndex}-${digest}.flac`;
-    this.objects.set(objectRef, Buffer.from(bytes));
+    if (this.deletedMeetings.has(ownerKey(ownerUid, meetingId))) throw new Error('MEETING_DELETED');
+    const ownerHash = createHash('sha256').update(JSON.stringify(ownerUid), 'utf8').digest('hex').slice(0, 32);
+    const objectRef = `meetings/${ownerHash}/${encodeURIComponent(meetingId)}/parts/${partIndex}-${digest}-${opaqueId()}.flac`;
+    this.storedObjects.set(objectRef, Buffer.from(bytes));
     return objectRef;
   }
 
   async deleteObject(objectRef: string): Promise<void> {
-    this.objects.delete(objectRef);
+    this.storedObjects.delete(objectRef);
   }
 
   async deleteMeeting(ownerUid: string, meetingId: string): Promise<void> {
-    const ownerHash = createHash('sha256').update(ownerUid, 'utf8').digest('hex').slice(0, 32);
-    const prefix = `meetings/${ownerHash}/${meetingId}/`;
-    for (const objectRef of this.objects.keys()) {
-      if (objectRef.startsWith(prefix)) this.objects.delete(objectRef);
+    this.deletedMeetings.add(ownerKey(ownerUid, meetingId));
+    const ownerHash = createHash('sha256').update(JSON.stringify(ownerUid), 'utf8').digest('hex').slice(0, 32);
+    const prefix = `meetings/${ownerHash}/${encodeURIComponent(meetingId)}/`;
+    for (const objectRef of this.storedObjects.keys()) {
+      if (objectRef.startsWith(prefix)) this.storedObjects.delete(objectRef);
     }
   }
 }
@@ -105,6 +114,15 @@ export interface MeetingJobCreation {
   created: boolean;
 }
 
+/**
+ * All operations are atomic: implementations must check liveness, idempotency,
+ * revision ordering and state transitions in the same transaction as writes.
+ * Reads and returned records are detached snapshots, not mutable repository state.
+ * Deletion is a permanent owner/meeting tombstone; missing/deleted job updates
+ * return undefined. Terminal job updates return the unchanged job. Only the
+ * latest extraction revision may project its result status onto the meeting.
+ * Durable adapters must preserve these guarantees across concurrent workers.
+ */
 export interface MeetingRepository {
   getMeeting(ownerUid: string, meetingId: string): Promise<MeetingRecord | undefined>;
   createMeeting(ownerUid: string, input: MeetingCreate, uidHash: string): Promise<{ record: MeetingRecord; created: boolean }>;
@@ -123,33 +141,60 @@ export interface MeetingRepository {
   completeDeletion?(ownerUid: string, meetingId: string): Promise<DeletionReceipt | undefined>;
 }
 
-/**
- * Adapter seam for a durable Firestore/SQL implementation. The HTTP layer only
- * depends on MeetingRepository, so persistence can be swapped without changing
- * authentication or route contracts.
- */
+/** Adapter seam for durable Firestore/SQL persistence. */
 export interface DurableMeetingRepository extends MeetingRepository {
   flush?(): Promise<void>;
 }
 
 function now(): string { return new Date().toISOString(); }
 function opaqueId(): string { return randomBytes(16).toString('base64url'); }
-function ownerKey(ownerUid: string, meetingId: string): string { return `${ownerUid}\u0000${meetingId}`; }
+function ownerKey(ownerUid: string, meetingId: string): string { return JSON.stringify([ownerUid, meetingId]); }
 
 export class InMemoryMeetingRepository implements MeetingRepository {
-  readonly meetings = new Map<string, MeetingRecord>();
-  readonly jobs = new Map<string, MeetingJob>();
-  readonly deletions = new Map<string, DeletionReceipt>();
+  private readonly meetingState = new Map<string, MeetingRecord>();
+  private readonly jobState = new Map<string, MeetingJob>();
+  private readonly deletionState = new Map<string, DeletionReceipt>();
+
+  // Diagnostic snapshots cannot bypass the same invariants as API reads.
+  get meetings(): Map<string, MeetingRecord> { return structuredClone(this.meetingState); }
+  get jobs(): Map<string, MeetingJob> { return structuredClone(this.jobState); }
+  get deletions(): Map<string, DeletionReceipt> { return structuredClone(this.deletionState); }
+
+  private lookup(ownerUid: string, meetingId: string): MeetingRecord | undefined {
+    const record = this.meetingState.get(ownerKey(ownerUid, meetingId));
+    return record && !record.deleted ? record : undefined;
+  }
+
+  private requireMeeting(ownerUid: string, meetingId: string): MeetingRecord {
+    const record = this.lookup(ownerUid, meetingId);
+    if (!record) throw new Error('RESOURCE_NOT_FOUND');
+    return record;
+  }
+
+  private lookupJob(ownerUid: string, jobId: string): MeetingJob | undefined {
+    const job = this.jobState.get(jobId);
+    return job && job.ownerUid === ownerUid && this.lookup(ownerUid, job.meetingId) ? job : undefined;
+  }
+
+  private transcriptionJob(ownerUid: string, meetingId: string): MeetingJob | undefined {
+    for (const job of this.jobState.values()) {
+      if (job.ownerUid === ownerUid && job.meetingId === meetingId && job.stage === 'transcription') return job;
+    }
+    return undefined;
+  }
 
   async getMeeting(ownerUid: string, meetingId: string): Promise<MeetingRecord | undefined> {
-    const meeting = this.meetings.get(ownerKey(ownerUid, meetingId));
-    return meeting && !meeting.deleted ? meeting : undefined;
+    return structuredClone(this.lookup(ownerUid, meetingId));
   }
 
   async createMeeting(ownerUid: string, input: MeetingCreate, uidHash: string): Promise<{ record: MeetingRecord; created: boolean }> {
     const key = ownerKey(ownerUid, input.meetingId);
-    const existing = this.meetings.get(key);
-    if (existing && !existing.deleted) return { record: existing, created: false };
+    const existing = this.meetingState.get(key);
+    if (existing?.deleted || this.deletionState.has(key)) throw new Error('MEETING_DELETED');
+    if (existing) {
+      if (existing.provider !== input.provider || existing.disclosureVersionID !== input.disclosureVersionID || existing.languageTag !== input.languageTag || existing.timezoneIdentifier !== input.timezoneIdentifier || existing.expectedSpeakerRange?.min !== input.expectedSpeakerRange?.min || existing.expectedSpeakerRange?.max !== input.expectedSpeakerRange?.max) throw new Error('MEETING_METADATA_CONFLICT');
+      return { record: structuredClone(existing), created: false };
+    }
     const timestamp = now();
     const record: MeetingRecord = {
       ownerUid,
@@ -160,7 +205,7 @@ export class InMemoryMeetingRepository implements MeetingRepository {
       languageTag: input.languageTag,
       timezoneIdentifier: input.timezoneIdentifier,
       sampleRate: 16000,
-      expectedSpeakerRange: input.expectedSpeakerRange,
+      expectedSpeakerRange: structuredClone(input.expectedSpeakerRange),
       status: 'recording',
       currentTranscriptRevision: null,
       meetingSampleCount: null,
@@ -172,134 +217,159 @@ export class InMemoryMeetingRepository implements MeetingRepository {
       createdAt: timestamp,
       updatedAt: timestamp,
     };
-    this.meetings.set(key, record);
-    return { record, created: true };
-  }
-
-  private lookup(ownerUid: string, meetingId: string): MeetingRecord | undefined {
-    return this.meetings.get(ownerKey(ownerUid, meetingId));
+    this.meetingState.set(key, record);
+    return { record: structuredClone(record), created: true };
   }
 
   async freezeManifest(ownerUid: string, meetingId: string, manifest: FinalizeManifest, digest: string): Promise<{ record: MeetingRecord; created: boolean }> {
-    const record = this.lookup(ownerUid, meetingId);
-    if (!record || record.deleted) throw new Error('RESOURCE_NOT_FOUND');
-    if (record.frozenManifestDigest !== null) return { record, created: false };
-    record.meetingSampleCount = manifest.meetingSampleCount;
-    record.expectedPartCount = manifest.partCount;
+    const record = this.requireMeeting(ownerUid, meetingId);
+    if (record.frozenManifestDigest !== null) {
+      if (record.frozenManifestDigest !== digest) throw new Error('MANIFEST_MUTATION_CONFLICT');
+      return { record: structuredClone(record), created: false };
+    }
+    const storedManifest = structuredClone(manifest);
+    record.meetingSampleCount = storedManifest.meetingSampleCount;
+    record.expectedPartCount = storedManifest.partCount;
     record.frozenManifestDigest = digest;
-    record.manifest = manifest;
+    record.manifest = storedManifest;
     record.status = 'stopping';
     record.updatedAt = now();
-    return { record, created: true };
+    return { record: structuredClone(record), created: true };
   }
 
   async getPart(ownerUid: string, meetingId: string, partIndex: number): Promise<PartUploadRecord | undefined> {
-    return this.lookup(ownerUid, meetingId)?.parts.get(partIndex);
+    return structuredClone(this.lookup(ownerUid, meetingId)?.parts.get(partIndex));
   }
 
   async savePart(ownerUid: string, meetingId: string, part: PartUploadRecord): Promise<{ part: PartUploadRecord; created: boolean }> {
-    const record = this.lookup(ownerUid, meetingId);
-    if (!record || record.deleted) throw new Error('RESOURCE_NOT_FOUND');
+    const record = this.requireMeeting(ownerUid, meetingId);
     const existing = record.parts.get(part.partIndex);
-    if (existing) return { part: existing, created: false };
-    record.parts.set(part.partIndex, part);
+    if (existing && existing.digest !== part.digest) throw new Error('PART_DIGEST_CONFLICT');
+    if (!record.manifest) throw new Error('MANIFEST_REQUIRED');
+    const expected = record.manifest.parts.find(candidate => candidate.partIndex === part.partIndex);
+    if (!expected || expected.sha256 !== part.digest || expected.byteCount !== part.byteCount || expected.partStartSample !== part.fields.partStartSample || expected.ownedStartSample !== part.fields.ownedStartSample || expected.ownedEndSample !== part.fields.ownedEndSample || record.manifest.meetingSampleCount !== part.fields.meetingSampleCount) throw new Error('MANIFEST_PART_MISMATCH');
+    if (existing) return { part: structuredClone(existing), created: false };
+    const storedPart = structuredClone(part);
+    record.parts.set(part.partIndex, storedPart);
     record.updatedAt = now();
-    return { part, created: true };
+    return { part: structuredClone(storedPart), created: true };
   }
 
   async listParts(ownerUid: string, meetingId: string): Promise<PartUploadRecord[]> {
-    return [...(this.lookup(ownerUid, meetingId)?.parts.values() ?? [])].sort((a, b) => a.partIndex - b.partIndex);
+    return structuredClone([...(this.lookup(ownerUid, meetingId)?.parts.values() ?? [])].sort((a, b) => a.partIndex - b.partIndex));
   }
 
   async createOrGetTranscriptionJob(ownerUid: string, meetingId: string): Promise<MeetingJobCreation> {
-    const existing = [...this.jobs.values()].find(job => job.ownerUid === ownerUid && job.meetingId === meetingId && job.stage === 'transcription');
-    if (existing) return { job: existing, created: false };
-    const meeting = this.lookup(ownerUid, meetingId);
-    if (!meeting || meeting.deleted) throw new Error('RESOURCE_NOT_FOUND');
+    const meeting = this.requireMeeting(ownerUid, meetingId);
+    const existing = this.transcriptionJob(ownerUid, meetingId);
+    if (existing) return { job: structuredClone(existing), created: false };
+    if (!meeting.manifest) throw new Error('MANIFEST_REQUIRED');
+    if (meeting.parts.size !== meeting.manifest.partCount || meeting.manifest.parts.some(part => meeting.parts.get(part.partIndex)?.digest !== part.sha256)) throw new Error('PARTS_INCOMPLETE');
     const timestamp = now();
     const job: MeetingJob = { jobId: opaqueId(), ownerUid, meetingId, provider: meeting.provider, stage: 'transcription', status: 'queued', attempt: 0, inputRevision: null, inputDigest: null, transcriptionJobId: null, transcriptSegments: null, transcriptRevision: null, result: null, errorCode: null, createdAt: timestamp, updatedAt: timestamp };
-    this.jobs.set(job.jobId, job);
+    this.jobState.set(job.jobId, job);
     meeting.status = 'finalizingTranscript';
     meeting.updatedAt = timestamp;
-    return { job, created: true };
+    return { job: structuredClone(job), created: true };
   }
 
   async completeTranscriptionJob(ownerUid: string, jobId: string, segments: MeetingSegment[]): Promise<MeetingJob | undefined> {
-    const job = await this.getJob(ownerUid, jobId);
-    if (!job || job.stage !== 'transcription' || job.status === 'deleting') return undefined;
-    job.transcriptSegments = segments;
+    const job = this.lookupJob(ownerUid, jobId);
+    if (!job || job.stage !== 'transcription') return undefined;
+    if (job.status !== 'queued' && job.status !== 'transcribing') return structuredClone(job);
+    job.transcriptSegments = structuredClone(segments);
     job.status = 'awaiting_client_extraction';
     job.updatedAt = now();
-    return job;
+    return structuredClone(job);
   }
 
   async getJob(ownerUid: string, jobId: string): Promise<MeetingJob | undefined> {
-    const job = this.jobs.get(jobId);
-    if (!job || job.ownerUid !== ownerUid) return undefined;
-    return job;
+    return structuredClone(this.lookupJob(ownerUid, jobId));
   }
 
   async createOrGetExtractionJob(ownerUid: string, meetingId: string, inputRevision: number, inputDigest: string, segments: MeetingSegment[]): Promise<MeetingJobCreation> {
-    const existing = [...this.jobs.values()].find(job => job.ownerUid === ownerUid && job.meetingId === meetingId && job.stage === 'extraction' && job.inputRevision === inputRevision && job.inputDigest === inputDigest);
-    if (existing) return { job: existing, created: false };
-    const conflictingRevision = [...this.jobs.values()].find(job => job.ownerUid === ownerUid && job.meetingId === meetingId && job.stage === 'extraction' && job.inputRevision === inputRevision);
-    if (conflictingRevision) throw new Error('EXTRACTION_REVISION_CONFLICT');
-    const meeting = this.lookup(ownerUid, meetingId);
-    if (!meeting || meeting.deleted) throw new Error('RESOURCE_NOT_FOUND');
+    const meeting = this.requireMeeting(ownerUid, meetingId);
+    for (const job of this.jobState.values()) {
+      if (job.ownerUid !== ownerUid || job.meetingId !== meetingId || job.stage !== 'extraction' || job.inputRevision !== inputRevision) continue;
+      if (job.inputDigest !== inputDigest) throw new Error('EXTRACTION_REVISION_CONFLICT');
+      return { job: structuredClone(job), created: false };
+    }
+    const currentRevision = meeting.currentTranscriptRevision;
+    if (!Number.isSafeInteger(inputRevision) || inputRevision < 0 || (currentRevision === null ? inputRevision !== 0 : inputRevision < currentRevision || inputRevision > currentRevision + 1)) throw new Error('NON_MONOTONIC_REVISION');
+    const baseJob = this.transcriptionJob(ownerUid, meetingId);
+    if (!baseJob || baseJob.status !== 'awaiting_client_extraction' || baseJob.transcriptSegments === null) throw new Error('TRANSCRIPTION_NOT_READY');
+    const storedSegments = structuredClone(segments);
     const timestamp = now();
-    const baseJob = [...this.jobs.values()].find(job => job.ownerUid === ownerUid && job.meetingId === meetingId && job.stage === 'transcription');
-    const job: MeetingJob = { jobId: opaqueId(), ownerUid, meetingId, provider: meeting.provider, stage: 'extraction', status: 'extracting', attempt: 0, inputRevision, inputDigest, transcriptionJobId: baseJob?.jobId ?? null, transcriptSegments: segments, transcriptRevision: inputRevision, result: null, errorCode: null, createdAt: timestamp, updatedAt: timestamp };
-    this.jobs.set(job.jobId, job);
+    const job: MeetingJob = { jobId: opaqueId(), ownerUid, meetingId, provider: meeting.provider, stage: 'extraction', status: 'extracting', attempt: 0, inputRevision, inputDigest, transcriptionJobId: baseJob.jobId, transcriptSegments: storedSegments, transcriptRevision: inputRevision, result: null, errorCode: null, createdAt: timestamp, updatedAt: timestamp };
+    this.jobState.set(job.jobId, job);
     meeting.currentTranscriptRevision = inputRevision;
     meeting.status = 'extractingActions';
     meeting.updatedAt = timestamp;
-    return { job, created: true };
+    return { job: structuredClone(job), created: true };
   }
 
   async setJobResult(ownerUid: string, jobId: string, result: unknown, status: JobStatus = 'ready'): Promise<MeetingJob | undefined> {
-    const job = await this.getJob(ownerUid, jobId);
-    if (!job || job.status === 'deleting') return undefined;
-    job.result = result;
-    job.status = status;
-    if (status === 'failed' && typeof result === 'object' && result !== null && 'errorCode' in result && typeof result.errorCode === 'string') job.errorCode = result.errorCode;
-    job.updatedAt = now();
-    const meeting = this.lookup(ownerUid, job.meetingId);
-    if (meeting && status === 'ready') { meeting.status = 'ready'; meeting.updatedAt = job.updatedAt; }
-    if (meeting && status === 'failed') { meeting.status = 'failed'; meeting.updatedAt = job.updatedAt; }
-    return job;
-  }
-  async advanceJob(ownerUid: string, jobId: string, status: JobStatus): Promise<MeetingJob | undefined> {
-    const job = await this.getJob(ownerUid, jobId);
+    const job = this.lookupJob(ownerUid, jobId);
     if (!job) return undefined;
+    if (job.status === 'ready' || job.status === 'failed' || job.status === 'awaiting_client_extraction') return structuredClone(job);
+    if ((status !== 'ready' && status !== 'failed') || (status === 'ready' && job.stage !== 'extraction')) throw new Error('INVALID_JOB_TRANSITION');
+    const storedResult = structuredClone(result);
+    job.result = storedResult;
+    job.status = status;
+    job.errorCode = status === 'failed' && typeof storedResult === 'object' && storedResult !== null && 'errorCode' in storedResult && typeof storedResult.errorCode === 'string' ? storedResult.errorCode : null;
+    job.updatedAt = now();
+    const meeting = this.requireMeeting(ownerUid, job.meetingId);
+    if (job.stage === 'transcription' || job.inputRevision === meeting.currentTranscriptRevision) {
+      meeting.status = status;
+      meeting.updatedAt = job.updatedAt;
+    }
+    return structuredClone(job);
+  }
+
+  async advanceJob(ownerUid: string, jobId: string, status: JobStatus): Promise<MeetingJob | undefined> {
+    const job = this.lookupJob(ownerUid, jobId);
+    if (!job) return undefined;
+    if (job.status === status || job.status === 'ready' || job.status === 'failed' || job.status === 'awaiting_client_extraction') return structuredClone(job);
+    if (job.stage !== 'transcription' || job.status !== 'queued' || status !== 'transcribing') throw new Error('INVALID_JOB_TRANSITION');
     job.status = status;
     job.updatedAt = now();
-    return job;
+    return structuredClone(job);
   }
 
   async createDeletion(ownerUid: string, meetingId: string): Promise<DeletionReceipt | undefined> {
     const key = ownerKey(ownerUid, meetingId);
-    const existing = this.deletions.get(key);
-    if (existing) return existing;
-    const record = this.meetings.get(key);
+    const existing = this.deletionState.get(key);
+    if (existing) return structuredClone(existing);
+    const record = this.meetingState.get(key);
     if (!record) return undefined;
     const timestamp = now();
     const receipt: DeletionReceipt = { ownerUid, meetingId, provider: record.provider, deleteRequestedAt: timestamp, applicationVisibleStateDeleted: true, remoteCleanupComplete: false, deletionStatus: 'pending_provider_terminal', providerCancellationStatus: 'requested', providerRetractionGuaranteed: false, expiresAt: new Date(Date.now() + 72 * 60 * 60 * 1000).toISOString() };
-    this.deletions.set(key, receipt);
+    this.deletionState.set(key, receipt);
     record.deleted = true;
     record.status = 'cancelled';
+    record.parts.clear();
+    record.manifest = null;
     record.updatedAt = timestamp;
-    for (const job of this.jobs.values()) if (job.ownerUid === ownerUid && job.meetingId === meetingId) job.status = 'deleting';
-    return receipt;
+    for (const job of this.jobState.values()) {
+      if (job.ownerUid !== ownerUid || job.meetingId !== meetingId) continue;
+      job.status = 'deleting';
+      job.transcriptSegments = null;
+      job.result = null;
+      job.errorCode = null;
+      job.updatedAt = timestamp;
+    }
+    return structuredClone(receipt);
   }
 
   async getDeletion(ownerUid: string, meetingId: string): Promise<DeletionReceipt | undefined> {
-    return this.deletions.get(ownerKey(ownerUid, meetingId));
+    return structuredClone(this.deletionState.get(ownerKey(ownerUid, meetingId)));
   }
+
   async completeDeletion(ownerUid: string, meetingId: string): Promise<DeletionReceipt | undefined> {
-    const receipt = await this.getDeletion(ownerUid, meetingId);
+    const receipt = this.deletionState.get(ownerKey(ownerUid, meetingId));
     if (!receipt) return undefined;
     receipt.remoteCleanupComplete = true;
     receipt.deletionStatus = 'complete';
-    return receipt;
+    return structuredClone(receipt);
   }
 }

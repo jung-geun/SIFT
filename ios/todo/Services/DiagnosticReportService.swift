@@ -165,16 +165,18 @@ nonisolated final class DiagnosticReportStore {
         return archive
     }
 
-    /// Removes diagnostics no newer than a successfully delivered report.
-    /// The preparation boundary makes later errors their own event, so they stay
-    /// queued. Payload digests remain so Apple does not re-ingest a payload.
+    /// Removes only exact event snapshots included in the delivered report.
+    /// Changed, older omitted and later events remain queued. Payload digests
+    /// remain so Apple does not re-ingest a payload.
     func acknowledgeReportedDiagnostics(
-        through: Date,
+        events: [DiagnosticEvent],
         metricPayloadIDs: [UUID]
     ) -> DiagnosticReportArchive {
         var archive = load()
-        archive.events.removeAll {
-            ($0.lastTimestamp ?? $0.timestamp) <= through
+        for event in events {
+            if let index = archive.events.firstIndex(of: event) {
+                archive.events.remove(at: index)
+            }
         }
         let reportedPayloadIDs = Set(metricPayloadIDs)
         let retainedPayloads = zip(archive.metricPayloads, archive.metricPayloadIDs)
@@ -348,12 +350,12 @@ nonisolated final class DiagnosticRecorder: @unchecked Sendable {
     }
 
     func acknowledgeReportedDiagnostics(
-        through: Date,
+        events: [DiagnosticEvent],
         metricPayloadIDs: [UUID]
     ) {
         lock.lock()
         let archive = store.acknowledgeReportedDiagnostics(
-            through: through,
+            events: events,
             metricPayloadIDs: metricPayloadIDs
         )
         preparedReportBoundary = nil
@@ -400,7 +402,6 @@ final class DiagnosticReportService: ObservableObject {
     static let shared = DiagnosticReportService()
 
     nonisolated static let collectionEnabledKey = "pieroot.todo.diagnosticReportCollectionEnabled"
-    nonisolated static let supportEmail = "pieroot.02@gmail.com"
 
     @Published private(set) var eventCount = 0
     @Published private(set) var metricPayloadCount = 0
@@ -511,11 +512,11 @@ final class DiagnosticReportService: ObservableObject {
         }
     }
 
-    /// A report payload plus the cutoff used to keep only later diagnostics
-    /// queued after delivery.
+    /// Exact local snapshots are carried separately from the JSON's rounded dates
+    /// so delivery never acknowledges an omitted or subsequently changed event.
     struct PreparedReport: Sendable {
         let data: Data
-        let generatedAt: Date
+        let events: [DiagnosticEvent]
         let metricPayloads: [String]
         let metricPayloadIDs: [UUID]
     }
@@ -535,7 +536,7 @@ final class DiagnosticReportService: ObservableObject {
             return nil
         }
         let device = DiagnosticEnvironment.deviceInfo()
-        let app = DiagnosticEnvironment.appInfo()
+        let app = await DiagnosticEnvironment.appInfo()
         let settings = scopedEvents[0].settings
         let logs = await recentLogsForReport()
         guard collectionEnabled else { return nil }
@@ -564,18 +565,18 @@ final class DiagnosticReportService: ObservableObject {
         }
         return PreparedReport(
             data: data,
-            generatedAt: generatedAt,
+            events: scopedEvents,
             metricPayloads: scopedMetricPayloads,
             metricPayloadIDs: scopedMetricPayloadIDs
         )
     }
 
-    /// Call only after Mail reports `.sent` or a share activity completes.
+    /// Call only after the server confirms durable receipt of the attached report.
     /// Cancellation leaves all diagnostics queued.
     func acknowledgeDeliveredReport(_ report: PreparedReport) {
         guard collectionEnabled else { return }
         recorder.acknowledgeReportedDiagnostics(
-            through: report.generatedAt,
+            events: report.events,
             metricPayloadIDs: report.metricPayloadIDs
         )
         recentLogCache = nil

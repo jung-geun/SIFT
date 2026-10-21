@@ -178,14 +178,22 @@ final class TodoCaptureUITests: SIFTUITestCase {
     }
 
     private func revealExpandedControl(_ element: XCUIElement, in form: XCUIElement, message: String) {
-        // Full-height swipes can skip a short row entirely in landscape.
-        for _ in 0..<16 where !element.isHittable {
-            let above = element.exists && element.frame.maxY < app.navigationBars["새 할 일"].frame.maxY
+        func hasVisibleTapTarget() -> Bool {
+            guard element.exists, element.isHittable else { return false }
+            let top = max(form.frame.minY, app.navigationBars["새 할 일"].frame.maxY)
+            let saveTop = app.buttons["todo.add.saveButton"].frame.minY
+            let bottom = saveTop > top ? min(form.frame.maxY, saveTop) : form.frame.maxY
+            return element.frame.midY > top && element.frame.midY < bottom
+        }
+        // A partially visible label can be hittable while the switch thumb is below the pinned Save bar.
+        // Bounded drags also avoid skipping short rows in landscape.
+        for _ in 0..<16 where !hasVisibleTapTarget() {
+            let above = element.exists && element.frame.midY < app.navigationBars["새 할 일"].frame.maxY
             form.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: above ? 0.45 : 0.7))
                 .press(forDuration: 0.05, thenDragTo: form.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: above ? 0.7 : 0.45)))
         }
         require(element, message: message)
-        XCTAssertTrue(element.isHittable, message)
+        XCTAssertTrue(hasVisibleTapTarget(), message)
     }
 
 }

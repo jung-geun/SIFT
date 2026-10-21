@@ -120,6 +120,95 @@ struct MeetingFLACRoundTripTests {
         #expect(Int64(output.frameLength) == count)
     }
 
+    @Test("finish immediately publishes exact lossless FLAC at block boundaries", arguments: [
+        1, 7, 15, 16, 17, 19, 64, 1_600, 4_607, 4_608, 4_609, 9_215, 9_216, 9_217, 16_000,
+    ])
+    func finishesExactPositiveLength(frameCount: Int) throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("meeting-flac-exact-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let writer = try MeetingFLACPartWriter(directory: directory)
+        let format = try #require(AVAudioFormat(
+            commonFormat: .pcmFormatInt16, sampleRate: 16_000, channels: 1, interleaved: true
+        ))
+        let expected = (0..<frameCount).map { Int16(truncatingIfNeeded: $0 * 7_919 + 32_768) }
+        var offset = 0
+        while offset < frameCount {
+            let count = min(997, frameCount - offset)
+            let buffer = try canonicalPCMBuffer(format: format, frameCount: count) { expected[offset + $0] }
+            try writer.append(buffer)
+            offset += count
+        }
+
+        let parts = try writer.finish()
+        #expect(parts.count == 1)
+        let part = try #require(parts.first)
+        #expect(part.partStartSample == 0)
+        #expect(part.ownedStartSample == 0)
+        #expect(part.ownedEndSample == Int64(frameCount))
+        #expect(writer.totalSamples == Int64(frameCount))
+        let publishedPart = try #require(writer.manifest(relativeDirectory: "unused").parts.first)
+        let url = directory.appendingPathComponent(publishedPart.fileName)
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        #expect(try handle.read(upToCount: 4) == Data("fLaC".utf8))
+        let file = try AVAudioFile(forReading: url, commonFormat: .pcmFormatInt16, interleaved: true)
+        #expect(file.fileFormat.streamDescription.pointee.mFormatID == kAudioFormatFLAC)
+        #expect(file.length == Int64(frameCount))
+        #expect(try decodedSamples(from: file) == expected)
+        #expect(file.framePosition == Int64(frameCount))
+        let defaultFormatFile = try AVAudioFile(forReading: url)
+        #expect(try decodedSamples(from: defaultFormatFile) == expected)
+        // Retain the writer: readability must not depend on its deinitialization.
+        #expect(try writer.finish() == parts)
+    }
+
+    @Test("open writer progress is never published as finalized audio")
+    func manifestOmitsOpenFile() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("meeting-flac-publication-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let directory = root.appendingPathComponent("audio", isDirectory: true)
+        let writer = try MeetingFLACPartWriter(directory: directory)
+        let format = try #require(AVAudioFormat(
+            commonFormat: .pcmFormatInt16, sampleRate: 16_000, channels: 1, interleaved: true
+        ))
+        try writer.append(canonicalPCMBuffer(format: format, frameCount: 7) { Int16($0 - 3) })
+        let live = writer.manifest(relativeDirectory: "audio")
+        #expect(writer.totalSamples == 7)
+        #expect(live.totalSamples == 0)
+        #expect(live.parts.isEmpty)
+        #expect(try MeetingLogicalAudioCursor.validatedParts(for: live).isEmpty)
+        // A second writer must not truncate the first writer's physical file.
+        #expect(throws: MeetingFLACPartWriterError.self) {
+            _ = try MeetingFLACPartWriter(directory: directory)
+        }
+        _ = try writer.finish()
+        let published = writer.manifest(relativeDirectory: "audio")
+        #expect(published.totalSamples == 7)
+        let cursor = try MeetingLogicalAudioCursor(manifest: published, rootURL: root)
+        let decoded = try #require(try cursor.nextPCMBuffer(maxFrames: 7, outputFormat: format))
+        let samples = try #require(decoded.int16ChannelData?[0])
+        #expect(Array(UnsafeBufferPointer(start: samples, count: Int(decoded.frameLength))) == [-3, -2, -1, 0, 1, 2, 3])
+    }
+
+    @Test("short FLAC finalization failures never publish a completed part")
+    func shortFinalizationPropagatesStorageFailure() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("meeting-flac-write-failure-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let writer = try MeetingFLACPartWriter(directory: directory)
+        let format = try #require(AVAudioFormat(
+            commonFormat: .pcmFormatInt16, sampleRate: 16_000, channels: 1, interleaved: true
+        ))
+        try writer.append(canonicalPCMBuffer(format: format, frameCount: 7) { Int16($0) })
+        try FileManager.default.removeItem(at: directory)
+        #expect(throws: (any Error).self) { try writer.finish() }
+        #expect(writer.completedParts.isEmpty)
+        // A failed finish must not turn into a successful empty manifest on retry.
+        #expect(throws: (any Error).self) { try writer.finish() }
+    }
+
     @Test("eighty-five seconds records without PCM loss")
     func recordsPastEightySecondsWithoutLoss() throws {
         let directory = FileManager.default.temporaryDirectory
@@ -190,9 +279,9 @@ struct MeetingFLACRoundTripTests {
             interleaved: true
         ))
         let chunkSize = 16_000
-        let total = Int(MeetingMediaTimeline.ownedSamplesPerPart)
-            + Int(MeetingMediaTimeline.overlapSamples)
-            + chunkSize
+        // The rotated file has overlap plus only seven newly owned samples.
+        // Neither encoder block alignment nor overlap may extend that ownership.
+        let total = Int(MeetingMediaTimeline.ownedSamplesPerPart) + 7
         var expected = [Int16]()
         expected.reserveCapacity(total)
         var offset = 0
@@ -214,6 +303,11 @@ struct MeetingFLACRoundTripTests {
             }
             offset += count
         }
+        let live = writer.manifest(relativeDirectory: "unused")
+        #expect(writer.totalSamples == total)
+        #expect(live.totalSamples == MeetingMediaTimeline.ownedSamplesPerPart)
+        #expect(live.parts.count == 1)
+        #expect(try MeetingLogicalAudioCursor.validatedParts(for: live).count == 1)
         _ = try writer.finish()
         let manifest = writer.manifest(relativeDirectory: "unused")
         #expect(manifest.parts.count == 2)
@@ -222,10 +316,19 @@ struct MeetingFLACRoundTripTests {
         #expect(second.partStartSample == MeetingMediaTimeline.ownedSamplesPerPart - MeetingMediaTimeline.overlapSamples)
         #expect(second.ownedStartSample == MeetingMediaTimeline.ownedSamplesPerPart)
         #expect(second.ownedEndSample == total)
+        let first = try #require(manifest.parts.first)
+        #expect(first.partStartSample == 0)
+        #expect(first.ownedStartSample == 0)
+        #expect(first.ownedEndSample == second.ownedStartSample)
+        let firstFile = try AVAudioFile(forReading: directory.appendingPathComponent(first.fileName))
+        #expect(firstFile.length == MeetingMediaTimeline.ownedSamplesPerPart)
+        #expect(try decodedSamples(from: firstFile) == Array(expected[..<Int(first.ownedEndSample)]))
         let secondFile = try AVAudioFile(
             forReading: directory.appendingPathComponent("part-01.flac")
         )
         let physical = try decodedSamples(from: secondFile)
+        #expect(secondFile.length == MeetingMediaTimeline.overlapSamples + 7)
+        #expect(physical.count == Int(secondFile.length))
         let overlapStart = Int(
             MeetingMediaTimeline.ownedSamplesPerPart
                 - MeetingMediaTimeline.overlapSamples

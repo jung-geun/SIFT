@@ -1,5 +1,3 @@
-import MessageUI
-import UniformTypeIdentifiers
 import SwiftUI
 
 
@@ -31,27 +29,17 @@ struct DiagnosticReportPreview: Equatable {
 }
 
 struct DiagnosticExportRequest: Identifiable, Equatable {
-    enum Destination: String, Equatable {
-        case mail
-        case share
-    }
-
     let id: UUID
     let data: Data
     let preview: DiagnosticReportPreview?
-    let fileURL: URL?
-    /// Only diagnostics recorded no later than this report are acknowledged
-    /// after a successful user delivery.
-    let generatedAt: Date
+    /// Only diagnostics captured in this exact report are acknowledged after receipt.
+    let events: [DiagnosticEvent]
     let metricPayloads: [String]
     let metricPayloadIDs: [UUID]
-    let destination: Destination
 
     init(
         data: Data,
-        fileURL: URL?,
-        canSendMail: Bool,
-        generatedAt: Date = Date(),
+        events: [DiagnosticEvent],
         metricPayloads: [String] = [],
         metricPayloadIDs: [UUID] = [],
         id: UUID = UUID()
@@ -59,11 +47,9 @@ struct DiagnosticExportRequest: Identifiable, Equatable {
         self.id = id
         self.data = data
         preview = DiagnosticReportPreview(data: data)
-        self.fileURL = fileURL
-        self.generatedAt = generatedAt
+        self.events = events
         self.metricPayloads = metricPayloads
         self.metricPayloadIDs = metricPayloadIDs
-        destination = canSendMail ? .mail : .share
     }
 }
 
@@ -72,6 +58,7 @@ struct DiagnosticReportView: View {
     @StateObject private var diagnostics = DiagnosticReportService.shared
     @State private var activeExport: DiagnosticExportRequest?
     @State private var isDeliveryPresented = false
+    @State private var hasDeliveredDiagnostics = false
     @State private var isPreparingReport = false
     @State private var preparationTask: Task<Void, Never>?
     @State private var pendingDiagnostic: PendingDiagnostic?
@@ -119,9 +106,6 @@ struct DiagnosticReportView: View {
                         get: { diagnostics.collectionEnabled },
                         set: { enabled in
                             diagnostics.setCollectionEnabled(enabled)
-                            if !enabled {
-                                Self.removeTemporaryReport()
-                            }
                             recordPendingDiagnosticIfConsented()
                             diagnostics.prepareReport()
                         }
@@ -134,8 +118,9 @@ struct DiagnosticReportView: View {
                     korean: "동의한 경우에만 오류 발생 시각·반복 횟수, 소스 파일·줄 번호·함수, 오류 코드·메시지·하위 오류 사슬, 오류 당시 앱·OS 빌드와 실행 상태·기능 설정·언어/국가/지역·시간대·UTC 오프셋·달력·24시간 설정, 보고서 준비 시점의 기기 모델·사양·언어·지역·시간대, 최근 앱 오류 로그와 Apple 시스템 진단을 이 기기에 보관합니다. 국가/지역은 기기 언어 설정에서 파생하며 GPS 등 실제 위치, 음성 녹음, 전사문, TODO, 이메일 내용, 계정 정보는 포함하지 않습니다.",
                     english: "Only with your consent, this device keeps error timestamps and repeat counts; source file, line, and function; error codes, messages, and underlying errors; the app and OS build plus runtime state, feature settings, language, locale-derived country or region, time zone, UTC offset, calendar, and 24-hour setting at the error; device model, specifications, language, region, and time zone when the report is prepared; recent app error logs; and Apple system diagnostics. Country and region come from device locale settings. Physical or GPS location, recordings, transcripts, to-dos, email content, and account information are excluded."
                 ))
-                .font(.caption)
+                .font(.footnote)
                 .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             } header: {
                 Text(copy("diagnostics.collection.title", korean: "진단 및 개인정보", english: "Diagnostics and privacy"))
             }
@@ -150,7 +135,6 @@ struct DiagnosticReportView: View {
                     }
                     Button(role: .destructive) {
                         diagnostics.clearLocalReports()
-                        Self.removeTemporaryReport()
                     } label: {
                         Label(copy("diagnostics.clear", korean: "기기에 저장된 진단 로그 삭제", english: "Delete diagnostic logs on this device"), systemImage: "trash")
                     }
@@ -171,7 +155,7 @@ struct DiagnosticReportView: View {
                         preparationTask = Task { await beginReport() }
                     } label: {
                         if isPreparingReport {
-                            HStack(spacing: 8) {
+                            HStack(spacing: AppTheme.Spacing.compact) {
                                 ProgressView().controlSize(.small)
                                 Text(copy(
                                     "diagnostics.preparing",
@@ -180,21 +164,12 @@ struct DiagnosticReportView: View {
                                 ))
                             }
                         } else {
-                            Label(copy("diagnostics.send", korean: "오류 보고서 보내기", english: "Send error report"), systemImage: "envelope")
+                            Label(copy("diagnostics.send", korean: "오류 보고서 보내기", english: "Send error report"), systemImage: "paperplane")
                         }
                     }
                     .disabled(!diagnostics.hasShareableReport || isPreparingReport || activeExport != nil)
                     .accessibilityIdentifier("diagnostics.sendButton")
 
-                    if !MFMailComposeViewController.canSendMail() {
-                        Text(copy(
-                            "diagnostics.mail.unavailable",
-                            korean: "이 기기에서 메일을 보낼 수 없어 공유 시트로 보고서를 내보냅니다.",
-                            english: "Mail can’t be sent from this device, so the report opens in the share sheet."
-                        ))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    }
                 } header: {
                     Text(copy("diagnostics.send.title", korean: "지원팀에 보내기", english: "Send to support"))
                 } footer: {
@@ -206,6 +181,7 @@ struct DiagnosticReportView: View {
                 }
             }
         }
+        .appFormStyle()
         .navigationTitle(copy("diagnostics.title", korean: "오류 보고", english: "Error Reports"))
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {
@@ -226,40 +202,32 @@ struct DiagnosticReportView: View {
         }
         .onChange(of: diagnostics.collectionEnabled) { _, enabled in
             if !enabled, let export = activeExport {
-                finishExport(export, delivered: false)
+                finishExport(export)
             }
         }
         .sheet(item: $activeExport, onDismiss: {
             // Covers an interactive dismissal of the local review as well.
             isDeliveryPresented = false
-            diagnostics.discardPreparedReport()
-            Self.removeTemporaryReport()
+            if !hasDeliveredDiagnostics { diagnostics.discardPreparedReport() }
+            hasDeliveredDiagnostics = false
         }) { export in
             reportReview(export)
                 .interactiveDismissDisabled(isDeliveryPresented)
                 .sheet(isPresented: $isDeliveryPresented, onDismiss: {
-                    if activeExport != nil {
-                        finishExport(export, delivered: false)
-                    }
+                    if let export = activeExport { finishExport(export) }
                 }) {
-                    switch export.destination {
-                    case .mail:
-                        DiagnosticMailComposer(
-                            recipients: [DiagnosticReportService.supportEmail],
-                            subject: copy("diagnostics.mail.subject", korean: "SIFT 오류 보고", english: "SIFT Error Report"),
-                            body: copy("diagnostics.mail.body", korean: "아래 첨부 파일에는 사용자가 동의한 진단 정보만 포함됩니다.", english: "The attached file contains only diagnostics you consented to share."),
-                            attachment: export.data,
-                            onFinish: { delivered in
-                                finishExport(export, delivered: delivered)
-                            }
-                        )
-                    case .share:
-                        DiagnosticShareSheet(
-                            items: [export.fileURL as Any? ?? DiagnosticReportItemSource(data: export.data)],
-                            onFinish: { delivered in
-                                finishExport(export, delivered: delivered)
-                            }
-                        )
+                    NavigationStack {
+                        FeedbackView(initialKind: .bug, diagnosticData: export.data, showsCloseButton: true) { _, includedDiagnostics in
+                            guard includedDiagnostics, !hasDeliveredDiagnostics,
+                                  activeExport?.id == export.id else { return }
+                            diagnostics.acknowledgeDeliveredReport(.init(
+                                data: export.data,
+                                events: export.events,
+                                metricPayloads: export.metricPayloads,
+                                metricPayloadIDs: export.metricPayloadIDs
+                            ))
+                            hasDeliveredDiagnostics = true
+                        }
                     }
                 }
         }
@@ -269,14 +237,14 @@ struct DiagnosticReportView: View {
         NavigationStack {
             ScrollView {
                 if let preview = export.preview {
-                    VStack(alignment: .leading, spacing: 20) {
+                    VStack(alignment: .leading, spacing: AppTheme.Spacing.section) {
                         Text(copy(
-                            "diagnostics.review.detail",
-                            korean: "이 보고서는 아직 이 기기에만 있습니다. 아래 저장 공간·가동 시간과 전체 보고서를 검토하세요. ‘공유 계속’을 누르면 이 정확한 보고서를 메일 또는 공유 시트로 전달합니다. 지원팀은 오류 조사 및 답변 목적으로만 사용합니다. 취소하면 진단 로그는 유지됩니다.",
-                            english: "This report is still only on this device. Review its disk space, uptime, and complete contents below. Continue to share opens mail or the share sheet with this exact report. Support uses it only to investigate or respond to your bug report. Cancel keeps your diagnostic logs."
+                            "feedback.diagnostics.reviewDetail",
+                            korean: "이 보고서는 아직 이 기기에만 있습니다. 전체 내용을 검토한 뒤 의견 작성을 계속하세요. 최종 전송을 승인할 때만 이 정확한 보고서를 SIFT 비공개 접수함으로 보냅니다. 로그인이나 메일 연결은 필요하지 않으며 취소하면 진단 로그는 유지됩니다.",
+                            english: "This report is still only on this device. Review its complete contents before continuing to feedback. This exact report is sent to SIFT’s private inbox only when you approve the final submission. No login or email setup is required. Cancelling keeps your diagnostic logs."
                         ))
 
-                        VStack(alignment: .leading, spacing: 12) {
+                        VStack(alignment: .leading, spacing: AppTheme.Spacing.item) {
                             Text(copy("diagnostics.review.device", korean: "보고서 준비 시점의 저장 공간 및 가동 시간", english: "Disk space and uptime at report preparation"))
                                 .font(.headline)
                                 .accessibilityIdentifier("diagnostics.preview.deviceSummary")
@@ -287,15 +255,15 @@ struct DiagnosticReportView: View {
                             previewValue(copy("diagnostics.review.uptime.app", korean: "앱 실행 경과 시간 (초)", english: "Elapsed app runtime (seconds)"), value: String(preview.app.processUptimeSeconds))
                         }
 
-                        VStack(alignment: .leading, spacing: 12) {
+                        VStack(alignment: .leading, spacing: AppTheme.Spacing.item) {
                             Text(copy("diagnostics.review.events", korean: "보고서에 포함된 모든 오류 시점 스냅샷", english: "All event snapshots included in this report"))
                                 .font(.headline)
                                 .accessibilityIdentifier("diagnostics.preview.eventSnapshots")
                             ForEach(preview.events.indices, id: \.self) { index in
                                 let event = preview.events[index]
-                                VStack(alignment: .leading, spacing: 8) {
+                                VStack(alignment: .leading, spacing: AppTheme.Spacing.compact) {
                                     Text("\(index + 1). \(event.component) / \(event.operation)")
-                                        .font(.subheadline.bold())
+                                        .font(.subheadline.weight(.medium))
                                     Text(event.timestamp.ISO8601Format())
                                     previewValue(copy("diagnostics.review.disk.available", korean: "중요 용도로 사용 가능한 디스크 용량 (바이트)", english: "Available disk capacity for important usage (bytes)"), value: event.runtime?.availableDiskBytes.map { String($0) })
                                     previewValue(copy("diagnostics.review.uptime.app", korean: "앱 실행 경과 시간 (초)", english: "Elapsed app runtime (seconds)"), value: event.runtime.map { String($0.processUptimeSeconds) })
@@ -303,11 +271,12 @@ struct DiagnosticReportView: View {
                             }
                         }
 
-                        VStack(alignment: .leading, spacing: 12) {
+                        VStack(alignment: .leading, spacing: AppTheme.Spacing.item) {
                             Text(copy("diagnostics.review.payload", korean: "공유될 전체 보고서 (정확한 JSON 원문)", english: "Complete report to be shared (exact JSON)"))
                                 .font(.headline)
                             Text(preview.text)
-                                .font(.system(.caption, design: .monospaced))
+                                .font(.system(.footnote, design: .monospaced))
+                                .fixedSize(horizontal: false, vertical: true)
                                 .textSelection(.enabled)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .accessibilityIdentifier("diagnostics.preview.payload")
@@ -316,12 +285,13 @@ struct DiagnosticReportView: View {
                     .padding()
                 }
             }
+            .appScreenStyle()
             .navigationTitle(copy("diagnostics.review.title", korean: "오류 보고서 검토", english: "Review error report"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button(copy("diagnostics.review.cancel", korean: "취소", english: "Cancel")) {
-                        finishExport(export, delivered: false)
+                        finishExport(export)
                     }
                     .accessibilityIdentifier("diagnostics.preview.cancel")
                 }
@@ -330,12 +300,12 @@ struct DiagnosticReportView: View {
                 Button {
                     guard diagnostics.collectionEnabled, activeExport?.id == export.id,
                           export.preview != nil else {
-                        finishExport(export, delivered: false)
+                        finishExport(export)
                         return
                     }
                     isDeliveryPresented = true
                 } label: {
-                    Text(copy("diagnostics.review.continue", korean: "공유 계속", english: "Continue to share"))
+                    Text(copy("feedback.diagnostics.continue", korean: "의견 작성 계속", english: "Continue to feedback"))
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
@@ -349,7 +319,7 @@ struct DiagnosticReportView: View {
     }
 
     private func previewValue(_ label: String, value: String?) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: AppTheme.Spacing.compact) {
             Text(label).font(.subheadline).foregroundStyle(.secondary)
             Text(value ?? copy("diagnostics.review.unavailable", korean: "사용 불가 — 보고서에 값이 없음", english: "Unavailable — no value in the report"))
                 .font(.body.monospacedDigit())
@@ -372,81 +342,26 @@ struct DiagnosticReportView: View {
             diagnostics.discardPreparedReport()
             return
         }
-        let canSendMail = MFMailComposeViewController.canSendMail()
-        let fileURL = canSendMail ? nil : try? await Self.writeTemporaryReport(report.data)
-        guard diagnostics.collectionEnabled, !Task.isCancelled else {
-            if let fileURL {
-                Self.removeTemporaryReport(at: fileURL)
-            }
-            diagnostics.discardPreparedReport()
-            return
-        }
         let export = DiagnosticExportRequest(
             data: report.data,
-            fileURL: fileURL,
-            canSendMail: canSendMail,
-            generatedAt: report.generatedAt,
+            events: report.events,
             metricPayloads: report.metricPayloads,
             metricPayloadIDs: report.metricPayloadIDs
         )
         guard export.preview != nil else {
-            if let fileURL { Self.removeTemporaryReport(at: fileURL) }
             diagnostics.discardPreparedReport()
             return
         }
         activeExport = export
     }
 
-    private func finishExport(_ export: DiagnosticExportRequest, delivered: Bool) {
+    private func finishExport(_ export: DiagnosticExportRequest) {
         guard activeExport?.id == export.id else { return }
-        if let fileURL = export.fileURL {
-            Self.removeTemporaryReport(at: fileURL)
-        }
-        if delivered {
-            diagnostics.acknowledgeDeliveredReport(
-                .init(
-                    data: export.data,
-                    generatedAt: export.generatedAt,
-                    metricPayloads: export.metricPayloads,
-                    metricPayloadIDs: export.metricPayloadIDs
-                )
-            )
-        } else {
-            diagnostics.discardPreparedReport()
-        }
+        if !hasDeliveredDiagnostics { diagnostics.discardPreparedReport() }
         activeExport = nil
         isDeliveryPresented = false
     }
 
-    private static var temporaryReportURL: URL {
-        FileManager.default.temporaryDirectory
-            .appendingPathComponent("sift-diagnostic-report.json")
-    }
-
-    private static func writeTemporaryReport(_ data: Data) async throws -> URL {
-        try await Task.detached(priority: .userInitiated) {
-            let url = FileManager.default.temporaryDirectory
-                .appendingPathComponent("sift-diagnostic-report.json")
-            do {
-                try data.write(
-                    to: url,
-                    options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]
-                )
-                var protectedURL = url
-                var values = URLResourceValues()
-                values.isExcludedFromBackup = true
-                try protectedURL.setResourceValues(values)
-                return url
-            } catch {
-                try? FileManager.default.removeItem(at: url)
-                throw error
-            }
-        }.value
-    }
-
-    private static func removeTemporaryReport(at url: URL = temporaryReportURL) {
-        try? FileManager.default.removeItem(at: url)
-    }
 
     private func recordPendingDiagnosticIfConsented() {
         guard diagnostics.collectionEnabled, let pendingDiagnostic else { return }
@@ -469,84 +384,3 @@ struct DiagnosticReportView: View {
     }
 }
 
-private struct DiagnosticMailComposer: UIViewControllerRepresentable {
-    let recipients: [String]
-    let subject: String
-    let body: String
-    let attachment: Data
-    let onFinish: (Bool) -> Void
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(onFinish: onFinish)
-    }
-    func makeUIViewController(context: Context) -> MFMailComposeViewController {
-        let composer = MFMailComposeViewController()
-        composer.view.accessibilityIdentifier = "diagnostics.mailComposer"
-        composer.mailComposeDelegate = context.coordinator
-        composer.setToRecipients(recipients)
-        composer.setSubject(subject)
-        composer.setMessageBody(body, isHTML: false)
-        composer.addAttachmentData(attachment, mimeType: "application/json", fileName: "sift-diagnostic-report.json")
-        return composer
-    }
-
-    func updateUIViewController(_ uiViewController: MFMailComposeViewController, context: Context) {}
-
-    final class Coordinator: NSObject, MFMailComposeViewControllerDelegate {
-        private let onFinish: (Bool) -> Void
-
-        init(onFinish: @escaping (Bool) -> Void) {
-            self.onFinish = onFinish
-        }
-
-        func mailComposeController(
-            _ controller: MFMailComposeViewController,
-            didFinishWith result: MFMailComposeResult,
-            error: Error?
-        ) {
-            onFinish(result == .sent && error == nil)
-        }
-    }
-}
-
-private final class DiagnosticReportItemSource: NSObject, UIActivityItemSource {
-    private let data: Data
-
-    init(data: Data) {
-        self.data = data
-    }
-
-    func activityViewControllerPlaceholderItem(_ activityViewController: UIActivityViewController) -> Any {
-        data
-    }
-
-    func activityViewController(
-        _ activityViewController: UIActivityViewController,
-        itemForActivityType activityType: UIActivity.ActivityType?
-    ) -> Any? {
-        data
-    }
-
-    func activityViewController(
-        _ activityViewController: UIActivityViewController,
-        dataTypeIdentifierForActivityType activityType: UIActivity.ActivityType?
-    ) -> String {
-        UTType.json.identifier
-    }
-}
-
-private struct DiagnosticShareSheet: UIViewControllerRepresentable {
-    let items: [Any]
-    let onFinish: (Bool) -> Void
-
-    func makeUIViewController(context: Context) -> UIActivityViewController {
-        let controller = UIActivityViewController(activityItems: items, applicationActivities: nil)
-        controller.view.accessibilityIdentifier = "diagnostics.shareSheet"
-        controller.completionWithItemsHandler = { _, completed, _, _ in
-            onFinish(completed)
-        }
-        return controller
-    }
-
-    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
-}

@@ -573,6 +573,7 @@ nonisolated final class MeetingDiarizationInputPipeline: @unchecked Sendable {
 /// `processComplete`, which would hold the whole recording's PCM and mel.
 nonisolated enum MeetingDiarizationReplay {
     struct Evidence: Sendable {
+        let manifestDigest: String
         let intervals: [MeetingSpeakerInterval]
         let coveredThroughSample: Int64
         let voiceEvidence: MeetingSpeakerVoiceEvidence?
@@ -594,6 +595,7 @@ nonisolated enum MeetingDiarizationReplay {
         } catch {
             throw MeetingDiarizationFailure.audioUnavailable
         }
+        let manifestDigest = try MeetingDiarizationFingerprint.manifest(manifest)
         // Keep the whole verified pack leased across the handoff between models.
         _ = try await store.acquire()
         let worker = MeetingDiarizationWorker(preset: .finalPass, sessionID: UUID(), store: store)
@@ -627,7 +629,8 @@ nonisolated enum MeetingDiarizationReplay {
                 store: store, rootURL: rootURL, progress: { progress(0.8 + 0.2 * $0) }
             )
             await store.release()
-            return Evidence(intervals: intervals, coveredThroughSample: tail.coveredThroughSample, voiceEvidence: voiceEvidence)
+            return Evidence(manifestDigest: manifestDigest,
+                            intervals: intervals, coveredThroughSample: tail.coveredThroughSample, voiceEvidence: voiceEvidence)
         } catch {
             await worker.cancel()
             await store.release()
@@ -819,13 +822,16 @@ final class MeetingLiveSpeakerPrewarmer: ObservableObject {
 /// Provisional, in-memory speaker evidence of the active recording. Only a
 /// completed saved-audio pass persists labels.
 nonisolated struct MeetingLiveSpeakerTimeline: Sendable, Equatable {
+    /// The unique source-child record, never the shared recording-group ID.
+    let meetingID: String
     let sessionID: UUID
     private(set) var intervals: [MeetingSpeakerInterval] = []
     private(set) var openIntervals: [MeetingSpeakerInterval] = []
     private(set) var coveredThroughSample: Int64 = 0
     private(set) var ordinals: [String: Int] = [:]
 
-    init(sessionID: UUID) {
+    init(meetingID: String, sessionID: UUID) {
+        self.meetingID = meetingID
         self.sessionID = sessionID
     }
 

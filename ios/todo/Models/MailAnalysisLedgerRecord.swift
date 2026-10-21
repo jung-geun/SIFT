@@ -3,6 +3,9 @@ import SwiftData
 
 @Model
 final class MailAnalysisLedgerRecord {
+    /// Empty uses the immutable fingerprint as the portable natural identity.
+    /// A deterministic override retains a divergent legacy version during merge.
+    var syncIdentity: String = ""
     var fingerprintData: Data = Data()
     var revision: Int = 0
     var stateRawValue: String = ""

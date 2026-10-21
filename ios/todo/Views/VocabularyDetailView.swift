@@ -18,8 +18,10 @@ struct VocabularyDetailView: View {
             section("검토 필요", terms.filter { !$0.isPromoted && !$0.isRejected })
             section("거절됨", terms.filter(\.isRejected))
         }
+        .appListStyle()
         .searchable(text: $query)
         .navigationTitle("사용자 단어장")
+        .navigationBarTitleDisplayMode(.inline)
         .task(id: query) { await reload() }
         .alert("단어장 오류", isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })) {
             Button("확인", role: .cancel) {}
@@ -35,14 +37,21 @@ struct VocabularyDetailView: View {
                 Text("없음").foregroundStyle(.secondary)
             }
             ForEach(values, id: \.canonicalKey) { term in
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(term.canonical).font(.headline)
-                    Text(term.category.rawValue).font(.caption).foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: AppTheme.Spacing.compact) {
+                    Text(term.canonical)
+                        .font(.body)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(term.category.rawValue)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                     if !term.aliases.isEmpty || !term.variants.isEmpty {
                         Text((term.aliases.map(\.value) + term.variants).joined(separator: ", "))
-                            .font(.caption).foregroundStyle(.secondary)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
-                    HStack {
+                    VStack(alignment: .leading, spacing: AppTheme.Spacing.item) {
                         if term.isRejected {
                             Button("다시 학습 허용") { allowRelearning(term) }
                             Button("제거", role: .destructive) { removeRejected(term) }
@@ -52,8 +61,12 @@ struct VocabularyDetailView: View {
                         } else {
                             Button("거절", role: .destructive) { reject(term) }
                         }
-                    }.buttonStyle(.borderless)
+                    }
+                    .buttonStyle(.borderless)
+                    .padding(.top, AppTheme.Spacing.compact)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, AppTheme.Spacing.compact)
             }
         }
     }

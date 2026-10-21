@@ -4,7 +4,7 @@ import Foundation
 /// Streams the logical meeting timeline into an AVAudioPlayerNode while keeping
 /// at most `maxInFlightBuffers` decoded chunks alive, so a multi-hour meeting
 /// plays with constant memory instead of a full-timeline PCM preload.
-final class MeetingPlaybackStreamScheduler: @unchecked Sendable {
+nonisolated final class MeetingPlaybackStreamScheduler: @unchecked Sendable {
     /// ≈4.1 s per chunk at 16 kHz; 3 chunks keep >8 s of audio scheduled ahead.
     static let chunkFrames: Int64 = 65_536
     static let maxInFlightBuffers = 3
@@ -19,7 +19,7 @@ final class MeetingPlaybackStreamScheduler: @unchecked Sendable {
     var onEvent: ((Event) -> Void)?
 
     private let queue = DispatchQueue(label: "pieroot.todo.meeting.playback-stream", qos: .userInitiated)
-    private let cursor: MeetingLogicalAudioCursor
+    private var cursor: (any MeetingPCMStreamCursor)?
     private let node: AVAudioPlayerNode
     private let format: AVAudioFormat
     private var inFlight = 0
@@ -43,7 +43,7 @@ final class MeetingPlaybackStreamScheduler: @unchecked Sendable {
         _epoch += 1
     }
 
-    init(cursor: MeetingLogicalAudioCursor, node: AVAudioPlayerNode, format: AVAudioFormat) {
+    init(cursor: any MeetingPCMStreamCursor, node: AVAudioPlayerNode, format: AVAudioFormat) {
         self.cursor = cursor
         self.node = node
         self.format = format
@@ -54,6 +54,7 @@ final class MeetingPlaybackStreamScheduler: @unchecked Sendable {
     func start() throws {
         var startError: Error?
         queue.sync {
+            guard !cancelled, let cursor else { startError = CancellationError(); return }
             do {
                 if let first = try cursor.nextPCMBuffer(maxFrames: Self.chunkFrames, outputFormat: format) {
                     schedule(first)
@@ -70,7 +71,14 @@ final class MeetingPlaybackStreamScheduler: @unchecked Sendable {
 
     /// After this returns no further buffers are scheduled and no events fire.
     func cancel() {
-        queue.sync { cancelled = true }
+        queue.sync {
+            cancelled = true
+            bumpEpoch()
+            node.stop()
+            inFlight = 0
+            cursor = nil
+            onEvent = nil
+        }
     }
 
     /// Repositions playback to `sample` in the logical timeline. Flushes the
@@ -81,6 +89,7 @@ final class MeetingPlaybackStreamScheduler: @unchecked Sendable {
     func seek(toLogicalSample sample: Int64, resumePlaying: Bool) throws {
         var seekError: Error?
         queue.sync {
+            guard let cursor else { seekError = CancellationError(); return }
             bumpEpoch()
             node.stop()
             inFlight = 0
@@ -114,7 +123,7 @@ final class MeetingPlaybackStreamScheduler: @unchecked Sendable {
         node.scheduleBuffer(buffer, at: nil, options: [], completionCallbackType: .dataConsumed) { [weak self] _ in
             guard let self else { return }
             self.queue.async {
-                guard scheduledEpoch == self.currentEpoch() else { return }
+                guard !self.cancelled, scheduledEpoch == self.currentEpoch() else { return }
                 self.inFlight -= 1
                 self.fill()
             }
@@ -122,6 +131,7 @@ final class MeetingPlaybackStreamScheduler: @unchecked Sendable {
     }
 
     private func fill() {
+        guard let cursor else { return }
         while !cancelled, !reachedEnd, inFlight < Self.maxInFlightBuffers {
             do {
                 guard let buffer = try cursor.nextPCMBuffer(maxFrames: Self.chunkFrames, outputFormat: format) else {

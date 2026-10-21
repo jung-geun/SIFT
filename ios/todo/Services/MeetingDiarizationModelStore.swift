@@ -401,7 +401,7 @@ nonisolated enum MeetingDiarizationModelError: LocalizedError, Equatable {
     }
 }
 
-/// Presentation state for Beta Features; capture and replay consult the actor.
+/// Presentation state for AI settings; capture and replay consult the actor.
 @MainActor
 final class MeetingDiarizationModelController: ObservableObject {
     static let shared = MeetingDiarizationModelController()

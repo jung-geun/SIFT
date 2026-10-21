@@ -58,6 +58,8 @@ struct MeetingOfflineOrchestratorTests {
     @Test("successful offline replacement preserves Apple raw evidence and releases the gate")
     func commitsWithoutErasingApple() async throws {
         let (context, record, apple) = try fixture()
+        record.languageTag = "bn-IN"
+        record.summaryLanguageTag = "ar"
         let manifest = try #require(record.audioManifest)
         let speakerPayload = try MeetingDiarizationPostProcessor.seed(
             record: record, source: apple,
@@ -69,7 +71,7 @@ struct MeetingOfflineOrchestratorTests {
         let gate = MeetingDiarizationExecutionGate()
         let produced = output()
         let orchestrator = MeetingOfflineTranscriptionOrchestrator(gate: gate) { _, _, language in
-            #expect(language == nil) // automatic detection, not the Apple language hint
+            #expect(language == "bn-IN")
             return produced
         }
         #expect(try await orchestrator.run(record: record, context: context) == .committed)
@@ -78,19 +80,104 @@ struct MeetingOfflineOrchestratorTests {
         #expect(record.appleRawResult == apple)
         #expect(record.asrSource == .offline)
         #expect(record.asrModelRevision == MeetingWhisperManifest.modelRevision)
-        #expect(record.asrDetectedLanguages == ["en"])
+        #expect(record.asrDetectedLanguages.isEmpty) // explicit bn is not detection
         #expect(record.status == .ready)
+        #expect(record.languageTag == "bn-IN")
+        #expect(!record.automaticLanguageDetection)
+        #expect(record.summaryLanguageTag == "ar")
         #expect(record.offlineASRFailure == nil)
         #expect(record.diarizationData == nil)
         #expect(await gate.beginFinal()) // a subsequent speaker pass may start
         gate.endFinal()
     }
 
-    @Test("failed offline inference keeps failed Apple finalization and allows explicit retry")
-    func failureAndRetry() async throws {
+    @Test("automatic mode passes nil and commits detected languages without changing either selected locale")
+    func automaticCommitKeepsLocales() async throws {
+        let (context, record, apple) = try fixture()
+        record.languageTag = "ko-KR"
+        record.summaryLanguageTag = "fr-FR"
+        record.automaticLanguageDetection = true
+        try context.save()
+        let produced = output()
+        let orchestrator = MeetingOfflineTranscriptionOrchestrator(gate: MeetingDiarizationExecutionGate()) { _, _, language in
+            #expect(language == nil)
+            return produced
+        }
+        #expect(try await orchestrator.run(record: record, context: context) == .committed)
+        let savedContext = ModelContext(context.container)
+        let saved = try #require(savedContext.fetch(FetchDescriptor<MeetingRecord>()).first)
+        #expect(saved.automaticLanguageDetection)
+        #expect(saved.languageTag == "ko-KR")
+        #expect(saved.summaryLanguageTag == "fr-FR")
+        #expect(saved.asrDetectedLanguages == ["en"])
+        #expect(saved.result == produced.result)
+        #expect(saved.rawResult == produced.result)
+        #expect(saved.appleRawResult == apple)
+    }
+
+    @Test("a language mode edit supersedes inference even without a revision or timestamp change", arguments: [false, true])
+    func changedModeWins(fails: Bool) async throws {
+        let (context, record, _) = try fixture()
+        let probe = SuspendedOfflineASR()
+        let produced = output()
+        let orchestrator = MeetingOfflineTranscriptionOrchestrator(gate: MeetingDiarizationExecutionGate()) { _, _, _ in
+            await probe.pause()
+            if fails { throw TestError.inference }
+            return produced
+        }
+        let running = Task { try await orchestrator.run(record: record, context: context) }
+        while !(await probe.started) { await Task.yield() }
+        record.automaticLanguageDetection = true
+        try context.save()
+        let edited = record.persistenceSnapshot()
+        await probe.resume()
+        if fails {
+            await #expect(throws: TestError.inference) { try await running.value }
+        } else {
+            #expect(try await running.value == .superseded)
+        }
+        #expect(record.persistenceSnapshot() == edited)
+        #expect(record.offlineASRFailure == nil)
+    }
+
+    @Test("queued work with an old language mode cannot start inference")
+    func staleModeSnapshotDoesNotRun() async throws {
+        let (context, record, _) = try fixture()
+        let queued = record.persistenceSnapshot()
+        record.automaticLanguageDetection = true
+        try context.save()
+        let edited = record.persistenceSnapshot()
+        let orchestrator = MeetingOfflineTranscriptionOrchestrator(gate: MeetingDiarizationExecutionGate()) { _, _, _ in
+            throw TestError.inference
+        }
+        #expect(try await orchestrator.run(record: record, context: context, expectedSource: queued) == .superseded)
+        #expect(record.persistenceSnapshot() == edited)
+    }
+
+    @Test("failed commits restore the language mode together with source and summary locales")
+    func modeRollback() throws {
+        let (context, record, _) = try fixture()
+        record.automaticLanguageDetection = true
+        try context.save()
+        let before = record.persistenceSnapshot()
+        #expect(throws: TestError.save) {
+            try MeetingRecordCommitter.persist(record: record, save: { throw TestError.save }) {
+                record.automaticLanguageDetection = false
+                record.languageTag = "ko-KR"
+                record.summaryLanguageTag = "fr-FR"
+            }
+        }
+        #expect(record.persistenceSnapshot() == before)
+    }
+
+    @Test("failed offline inference keeps failed finalization, mode and languages for retry", arguments: [false, true])
+    func failureAndRetry(automatic: Bool) async throws {
         let (context, record, apple) = try fixture(status: .transcriptFinalizationFailed)
+        record.automaticLanguageDetection = automatic
+        try context.save()
         let originalManifest = record.audioManifest
-        let fail = MeetingOfflineTranscriptionOrchestrator(gate: MeetingDiarizationExecutionGate()) { _, _, _ in
+        let fail = MeetingOfflineTranscriptionOrchestrator(gate: MeetingDiarizationExecutionGate()) { _, _, language in
+            #expect(language == (automatic ? nil : "en-US"))
             throw TestError.inference
         }
         await #expect(throws: TestError.inference) {
@@ -105,12 +192,19 @@ struct MeetingOfflineOrchestratorTests {
         #expect(record.status == .transcriptFinalizationFailed)
         #expect(record.asrSource == .apple)
         #expect(record.offlineASRFailure == .transcriptionFailed)
+        #expect(record.automaticLanguageDetection == automatic)
         let produced = output()
-        let retry = MeetingOfflineTranscriptionOrchestrator(gate: MeetingDiarizationExecutionGate()) { _, _, _ in produced }
+        let retry = MeetingOfflineTranscriptionOrchestrator(gate: MeetingDiarizationExecutionGate()) { _, _, language in
+            #expect(language == (automatic ? nil : "en-US"))
+            return produced
+        }
         #expect(try await retry.run(record: record, context: context) == .committed)
         #expect(record.status == .ready)
         #expect(record.offlineASRFailure == nil)
         #expect(record.appleRawResult == apple)
+        #expect(record.automaticLanguageDetection == automatic)
+        #expect(record.languageTag == "en-US")
+        #expect(record.asrDetectedLanguages == (automatic ? ["en"] : []))
     }
 
     @Test("missing local model records a safe failure without replacing Apple")

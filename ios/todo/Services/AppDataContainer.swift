@@ -4,15 +4,9 @@ import Combine
 
 // MARK: - AppDataContainer
 
-/// 앱 전체 ModelContainer를 관리하는 swappable 홀더.
-///
-/// iCloud 동기화 전환 시 `rebuild(useICloud:)`를 호출해
-/// 앱 재시작 없이 컨테이너를 동적으로 교체한다.
-///
-/// - `AppDataContainer.shared`: todoApp이 @StateObject로 생성한 뒤 set.
-///   서비스 레이어(MemoryService 등)는 이 shared 참조를 통해 현재 컨테이너에 접근.
-/// - SwiftUI 뷰 트리: todoApp.body의 `.modelContainer(appData.container)`가
-///   @Published container 변경을 감지해 @Query를 자동 갱신.
+/// Owns the canonical local containers and retries failed local migrations.
+/// Full iCloud transport uses a separate revision store; toggling sync never
+/// replaces this container or exposes its health-derived rows to CloudKit.
 final class AppDataContainer: ObservableObject {
 
     /// todoApp @StateObject 생성 시 설정되는 전역 접근자.
@@ -35,25 +29,28 @@ final class AppDataContainer: ObservableObject {
         if Self.usesInMemoryUITestStore {
             self.container = Self.buildInMemoryContainer()
         } else {
-            let useICloud = UserDefaults.standard.bool(forKey: "pieroot.todo.iCloudSyncEnabled")
-            if useICloud {
-                AppDataContainer.migrateLocalToICloudIfNeeded()
-            }
-            self.container = AppDataContainer.buildContainer(useICloud: useICloud)
+            self.container = AppDataContainer.buildContainer()
         }
         AppDataContainer.shared = self
     }
 
     // MARK: - Rebuild (동적 전환)
 
-    /// iCloud 토글 시 메인 스레드에서 호출.
-    /// 마이그레이션 완료 후 새 컨테이너로 교체 → @Published가 SwiftUI를 갱신.
-    func rebuild(useICloud: Bool) {
-        if useICloud {
-            AppDataContainer.migrateLocalToICloudIfNeeded()
+    /// Retry local persistence without switching data sets or synchronization policy.
+    func rebuild() {
+        HealthRoutineStore.shared.cancelRefresh()
+        if Self.usesInMemoryUITestStore {
+            rebuildID += 1
+            return
         }
-        container = AppDataContainer.buildContainer(useICloud: useICloud)
-        rebuildID += 1
+        do {
+            // A failed save or migration must not replace the currently visible rows.
+            try container.mainContext.save()
+            container = try Self.makePrimaryContainer()
+            rebuildID += 1
+        } catch {
+            Self.recordMigrationFailure(error, operation: "containerRebuild")
+        }
     }
 
     // MARK: - Store URL
@@ -82,41 +79,72 @@ final class AppDataContainer: ObservableObject {
         return try! ModelContainer(for: appSchema, configurations: [config])
     }
 
-    /// Preserve the requested store path even in local-only builds: disabling
-    /// CloudKit must not hide existing rows by switching to an empty local store.
-    static func buildContainer(useICloud: Bool) -> ModelContainer {
-        let schema = AppDataContainer.appSchema
+    /// A single canonical local store survives every sync preference and consent state.
+    static func buildContainer() -> ModelContainer {
+        if usesInMemoryUITestStore { return buildInMemoryContainer() }
+        do {
+            return try makePrimaryContainer()
+        } catch {
+            recordMigrationFailure(error, operation: "containerInitFallback")
+            return buildInMemoryContainer()
+        }
+    }
+
+    private static func makePrimaryContainer() throws -> ModelContainer {
+        let primaryURL = getStoreURL(name: "primary_v3.store")
+        let defaultURL = ModelConfiguration(schema: appSchema, cloudKitDatabase: .none).url
+        return try makePrimaryContainer(
+            primaryURL: primaryURL,
+            legacyURLs: [getStoreURL(name: "local_v2.store"),
+                         getStoreURL(name: "icloud_v2.store"), defaultURL]
+        )
+    }
+
+    static func makePrimaryContainer(
+        primaryURL: URL,
+        legacyURLs: [URL]
+    ) throws -> ModelContainer {
+        if usesInMemoryUITestStore { return buildInMemoryContainer() }
+        try migrateMainStores(to: primaryURL, from: legacyURLs)
+        let config = ModelConfiguration(
+            schema: appSchema,
+            url: primaryURL,
+            cloudKitDatabase: .none
+        )
+        return try ModelContainer(for: appSchema, configurations: [config])
+    }
+
+    private static var legacyCloudContainerIdentifier: String {
+        "iCloud.\(Bundle.main.bundleIdentifier ?? "pieroot.sift-todo")"
+    }
+
+    /// Explicitly requested legacy downloads use a separate store. Full-sync's
+    /// canonical primary never acquires an automatic CloudKit attachment.
+    func makeLegacyCloudImportContainer() throws -> ModelContainer {
+        try Self.makeLegacyCloudImportContainer()
+    }
+
+    static func makeLegacyCloudImportContainer() throws -> ModelContainer {
+        try Self.makeLegacyCloudImportContainer(
+            storeURL: Self.usesInMemoryUITestStore ? nil : Self.getStoreURL(name: "legacy_cloud_import_v3.store"),
+            inMemory: Self.usesInMemoryUITestStore
+        )
+    }
+
+    static func makeLegacyCloudImportContainer(storeURL: URL?, inMemory: Bool) throws -> ModelContainer {
         let config: ModelConfiguration
-        if useICloud {
+        if inMemory || usesInMemoryUITestStore {
+            config = ModelConfiguration(schema: appSchema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)
+        } else if let storeURL {
             config = ModelConfiguration(
-                schema: schema,
-                url: getStoreURL(name: "icloud_v2.store"),
-                cloudKitDatabase: SettingsStore.supportsICloud
-                    ? .private("iCloud.\(Bundle.main.bundleIdentifier ?? "pieroot.sift-todo")")
-                    : .none
+                schema: appSchema,
+                url: storeURL,
+                cloudKitDatabase: .private(legacyCloudContainerIdentifier)
             )
         } else {
-            config = ModelConfiguration(
-                schema: schema,
-                url: getStoreURL(name: "local_v2.store"),
-                cloudKitDatabase: .none
-            )
+            throw MainStoreMigrationError.missingImportURL
         }
-
-        do {
-            return try ModelContainer(for: schema, configurations: [config])
-        } catch {
-            DiagnosticRecorder.shared.record(
-                error: error,
-                component: "storage.swiftdata",
-                operation: "containerInitFallback"
-            )
-            // A load error can mean a locked device, an incompatible schema, or
-            // damaged data. Never turn it into an irreversible empty-store reset.
-            print("[SwiftData] 저장소 초기화 실패: \(error). 원본 파일을 보존하고 복구 화면을 표시합니다.")
-            let fallback = ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)
-            return try! ModelContainer(for: schema, configurations: [fallback])
-        }
+        return try ModelContainer(for: appSchema, configurations: [config])
     }
 
     // MARK: - Schema
@@ -130,10 +158,10 @@ final class AppDataContainer: ObservableObject {
         MailAnalysisLedgerRecord.self
     ])
 
-    // MARK: - Email Container (로컬 전용, CloudKit 절대 금지)
+    // MARK: - Email Container (local storage, no automatic CloudKit mirror)
 
-    /// 이메일 본문 저장 전용 스키마. appSchema와 철저히 분리하여
-    /// iCloud 토글 여부와 무관하게 항상 기기 로컬에만 저장.
+    /// Email rows stay in a separate local schema. Explicit full-scope transport
+    /// uses CloudModelCodec, never SwiftData's automatic CloudKit integration.
     static let emailSchema = Schema([EmailMessage.self])
 
     static func makeEmailContainer(storeURL: URL) throws -> ModelContainer {
@@ -194,29 +222,59 @@ final class AppDataContainer: ObservableObject {
         let directory = try emailDirectory()
         let storeURL = directory.appendingPathComponent("email_local.store")
         let legacyURL = getStoreURL(name: "email_local.store")
-        let fileManager = FileManager.default
+        try migrateEmailStoreBundle(from: legacyURL, to: storeURL)
+        return storeURL
+    }
 
-        for suffix in ["-shm", "-wal", ""] {
+    nonisolated private static let emailMigrationLock = NSLock()
+
+    /// Publish a complete legacy SQLite bundle only before the destination has
+    /// ever opened. Once its main database exists, retained legacy WAL/SHM files
+    /// must never be copied back after SQLite checkpoints or removes its WAL.
+    nonisolated static func migrateEmailStoreBundle(from legacyURL: URL, to storeURL: URL) throws {
+        emailMigrationLock.lock()
+        defer { emailMigrationLock.unlock() }
+        let fileManager = FileManager.default
+        guard !fileManager.fileExists(atPath: storeURL.path),
+              fileManager.fileExists(atPath: legacyURL.path) else { return }
+
+        let directory = storeURL.deletingLastPathComponent()
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        let staging = directory.appendingPathComponent(".email-migration-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: staging, withIntermediateDirectories: false)
+        defer { try? fileManager.removeItem(at: staging) }
+        let stagedStore = staging.appendingPathComponent(storeURL.lastPathComponent)
+        for suffix in ["", "-wal", "-shm"] {
             let source = URL(fileURLWithPath: legacyURL.path + suffix)
-            let destination = URL(fileURLWithPath: storeURL.path + suffix)
-            guard fileManager.fileExists(atPath: source.path),
-                  !fileManager.fileExists(atPath: destination.path)
-            else {
-                continue
-            }
-            try fileManager.moveItem(at: source, to: destination)
+            guard fileManager.fileExists(atPath: source.path) else { continue }
+            let copy = URL(fileURLWithPath: stagedStore.path + suffix)
+            try fileManager.copyItem(at: source, to: copy)
             try fileManager.setAttributes(
                 [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
-                ofItemAtPath: destination.path
+                ofItemAtPath: copy.path
             )
         }
-        return storeURL
+
+        guard !fileManager.fileExists(atPath: storeURL.path) else { return }
+        // A failed earlier publication may have left sidecars without a main
+        // database. Replace that incomplete bundle, then publish main last.
+        for suffix in ["-wal", "-shm"] {
+            let destination = URL(fileURLWithPath: storeURL.path + suffix)
+            if fileManager.fileExists(atPath: destination.path) {
+                try fileManager.removeItem(at: destination)
+            }
+            let copy = URL(fileURLWithPath: stagedStore.path + suffix)
+            if fileManager.fileExists(atPath: copy.path) {
+                try fileManager.moveItem(at: copy, to: destination)
+            }
+        }
+        try fileManager.moveItem(at: stagedStore, to: storeURL)
     }
 
     // MARK: - Meeting Container (local-only, protected)
 
-    /// Transcripts, summaries, draft actions, manifests, and the derived
-    /// personalized glossary never enter CloudKit.
+    /// Meeting and vocabulary rows never attach an automatic CloudKit mirror.
+    /// Explicit full-scope transport uses CloudModelCodec over these local rows.
     static let meetingSchema = Schema([
         MeetingRecord.self,
         MeetingGlossaryTerm.self,
@@ -309,258 +367,75 @@ final class AppDataContainer: ObservableObject {
         )
     }
 
-    // MARK: - Migration (legacy local/iCloud → local)
+    // MARK: - Main-store migration
 
-    static func migrateLegacyStoresToLocalIfNeeded() {
+    enum MainStoreMigrationError: Error, Equatable {
+        case missingImportURL
+        case invalidCheckpoint
+        case missingCanonicalStore
+    }
+
+    static func migrationCheckpointURL(for primaryURL: URL) -> URL {
+        primaryURL.appendingPathExtension("legacy-merge-v1")
+    }
+
+    /// Merges every existing legacy main store before the canonical store may be
+    /// selected. URLs are injectable so migration tests never use app storage.
+    ///
+    /// All reads and merges must succeed; fetch errors are not empty snapshots.
+    /// Autosave is disabled and a single explicit save commits the merged rows.
+    /// The atomic receipt is written only after that save. Until the receipt is
+    /// durable callers must not expose the canonical store to user edits.
+    /// A crash between save and receipt is safe: codec merge deduplicates retries.
+    /// Once selected, the receipt prevents retained originals from resurrecting
+    /// subsequent hard deletions, including after synchronization is toggled.
+    /// Original stores and their sidecars are never moved or deleted.
+    static func migrateMainStores(to primaryURL: URL, from legacyURLs: [URL]) throws {
+        guard !usesInMemoryUITestStore else { return }
         let fileManager = FileManager.default
-        let localV2URL = getStoreURL(name: "local_v2.store")
-        let icloudV2URL = getStoreURL(name: "icloud_v2.store")
-        let defaultConfig = ModelConfiguration(schema: appSchema, isStoredInMemoryOnly: false)
-        let defaultURL = defaultConfig.url
-
-        if !fileManager.fileExists(atPath: localV2URL.path), fileManager.fileExists(atPath: icloudV2URL.path) {
-            do {
-                try fileManager.copyItem(at: icloudV2URL, to: localV2URL)
-                let legacySHM = icloudV2URL.deletingPathExtension().appendingPathExtension("store-shm")
-                let localSHM = localV2URL.deletingPathExtension().appendingPathExtension("store-shm")
-                if fileManager.fileExists(atPath: legacySHM.path), !fileManager.fileExists(atPath: localSHM.path) {
-                    try? fileManager.copyItem(at: legacySHM, to: localSHM)
-                }
-                let legacyWAL = icloudV2URL.deletingPathExtension().appendingPathExtension("store-wal")
-                let localWAL = localV2URL.deletingPathExtension().appendingPathExtension("store-wal")
-                if fileManager.fileExists(atPath: legacyWAL.path), !fileManager.fileExists(atPath: localWAL.path) {
-                    try? fileManager.copyItem(at: legacyWAL, to: localWAL)
-                }
-            } catch {
-                DiagnosticRecorder.shared.record(
-                    error: error,
-                    component: "storage.swiftdata",
-                    operation: "migrateLegacyCopy"
-                )
-                print("[Migration] 기존 iCloud 저장소를 local_v2.store로 복사하지 못했습니다: \(error)")
+        let checkpointURL = migrationCheckpointURL(for: primaryURL)
+        let checkpoint = Data("sift-main-store-merge-v1\n".utf8)
+        if fileManager.fileExists(atPath: checkpointURL.path) {
+            guard try Data(contentsOf: checkpointURL) == checkpoint else {
+                throw MainStoreMigrationError.invalidCheckpoint
             }
+            guard fileManager.fileExists(atPath: primaryURL.path) else {
+                throw MainStoreMigrationError.missingCanonicalStore
+            }
+            return
         }
 
-        if !fileManager.fileExists(atPath: localV2URL.path), fileManager.fileExists(atPath: defaultURL.path) {
-            do {
-                try fileManager.moveItem(at: defaultURL, to: localV2URL)
-                let defaultSHM = defaultURL.deletingPathExtension().appendingPathExtension("store-shm")
-                let localSHM = localV2URL.deletingPathExtension().appendingPathExtension("store-shm")
-                if fileManager.fileExists(atPath: defaultSHM.path), !fileManager.fileExists(atPath: localSHM.path) {
-                    try? fileManager.moveItem(at: defaultSHM, to: localSHM)
-                }
-                let defaultWAL = defaultURL.deletingPathExtension().appendingPathExtension("store-wal")
-                let localWAL = localV2URL.deletingPathExtension().appendingPathExtension("store-wal")
-                if fileManager.fileExists(atPath: defaultWAL.path), !fileManager.fileExists(atPath: localWAL.path) {
-                    try? fileManager.moveItem(at: defaultWAL, to: localWAL)
-                }
-            } catch {
-                DiagnosticRecorder.shared.record(
-                    error: error,
-                    component: "storage.swiftdata",
-                    operation: "migrateLegacyMove"
-                )
-                print("[Migration] 레거시 default.store를 local_v2.store로 이동하지 못했습니다: \(error)")
+        var snapshots: [CloudModelCodec.MainStoreSnapshot] = []
+        var visited: Set<URL> = [primaryURL.standardizedFileURL.resolvingSymlinksInPath()]
+        for legacyURL in legacyURLs {
+            let normalizedURL = legacyURL.standardizedFileURL.resolvingSymlinksInPath()
+            guard visited.insert(normalizedURL).inserted,
+                  fileManager.fileExists(atPath: legacyURL.path) else { continue }
+            let configuration = ModelConfiguration(schema: appSchema, url: legacyURL, cloudKitDatabase: .none)
+            let source = try ModelContainer(for: appSchema, configurations: [configuration])
+            let context = ModelContext(source)
+            context.autosaveEnabled = false
+            snapshots.append(try CloudModelCodec.snapshotMainStore(from: context))
+        }
+
+        let configuration = ModelConfiguration(schema: appSchema, url: primaryURL, cloudKitDatabase: .none)
+        let destination = try ModelContainer(for: appSchema, configurations: [configuration])
+        let context = ModelContext(destination)
+        context.autosaveEnabled = false
+        do {
+            for snapshot in snapshots {
+                try CloudModelCodec.mergeMainStore(snapshot, into: context)
             }
+            try context.save()
+            try checkpoint.write(to: checkpointURL, options: .atomic)
+        } catch {
+            context.rollback()
+            throw error
         }
     }
 
-    /// 로컬 데이터가 있고 iCloud 스토어가 없으면 깊은 복사 이관 실행.
-    /// iCloud 첫 활성화 시 1회만 의미 있음 (이후엔 이미 icloud_v2.store 존재).
-    static func migrateLocalToICloudIfNeeded() {
-        guard SettingsStore.supportsICloud else { return }
-        let schema = AppDataContainer.appSchema
-        let localV2URL = getStoreURL(name: "local_v2.store")
-        let icloudV2URL = getStoreURL(name: "icloud_v2.store")
-        let fileManager = FileManager.default
-
-        // 1. 레거시 default.store → local_v2.store 백업 (최초 1회)
-        let defaultConfig = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
-        let defaultURL = defaultConfig.url
-        if fileManager.fileExists(atPath: defaultURL.path) && !fileManager.fileExists(atPath: localV2URL.path) {
-            print("[Migration] 레거시 default.store를 local_v2.store로 마이그레이션합니다.")
-            do {
-                try fileManager.moveItem(at: defaultURL, to: localV2URL)
-                let defaultSHM = defaultURL.deletingPathExtension().appendingPathExtension("store-shm")
-                let localSHM = localV2URL.deletingPathExtension().appendingPathExtension("store-shm")
-                if fileManager.fileExists(atPath: defaultSHM.path) {
-                    try? fileManager.moveItem(at: defaultSHM, to: localSHM)
-                }
-                let defaultWAL = defaultURL.deletingPathExtension().appendingPathExtension("store-wal")
-                let localWAL = localV2URL.deletingPathExtension().appendingPathExtension("store-wal")
-                if fileManager.fileExists(atPath: defaultWAL.path) {
-                    try? fileManager.moveItem(at: defaultWAL, to: localWAL)
-                }
-            } catch {
-                DiagnosticRecorder.shared.record(
-                    error: error,
-                    component: "storage.swiftdata",
-                    operation: "migrateFileMove"
-                )
-                print("[Migration] 레거시 파일 이동 실패: \(error)")
-            }
-        }
-
-        // 2. local_v2.store → icloud_v2.store 깊은 복사 이관
-        guard fileManager.fileExists(atPath: localV2URL.path) else { return }
-        guard !fileManager.fileExists(atPath: icloudV2URL.path) else { return }
-
-        print("[Migration] 로컬 데이터를 iCloud 데이터베이스(icloud_v2.store)로 이관을 진행합니다.")
-        do {
-            let localConfig = ModelConfiguration(schema: schema, url: localV2URL, cloudKitDatabase: .none)
-            let localContainer = try ModelContainer(for: schema, configurations: [localConfig])
-            let localContext = ModelContext(localContainer)
-
-            let localTodos          = (try? localContext.fetch(FetchDescriptor<Todo>())) ?? []
-            let localPersonas       = (try? localContext.fetch(FetchDescriptor<Persona>())) ?? []
-            let localAuditEvents    = (try? localContext.fetch(FetchDescriptor<TaskAuditEvent>())) ?? []
-            let localBehaviorEvents = (try? localContext.fetch(FetchDescriptor<TaskBehaviorEvent>())) ?? []
-            let localAnalyses       = (try? localContext.fetch(FetchDescriptor<MemoryAnalysis>())) ?? []
-
-            guard !localTodos.isEmpty
-                    || !localPersonas.isEmpty
-                    || !localAuditEvents.isEmpty
-                    || !localBehaviorEvents.isEmpty
-                    || !localAnalyses.isEmpty else {
-                print("[Migration] 이전 데이터가 비어있어 이관을 생략합니다.")
-                return
-            }
-
-            let bundleIdentifier = Bundle.main.bundleIdentifier ?? "pieroot.sift-todo"
-            let containerIdentifier = "iCloud.\(bundleIdentifier)"
-            let icloudConfig = ModelConfiguration(schema: schema, url: icloudV2URL, cloudKitDatabase: .private(containerIdentifier))
-            let icloudContainer = try ModelContainer(for: schema, configurations: [icloudConfig])
-            let icloudContext = ModelContext(icloudContainer)
-
-            for persona in localPersonas {
-                let newPersona = Persona(descriptionText: persona.descriptionText, personaTypes: persona.personaTypes)
-                newPersona.id = persona.id
-                newPersona.updatedAt = persona.updatedAt
-                icloudContext.insert(newPersona)
-            }
-
-            for todo in localTodos {
-                let newTodo = Todo(
-                    title: todo.title,
-                    notes: todo.notes,
-                    startDate: todo.startDate,
-                    dueDate: todo.dueDate,
-                    source: todo.todoSource,
-                    sourceRef: todo.sourceRef,
-                    tags: todo.tags,
-                    reminderOffsets: todo.reminderOffsets
-                )
-                newTodo.id = todo.id
-                newTodo.createdAt = todo.createdAt
-                newTodo.updatedAt = todo.updatedAt
-                newTodo.isCompleted = todo.isCompleted
-                newTodo.completedAt = todo.completedAt
-                newTodo.manualPriority = todo.manualPriority
-                newTodo.computedPriorityScore = todo.computedPriorityScore
-                newTodo.priorityReason = todo.priorityReason
-                newTodo.estimatedDurationMinutes = todo.estimatedDurationMinutes
-                newTodo.sourceSender = todo.sourceSender
-                newTodo.sourceMessageID = todo.sourceMessageID
-                newTodo.sourceThreadID = todo.sourceThreadID
-                newTodo.sourceSenderEmail = todo.sourceSenderEmail
-                newTodo.sourceAccountNamespace = todo.sourceAccountNamespace
-                newTodo.triageStatus = todo.triageStatus
-                newTodo.calendarEventID = todo.calendarEventID
-                newTodo.calendarEventExternalID = todo.calendarEventExternalID
-                newTodo.calendarEventOrigin = todo.calendarEventOrigin
-                newTodo.memoryNotes = todo.memoryNotes
-                newTodo.aiRecommendedTime = todo.aiRecommendedTime
-                newTodo.aiNeedsNotification = todo.aiNeedsNotification
-                newTodo.aiPersonaFit = todo.aiPersonaFit
-                newTodo.aiDetail = todo.aiDetail
-                newTodo.aiEngine = todo.aiEngine
-                newTodo.aiRequestedProvider = todo.aiRequestedProvider
-                newTodo.aiFallbackReason = todo.aiFallbackReason
-                newTodo.isFixedSchedule = todo.isFixedSchedule
-                icloudContext.insert(newTodo)
-            }
-
-            for event in localAuditEvents {
-                let newEvent = TaskAuditEvent(from: Todo())
-                newEvent.id = event.id
-                newEvent.todoID = event.todoID
-                newEvent.createdAt = event.createdAt
-                newEvent.completedAt = event.completedAt
-                newEvent.deletedAt = event.deletedAt
-                newEvent.sourceType = event.sourceType
-                newEvent.triageType = event.triageType
-                newEvent.wasFixedSchedule = event.wasFixedSchedule
-                newEvent.hadDueDate = event.hadDueDate
-                newEvent.dueDate = event.dueDate
-                newEvent.tags = event.tags
-                icloudContext.insert(newEvent)
-            }
-
-            for event in localBehaviorEvents {
-                let newEvent = TaskBehaviorEvent(
-                    todo: Todo(),
-                    type: event.eventType,
-                    actor: event.actor,
-                    occurredAt: event.occurredAt
-                )
-                newEvent.id = event.id
-                newEvent.todoID = event.todoID
-                newEvent.eventTypeRaw = event.eventTypeRaw
-                newEvent.actorRaw = event.actorRaw
-                newEvent.sourceType = event.sourceType
-                newEvent.triageType = event.triageType
-                newEvent.wasFixedSchedule = event.wasFixedSchedule
-                newEvent.beforeCompletion = event.beforeCompletion
-                newEvent.afterCompletion = event.afterCompletion
-                newEvent.beforeDueDate = event.beforeDueDate
-                newEvent.afterDueDate = event.afterDueDate
-                newEvent.beforeManualPriority = event.beforeManualPriority
-                newEvent.afterManualPriority = event.afterManualPriority
-                newEvent.beforeComputedPriority = event.beforeComputedPriority
-                newEvent.todoCreatedAt = event.todoCreatedAt
-                newEvent.afterComputedPriority = event.afterComputedPriority
-                icloudContext.insert(newEvent)
-            }
-
-            for analysis in localAnalyses {
-                let newAnalysis = MemoryAnalysis(
-                    summary: analysis.summary,
-                    insights: analysis.insights,
-                    fastTags: analysis.fastTags,
-                    overdueRate: analysis.overdueRate,
-                    productiveHour: analysis.productiveHour,
-                    recordTitle: analysis.recordTitle,
-                    accessScopeSummary: analysis.accessScopeSummary,
-                    processorDescription: analysis.processorDescription,
-                    behaviorProfile: analysis.behaviorProfile
-                )
-                newAnalysis.id = analysis.id
-                newAnalysis.createdAt = analysis.createdAt
-                icloudContext.insert(newAnalysis)
-            }
-
-            try icloudContext.save()
-            let migratedCount = localTodos.count
-                + localPersonas.count
-                + localAuditEvents.count
-                + localBehaviorEvents.count
-                + localAnalyses.count
-            print("[Migration] iCloud 컨테이너에 \(migratedCount)개의 로컬 데이터 이관 완료!")
-
-            // 이관 완료 후 로컬 원본 삭제
-            try fileManager.removeItem(at: localV2URL)
-            let shmURL = localV2URL.deletingPathExtension().appendingPathExtension("store-shm")
-            let walURL = localV2URL.deletingPathExtension().appendingPathExtension("store-wal")
-            if fileManager.fileExists(atPath: shmURL.path) { try? fileManager.removeItem(at: shmURL) }
-            if fileManager.fileExists(atPath: walURL.path) { try? fileManager.removeItem(at: walURL) }
-            print("[Migration] 이전 로컬 백업 파일 정리 완료.")
-        } catch {
-            DiagnosticRecorder.shared.record(
-                error: error,
-                component: "storage.swiftdata",
-                operation: "migrateToICloud"
-            )
-            print("[Migration] 데이터베이스 마이그레이션 중 오류 발생: \(error)")
-        }
+    private static func recordMigrationFailure(_ error: Error, operation: String) {
+        DiagnosticRecorder.shared.record(error: error, component: "storage.swiftdata", operation: operation)
+        print("[SwiftData] Store migration/open failed; originals and current rows retained: \(error)")
     }
 }

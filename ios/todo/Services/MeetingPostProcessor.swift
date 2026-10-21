@@ -36,6 +36,41 @@ enum MeetingPostProcessor {
         }
     }
 
+    private struct ProcessingLanguages {
+        let sourceLanguageTag: String
+        let savedSourceLanguageTag: String
+        let automaticLanguageDetection: Bool
+        let detectedLanguages: [String]
+        let summaryLanguageTag: String
+
+        init(record: MeetingRecord) {
+            sourceLanguageTag = record.processingSourceLanguageTag
+            savedSourceLanguageTag = record.languageTag
+            automaticLanguageDetection = record.automaticLanguageDetection
+            detectedLanguages = record.asrDetectedLanguages
+            // Preserve the intentionally existing legacy output preference.
+            // Actual source evidence must not change the requested summary language.
+            summaryLanguageTag = MeetingSummaryLanguages.requestedLanguageTag(
+                sourceLanguageTag: record.languageTag, savedSummaryLanguageTag: record.summaryLanguageTag
+            )
+        }
+    }
+
+    private static func requireLanguages(
+        _ record: MeetingRecord, languages: ProcessingLanguages,
+        reporter: MeetingProcessingReporter?
+    ) throws {
+        guard record.languageTag == languages.savedSourceLanguageTag,
+              record.automaticLanguageDetection == languages.automaticLanguageDetection,
+              record.asrDetectedLanguages == languages.detectedLanguages,
+              MeetingSummaryLanguages.requestedLanguageTag(
+                sourceLanguageTag: record.languageTag, savedSummaryLanguageTag: record.summaryLanguageTag
+              ) == languages.summaryLanguageTag else {
+            reporter?.reset()
+            throw Failure.superseded
+        }
+    }
+
     struct Result {
         /// True when the correction pass actually changed the transcript.
         let refined: Bool
@@ -51,6 +86,7 @@ enum MeetingPostProcessor {
             _ meetingID: String,
             _ result: MeetingResult,
             _ vocabulary: UserVocabularySnapshot,
+            _ sourceLanguageTag: String,
             _ language: AppLanguage,
             _ allowModelLoad: Bool
         ) async throws -> MeetingRefinementEngine.Outcome
@@ -58,6 +94,8 @@ enum MeetingPostProcessor {
             _ meetingID: String,
             _ result: MeetingResult,
             _ glossaryHint: String,
+            _ sourceLanguageTag: String,
+            _ summaryLanguageTag: String,
             _ language: AppLanguage
         ) async throws -> MeetingAnalysisEngine.Outcome
         let save: (_ context: ModelContext) throws -> Void
@@ -66,20 +104,23 @@ enum MeetingPostProcessor {
         static var empty: Dependencies {
             Dependencies(
                 snapshot: { .empty },
-                refine: { meetingID, result, vocabulary, language, allowModelLoad in
+                refine: { meetingID, result, vocabulary, sourceLanguageTag, language, allowModelLoad in
                     try await MeetingRefinementEngine().refine(
                         meetingID: meetingID,
                         result: result,
                         vocabulary: vocabulary,
+                        sourceLanguageTag: sourceLanguageTag,
                         language: language,
                         allowModelLoad: allowModelLoad
                     )
                 },
-                analyze: { meetingID, result, glossaryHint, language in
+                analyze: { meetingID, result, glossaryHint, sourceLanguageTag, summaryLanguageTag, language in
                     try await MeetingAnalysisEngine().analyze(
                         meetingID: meetingID,
                         result: result,
                         glossaryHint: glossaryHint,
+                        sourceLanguageTag: sourceLanguageTag,
+                        summaryLanguageTag: summaryLanguageTag,
                         language: language
                     )
                 },
@@ -136,9 +177,10 @@ enum MeetingPostProcessor {
         dependencies: Dependencies? = nil
     ) async throws -> Result {
         let dependencies = dependencies ?? .empty
-        guard let language = AppLanguage.supportedLanguage(for: record.languageTag) else {
-            throw MeetingTranscriptionError.unsupportedLocale(record.languageTag)
-        }
+        let languages = ProcessingLanguages(record: record)
+        let sourceLanguageTag = languages.sourceLanguageTag
+        let summaryLanguageTag = languages.summaryLanguageTag
+        let language = AppLanguage.current
         guard let base = record.result else {
             reporter?.reset()
             return Result(refined: false, analysisLabel: "", correctionCount: 0)
@@ -163,14 +205,17 @@ enum MeetingPostProcessor {
             do {
                 let vocabulary = await dependencies.snapshot()
                 try requireCurrent(record, in: context, revision: sourceRevision, data: sourceData, reporter: reporter)
+                try requireLanguages(record, languages: languages, reporter: reporter)
                 let outcome = try await dependencies.refine(
                     record.meetingID,
                     result,
                     vocabulary,
+                    sourceLanguageTag,
                     language,
                     allowModelLoad
                 )
                 try requireCurrent(record, in: context, revision: sourceRevision, data: sourceData, reporter: reporter)
+                try requireLanguages(record, languages: languages, reporter: reporter)
                 if case .rules(let reason) = outcome.executionPath {
                     record.refinementFallbackReasonRaw = reason.rawValue
                 } else {
@@ -201,6 +246,7 @@ enum MeetingPostProcessor {
                         sourceRevision = changed ? refinedResult.transcriptRevision : sourceRevision
                         sourceData = committedData
                         try requireCurrent(record, in: context, revision: sourceRevision, data: sourceData, reporter: reporter)
+                        try requireLanguages(record, languages: languages, reporter: reporter)
                         result = refinedResult
                         refined = changed
                         correctionCount = changed ? count : 0
@@ -228,6 +274,7 @@ enum MeetingPostProcessor {
                 throw CancellationError()
             } catch {
                 try requireCurrent(record, in: context, revision: sourceRevision, data: sourceData, reporter: reporter)
+                try requireLanguages(record, languages: languages, reporter: reporter)
                 let reason = ProviderErrorMapper.fallbackReason(for: error) ?? .providerExecutionFailed
                 record.refinementFallbackReasonRaw = reason.rawValue
                 try? dependencies.save(context)
@@ -244,9 +291,13 @@ enum MeetingPostProcessor {
         reporter?.set(.summarizing(engine: ""))
         let analysisHint = (await dependencies.snapshot()).promptHint
         try requireCurrent(record, in: context, revision: sourceRevision, data: sourceData, reporter: reporter)
-        let analysis = try await dependencies.analyze(meetingID, result, analysisHint, language)
+        try requireLanguages(record, languages: languages, reporter: reporter)
+        let analysis = try await dependencies.analyze(
+            meetingID, result, analysisHint, sourceLanguageTag, summaryLanguageTag, language
+        )
         do {
             try requireCurrent(record, in: context, revision: sourceRevision, data: sourceData, reporter: reporter)
+            try requireLanguages(record, languages: languages, reporter: reporter)
         } catch Failure.superseded {
             reporter?.reset()
             throw Failure.superseded
@@ -258,11 +309,23 @@ enum MeetingPostProcessor {
                 language: .current,
                 comment: "Unknown meeting engine provenance shown in the current app language."
             )
+        let attributedResult = MeetingActionAttribution.applying(to: analysis.result, meetingID: meetingID,
+            profiles: record.diarization?.profiles ?? [])
         do {
             try MeetingRecordCommitter.persist(
                 record: record,
                 save: { try dependencies.save(context) },
-                mutate: { try record.update(result: analysis.result, status: .ready) }
+                mutate: {
+                    try record.update(result: attributedResult, status: .ready)
+                    record.summaryKindRaw = analysis.summaryKind.rawValue
+                    record.summaryEngineLabel = analysis.engineSource?.rawValue ?? ""
+                    record.summaryResultLanguageTag = analysis.summaryKind == .generated ? summaryLanguageTag : sourceLanguageTag
+                    if case .rules(let reason) = analysis.executionPath {
+                        record.summaryFallbackReasonRaw = reason.rawValue
+                    } else {
+                        record.summaryFallbackReasonRaw = nil
+                    }
+                }
             )
         } catch {
             // Never report `.completed` when the final persist failed — the

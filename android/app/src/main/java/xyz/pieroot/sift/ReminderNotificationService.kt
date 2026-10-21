@@ -8,6 +8,7 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
@@ -27,7 +28,7 @@ internal const val REMINDER_CHANNEL_ID = "todo_reminders"
 private const val NOTIFICATION_ID_SEED = 72_000
 
 internal const val EXTRA_TODO_ID = "xyz.pieroot.sift.EXTRA_TODO_ID"
-internal const val EXTRA_TODO_TITLE = "xyz.pieroot.sift.EXTRA_TODO_TITLE"
+internal const val REMINDER_NOTIFICATION_ID = 1
 internal const val EXTRA_DUE_AT = "xyz.pieroot.sift.EXTRA_DUE_AT"
 internal const val EXTRA_OPEN_TODO_ID = "xyz.pieroot.sift.EXTRA_OPEN_TODO_ID"
 internal const val REMINDER_MIN_LEAD_MILLIS = 60_000L
@@ -58,6 +59,9 @@ internal fun computeReminderTime(
 internal fun isReminderSchedulable(todo: TodoItem): Boolean =
     !todo.isCompleted && todo.triage == TodoTriage.TODO && todo.dueAt != null
 
+internal fun reminderMatchesStoredTodo(todo: TodoItem?, expectedDueAt: Long): Boolean =
+    todo != null && isReminderSchedulable(todo) && todo.aiNeedsNotification && todo.dueAt == expectedDueAt
+
 class ReminderNotificationService(private val context: Context) {
     private val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
     private val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -68,7 +72,7 @@ class ReminderNotificationService(private val context: Context) {
         encodeDefaults = true
     }
 
-    fun rescheduleForTodos(todos: List<TodoItem>) {
+    fun rescheduleForTodos(todos: List<TodoItem>): Unit = synchronized(scheduleLock) {
         ensureChannel()
 
         val targetIds = linkedSetOf<String>()
@@ -101,14 +105,19 @@ class ReminderNotificationService(private val context: Context) {
         persistScheduledIds(targetIds)
     }
 
-    fun rescheduleFromStoredState() {
-        val snapshot = loadStoredSnapshot() ?: return
+    fun rescheduleFromStoredState(): Unit = synchronized(scheduleLock) {
+        val snapshot = loadStoredSnapshot() ?: run {
+            scheduledTodoIds().forEach(::cancel)
+            persistScheduledIds(emptySet())
+            return@synchronized
+        }
         rescheduleForTodos(snapshot.todos)
     }
 
-    fun cancel(todoId: String) {
-        if (todoId.isBlank()) return
+    fun cancel(todoId: String): Unit = synchronized(scheduleLock) {
+        if (todoId.isBlank()) return@synchronized
 
+        cancelLegacyAlarm(todoId)
         val alarmIntent = reminderAlarmIntent(todoId)
         val pendingIntent = PendingIntent.getBroadcast(
             context,
@@ -119,16 +128,28 @@ class ReminderNotificationService(private val context: Context) {
         alarmManager.cancel(pendingIntent)
         pendingIntent.cancel()
 
-        notificationManager.cancel(notificationId(todoId))
+        notificationManager.cancel(todoId, REMINDER_NOTIFICATION_ID)
+        // Remove notifications created by the old hash-only identity after upgrade.
+        notificationManager.cancel(NOTIFICATION_ID_SEED + reminderRequestCode(todoId))
+        removeScheduledMarker(todoId)
     }
 
-    fun showReminderNotification(todoId: String, todoTitle: String, dueAt: Long) {
-        if (!canPostReminderNotification()) return
+    fun showReminderNotification(todoId: String, expectedDueAt: Long): Unit = synchronized(scheduleLock) {
+        val todo = loadStoredSnapshot()?.todos?.firstOrNull { it.id == todoId }
+        if (!reminderMatchesStoredTodo(todo, expectedDueAt)) {
+            // An older broadcast may already be queued when this todo is rescheduled.
+            // Ignore it without touching the replacement alarm or its schedule marker.
+            return@synchronized
+        }
+        // Keep delivered IDs tracked until cancel/reconciliation, so deleting a todo
+        // also removes its already-visible notification and private title.
+        if (!canPostReminderNotification()) return@synchronized
+        val currentTodo = requireNotNull(todo)
 
         ensureChannel()
 
-        val title = todoTitle.ifBlank { "할 일 알림" }
-        val dueText = formatDueText(dueAt)
+        val title = currentTodo.title.ifBlank { "할 일 알림" }
+        val dueText = formatDueText(expectedDueAt)
         val body = if (dueText == null) {
             "등록된 마감 일정이 곧 예정되어 있습니다."
         } else {
@@ -144,11 +165,11 @@ class ReminderNotificationService(private val context: Context) {
             .setAutoCancel(true)
             .setContentIntent(openIntent)
             .setDefaults(NotificationCompat.DEFAULT_ALL)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .build()
 
-        notificationManager.notify(notificationId(todoId), notification)
-        removeScheduledMarker(todoId)
+        notificationManager.notify(todoId, REMINDER_NOTIFICATION_ID, notification)
     }
 
     private fun canPostReminderNotification(): Boolean {
@@ -166,9 +187,9 @@ class ReminderNotificationService(private val context: Context) {
             return
         }
 
+        cancelLegacyAlarm(todo.id)
         val intent = reminderAlarmIntent(todo.id).apply {
             putExtra(EXTRA_TODO_ID, todo.id)
-            putExtra(EXTRA_TODO_TITLE, todo.title)
             putExtra(EXTRA_DUE_AT, todo.dueAt ?: -1L)
         }
 
@@ -181,17 +202,14 @@ class ReminderNotificationService(private val context: Context) {
 
         alarmManager.cancel(pendingIntent)
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                alarmManager.setExactAndAllowWhileIdle(
-                    AlarmManager.RTC_WAKEUP,
-                    reminderAtMillis,
-                    pendingIntent,
-                )
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S || alarmManager.canScheduleExactAlarms()) {
+                alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, reminderAtMillis, pendingIntent)
             } else {
-                alarmManager.setExact(AlarmManager.RTC_WAKEUP, reminderAtMillis, pendingIntent)
+                alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, reminderAtMillis, pendingIntent)
             }
         } catch (_: SecurityException) {
-            alarmManager.set(AlarmManager.RTC_WAKEUP, reminderAtMillis, pendingIntent)
+            // Exact-alarm access can be revoked between the capability check and scheduling.
+            alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, reminderAtMillis, pendingIntent)
         }
     }
 
@@ -204,6 +222,7 @@ class ReminderNotificationService(private val context: Context) {
             NotificationManager.IMPORTANCE_HIGH,
         ).apply {
             description = "할 일 마감 알림 채널"
+            lockscreenVisibility = NotificationCompat.VISIBILITY_PRIVATE
         }
         notificationManager.createNotificationChannel(channel)
     }
@@ -239,14 +258,18 @@ class ReminderNotificationService(private val context: Context) {
         return if (raw == Int.MIN_VALUE) 0 else abs(raw)
     }
 
-    private fun notificationId(todoId: String): Int {
-        return NOTIFICATION_ID_SEED + reminderRequestCode(todoId)
+    private fun cancelLegacyAlarm(todoId: String) {
+        val legacy = Intent(context, ReminderReceiver::class.java).apply { action = REMINDER_ACTION }
+        val pending = PendingIntent.getBroadcast(context, reminderRequestCode(todoId), legacy, PendingIntent.FLAG_NO_CREATE or PendingIntent.FLAG_IMMUTABLE) ?: return
+        alarmManager.cancel(pending)
+        pending.cancel()
     }
 
     private fun reminderAlarmIntent(todoId: String): Intent {
         return Intent(context, ReminderReceiver::class.java).apply {
             action = REMINDER_ACTION
             setClass(context, ReminderReceiver::class.java)
+            data = Uri.Builder().scheme("sift").authority("reminder").appendPath(todoId).build()
             putExtra(EXTRA_TODO_ID, todoId)
         }
     }
@@ -254,6 +277,7 @@ class ReminderNotificationService(private val context: Context) {
     private fun openTodoPendingIntent(todoId: String): PendingIntent {
         val intent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            data = Uri.Builder().scheme("sift").authority("todo").appendPath(todoId).build()
             putExtra(EXTRA_OPEN_TODO_ID, todoId)
         }
 
@@ -273,5 +297,9 @@ class ReminderNotificationService(private val context: Context) {
 
     private fun pendingIntentFlags(): Int {
         return PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+    }
+    private companion object {
+        // Broadcast work and Compose callers share the same alarms/preferences.
+        val scheduleLock = Any()
     }
 }

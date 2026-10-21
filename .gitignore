@@ -54,3 +54,6 @@ Thumbs.db
 
 # Python evaluation scripts
 __pycache__/
+
+# Local Jekyll cache
+.sass-cache/

@@ -3,6 +3,8 @@ import SwiftUI
 struct OpenAISettingsView: View {
     @ObservedObject private var connection = OpenAIConnection.shared
     @ObservedObject private var settings = SettingsStore.shared
+    @ObservedObject private var regionalAvailability = OpenAIRegionalAvailability.shared
+    @AppStorage(SettingsStore.betaOpenAIEnabledKey) private var providerEnabled = false
     @State private var connectionTask: Task<Void, Never>?
     @State private var errorMessage: String?
     @State private var confirmDeleteConnections = false
@@ -14,29 +16,48 @@ struct OpenAISettingsView: View {
     @AppStorage(RemovedProviderCleanup.failureKey) private var cleanupFailed = false
 
     var body: some View {
+        Group {
+            if regionalAvailability.isAvailable {
+                availableContent
+            } else {
+                RegionalAnalysisUnavailableView()
+            }
+        }
+        .onChange(of: regionalAvailability.isAvailable) { _, available in
+            guard !available else { return }
+            confirmDeleteConnections = false
+            connectionTask?.cancel()
+            resetConnectionCheck()
+        }
+    }
+
+    private var availableContent: some View {
         Form {
             Section {
                 Toggle(copy("openai.settings.enabled", fallback: "OpenAI 외부 분석 제공자 활성화"), isOn: Binding(
-                    get: { SettingsStore.betaProviderEnabled(.openAI) },
+                    get: { providerEnabled },
                     set: { enabled in
+                        providerEnabled = enabled
                         if !enabled { resetConnectionCheck() }
                         settings.setBetaProvider(.openAI, enabled: enabled)
-                        if enabled { settings.setBetaSelectedProvider(.openAI) }
                     }
                 ))
                 .accessibilityIdentifier("openai.enabled")
                 Text(copy("openai.settings.optionalNotice", fallback: "OpenAI 연결은 선택 사항입니다. ChatGPT Plus·Pro의 사용 가능한 한도와 승인된 앱 권한을 사용합니다. 로그인만으로 데이터 전송에 동의한 것으로 처리하지 않습니다."))
-                    .font(.caption)
+                    .font(.footnote)
                 Text(copy("openai.settings.models", fallback: "기초 분석: gpt-6-luna\n직접 누른 고급 재요청: gpt-6.1-sol"))
-                    .font(.caption.monospaced())
+                    .font(.footnote.monospaced())
                 Text(copy("openai.settings.subscriptionNotice", fallback: "이 구독 연결은 로컬 개인 프로젝트·오픈소스 및 승인된 앱에 제공됩니다. 유료·원격 호스팅 배포에는 OpenAI 승인이 필요합니다. 계정별 모델 제공 여부와 한도는 OpenAI가 결정합니다."))
-                    .font(.caption)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Text(copy("openai.settings.syncNotice", fallback: "앱의 iCloud 동기화와 iCloud 키체인이 켜져 있으면 같은 Apple 계정의 다른 기기에서 ChatGPT 연결을 복원합니다. Apple의 동기화 완료 후 적용되며, 제공자 활성화와 데이터 전송 동의는 각 기기에서 따로 설정합니다."))
+                    .font(.footnote)
                     .foregroundStyle(.secondary)
             }
 
             Section(copy("openai.account.section", fallback: "ChatGPT 계정")) {
                 if let active = connection.activeProfile {
-                    Label(active.email ?? active.clientID, systemImage: "person.crop.circle")
+                    Label(active.email ?? copy("openai.account.connected", fallback: "연결된 ChatGPT 계정"), systemImage: "person.crop.circle.badge.checkmark")
                         .accessibilityIdentifier("openai.activeAccount")
                     Label(
                         connection.hasPlanPermission
@@ -44,36 +65,49 @@ struct OpenAISettingsView: View {
                             : copy("openai.account.planUnauthorized", fallback: "구독 사용 권한 없음 · 다시 연결하세요"),
                         systemImage: connection.hasPlanPermission ? "checkmark.shield" : "exclamationmark.shield"
                     )
-                    .font(.caption)
+                    .font(.footnote)
                     if !connection.hasPlanPermission {
                         Button(copy("openai.account.authorizePlan", fallback: "ChatGPT 구독 사용 권한 승인")) {
                             resetConnectionCheck()
                             connectionTask?.cancel()
                             connectionTask = Task {
-                                do { try await connection.enablePlanPermission() }
-                                catch { if !Task.isCancelled { errorMessage = OpenAIViewCopy.errorMessage(error) } }
+                                do {
+                                    try await connection.enablePlanPermission()
+                                    try Task.checkCancellation()
+                                    guard regionalAvailability.isAvailable, connection.activeProfile != nil else { return }
+                                    settings.setBetaProvider(.openAI, enabled: true)
+                                } catch is CancellationError {
+                                } catch {
+                                    if !Task.isCancelled, regionalAvailability.isAvailable {
+                                        errorMessage = OpenAIViewCopy.errorMessage(error)
+                                    }
+                                }
                             }
                         }
                         .disabled(connection.isSigningIn)
                     }
                 }
-                ForEach(connection.profiles) { profile in
+                if connection.refreshOwnedElsewhere {
+                    Text(OpenAIConnectionError.refreshOwnerRequired.errorDescription ?? "")
+                        .font(.footnote).foregroundStyle(.secondary)
+                    if connection.needsLocalReauthorization {
+                        Button(copy("openai.account.reconnectHere", fallback: "이 기기에서 다시 연결")) { connect(newAccount: false) }
+                            .disabled(connection.isSigningIn)
+                            .accessibilityIdentifier("openai.reconnectHere")
+                    }
+                }
+                ForEach(connection.profiles.filter { $0.id != connection.activeProfileID }) { profile in
                     Button {
                         resetConnectionCheck()
                         connectionTask?.cancel()
                         do { try connection.selectProfile(profile.id) }
+                        catch OpenAIConnectionError.signInRequired {
+                            // Selection remembers this registration while the current account stays active.
+                            connect(newAccount: false)
+                        }
                         catch { errorMessage = OpenAIViewCopy.errorMessage(error) }
                     } label: {
-                        HStack {
-                            VStack(alignment: .leading) {
-                                Text(profile.email ?? copy("openai.account.saved", fallback: "저장된 계정"))
-                                Text(profile.clientID).font(.caption2).foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            if profile.id == connection.activeProfileID {
-                                Image(systemName: "checkmark")
-                            }
-                        }
+                        Text(profile.email ?? copy("openai.account.saved", fallback: "저장된 계정"))
                     }
                     .disabled(connection.isSigningIn)
                 }
@@ -83,9 +117,12 @@ struct OpenAISettingsView: View {
                         connection.cancelSignIn()
                         connectionTask?.cancel()
                     }
+                    .accessibilityIdentifier("openai.cancelSignIn")
                 } else {
-                    Button(copy("openai.account.continue", fallback: "ChatGPT로 계속하기")) { connect(newAccount: false) }
-                        .accessibilityIdentifier("openai.signIn")
+                    if connection.activeProfile == nil {
+                        Button(copy("openai.account.continue", fallback: "ChatGPT로 계속하기")) { connect(newAccount: false) }
+                            .accessibilityIdentifier("openai.signIn")
+                    }
                     if !connection.profiles.isEmpty {
                         Button(copy("openai.account.add", fallback: "다른 계정 추가")) { connect(newAccount: true) }
                     }
@@ -100,10 +137,12 @@ struct OpenAISettingsView: View {
                     .accessibilityIdentifier("openai.signOut")
                 }
                 if let status = connection.statusMessage {
-                    Text(status).font(.caption).foregroundStyle(.secondary)
+                    Text(status).font(.footnote).foregroundStyle(.secondary)
                 }
                 Link(copy("openai.account.manageUsage", fallback: "ChatGPT 사용량·앱 권한 관리"), destination: URL(string: "https://chatgpt.com/settings/usage")!)
             }
+
+            OpenAIModelCatalogSection(connection: connection)
 
             Section {
                 Button(copy("openai.connection.test", fallback: "구독 연결 테스트")) {
@@ -111,22 +150,29 @@ struct OpenAISettingsView: View {
                 }
                 .disabled(!canTestConnection)
                 .accessibilityIdentifier("openai.testConnection")
+                if connection.activeProfile == nil {
+                    Text(copy("openai.connection.requiresSignIn", fallback: "ChatGPT 계정을 먼저 연결하세요."))
+                        .font(.footnote).foregroundStyle(.secondary)
+                } else if !connection.hasPlanPermission {
+                    Text(copy("openai.connection.requiresPlan", fallback: "연결된 계정의 구독 사용 권한을 먼저 승인하세요."))
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
                 if connectionCheckID != nil {
                     ProgressView(copy("openai.connection.testProgress", fallback: "구독 연결을 확인하는 중…"))
                         .accessibilityIdentifier("openai.testConnectionProgress")
                 }
                 if let verifiedModel {
                     Text(String(format: copy("openai.connection.testSuccess", fallback: "%@ 모델로 구독 연결을 확인했습니다."), verifiedModel))
-                        .font(.caption)
+                        .font(.footnote)
                         .accessibilityIdentifier("openai.testConnectionResult")
                 } else if let connectionCheckError {
                     Text(connectionCheckError)
-                        .font(.caption)
+                        .font(.footnote)
                         .foregroundStyle(.orange)
                         .accessibilityIdentifier("openai.testConnectionResult")
                 }
             } footer: {
-                Text(copy("openai.connection.testExplanation", fallback: "짧고 고정된 테스트 메시지만 전송하며, 저장된 앱 데이터는 보내지 않습니다. 할 일·메일·루틴·페르소나 전송 동의 없이 테스트할 수 있습니다. 구독 사용 한도를 일부 사용할 수 있습니다."))
+                Text(copy("openai.connection.testExplanation", fallback: "짧고 고정된 테스트 메시지만 전송하며, 저장된 앱 데이터는 보내지 않습니다. 외부 분석 제공자가 꺼져 있거나 할 일·메일·루틴·페르소나 전송에 동의하지 않아도 직접 테스트할 수 있습니다. 구독 사용 한도를 일부 사용할 수 있습니다."))
             }
 
             ForEach(OpenAIDataScope.allCases, id: \.rawValue) { scope in
@@ -140,7 +186,7 @@ struct OpenAISettingsView: View {
                 if isDeletingConnections { ProgressView(copy("openai.connections.deleting", fallback: "연결 기록 삭제·원격 철회 확인 중…")) }
                 if cleanupFailed {
                     Text(copy("openai.cleanup.failedNotice", fallback: "제거된 제공자의 비밀정보 삭제를 확인하지 못했습니다. 해당 제공자는 활성화되지 않습니다."))
-                        .font(.caption).foregroundStyle(.orange)
+                        .font(.footnote).foregroundStyle(.orange)
                     Button(copy("openai.cleanup.retry", fallback: "이전 비밀정보 삭제 다시 시도")) {
                         do { try RemovedProviderCleanup.run() }
                         catch { errorMessage = copy("openai.cleanup.error", fallback: "이전 제공자의 비밀정보를 안전하게 삭제하지 못했습니다. 다시 시도해 주세요.") }
@@ -148,9 +194,14 @@ struct OpenAISettingsView: View {
                 }
             }
         }
+        .appFormStyle()
         .navigationTitle(copy("openai.title", fallback: "OpenAI · ChatGPT"))
         .navigationBarTitleDisplayMode(.inline)
         .disabled(isDeletingConnections)
+        .task {
+            guard regionalAvailability.isAvailable else { return }
+            connection.refreshCredentials()
+        }
         .confirmationDialog(copy("openai.connections.deleteConfirmation", fallback: "이 기기의 모든 ChatGPT 연결 기록과 전송 동의를 지울까요?"), isPresented: $confirmDeleteConnections, titleVisibility: .visible) {
             Button(copy("openai.connections.deleteAll", fallback: "연결 기록 모두 삭제"), role: .destructive) {
                 resetConnectionCheck()
@@ -175,7 +226,7 @@ struct OpenAISettingsView: View {
         .onChange(of: connection.sessionGeneration) { _, _ in
             resetConnectionCheck()
         }
-        .onChange(of: SettingsStore.betaProviderEnabled(.openAI)) { _, enabled in
+        .onChange(of: providerEnabled) { _, enabled in
             if !enabled { resetConnectionCheck() }
         }
         .onChange(of: connection.isSigningIn) { _, isSigningIn in
@@ -192,19 +243,29 @@ struct OpenAISettingsView: View {
     }
 
     private func connect(newAccount: Bool) {
+        guard regionalAvailability.isAvailable else { return }
         resetConnectionCheck()
         connectionTask?.cancel()
         connectionTask = Task {
-            do { try await connection.signIn(newAccount: newAccount) }
-            catch is CancellationError { }
-            catch { errorMessage = OpenAIViewCopy.errorMessage(error) }
+            do {
+                try await connection.signIn(newAccount: newAccount)
+                try Task.checkCancellation()
+                guard regionalAvailability.isAvailable, connection.activeProfile != nil else { return }
+                settings.setBetaProvider(.openAI, enabled: true)
+            } catch is CancellationError {
+            } catch {
+                if !Task.isCancelled, regionalAvailability.isAvailable {
+                    errorMessage = OpenAIViewCopy.errorMessage(error)
+                }
+            }
         }
     }
 
     private var canTestConnection: Bool {
-        SettingsStore.betaProviderEnabled(.openAI)
+        regionalAvailability.isAvailable
             && connection.activeProfile != nil
             && connection.hasPlanPermission
+            && !connection.needsLocalReauthorization
             && !connection.isSigningIn
             && !isDeletingConnections
             && connectionCheckID == nil
@@ -227,16 +288,14 @@ struct OpenAISettingsView: View {
                 let model = try await OpenAIProviderService().verifySubscriptionConnection()
                 try Task.checkCancellation()
                 guard connectionCheckID == checkID,
-                      connection.sessionGeneration == generation,
-                      SettingsStore.betaProviderEnabled(.openAI) else { return }
+                      connection.sessionGeneration == generation else { return }
                 verifiedModel = model
             } catch is CancellationError {
             } catch {
                 guard !Task.isCancelled,
                       connectionCheckID == checkID,
-                      connection.sessionGeneration == generation,
-                      SettingsStore.betaProviderEnabled(.openAI) else { return }
-                connectionCheckError = OpenAIViewCopy.errorMessage(error)
+                      connection.sessionGeneration == generation else { return }
+                connectionCheckError = OpenAIViewCopy.connectionCheckErrorMessage(error)
             }
         }
     }
@@ -255,9 +314,89 @@ struct OpenAISettingsView: View {
     }
 }
 
+private struct OpenAIModelCatalogSection: View {
+    @ObservedObject var connection: OpenAIConnection
+    @State private var models: [OpenAIAvailableModel] = []
+    @State private var loadedGeneration: UUID?
+    @State private var errorMessage: String?
+    @State private var isLoading = false
+    @State private var revision = 0
+
+    private struct RequestID: Hashable {
+        let generation: UUID
+        let revision: Int
+    }
+
+    var body: some View {
+        if connection.activeProfile != nil, connection.hasPlanPermission, !connection.needsLocalReauthorization {
+            Section {
+                if isLoading || loadedGeneration != connection.sessionGeneration {
+                    ProgressView(copy("openai.models.loading", "모델 목록 확인 중…"))
+                } else if let errorMessage {
+                    Text(errorMessage).font(.footnote).foregroundStyle(.orange)
+                } else if models.isEmpty {
+                    Text(copy("openai.models.empty", "표시할 수 있는 모델이 없습니다."))
+                        .font(.footnote).foregroundStyle(.secondary)
+                } else {
+                    ForEach(models) { model in
+                        VStack(alignment: .leading, spacing: AppTheme.Spacing.compact) {
+                            Text(model.displayName)
+                            if model.displayName != model.id {
+                                Text(model.id).font(.footnote.monospaced()).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+                Button(copy("openai.models.refresh", "모델 목록 새로고침")) { revision += 1 }
+                    .disabled(isLoading || connection.isSigningIn)
+                    .accessibilityIdentifier("openai.refreshModels")
+            } header: {
+                Text(copy("openai.models.section", "이 계정에서 제공하는 모델"))
+                    .accessibilityIdentifier("openai.modelCatalog")
+            } footer: {
+                VStack(alignment: .leading, spacing: AppTheme.Spacing.compact) {
+                    Text(copy("openai.models.notice", "연결된 계정의 목록만 조회하며 추론이나 저장된 앱 데이터 전송을 하지 않습니다. 목록에 있다는 것이 모든 API 사용 권한을 뜻하지는 않습니다."))
+                    Text(copy("openai.models.subscriptionCapabilities", AppLanguage.current == .english
+                        ? "ChatGPT plan usage supports eligible Responses API requests. This subscription flow does not support audio/video input or the transcription API, including speaker diarization. A listed model does not grant access to these capabilities."
+                        : "ChatGPT 요금제로 지원 대상 Responses API 요청을 사용할 수 있습니다. 이 구독 연결은 음성·영상 입력이나 화자 분리를 포함한 전사 API를 지원하지 않습니다. 모델 목록에 표시되어도 이러한 기능의 사용 권한이 부여되지는 않습니다."))
+                }
+                .font(.footnote)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+            .task(id: RequestID(generation: connection.sessionGeneration, revision: revision)) {
+                await loadModels()
+            }
+        }
+    }
+
+    private func loadModels() async {
+        let generation = connection.sessionGeneration
+        loadedGeneration = generation
+        models = []
+        errorMessage = nil
+        isLoading = true
+        defer {
+            if !Task.isCancelled, connection.sessionGeneration == generation { isLoading = false }
+        }
+        do {
+            let available = try await OpenAIProviderService().availableModels()
+            guard !Task.isCancelled, connection.sessionGeneration == generation else { return }
+            models = available
+        } catch {
+            guard !Task.isCancelled, connection.sessionGeneration == generation else { return }
+            errorMessage = OpenAIViewCopy.errorMessage(error)
+        }
+    }
+
+    private func copy(_ key: String, _ fallback: String) -> String {
+        OpenAIViewCopy.copy(key, fallback: fallback)
+    }
+}
+
 struct OpenAIConsentSection: View {
     let scope: OpenAIDataScope
     @AppStorage private var consent: Bool
+    @ObservedObject private var regionalAvailability = OpenAIRegionalAvailability.shared
 
     init(scope: OpenAIDataScope) {
         self.scope = scope
@@ -265,14 +404,18 @@ struct OpenAIConsentSection: View {
     }
 
     var body: some View {
-        Section {
-            Toggle(title, isOn: $consent)
-                .accessibilityIdentifier("openai.consent.\(scope.rawValue)")
-        } footer: {
-            Text(explanation)
-        }
-        .onChange(of: consent) { _, enabled in
-            if !enabled { OpenAIRequestRegistry.shared.cancel(scope: scope) }
+        if regionalAvailability.isAvailable {
+            Section {
+                Toggle(title, isOn: $consent)
+                    .accessibilityIdentifier("openai.consent.\(scope.rawValue)")
+            } footer: {
+                Text(explanation)
+                    .font(.footnote)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .onChange(of: consent) { _, enabled in
+                if !enabled { OpenAIRequestRegistry.shared.cancel(scope: scope) }
+            }
         }
     }
 
@@ -288,7 +431,7 @@ struct OpenAIConsentSection: View {
     private var explanation: String {
         switch scope {
         case .tasks:
-            copy("openai.consent.tasks.explanation", fallback: "일반 할 일의 제목·메모·마감·예상 시간과 캘린더의 가용 시간을 OpenAI로 보냅니다. 별도 캘린더 이벤트 컨텍스트는 제목 대신 Busy와 시간 구간만 포함하지만, 외부 캘린더에서 가져와 확정한 할 일의 제목·메모는 이 동의 범위에 포함됩니다. 메일·회의 출처 할 일은 자동 정렬에서 항상 제외하며, 페르소나는 별도 동의가 있을 때만 포함됩니다.")
+            copy("openai.consent.tasks.explanation", fallback: "일반 할 일의 제목·메모·마감·예상 시간과 캘린더의 가용 시간을 OpenAI로 보냅니다. 별도 캘린더 이벤트 컨텍스트는 제목 대신 Busy와 시간 구간만 포함하지만, 외부 캘린더에서 가져와 확정한 할 일의 제목·메모는 이 동의 범위에 포함됩니다. 메일·회의 출처 및 건강 기록에서 생성한 할 일은 자동 정렬에서 항상 제외하며, 페르소나는 별도 동의가 있을 때만 포함됩니다.")
         case .email:
             copy("openai.consent.email.explanation", fallback: "메일 상세에서 직접 외부 분석을 요청한 메일의 제목과 본문을 OpenAI로 보냅니다. 받은편지함 자동 수집·분석은 계속 기기 내에서 처리합니다. 원문·기존 로컬 요약은 덮어쓰지 않습니다.")
         case .routines:
@@ -303,10 +446,40 @@ struct OpenAIConsentSection: View {
     }
 }
 
+struct RegionalAnalysisUnavailableView: View {
+    var body: some View {
+        ContentUnavailableView {
+            Label {
+                Text(AppLanguage.localized("analysis.regional.unavailable.title", defaultValue: "분석을 사용할 수 없습니다", language: .current))
+            } icon: {
+                Image(systemName: "globe")
+            }
+        } description: {
+            Text(AppLanguage.localized(
+                "analysis.regional.unavailable.message",
+                defaultValue: "현재 App Store 국가 또는 지역에서는 외부 분석을 사용할 수 없습니다. 기기 내 기능은 계속 사용할 수 있습니다.",
+                language: .current
+            ))
+        }
+        .appScreenStyle()
+        .navigationTitle(AppLanguage.localized("analysis.regional.navigationTitle", defaultValue: "분석", language: .current))
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
 /// View-owned localization for OpenAI settings and remote-analysis error presentation.
 enum OpenAIViewCopy {
     static func copy(_ key: String, fallback: String) -> String {
         AppLanguage.localized(key, defaultValue: fallback, language: .current, comment: "OpenAI view copy.")
+    }
+
+    static func connectionCheckErrorMessage(_ error: Error) -> String {
+        if (error as? OpenAIRequestError) == .invalidResponse {
+            return copy("openai.connection.check.invalidResponse", fallback: AppLanguage.current == .english
+                ? "OpenAI returned an invalid connection-check response. Inference access has not been verified. No stored app data was sent."
+                : "OpenAI가 올바르지 않은 연결 확인 응답을 반환했습니다. 추론 사용 권한은 확인되지 않았습니다. 저장된 앱 데이터는 전송하지 않았습니다.")
+        }
+        return errorMessage(error)
     }
 
     static func errorMessage(_ error: Error) -> String {

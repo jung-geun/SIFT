@@ -1,0 +1,18 @@
+{
+  "upstream": "https://github.com/ml-explore/mlx-swift",
+  "version": "0.32.3",
+  "revision": "19601207e9a0de51e03ee6ec0c3c5f3784275075",
+  "localChanges": [
+    "Package.swift: macOS and iOS minimum deployment targets raised to 26 to match SIFT and select a Metal language standard supporting upstream C++17 shader syntax.",
+    "Cmlx: preserve full-width sizes, offsets and signed strides across operations, traversal, BLAS and Metal dispatch; use sift_checked_cast at narrower host/kernel ABI boundaries and retain the actual uint32/int64 generated-shader size contracts.",
+    "Cmlx: honor small-power threadgroup budgets; explicitly preserve bfloat copy assignment and remove unused base-method parameter names, with matching framework headers.",
+    "MLX: preserve caller isolation in async random/device/stream task-local scopes using nonisolated(nonsending); remove an unused mask-fill binding.",
+    "MLXNN: preserve both unset and explicitly nil Optional property-wrapper states while retaining non-Optional initialization failures; remove an exhaustive-switch dead default."
+  ],
+  "omittedTooling": [
+    ".git",
+    ".build",
+    "default.profraw"
+  ],
+  "license": "LICENSE"
+}

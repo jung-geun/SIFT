@@ -6,7 +6,13 @@ struct MeetingView: View {
     @Environment(\.userVocabulary) private var userVocabulary
     @Query(filter: #Predicate<MeetingRecord> { $0.parentMeetingID == nil }, sort: \MeetingRecord.updatedAt, order: .reverse) private var meetings: [MeetingRecord]
     @StateObject private var coordinator = MeetingCaptureCoordinator()
-    @State private var languageTag = AppLanguage.current.speechLanguageTag
+    @ObservedObject private var languagePreferences = MeetingLanguagePreferences.shared
+    @State private var appleLanguages: [MeetingLanguageOption] = []
+    @State private var recordingLanguageOptions: [MeetingLanguageOption] = []
+    @State private var summaryLanguageOptions: [MeetingLanguageOption] = []
+    @State private var recordingLanguages: (source: String, summary: String, automatic: Bool)?
+    @ObservedObject private var whisperModel = MeetingWhisperModelController.shared
+    @ObservedObject private var localModel = OnDeviceLLMService.shared
     @State private var consentAccepted = false
     @State private var microphoneRequested = true
     @State private var appAudioRequested = false
@@ -34,24 +40,53 @@ struct MeetingView: View {
     @ObservedObject private var settings = SettingsStore.shared
     @State private var meetingScreenVisible = false
 
+
     private var showsSourceControlsBeforeRecording: Bool {
         switch coordinator.status {
         case .recording, .paused, .stopping, .finalizingTranscript, .extractingActions: false
         default: true
         }
     }
+    private var automaticDetectionAvailable: Bool {
+        settings.meetingAdvancedTranscriptionEnabled && whisperModel.isInstalled
+    }
+    private var languageTag: String {
+        languagePreferences.sourceSelection(options: recordingLanguageOptions)
+    }
+
+    private var summaryLanguageTag: String {
+        languagePreferences.summarySelection(options: summaryLanguageOptions)
+    }
+
+    private var automaticLanguageDetection: Bool { languagePreferences.automaticLanguageDetection }
+
+    private func refreshRecordingLanguageOptions() {
+        recordingLanguageOptions = MeetingTranscriptionLanguages.options(apple: appleLanguages,
+            whisperAvailable: automaticDetectionAvailable)
+    }
+
+    private func refreshSummaryLanguageOptions() {
+        summaryLanguageOptions = MeetingSummaryLanguages.available
+    }
+
 
     var body: some View {
         NavigationStack {
             List {
-                Section(copy("meeting.section.new", fallback: "새 회의")) {
-                    Picker(copy("meeting.language.label", fallback: "언어"), selection: $languageTag) {
-                        ForEach(AppLanguage.supported) { language in
-                            Text(language.displayName).tag(language.speechLanguageTag)
-                        }
+                Section {
+                    MeetingLanguagePicker(title: MeetingLanguageCopy.sourceTitle,
+                        selection: Binding(get: { languageTag }, set: { languagePreferences.selectSource($0) }),
+                        options: recordingLanguageOptions, identifier: "meeting.languages.source",
+                        automaticLanguageDetection: Binding(get: { automaticLanguageDetection },
+                            set: { languagePreferences.selectAutomaticDetection($0) }),
+                        automaticDetectionAvailable: automaticDetectionAvailable)
+                        .disabled(!showsSourceControlsBeforeRecording || sourceChangeInProgress || finalizingCaptureID != nil)
+                    if !summaryLanguageOptions.isEmpty {
+                        MeetingLanguagePicker(title: MeetingLanguageCopy.summaryTitle,
+                            selection: Binding(get: { summaryLanguageTag }, set: { languagePreferences.selectSummary($0) }),
+                            options: summaryLanguageOptions, identifier: "meeting.languages.summary")
+                            .disabled(!showsSourceControlsBeforeRecording || sourceChangeInProgress || finalizingCaptureID != nil)
                     }
-
-                    .pickerStyle(.menu)
 
                     settingToggle(
                         title: "녹음 고지 및 동의 확인",
@@ -86,6 +121,22 @@ struct MeetingView: View {
                                 .accessibilityIdentifier("meeting.diarization.prewarm.state")
                         }
                     }
+                } header: {
+                    Text(copy("meeting.section.new", fallback: "새 회의"))
+                } footer: {
+                    VStack(alignment: .leading, spacing: AppTheme.Spacing.compact) {
+                        MeetingAIAccuracyNotice()
+                        Text(MeetingLanguageCopy.text("meeting.languages.engineNotice", "Apple languages depend on this device. Enable and install Whisper in Settings → Beta features for additional recording languages; those languages are transcribed after recording stops. Summary languages also depend on the selected provider and downloaded model."))
+                        if automaticLanguageDetection {
+                            MeetingAutomaticLanguageNotice()
+                            if !automaticDetectionAvailable {
+                                Text(MeetingLanguageCopy.automaticRequiresWhisper)
+                            }
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 }
 
                 if processingReporter.phase != .idle {
@@ -93,7 +144,7 @@ struct MeetingView: View {
                         MeetingProcessingStatusView(
                             phase: processingReporter.phase,
                             showsTranscription: processingReporter.includesTranscription,
-                            offlineTranscription: settings.meetingAdvancedTranscriptionEnabled,
+                            offlineTranscription: recordingLanguages?.automatic == true || settings.meetingAdvancedTranscriptionEnabled,
                             transcriptionProgress: processingReporter.transcriptionProgress
                         )
                     }
@@ -141,7 +192,7 @@ struct MeetingView: View {
                     }
                 }
 
-                if coordinator.status == .recording || coordinator.status == .paused || coordinator.status == .stopping {
+                if coordinator.status == .recording || coordinator.status == .paused || coordinator.status == .stopping || coordinator.status == .finalizingTranscript {
                     Section(copy("meeting.section.recording", fallback: "녹음 중")) {
                         HStack {
                             Circle().fill(AppTheme.destructive).frame(width: 10, height: 10)
@@ -154,8 +205,9 @@ struct MeetingView: View {
                             : "소스별로 원음과 전사·화자를 따로 저장합니다. 앱·화면 오디오 안에는 여러 참가자의 소리가 섞일 수 있으며 화자 ID는 해당 트랙 안에서만 사용합니다."))
                             .font(.caption).foregroundStyle(.secondary)
                         ForEach(coordinator.liveTracks) { track in
-                            liveTrackTranscript(track)
+                            liveTrackStatus(track)
                         }
+                        liveConversationTranscript
                     }
                 }
                 if coordinator.status == .recording || coordinator.status == .paused {
@@ -184,6 +236,7 @@ struct MeetingView: View {
                     }
                 }
             }
+            .appListStyle()
             .navigationTitle(copy("meeting.navigationTitle", fallback: "회의"))
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
@@ -270,7 +323,7 @@ struct MeetingView: View {
                         defer { importingMeetingID = nil }
                         do {
                             let outcome = try await MeetingOfflineTranscriptionOrchestrator().run(
-                                record: record, context: modelContext, languageTag: record.languageTag,
+                                record: record, context: modelContext,
                                 reporter: processingReporter)
                             processingReporter.set(.idle)
                             guard outcome == .committed else { return }
@@ -286,6 +339,21 @@ struct MeetingView: View {
             }
         }
         .onAppear { meetingScreenVisible = true }
+        .task {
+            refreshSummaryLanguageOptions()
+            appleLanguages = await MeetingTranscriptionLanguages.apple()
+            await whisperModel.refresh()
+            refreshRecordingLanguageOptions()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UserCloudSyncPolicy.didRestoreNotification)) { _ in
+            guard !MeetingCaptureCoordinator.hasActiveCaptureForCloudSync else { return }
+            Task { await persistPendingCaptureRecoveries() }
+        }
+        .onChange(of: settings.meetingAdvancedTranscriptionEnabled) { _, _ in refreshRecordingLanguageOptions() }
+        .onChange(of: whisperModel.isInstalled) { _, _ in refreshRecordingLanguageOptions() }
+        .onChange(of: localModel.loadedModelIdentifier) { _, _ in refreshSummaryLanguageOptions() }
+        .onChange(of: localModel.modelID) { _, _ in refreshSummaryLanguageOptions() }
+        .onChange(of: SettingsStore.betaSelectedProvider()) { _, _ in refreshSummaryLanguageOptions() }
         .onDisappear {
             cancelPendingStart()
             meetingScreenVisible = false
@@ -329,16 +397,27 @@ struct MeetingView: View {
         return record
     }
 
-    @ViewBuilder private func liveTrackTranscript(_ track: MeetingLiveCaptureTrack) -> some View {
+    @ViewBuilder private func liveTrackStatus(_ track: MeetingLiveCaptureTrack) -> some View {
         let profiles = MeetingSpeakerLabelFormatter.liveProfiles(track.liveSpeakerOrdinals)
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: AppTheme.Spacing.compact) {
             HStack {
-                Text(track.sourceLabel ?? track.sourceKind.displayName()).font(.headline)
+                Text(track.conversationSourceLabel).font(.headline)
                 Spacer()
                 Text(duration(track.recordedAudioSamples * 1_000 / MeetingMediaTimeline.sampleRate))
                     .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
             }
             .accessibilityIdentifier("meeting.audioTrack.live.\(track.meetingID)")
+            if track.isDetectingLanguage {
+                Text(MeetingLanguageCopy.text("meeting.languages.waitingForDetection", "Waiting for this source's language estimate · about 10 seconds of audio needed"))
+                    .font(.caption).foregroundStyle(.secondary)
+                    .accessibilityIdentifier("meeting.audioTrack.language.waiting.\(track.meetingID)")
+            } else if let detectedLanguageTag = track.detectedLanguageTag {
+                Text(String(format: MeetingLanguageCopy.text("meeting.languages.detected", "Detected language: %@"),
+                    locale: AppLanguage.current.locale,
+                    MeetingLanguageOption(id: detectedLanguageTag).displayName(locale: AppLanguage.current.locale)))
+                    .font(.caption).foregroundStyle(.secondary)
+                    .accessibilityIdentifier("meeting.audioTrack.language.detected.\(track.meetingID)")
+            }
             if let warning = track.liveTranscriptionWarning {
                 Text(warning).font(.caption).foregroundStyle(AppTheme.warning)
             }
@@ -365,30 +444,44 @@ struct MeetingView: View {
                 Text(copy("meeting.audioTrack.waitingForTranscript", fallback: AppLanguage.current == .english
                     ? "Waiting for speech from this source" : "이 소스의 음성 전사 대기 중"))
                     .font(.caption).foregroundStyle(.secondary)
-            } else {
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 10) {
-                            ForEach(track.liveTranscriptRows) { row in
-                                VStack(alignment: .leading, spacing: 4) {
-                                    if coordinator.recordingDiarizationEnabled {
-                                        Text(MeetingSpeakerLabelFormatter.label(for: row.speakerIDs, profiles: profiles, state: .provisional))
-                                            .font(.caption).foregroundStyle(.secondary)
-                                    }
-                                    Text(row.text).textSelection(.enabled)
+            }
+        }
+    }
+
+    private var liveConversationTranscript: some View {
+        let timeline = MeetingConversationTimeline.live(coordinator.liveTracks)
+        let tracks = Dictionary(uniqueKeysWithValues: coordinator.liveTracks.map { ($0.meetingID, $0) })
+        let profiles = tracks.mapValues { MeetingSpeakerLabelFormatter.liveProfiles($0.liveSpeakerOrdinals) }
+        return ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 16) {
+                    ForEach(timeline.rows) { row in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(tracks[row.id.trackID]?.conversationSourceLabel ?? "")
+                                .font(.subheadline.weight(.medium)).foregroundStyle(.primary)
+                            HStack(alignment: .firstTextBaseline) {
+                                Text(MeetingSpeakerLabelFormatter.label(for: row.speakerIDs,
+                                    profiles: profiles[row.id.trackID] ?? [:], state: .provisional))
+                                Spacer()
+                                if let sample = row.startSample {
+                                    Text(duration(sample * 1_000 / MeetingMediaTimeline.sampleRate)).monospacedDigit()
                                 }
-                                .id(row.id)
-                                .accessibilityElement(children: .combine)
-                                .accessibilityIdentifier("meeting.liveTranscript.\(track.meetingID).\(row.id)")
                             }
+                            .font(.caption).foregroundStyle(.secondary)
+                            Text(row.text).textSelection(.enabled)
                         }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .frame(maxHeight: liveTranscriptViewportHeight)
-                    .onChange(of: track.liveTranscriptRows.last) { _, row in
-                        if let row { proxy.scrollTo(row.id, anchor: .bottom) }
+                        .id(row.id)
+                        .accessibilityElement(children: .combine)
+                        .accessibilityIdentifier("meeting.liveTranscript.\(row.id.trackID).\(row.id.localID)")
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxHeight: liveTranscriptViewportHeight)
+            .clipped()
+            .accessibilityIdentifier("meeting.conversation.live")
+            .onChange(of: timeline.rows.last) { _, row in
+                if let row { proxy.scrollTo(row.id, anchor: .bottom) }
             }
         }
     }
@@ -489,6 +582,7 @@ struct MeetingView: View {
                 .font(.caption).foregroundStyle(.secondary)
         }
 
+        if appAudioAvailable {
         Toggle(copy(
             {
                 #if targetEnvironment(macCatalyst)
@@ -520,16 +614,11 @@ struct MeetingView: View {
                     } else { appAudioRequested = requested }
                 }
                ))
-            .disabled(!enabled || !consentAccepted || !appAudioAvailable)
+            .disabled(!enabled || !consentAccepted)
             .accessibilityIdentifier("meeting.source.app.toggle")
+        }
 
-        if !appAudioAvailable {
-            Text(copy("meeting.source.app.unavailable", fallback: AppLanguage.current == .english
-                ? "App audio requires supported iOS 27 hardware or Mac Catalyst system sharing. Microphone recording remains available."
-                : "앱 오디오는 지원되는 iOS 27 실기기 또는 Mac Catalyst 화면 공유가 필요합니다. 마이크 녹음은 계속 사용할 수 있습니다."))
-                .font(.caption).foregroundStyle(.secondary)
-                .accessibilityIdentifier("meeting.source.app.availability")
-        } else if active {
+        if appAudioAvailable && active {
             #if targetEnvironment(macCatalyst)
             ForEach(coordinator.appAudioSources) { source in
                 HStack(alignment: .top) {
@@ -566,7 +655,7 @@ struct MeetingView: View {
                 .font(.caption).foregroundStyle(.secondary)
                 .accessibilityIdentifier("meeting.source.app.state")
             #endif
-        } else {
+        } else if appAudioAvailable {
             #if targetEnvironment(macCatalyst)
             Text(copy("meeting.source.app.selectionOnStart", fallback: AppLanguage.current == .english
                 ? "The system picker requests a source when recording starts; no screen video is saved. Use headphones to limit microphone bleed."
@@ -582,25 +671,18 @@ struct MeetingView: View {
         if active {
             HStack {
                 Text(copy("meeting.source.microphone.level", fallback: AppLanguage.current == .english ? "Microphone level" : "마이크 입력 레벨"))
-                    .font(.caption2)
+                    .font(.caption)
                 ProgressView(value: min(1, sqrt(coordinator.microphoneRMS)))
                     .accessibilityIdentifier("meeting.source.microphone.level")
             }
             if appAudioAvailable {
                 HStack {
                     Text(copy("meeting.source.app.level", fallback: AppLanguage.current == .english ? "App audio level" : "앱 오디오 입력 레벨"))
-                        .font(.caption2)
+                        .font(.caption)
                     ProgressView(value: min(1, sqrt(coordinator.appAudioRMS)))
                         .accessibilityIdentifier("meeting.source.app.level")
                 }
             }
-            Text(String(format: copy("meeting.source.buffers", fallback: AppLanguage.current == .english
-                ? "Buffers received: microphone %lld · app %lld (silent buffers also count)"
-                : "수신 버퍼: 마이크 %lld · 앱 %lld (무음 버퍼도 포함)"),
-                        locale: AppLanguage.current.locale,
-                        coordinator.microphoneAudioBufferCount, coordinator.appAudioBufferCount))
-                .font(.caption2).foregroundStyle(.secondary)
-                .accessibilityIdentifier("meeting.source.buffers")
         }
     }
 
@@ -658,14 +740,19 @@ struct MeetingView: View {
                 .accessibilityIdentifier("meeting.action.startRecording")
                 .disabled(sourceChangeInProgress || finalizingCaptureID != nil || importingMeetingID != nil
                           || processingReporter.isBusy || diarizingMeetingID != nil || !consentAccepted
+                          || (automaticLanguageDetection ? !automaticDetectionAvailable : languageTag.isEmpty)
                           || (!microphoneRequested && !appAudioRequested))
         }
     }
 
     private func startRecording() {
         guard meetingScreenVisible, consentAccepted, pendingStartTask == nil,
-              finalizingCaptureID == nil, !sourceChangeInProgress, microphoneRequested || appAudioRequested else { return }
+              finalizingCaptureID == nil, !sourceChangeInProgress, microphoneRequested || appAudioRequested,
+              automaticLanguageDetection ? automaticDetectionAvailable : !languageTag.isEmpty else { return }
         sourceChangeInProgress = true
+        let chosenLanguages = (source: languageTag.isEmpty ? summaryLanguageTag : languageTag,
+                               summary: summaryLanguageTag, automatic: automaticLanguageDetection)
+        recordingLanguages = chosenLanguages
         let id = UUID().uuidString.lowercased()
         interruptedSpeakerMeetingID = nil
         currentMeetingID = id
@@ -676,11 +763,27 @@ struct MeetingView: View {
         }
         pendingStartTask = Task {
             do {
+                let appleSupported = chosenLanguages.automatic ? false
+                    : await MeetingTranscriptionLanguages.supportsApple(chosenLanguages.source)
+                let offlineInstalled = await MeetingWhisperModelStore.shared.isInstalled()
+                let offlineEnabled = settings.meetingAdvancedTranscriptionEnabled && offlineInstalled
+                let deferred = !chosenLanguages.automatic && !appleSupported && offlineEnabled
+                if chosenLanguages.automatic {
+                    guard offlineEnabled else {
+                        coordinator.reportFailure(MeetingLanguageCopy.automaticRequiresWhisper)
+                        throw CancellationError()
+                    }
+                } else {
+                    guard appleSupported || deferred else { throw MeetingTranscriptionError.unsupportedLocale(chosenLanguages.source) }
+                }
+                try Task.checkCancellation()
                 try await coordinator.start(
-                    meetingID: id, languageTag: languageTag,
+                    meetingID: id, languageTag: chosenLanguages.source,
                     microphoneEnabled: microphoneRequested,
                     appAudioEnabled: appAudioRequested,
-                    consentConfirmed: consentAccepted
+                    consentConfirmed: consentAccepted, summaryLanguageTag: chosenLanguages.summary,
+                    deferTranscription: deferred,
+                    automaticLanguageDetection: chosenLanguages.automatic
                 )
                 if Task.isCancelled || !consentAccepted || !meetingScreenVisible {
                     await coordinator.cancel()
@@ -731,6 +834,8 @@ struct MeetingView: View {
 
     private func stopRecording(meetingID id: String) async {
         let captureEnabledAtStart = coordinator.recordingDiarizationEnabled
+        let deferred = coordinator.recordingDefersTranscription
+        let automatic = recordingLanguages?.automatic == true
         defer { releaseCapture(id) }
         let parent: MeetingRecord
         let records: [MeetingRecord]
@@ -738,8 +843,10 @@ struct MeetingView: View {
             let artifact = try await coordinator.stopCapture()
             guard currentMeetingID == id, artifact.meetingID == id else { return }
             parent = try MeetingInitialCapturePersister.persist(
-                artifact: artifact, languageTag: languageTag,
-                timezoneIdentifier: TimeZone.current.identifier, in: modelContext
+                artifact: artifact, languageTag: recordingLanguages?.source ?? languageTag,
+                timezoneIdentifier: TimeZone.current.identifier,
+                summaryLanguageTag: recordingLanguages?.summary ?? summaryLanguageTag,
+                deferredTranscription: deferred || automatic, automaticLanguageDetection: automatic, in: modelContext
             )
             records = try MeetingAudioTrackStore.tracks(for: parent, in: modelContext)
         } catch {
@@ -767,6 +874,12 @@ struct MeetingView: View {
         var processable = [MeetingRecord]()
         for record in records {
             guard isCurrent(record), let expectedData = bases[record.meetingID] else { continue }
+            if deferred || automatic {
+                guard record.resultData == expectedData else { continue }
+                clearCaptureRecovery(meetingID: record.meetingID)
+                processable.append(record)
+                continue
+            }
             do {
                 let baseline = try coordinator.transcriptionResult(for: record.meetingID)
                 let failure = coordinator.transcriptionFailure(for: record.meetingID) ?? finalizationFailure
@@ -785,8 +898,13 @@ struct MeetingView: View {
         coordinator.completeFinalization()
 
         let queuedBases = Dictionary(uniqueKeysWithValues: processable.map { ($0.meetingID, $0.persistenceSnapshot()) })
-        let offlineRequested = settings.meetingAdvancedTranscriptionEnabled
-            ? await MeetingWhisperModelStore.shared.isInstalled() : false
+        let offlineRequested: Bool
+        if automatic {
+            offlineRequested = true
+        } else {
+            offlineRequested = (deferred || settings.meetingAdvancedTranscriptionEnabled)
+                ? await MeetingWhisperModelStore.shared.isInstalled() : false
+        }
         // Inference remains bounded: one saved-audio ASR/final-speaker/AI pass at
         // a time, after every live child has released its reservation.
         for record in processable {
@@ -923,27 +1041,26 @@ struct MeetingView: View {
         }
         let offlineRequested = settings.meetingAdvancedTranscriptionEnabled
             ? await MeetingWhisperModelStore.shared.isInstalled() : false
-        if offlineRequested {
-            for id in recoveredIDs {
-                guard !Task.isCancelled else { break }
-                do {
-                    let descriptor = FetchDescriptor<MeetingRecord>(predicate: #Predicate { $0.meetingID == id })
-                    guard let record = try modelContext.fetch(descriptor).first,
-                          record.status == .transcriptFinalizationFailed,
-                          record.persistenceSnapshot() == queuedRecoveryBases[id] else { continue }
-                    let outcome = try await MeetingOfflineTranscriptionOrchestrator().run(
-                        record: record, context: modelContext, expectedSource: queuedRecoveryBases[id],
-                        reporter: processingReporter)
-                    processingReporter.set(.idle)
-                    guard outcome == .committed else { continue }
-                    try MeetingAudioTrackStore.refreshParent(of: record, in: modelContext)
-                    await processCapturedTrack(record, captureEnabledAtStart: settings.effectiveMeetingDiarizationEnabled)
-                    try MeetingAudioTrackStore.refreshParent(of: record, in: modelContext)
-                } catch {
-                    processingReporter.reset()
-                    if Task.isCancelled || error is CancellationError { break }
-                    coordinator.reportFailure(copy("meeting.error.recoverySave", fallback: "복구한 회의 저장에 실패했습니다. 저장 재시도"))
-                }
+        for id in recoveredIDs {
+            guard !Task.isCancelled else { break }
+            do {
+                let descriptor = FetchDescriptor<MeetingRecord>(predicate: #Predicate { $0.meetingID == id })
+                guard let record = try modelContext.fetch(descriptor).first,
+                      offlineRequested || record.automaticLanguageDetection,
+                      record.status == .transcriptFinalizationFailed,
+                      record.persistenceSnapshot() == queuedRecoveryBases[id] else { continue }
+                let outcome = try await MeetingOfflineTranscriptionOrchestrator().run(
+                    record: record, context: modelContext, expectedSource: queuedRecoveryBases[id],
+                    reporter: processingReporter)
+                processingReporter.set(.idle)
+                guard outcome == .committed else { continue }
+                try MeetingAudioTrackStore.refreshParent(of: record, in: modelContext)
+                await processCapturedTrack(record, captureEnabledAtStart: settings.effectiveMeetingDiarizationEnabled)
+                try MeetingAudioTrackStore.refreshParent(of: record, in: modelContext)
+            } catch {
+                processingReporter.reset()
+                if Task.isCancelled || error is CancellationError { break }
+                coordinator.reportFailure(copy("meeting.error.recoverySave", fallback: "복구한 회의 저장에 실패했습니다. 저장 재시도"))
             }
         }
         if !scan.unreadableMarkerNames.isEmpty {

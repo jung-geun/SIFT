@@ -291,6 +291,17 @@ struct TodoPriorityScopeTests {
         #expect(applied === todo)
         #expect(todo.computedPriorityScore == 0.73)
     }
+
+    @Test("Automatic analysis cannot assign health notifications or erase explicit reminders", arguments: ["", "health:workout:day", "HEALTH:medication:day"])
+    func healthNotificationsRequireIndividualChoice(sourceRef: String) throws {
+        let todo = Todo(title: "Private routine", sourceRef: sourceRef, reminderOffsets: [300])
+        let result = PriorityResult(todoID: todo.id, score: 0.9, reason: "Due soon", detail: "",
+            needsNotification: true, recommendedTime: nil, personaFit: false, engine: .heuristic,
+            axes: AxisScores(deadlineProximity: 5, urgency: 5, importance: 5, chaining: 2))
+        _ = TodoPriorityScope.apply(result, in: [todo])
+        #expect(todo.aiNeedsNotification == sourceRef.isEmpty)
+        #expect(todo.reminderOffsets == [300])
+    }
 }
 
 @Suite("AnalysisHeuristicTests")

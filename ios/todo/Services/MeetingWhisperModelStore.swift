@@ -11,6 +11,9 @@ actor MeetingWhisperModelStore {
     private let session: URLSession
     private var installing = false
     private var leases = 0
+    private var inferenceRunning = false
+    private var inferenceWaiters: [(id: UUID, continuation: CheckedContinuation<Bool, Never>)] = []
+    private var loadedModel: MeetingWhisperKit?
 
     init(root: URL? = nil, session: URLSession = .shared) {
         self.root = root ?? FileManager.default
@@ -36,6 +39,13 @@ actor MeetingWhisperModelStore {
     func withVerifiedModel<T: Sendable>(
         _ body: @Sendable (URL, URL) async throws -> T
     ) async throws -> T {
+        try beginVerifiedLease()
+        defer { leases -= 1 }
+        return try await body(installed.appendingPathComponent("model", isDirectory: true),
+                              installed.appendingPathComponent("tokenizer", isDirectory: true))
+    }
+
+    private func beginVerifiedLease() throws {
         guard !installing else { throw MeetingWhisperModelError.operationInProgress }
         guard FileManager.default.fileExists(atPath: installed.path) else {
             throw MeetingWhisperModelError.notInstalled
@@ -48,29 +58,82 @@ actor MeetingWhisperModelStore {
             throw MeetingWhisperModelError.corruptArtifact
         }
         leases += 1
-        defer { leases -= 1 }
-        return try await body(installed.appendingPathComponent("model", isDirectory: true),
-                              installed.appendingPathComponent("tokenizer", isDirectory: true))
     }
 
-    /// Safe inference entrypoint: the tokenizer is parsed from pinned local
-    /// bytes, and WhisperKit is initialized with both download and its own
-    /// tokenizer fallback disabled by supplying the tokenizer up front.
+    /// One model and one decoder consumer at a time, including live detectors.
+    /// Queued source jobs reuse the verified load; the final job unloads it.
+    /// Downloads and the SDK's tokenizer fallback remain disabled.
     func withLoadedModel<T: Sendable>(
-        _ body: @Sendable (WhisperKit) async throws -> T
+        _ body: @Sendable (MeetingWhisperKit) async throws -> T
     ) async throws -> T {
-        try await withVerifiedModel { modelDirectory, tokenizerDirectory in
-            let model = try await MeetingWhisperOfflineLoader.load(
-                modelDirectory: modelDirectory, tokenizerDirectory: tokenizerDirectory
-            )
-            do {
-                let result = try await body(model)
-                await model.unloadModels()
-                return result
-            } catch {
-                await model.unloadModels()
-                throw error
+        guard await acquireInference() else { throw CancellationError() }
+        do {
+            try Task.checkCancellation()
+            let model: MeetingWhisperKit
+            if let loadedModel {
+                model = loadedModel
+            } else {
+                try beginVerifiedLease()
+                do {
+                    model = try await MeetingWhisperOfflineLoader.load(
+                        modelDirectory: installed.appendingPathComponent("model", isDirectory: true),
+                        tokenizerDirectory: installed.appendingPathComponent("tokenizer", isDirectory: true)
+                    )
+                    loadedModel = model
+                } catch {
+                    leases -= 1
+                    throw error
+                }
             }
+            try Task.checkCancellation()
+            let result = try await body(model)
+            try Task.checkCancellation()
+            await finishInference(invalidateModel: false)
+            return result
+        } catch {
+            await finishInference(invalidateModel: true)
+            throw error
+        }
+    }
+
+    private func acquireInference() async -> Bool {
+        guard !Task.isCancelled else { return false }
+        if !inferenceRunning {
+            inferenceRunning = true
+            return true
+        }
+        let id = UUID()
+        let acquired = await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                inferenceWaiters.append((id, continuation))
+            }
+        } onCancel: {
+            Task { await self.cancelInferenceWaiter(id) }
+        }
+        if acquired, Task.isCancelled {
+            await finishInference(invalidateModel: false)
+            return false
+        }
+        return acquired
+    }
+
+    private func cancelInferenceWaiter(_ id: UUID) {
+        guard let index = inferenceWaiters.firstIndex(where: { $0.id == id }) else { return }
+        inferenceWaiters.remove(at: index).continuation.resume(returning: false)
+    }
+
+    private func finishInference(invalidateModel: Bool) async {
+        if invalidateModel || inferenceWaiters.isEmpty, let model = loadedModel {
+            loadedModel = nil
+            await model.unloadModels()
+            leases -= 1
+        }
+        if inferenceWaiters.isEmpty {
+            inferenceRunning = false
+        } else {
+            // Transfer ownership before resuming so a newly arriving source
+            // cannot overtake an older job while the actor is reentrant.
+            inferenceWaiters.removeFirst().continuation.resume(returning: true)
         }
     }
 

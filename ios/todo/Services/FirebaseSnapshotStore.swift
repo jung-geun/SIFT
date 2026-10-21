@@ -292,6 +292,9 @@ enum FirebaseSnapshotStore {
             todo.tags = payload.tags
             todo.calendarEventID = payload.calendarEventID
             todo.calendarEventExternalID = payload.calendarEventExternalID
+            // Device-local EventKit source provenance is deliberately absent
+            // from snapshots. Re-observe a locally selected source before analysis.
+            todo.calendarSourceID = ""
             todo.calendarEventOrigin = payload.calendarEventOrigin ?? ""
             todo.calendarSyncedTitle = payload.calendarSyncedTitle ?? ""
             todo.memoryNotes = payload.memoryNotes

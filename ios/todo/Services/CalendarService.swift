@@ -7,7 +7,7 @@ import SwiftData
 ///
 /// `eventIdentifier`는 기기별이고 SwiftData는 재설치 시 사라질 수 있으므로, 이
 /// 버전 있는 마커가 SIFT가 만든 이벤트를 외부 캘린더 import와 구별하는 기준이다.
-struct CalendarEventMarker: Equatable, Sendable {
+nonisolated struct CalendarEventMarker: Equatable, Sendable {
     enum Entity: String, Sendable, Equatable {
         case todo
         case standaloneEvent = "event"
@@ -75,6 +75,12 @@ struct CalendarEventMarker: Equatable, Sendable {
     }
 }
 
+enum CalendarCompletionAction: String, CaseIterable {
+    case keep
+    case silence
+    case remove
+}
+
 /// EventKit의 반복 일정 변경 범위. `allEvents`는 series master에서 `.futureEvents`
 /// 를 적용해 해당 반복 시리즈 전체를 대상으로 한다.
 enum CalendarRecurrenceScope: Sendable, Equatable {
@@ -101,9 +107,9 @@ final class CalendarService {
         )
     }
     private(set) var isAuthorized = false
-    private var lastStoreRefresh: Date = .distantPast
     private var unresolvedEventIDs = Set<String>()
     private let unresolvedEventIDsLock = NSLock()
+    private var isSyncingCalendarWithTodos = false
 
     private func cachedUnresolvedEventID(_ identifier: String) -> Bool {
         unresolvedEventIDsLock.lock()
@@ -121,6 +127,12 @@ final class CalendarService {
         guard let identifier, !identifier.isEmpty else { return }
         unresolvedEventIDsLock.lock()
         unresolvedEventIDs.remove(identifier)
+        unresolvedEventIDsLock.unlock()
+    }
+
+    private func clearUnresolvedEventIDs() {
+        unresolvedEventIDsLock.lock()
+        unresolvedEventIDs.removeAll(keepingCapacity: true)
         unresolvedEventIDsLock.unlock()
     }
 
@@ -163,7 +175,7 @@ final class CalendarService {
     }
 
     // MARK: - 이벤트 읽기
-    struct CalendarEventSummary: Sendable {
+    nonisolated struct CalendarEventSummary: Sendable {
         let title: String
         let notes: String
         let startDate: Date
@@ -202,7 +214,7 @@ final class CalendarService {
             self.calendarID = calendarID
         }
     }
-    private func summary(for event: EKEvent) -> CalendarEventSummary {
+    nonisolated fileprivate static func summary(for event: EKEvent) -> CalendarEventSummary {
         CalendarEventSummary(
             title: event.title ?? "",
             notes: event.notes ?? "",
@@ -225,8 +237,41 @@ final class CalendarService {
         guard let end = Calendar.current.date(byAdding: .day, value: days, to: start) else { return [] }
         let predicate = store.predicateForEvents(withStart: start, end: end, calendars: nil)
         return store.events(matching: predicate)
-            .map(summary(for:))
+            .map(Self.summary(for:))
             .sorted { $0.startDate < $1.startDate }
+    }
+
+    /// Automatic task analysis is opt-in, independent of calendar visibility/export.
+    /// Never pass an empty EventKit calendar array: it can mean all calendars.
+    func taskAnalysisEvents(days: Int = 30) -> [CalendarEventSummary] {
+        guard isAuthorized else { return [] }
+        let selectedIDs = taskAnalysisCalendarIDs
+        let calendars = store.calendars(for: .event).filter {
+            selectedIDs.contains($0.calendarIdentifier)
+        }
+        guard !calendars.isEmpty else { return [] }
+        let start = Date()
+        guard let end = Calendar.current.date(byAdding: .day, value: days, to: start) else { return [] }
+        let predicate = store.predicateForEvents(withStart: start, end: end, calendars: calendars)
+        return store.events(matching: predicate).map(Self.summary(for:))
+            .filter { Self.isTaskAnalysisEvent($0, selectedCalendarIDs: selectedIDs) }
+            .sorted { $0.startDate < $1.startDate }
+    }
+
+    static func isTaskAnalysisEvent(
+        _ event: CalendarEventSummary, selectedCalendarIDs: Set<String>
+    ) -> Bool {
+        !event.calendarID.isEmpty && selectedCalendarIDs.contains(event.calendarID)
+    }
+
+    static func isTaskAnalysisTodo(_ todo: Todo, selectedCalendarIDs: Set<String>? = nil) -> Bool {
+        guard todo.todoSource == .calendar else { return true }
+        guard !todo.calendarSourceID.isEmpty else { return false }
+        if let selectedCalendarIDs { return selectedCalendarIDs.contains(todo.calendarSourceID) }
+        // Single-model eligibility needs no Set allocation. Batch callers reuse
+        // their selection snapshot; non-calendar tasks never touch defaults.
+        return UserDefaults.standard.stringArray(forKey: taskAnalysisCalendarIDsKey)?
+            .contains(todo.calendarSourceID) == true
     }
 
     /// 반복 일정만 필터링
@@ -234,8 +279,11 @@ final class CalendarService {
         upcomingEvents(days: days).filter { $0.isRecurring }
     }
 
-    private func applySiftMarker(to event: EKEvent, for todo: Todo) {
-        let origin = todo.calendarOrigin
+    static func applySiftMarker(to event: EKEvent, for todo: Todo) {
+        // Health provenance must outlive the local Todo, including an old generic
+        // SIFT origin saved before health-aware markers were introduced.
+        let origin = todo.isHealthRelated && todo.calendarOrigin.isSiftManaged
+            ? CalendarEventOrigin.siftHealth : todo.calendarOrigin
         guard origin.isSiftManaged else { return }
         todo.calendarEventOrigin = origin.rawValue
         event.url = CalendarEventMarker.url(
@@ -262,43 +310,27 @@ final class CalendarService {
               let window = Self.eventWindow(todoStart: todo.startDate, todoDue: todo.dueDate)
         else { return nil }
 
-        // 기존 이벤트 업데이트 — 1순위: 이 기기의 eventIdentifier로 조회
-        if let existingID = todo.calendarEventID,
-           let event = event(withIdentifier: existingID) {
+        guard todo.todoSource != .calendar else { throw CalendarError.ownershipNotVerified }
+
+        // Resolve before changing any EventKit fields. A link or inferred origin
+        // cannot confer ownership, and colliding copies must not be chosen by order.
+        if let event = try resolvedTodoEvent(for: todo) {
+            if let marker = CalendarEventMarker.parse(event.url) {
+                Self.adoptRecoveredMarker(marker, for: todo)
+            }
             event.title = todo.title.isEmpty
                 ? Self.localizedDeadlineTitle(language: language)
                 : todo.title
             event.startDate = window.start
             event.endDate = window.end
             event.notes = todo.notes
-            applySiftMarker(to: event, for: todo)
+            Self.applySiftMarker(to: event, for: todo)
             try store.save(event, span: .thisEvent)
             todo.calendarSyncedTitle = event.title ?? ""
+            todo.calendarEventID = event.eventIdentifier
+            todo.calendarEventExternalID = event.calendarItemExternalIdentifier ?? ""
             markResolvedEventID(event.eventIdentifier)
-            return existingID
-        }
-        // A deleted event identifier is device-local. Clear it before the
-        // cross-device recovery path so subsequent edits do not keep querying
-        // EventKit for the same missing item.
-        todo.calendarEventID = nil
-
-        // 2순위: eventIdentifier가 stale한 경우 externalIdentifier로 재탐색 (store.reset() 후 무효화 방어)
-        if !todo.calendarEventExternalID.isEmpty {
-            let items = store.calendarItems(withExternalIdentifier: todo.calendarEventExternalID)
-            if let found = items.compactMap({ $0 as? EKEvent }).first {
-                found.title = todo.title.isEmpty
-                    ? Self.localizedDeadlineTitle(language: language)
-                    : todo.title
-                found.startDate = window.start
-                found.endDate = window.end
-                found.notes = todo.notes
-                applySiftMarker(to: found, for: todo)
-                try store.save(found, span: .thisEvent)
-                todo.calendarSyncedTitle = found.title ?? ""
-                todo.calendarEventID = found.eventIdentifier
-                markResolvedEventID(found.eventIdentifier)
-                return found.eventIdentifier
-            }
+            return event.eventIdentifier
         }
 
         // 신규 등록
@@ -309,12 +341,8 @@ final class CalendarService {
         event.startDate = window.start
         event.endDate = window.end
         event.notes = todo.notes
-        if let cid = preferredCalendarID, let cal = store.calendar(withIdentifier: cid) {
-            event.calendar = cal
-        } else {
-            event.calendar = preferredDefaultCalendar
-        }
-        applySiftMarker(to: event, for: todo)
+        event.calendar = try destinationCalendar(preferredID: preferredCalendarID)
+        Self.applySiftMarker(to: event, for: todo)
         try store.save(event, span: .thisEvent)
         todo.calendarSyncedTitle = event.title ?? ""
         markResolvedEventID(event.eventIdentifier)
@@ -325,8 +353,8 @@ final class CalendarService {
         return event.eventIdentifier
     }
 
-    /// 캘린더에서 이벤트 제거 (todo 삭제·완료 시, 단일 이벤트용).
-    /// - Returns: 실제 EventKit 이벤트를 찾아 삭제했는지 여부.
+    /// Direct Calendar-tab user action. Todo callers must use removeTodoEvent instead.
+    /// - Returns: whether the selected EventKit event was found and removed.
     func removeEvent(eventID: String) throws -> Bool {
         guard isAuthorized,
               let event = event(withIdentifier: eventID) else { return false }
@@ -364,14 +392,141 @@ final class CalendarService {
         }
     }
 
-    /// 이벤트를 삭제하지 않고 알람(리마인더)만 모두 제거.
-    /// 외부 캘린더(Google 등) 이벤트처럼 삭제하기 부담스러울 때 사용.
-    func removeAlarms(eventID: String) throws {
-        guard isAuthorized,
-              let event = event(withIdentifier: eventID) else { return }
-        guard !(event.alarms ?? []).isEmpty else { return }
-        event.alarms = []
-        try store.save(event, span: .thisEvent)
+    /// A local link or inferred origin alone is not proof of ownership.
+    static func hasTodoOwnership(_ todo: Todo, eventURL: URL?) -> Bool {
+        guard todo.todoSource != .calendar else { return false }
+        if let marker = CalendarEventMarker.parse(eventURL),
+           marker.entity == .todo, marker.identifier == todo.id {
+            return true
+        }
+        // Email exports predating versioned markers embed the exact email ref.
+        return todo.todoSource == .email && !todo.sourceRef.isEmpty
+            && eventURL?.scheme == "x-todoapp-email"
+            && eventURL?.host?.removingPercentEncoding == todo.sourceRef
+    }
+
+    static func completionAction(
+        for todo: Todo,
+        eventURL: URL?,
+        requested: CalendarCompletionAction
+    ) -> CalendarCompletionAction {
+        hasTodoOwnership(todo, eventURL: eventURL) ? requested : .keep
+    }
+
+    /// Shared by writes, deletion, completion and cross-device link recovery.
+    /// Multiple copies of the same proof cannot identify the intended account.
+    static func selectOwnedEvent(for todo: Todo, candidates: [EKEvent]) throws -> EKEvent? {
+        var seen = Set<String>()
+        var owned: EKEvent?
+        for candidate in candidates {
+            let key: String
+            if let id = candidate.eventIdentifier, !id.isEmpty {
+                key = id
+            } else {
+                key = "object:\(ObjectIdentifier(candidate))"
+            }
+            guard seen.insert(key).inserted,
+                  hasTodoOwnership(todo, eventURL: candidate.url) else { continue }
+            guard owned == nil else { throw CalendarError.ownershipNotVerified }
+            owned = candidate
+        }
+        if owned == nil && (!candidates.isEmpty || !todo.calendarEventExternalID.isEmpty) {
+            throw CalendarError.ownershipNotVerified
+        }
+        return owned
+    }
+
+    private func resolvedTodoEvent(for todo: Todo) throws -> EKEvent? {
+        var candidates: [EKEvent] = []
+        if let id = todo.calendarEventID, let linked = event(withIdentifier: id) {
+            candidates.append(linked)
+        }
+        if todo.todoSource == .email, !todo.sourceRef.isEmpty {
+            if let id = emailEventMapping[todo.sourceRef], let mapped = event(withIdentifier: id) {
+                candidates.append(mapped)
+            }
+            if let date = todo.dueDate {
+                candidates.append(contentsOf: emailEvents(sourceRef: todo.sourceRef, near: date))
+            }
+        }
+        var externalIDs = Set(candidates.compactMap { $0.calendarItemExternalIdentifier })
+        externalIDs.insert(todo.calendarEventExternalID)
+        for externalID in externalIDs where !externalID.isEmpty {
+            candidates.append(contentsOf: store.calendarItems(
+                withExternalIdentifier: externalID
+            ).compactMap { $0 as? EKEvent })
+        }
+        // A missing durable external ID may mean its account is disconnected,
+        // not deleted. The selector refuses to recreate it on another account.
+        return try Self.selectOwnedEvent(for: todo, candidates: candidates)
+    }
+
+    @discardableResult
+    func removeTodoEvent(for todo: Todo, on occurrenceDate: Date? = nil) throws -> Bool {
+        guard isAuthorized, todo.todoSource != .calendar,
+              var target = try resolvedTodoEvent(for: todo) else { return false }
+        if let occurrenceDate, target.hasRecurrenceRules {
+            let predicate = store.predicateForEvents(
+                withStart: occurrenceDate.addingTimeInterval(-60),
+                end: occurrenceDate.addingTimeInterval(60), calendars: nil
+            )
+            let occurrences = store.events(matching: predicate).filter {
+                $0.eventIdentifier == target.eventIdentifier
+            }
+            guard let occurrence = try Self.selectOwnedEvent(for: todo, candidates: occurrences) else { return false }
+            target = occurrence
+        }
+        try store.remove(target, span: .thisEvent)
+        if let id = target.eventIdentifier { markUnresolvedEventID(id) }
+        return true
+    }
+
+    /// The detail editor changes imported Todos locally, never their originals.
+    /// Keep this decision ahead of deadline removal (also used before completion).
+    func applyTodoCalendarEdit(for todo: Todo, linked: Bool) throws {
+        if todo.todoSource == .calendar {
+            if todo.dueDate == nil || !linked {
+                todo.calendarEventID = nil
+                todo.calendarEventExternalID = ""
+            }
+            return
+        }
+        if todo.dueDate == nil || !linked {
+            if todo.todoSource == .email {
+                if try removeTodoEvent(for: todo) { clearEmailCalendarReferences(for: todo) }
+            } else {
+                _ = try removeTodoEvent(for: todo)
+            }
+            todo.calendarEventID = nil
+            todo.calendarEventExternalID = ""
+        } else {
+            try registerOrUpdate(todo: todo)
+        }
+    }
+
+    func applyCompletionPolicy(for todo: Todo, action: CalendarCompletionAction) throws {
+        guard isAuthorized, action != .keep else { return }
+        guard todo.todoSource != .calendar,
+              let event = try resolvedTodoEvent(for: todo),
+              Self.completionAction(for: todo, eventURL: event.url, requested: action) != .keep
+        else { return }
+        var removed = false
+        if action == .remove {
+            try store.remove(event, span: .thisEvent)
+            if let id = event.eventIdentifier { markUnresolvedEventID(id) }
+            removed = true
+        } else if !(event.alarms ?? []).isEmpty {
+            event.alarms = []
+            try store.save(event, span: .thisEvent)
+        }
+        if removed {
+            if todo.todoSource == .email {
+                clearEmailCalendarReferences(for: todo)
+            } else {
+                todo.calendarEventID = nil
+                todo.calendarEventExternalID = ""
+            }
+        }
     }
 
     // MARK: - 이메일 → 캘린더 자동 등록
@@ -421,9 +576,13 @@ final class CalendarService {
         let start = Date().addingTimeInterval(-30 * 86400)
         let end   = Date().addingTimeInterval( 30 * 86400)
         let pred  = store.predicateForEvents(withStart: start, end: end, calendars: nil)
-        if let event = store.events(matching: pred).first(where: {
-            $0.url?.scheme == "x-todoapp-email" && $0.url?.host == ref
-        }) {
+        let candidates = store.events(matching: pred).filter {
+            $0.url?.scheme == "x-todoapp-email" && $0.url?.host?.removingPercentEncoding == ref
+        }
+        // Existing copies still block duplicate creation, but cannot establish
+        // a unique durable mapping by result order.
+        if candidates.count > 1 { return true }
+        if let event = candidates.first {
             mapping = Self.reconciledEmailEventMapping(
                 mapping,
                 for: ref,
@@ -437,16 +596,18 @@ final class CalendarService {
 
     /// sourceRef를 URL로 임베드한 이벤트를 EventKit 스캔으로 찾는다.
     /// Google/CalDAV 동기화 후 eventIdentifier가 재할당돼도 URL은 유지됨.
-    private func findEmailEvent(sourceRef: String, near date: Date) -> EKEvent? {
-        guard isAuthorized else { return nil }
-        // 지정 날짜 ±7일 윈도우 스캔 (CalDAV 지연 여유)
-        let start = date.addingTimeInterval(-7 * 86400)
-        let end   = date.addingTimeInterval( 7 * 86400)
-        let predicate = store.predicateForEvents(withStart: start, end: end, calendars: nil)
-        return store.events(matching: predicate).first { event in
-            event.url?.scheme == "x-todoapp-email" && event.url?.host == sourceRef
+    private func emailEvents(sourceRef: String, near date: Date) -> [EKEvent] {
+        guard isAuthorized else { return [] }
+        let predicate = store.predicateForEvents(
+            withStart: date.addingTimeInterval(-7 * 86400),
+            end: date.addingTimeInterval(7 * 86400), calendars: nil
+        )
+        return store.events(matching: predicate).filter {
+            $0.url?.scheme == "x-todoapp-email"
+                && $0.url?.host?.removingPercentEncoding == sourceRef
         }
     }
+
     private func clearEmailCalendarReferences(for todo: Todo) {
         if !todo.sourceRef.isEmpty {
             var mapping = emailEventMapping
@@ -462,22 +623,17 @@ final class CalendarService {
         var hasChanges = false
 
         for todo in todos where todo.todoSource != .calendar {
-            guard let eventID = todo.calendarEventID, !eventID.isEmpty else { continue }
-            if event(withIdentifier: eventID) != nil { continue }
-
-            if !todo.calendarEventExternalID.isEmpty {
-                let items = store.calendarItems(withExternalIdentifier: todo.calendarEventExternalID)
-                if let found = items.compactMap({ $0 as? EKEvent }).first,
-                   let foundID = found.eventIdentifier,
-                   !foundID.isEmpty {
-                    todo.calendarEventID = foundID
-                    markResolvedEventID(foundID)
-                    hasChanges = true
-                    continue
-                }
+            guard todo.calendarEventID != nil || !todo.calendarEventExternalID.isEmpty else { continue }
+            do {
+                let resolvedID = try resolvedTodoEvent(for: todo)?.eventIdentifier
+                guard resolvedID != todo.calendarEventID else { continue }
+                todo.calendarEventID = resolvedID
+                markResolvedEventID(resolvedID)
+            } catch {
+                // Retain the durable external reference to block duplicate exports.
+                // An unresolved collision is not evidence that the original was deleted.
+                continue
             }
-
-            todo.calendarEventID = nil
             hasChanges = true
         }
 
@@ -488,57 +644,18 @@ final class CalendarService {
     func removeEmailCalendarArtifacts(for todo: Todo) -> Bool {
         guard todo.todoSource == .email, isAuthorized else { return false }
 
-        var eventIDs = Set<String>()
-        if let eventID = todo.calendarEventID, !eventID.isEmpty {
-            eventIDs.insert(eventID)
+        do {
+            guard try removeTodoEvent(for: todo) else { return false }
+        } catch {
+            DiagnosticRecorder.shared.record(
+                error: error, component: "calendar.eventkit", operation: "removeTodoEvent"
+            )
+            return false
         }
-        if !todo.sourceRef.isEmpty, let mappedID = emailEventMapping[todo.sourceRef], !mappedID.isEmpty {
-            eventIDs.insert(mappedID)
-        }
-        if !todo.calendarEventExternalID.isEmpty {
-            let items = store.calendarItems(withExternalIdentifier: todo.calendarEventExternalID)
-            for case let event as EKEvent in items {
-                if let eventID = event.eventIdentifier, !eventID.isEmpty {
-                    eventIDs.insert(eventID)
-                }
-            }
-        }
-        if let dueDate = todo.dueDate,
-           !todo.sourceRef.isEmpty,
-           let found = findEmailEvent(sourceRef: todo.sourceRef, near: dueDate),
-           let foundID = found.eventIdentifier,
-           !foundID.isEmpty {
-            eventIDs.insert(foundID)
-        }
-
-        guard !eventIDs.isEmpty else { return false }
-        var removedEventCount = 0
-        for eventID in eventIDs {
-            do {
-                if try removeEvent(eventID: eventID) {
-                    removedEventCount += 1
-                }
-            } catch {
-                DiagnosticRecorder.shared.record(
-                    error: error,
-                    component: "calendar.eventkit",
-                    operation: "removeEvent"
-                )
-                return false
-            }
-        }
-
-        guard removedEventCount > 0 else { return false }
-
         clearEmailCalendarReferences(for: todo)
         return true
     }
 
-    @discardableResult
-    private func removePendingEmailCalendarLinkIfNeeded(for todo: Todo) -> Bool {
-        guard todo.triage != .todo else { return false }
-        return removeEmailCalendarArtifacts(for: todo)
-    }
 
 
     @discardableResult
@@ -555,12 +672,21 @@ final class CalendarService {
     ) throws -> String {
         guard isAuthorized else { throw CalendarError.notAuthorized }
 
-        // ① fast-path: 매핑 ID가 여전히 resolve되면 바로 반환
+        // A copied legacy proof is ambiguous too. Never turn a failed dedup
+        // lookup into a duplicate export on the current default account.
+        var candidates = emailEvents(sourceRef: sourceRef, near: start)
         if let existing = emailEventMapping[sourceRef],
-           event(withIdentifier: existing) != nil { return existing }
-
-        // ② 콘텐츠 스캔: ID 재할당됐어도 URL로 찾기
-        if let found = findEmailEvent(sourceRef: sourceRef, near: start) {
+           let mapped = event(withIdentifier: existing) {
+            guard mapped.url?.scheme == "x-todoapp-email",
+                  mapped.url?.host?.removingPercentEncoding == sourceRef else {
+                throw CalendarError.ownershipNotVerified
+            }
+            if !candidates.contains(where: { $0.eventIdentifier == mapped.eventIdentifier }) {
+                candidates.append(mapped)
+            }
+        }
+        guard candidates.count <= 1 else { throw CalendarError.ownershipNotVerified }
+        if let found = candidates.first {
             var mapping = emailEventMapping
             mapping[sourceRef] = found.eventIdentifier
             emailEventMapping = mapping
@@ -577,11 +703,7 @@ final class CalendarService {
         if !location.isEmpty { event.location = location }
         if !notes.isEmpty    { event.notes    = notes }
         event.url       = URL(string: "x-todoapp-email://\(sourceRef.addingPercentEncoding(withAllowedCharacters: .urlHostAllowed) ?? sourceRef)")
-        if let cid = calendarID, let cal = store.calendar(withIdentifier: cid) {
-            event.calendar = cal
-        } else {
-            event.calendar = preferredDefaultCalendar
-        }
+        event.calendar = try destinationCalendar(preferredID: calendarID)
         try store.save(event, span: .thisEvent)
         markResolvedEventID(event.eventIdentifier)
 
@@ -595,41 +717,36 @@ final class CalendarService {
 // MARK: - CalendarService + 자동 등록
 
 extension CalendarService {
-    static func isAutomaticRegistrationCandidate(_ todo: Todo) -> Bool {
-        guard todo.triage == .todo else { return false }
-        guard todo.todoSource != .calendar else { return false }
-        guard todo.dueDate != nil else { return false }
-        return true
+    static func isAutomaticRegistrationCandidate(
+        _ todo: Todo,
+        autoEnabled: Bool = CalendarAutoPolicy.isAuto,
+        sourceFilter: String = CalendarAutoPolicy.sourceFilter
+    ) -> Bool {
+        guard autoEnabled, !todo.isCompleted, todo.triage == .todo,
+              todo.todoSource != .calendar, todo.dueDate != nil,
+              !todo.isHealthRelated else { return false }
+        return sourceFilter == "all" || sourceFilter == todo.todoSource.rawValue
     }
 
 
     /// 마감일이 있는 todo를 캘린더에 자동 등록한다 (중복 방지 내장).
     /// - 캘린더 출처 todo는 역방향 재등록 방지를 위해 무시.
     /// - 권한 없음·마감 없음·이미 등록된 경우 무시.
-    /// - 마감이 있으면 우선순위·정책과 무관하게 항상 등록됨.
+    /// - 모든 우선순위에서 사용자 자동 등록 동의와 출처 필터를 따른다.
     @discardableResult
     func applyAutoRegistration(for todo: Todo) -> Bool {
         guard Self.isAutomaticRegistrationCandidate(todo) else { return false }
         guard isAuthorized else { return false }
 
-        // 1) 이 기기의 eventIdentifier로 이벤트 존재 확인
-        if let id = todo.calendarEventID, event(withIdentifier: id) != nil {
-            return false  // 이미 등록됨
-        }
-        // Do not retain a device-local identifier that EventKit no longer
-        // resolves. A valid external identifier can still recover the link.
-        todo.calendarEventID = nil
-
-
-        // 2) 크로스-기기 dedup: calendarItemExternalIdentifier로 조회
-        //    iCloud 동기화 후 eventIdentifier가 바뀌어도 externalIdentifier는 동일 → 중복 등록 방지
-        if !todo.calendarEventExternalID.isEmpty {
-            let items = store.calendarItems(withExternalIdentifier: todo.calendarEventExternalID)
-            if let event = items.compactMap({ $0 as? EKEvent }).first {
-                // 다른 기기에서 등록한 이벤트가 이미 이 기기에 동기화됨 → 로컬 ID만 갱신
+        // Existing links are read-only here, but still require unique ownership
+        // before rebinding. Registration uses the same resolver before any write.
+        do {
+            if let event = try resolvedTodoEvent(for: todo) {
                 todo.calendarEventID = event.eventIdentifier
                 return false
             }
+        } catch {
+            return false
         }
 
         // 3) 이벤트가 없음 → 새로 등록
@@ -644,48 +761,49 @@ extension CalendarService {
 // MARK: - 캘린더 자동 등록 정책 (UserDefaults 기반)
 
 /// 마감을 캘린더에 자동 등록할지 여부를 사용자 선택으로 결정하는 정책 헬퍼.
-/// 첫 등록 시점에 1회 물어보고 선택을 영속화한다. 이후 설정에서 변경 가능.
+/// 기본값은 비활성. 모든 자동 등록 경로에서 동일한 동의를 확인한다.
 enum CalendarAutoPolicy {
-    private static let choiceKey = "pieroot.todo.calendarAutoChoiceMade"
     private static let valueKey  = "pieroot.todo.calendarAutoRegister"
 
-    /// 사용자가 아직 선택하지 않았으면 false
-    static var choiceMade: Bool {
-        SettingsStore.shared.get(choiceKey, defaultValue: false)
-    }
-    /// 자동 등록 ON 여부 (choiceMade == false이면 의미 없음)
     static var isAuto: Bool {
         SettingsStore.shared.get(valueKey, defaultValue: false)
     }
-    /// 사용자가 선택한 값을 저장. choiceMade도 동시에 true로 설정.
-    static func setChoice(auto: Bool) {
-        let store = SettingsStore.shared
-        let useGlobal = SettingsStore.isICloudSyncEnabled
-        if useGlobal {
-            store.setGlobal(choiceKey, value: true)
-            store.setGlobal(valueKey, value: auto)
-        } else {
-            store.setLocal(choiceKey, value: true)
-            store.setLocal(valueKey, value: auto)
-        }
+
+    static var sourceFilter: String {
+        get { SettingsStore.shared.get("pieroot.todo.calendarAutoSource", defaultValue: "all") }
+        set { SettingsStore.shared.set("pieroot.todo.calendarAutoSource", value: newValue) }
     }
-    /// 설정에서 값만 변경(이미 선택됐다고 간주).
+    /// 기존 설정 저장 위치를 유지하며 동의 상태를 갱신한다.
     static func setValue(auto: Bool) {
-        setChoice(auto: auto)
+        SettingsStore.shared.set(valueKey, value: auto)
     }
 }
 
 // MARK: - Error
 
-enum CalendarError: LocalizedError {
+enum CalendarError: LocalizedError, Equatable {
     case notAuthorized
+    case destinationNotSelected
+    case destinationUnavailable
+    case ownershipNotVerified
 
     var errorDescription: String? {
         errorDescription(language: .current)
     }
 
     func errorDescription(language: AppLanguage) -> String {
-        AppLanguage.localized("error.calendar.unauthorized", defaultValue: "Calendar access is not authorized. Allow access in Settings > Privacy & Security.", language: language)
+        switch self {
+        case .notAuthorized:
+            AppLanguage.localized("error.calendar.unauthorized", defaultValue: "Calendar access is not authorized. Allow access in Settings > Privacy & Security.", language: language)
+        case .destinationNotSelected:
+            AppLanguage.localized("calendar.destination.notSelected", defaultValue: "Choose a writable calendar in Calendar Settings before exporting.", language: language)
+        case .destinationUnavailable:
+            AppLanguage.localized("calendar.destination.unavailable", defaultValue: "The selected calendar is missing or read-only. Reconnect its account in system settings or choose another writable calendar.", language: language)
+        case .ownershipNotVerified:
+            AppLanguage.localized("calendar.ownership.notVerified", defaultValue: language == .korean
+                ? "SIFT가 소유한 캘린더 일정을 하나로 확인할 수 없어 캘린더를 변경하지 않았습니다. 원래 캘린더 계정을 다시 연결하거나 캘린더에서 중복 일정을 확인하세요."
+                : "SIFT could not verify a unique owned calendar event. No calendar changes were made. Reconnect the original calendar account or resolve duplicate events in Calendar.", language: language)
+        }
     }
 }
 
@@ -695,12 +813,16 @@ extension CalendarService {
 
     private static let weeklyImportKey = "pieroot.todo.lastCalendarImportDate"
 
-    /// 동기화 창에 있던 외부 캘린더 발생분이 더는 EventKit에 없으면, 원본에서
-    /// import한 미완료 Todo도 제거해야 두 저장소가 같은 상태를 유지한다.
+    /// Reconcile missing imported occurrences only with device-local source
+    /// availability. Pending suggestions additionally require source selection.
     static func missingImportedTodoIDs(
         from todos: [Todo],
         observedOccurrenceRefs: Set<String>,
         observedExternalIDs: Set<String> = [],
+        observedCalendarIDsByExternalID: [String: Set<String>] = [:],
+        approvedCalendarIDsByExternalID: [String: Set<String>] = [:],
+        availableCalendarIDs: Set<String> = [],
+        selectedCalendarIDs: Set<String>? = nil,
         now: Date,
         calendar: Calendar = .current
     ) -> Set<UUID> {
@@ -710,6 +832,7 @@ extension CalendarService {
         let windowEnd = calendar.date(byAdding: .day, value: 30, to: now) ?? now
         return Set(todos.compactMap { todo in
             guard todo.todoSource == .calendar,
+                  (todo.triage != .review || (selectedCalendarIDs.map { $0.contains(todo.calendarSourceID) } ?? true)),
                   !todo.isCompleted,
                   !todo.sourceRef.isEmpty,
                   let dueDate = todo.dueDate,
@@ -717,6 +840,20 @@ extension CalendarService {
                   dueDate <= windowEnd
             else {
                 return nil
+            }
+            if todo.triage != .review {
+                guard !todo.calendarSourceID.isEmpty,
+                      availableCalendarIDs.contains(todo.calendarSourceID) else { return nil }
+            }
+            if !todo.calendarSourceID.isEmpty,
+               let observedSources = observedCalendarIDsByExternalID[todo.calendarEventExternalID],
+               !observedSources.contains(todo.calendarSourceID) {
+                // A suggestion is not authority to delete an approved task,
+                // even after it has appeared in repeated automatic scans.
+                if todo.triage != .review,
+                   approvedCalendarIDsByExternalID[todo.calendarEventExternalID]?
+                    .contains(where: observedSources.contains) != true { return nil }
+                return todo.id
             }
             if !todo.calendarEventExternalID.isEmpty && observedExternalIDs.contains(todo.calendarEventExternalID) {
                 return nil
@@ -788,6 +925,58 @@ extension CalendarService {
         return isStartMatched && isEndMatched ? nil : adopted
     }
 
+    /// Keep the strongest known provenance when an older event marker is read.
+    /// In particular, relinking must never turn a health Todo into generic manual data.
+    @discardableResult
+    static func adoptRecoveredMarker(_ marker: CalendarEventMarker, for todo: Todo) -> Bool {
+        guard marker.entity == .todo, marker.identifier == todo.id,
+              marker.origin.isSiftManaged else { return false }
+        let isHealth = todo.isHealthRelated || marker.origin == .siftHealth
+        let origin = isHealth ? CalendarEventOrigin.siftHealth : marker.origin
+        let sourceRef = isHealth && !todo.sourceRef.lowercased().hasPrefix("health:")
+            ? "health:calendar/\(marker.identifier.uuidString)" : todo.sourceRef
+        let changed = todo.calendarEventOrigin != origin.rawValue || todo.sourceRef != sourceRef
+        todo.calendarEventOrigin = origin.rawValue
+        todo.sourceRef = sourceRef
+        return changed
+    }
+
+    /// Recover only owned Todo markers, using the same transformation as EventKit sync.
+    static func restoredTodo(from event: CalendarEventSummary) -> Todo? {
+        guard let marker = event.marker, marker.entity == .todo,
+              marker.origin.isSiftManaged else { return nil }
+        let window = todoWindow(
+            eventStart: event.startDate, eventEnd: event.endDate, isAllDay: event.isAllDay
+        )
+        let restored = Todo(
+            id: marker.identifier,
+            title: event.title,
+            notes: event.notes,
+            startDate: window.startDate,
+            dueDate: window.dueDate,
+            source: .manual,
+            sourceRef: "sift-calendar://todo/\(marker.identifier.uuidString)"
+        )
+        restored.calendarEventID = event.identifier
+        restored.calendarEventExternalID = event.externalIdentifier
+        adoptRecoveredMarker(marker, for: restored)
+        restored.isFixedSchedule = event.isRecurring
+        restored.calendarSyncedTitle = event.title
+        return restored
+    }
+
+    /// Marker copies across calendars are not enough to choose an account.
+    /// Repeated occurrences of one event still represent a single owned event.
+    static func ambiguousTodoMarkerIDs(in events: [CalendarEventSummary]) -> Set<UUID> {
+        var eventIDsByTodo: [UUID: Set<String>] = [:]
+        for event in events {
+            guard let marker = event.marker, marker.entity == .todo,
+                  marker.origin.isSiftManaged else { continue }
+            eventIDsByTodo[marker.identifier, default: []].insert(event.identifier)
+        }
+        return Set(eventIDsByTodo.compactMap { $0.value.count > 1 ? $0.key : nil })
+    }
+
 
     /// 7일 쿨다운으로 캘린더 → TODO 주간 import를 실행.
     /// LLM 불필요 — EventKit 읽기 + SwiftData 쓰기만 수행.
@@ -798,8 +987,13 @@ extension CalendarService {
         let sevenDays: TimeInterval = 7 * 24 * 3600
         // 첫 실행 시 last == 0 이므로 항상 통과
         guard Date().timeIntervalSince1970 - last >= sevenDays else { return }
+        let selection = taskAnalysisCalendarIDs
         await syncCalendarTodos(context: context)
-        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: Self.weeklyImportKey)
+        // A selection change during async notification reconciliation must not
+        // put the newly selected sources behind the previous weekly cooldown.
+        if selection == taskAnalysisCalendarIDs {
+            UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: Self.weeklyImportKey)
+        }
     }
 
     /// 향후 30일 캘린더 이벤트를 TODO에 동기화.
@@ -812,44 +1006,129 @@ extension CalendarService {
     @MainActor
     @discardableResult
     func syncCalendarTodos(context: ModelContext) async -> Bool {
-        let now = Date()
+        guard isAuthorized else { return false }
+        let todos = (try? context.fetch(FetchDescriptor<Todo>())) ?? []
+        let linksChanged = reconcileStaleCalendarReferences(in: todos)
+        if linksChanged { try? context.save() }
+        let availableIDs = Set(store.calendars(for: .event).map(\.calendarIdentifier))
+        let changed = await syncCalendarTodos(
+            context: context,
+            events: upcomingEvents(days: 30),
+            recoveryEvents: upcomingEvents(days: 366).filter { $0.marker != nil },
+            now: Date(),
+            selectedCalendarIDs: taskAnalysisCalendarIDs.intersection(availableIDs),
+            availableCalendarIDs: availableIDs
+        )
+        return linksChanged || changed
+    }
+
+    /// Shared reconciliation path; all task writes happen before its first
+    /// suspension so deselection cannot race an in-flight external import.
+    @MainActor
+    @discardableResult
+    func syncCalendarTodos(
+        context: ModelContext,
+        events: [CalendarEventSummary],
+        recoveryEvents: [CalendarEventSummary],
+        now: Date,
+        selectedCalendarIDs: Set<String>,
+        availableCalendarIDs: Set<String> = []
+    ) async -> Bool {
         var todos = (try? context.fetch(FetchDescriptor<Todo>())) ?? []
         var hasChanges = false
-        hasChanges = reconcileStaleCalendarReferences(in: todos) || hasChanges
-        let importedEvents = upcomingEvents(days: 30).filter { !$0.identifier.isEmpty }
-        // 재설치 복원은 가까운 30일만 기다리지 않는다. URL 마커가 있는 SIFT
-        // 일정만 1년까지 확장해 읽고, 외부 캘린더 import 범위는 그대로 유지한다.
-        let markedSiftEvents = upcomingEvents(days: 366).filter {
+        var insertedReviewTodos: [Todo] = []
+        let observedEvents = events.filter { !$0.identifier.isEmpty }
+        // Ownership recovery is not external-source consent. Keep its wider
+        // window across ALL calendars, including when no sources are selected.
+        let markedSiftEvents = recoveryEvents.filter {
             !$0.identifier.isEmpty && $0.marker != nil
         }
         var allEventsByOccurrence: [String: CalendarEventSummary] = [:]
-        for event in importedEvents + markedSiftEvents {
+        for event in observedEvents + markedSiftEvents {
             let key = "\(event.identifier)#\(event.startDate.timeIntervalSinceReferenceDate)"
             allEventsByOccurrence[key] = event
         }
         let allEvents = allEventsByOccurrence.values.sorted { $0.startDate < $1.startDate }
 
-        // 1. 등록 대기열 만료 항목 자동 제거 (마감 지났지만 진행중 미등록)
-        for todo in todos where todo.triage == .review && !todo.isCompleted {
-            if let due = todo.dueDate, due < now {
-                if todo.todoSource == .email {
-                    _ = removeEmailCalendarArtifacts(for: todo)
-                }
-                TaskBehaviorRecorder.recordDeletion(of: todo, actor: .system, in: context)
-                context.delete(todo)
-                hasChanges = true
-            }
+        // Only unlinked review suggestions expire; a manual calendar link is durable.
+        for todo in todos where todo.calendarEventID == nil && todo.calendarEventExternalID.isEmpty
+            && TodoEligibilityReconciler.isExpiredReview(todo, now: now, selectedCalendarIDs: selectedCalendarIDs) {
+            TaskBehaviorRecorder.recordDeletion(of: todo, actor: .system, in: context)
+            context.delete(todo)
+            hasChanges = true
         }
         todos = (try? context.fetch(FetchDescriptor<Todo>())) ?? []
 
 
+        // Refresh provenance only, even for excluded sources: an event moved
+        // to a different account must stop being eligible immediately. Never
+        // guess a missing calendar from its title or another device's ID.
+        var observedByLocalID: [String: CalendarEventSummary] = [:]
+        var observedByExternalID: [String: CalendarEventSummary] = [:]
+        var ambiguousExternalIDs = Set<String>()
+        var observedCalendarIDsByExternalID: [String: Set<String>] = [:]
+        for event in observedEvents where event.marker == nil {
+            observedByLocalID[event.identifier] = event
+            if !event.externalIdentifier.isEmpty {
+                observedCalendarIDsByExternalID[event.externalIdentifier, default: []].insert(event.calendarID)
+                if let previous = observedByExternalID[event.externalIdentifier],
+                   previous.calendarID != event.calendarID {
+                    ambiguousExternalIDs.insert(event.externalIdentifier)
+                }
+                observedByExternalID[event.externalIdentifier] = event
+            }
+        }
+        var trackedCalendarIDsByExternalID: [String: Set<String>] = [:]
+        var approvedCalendarIDsByExternalID: [String: Set<String>] = [:]
+        for todo in todos where todo.todoSource == .calendar
+            && !todo.calendarSourceID.isEmpty && !todo.calendarEventExternalID.isEmpty {
+            trackedCalendarIDsByExternalID[todo.calendarEventExternalID, default: []].insert(todo.calendarSourceID)
+            if todo.triage != .review || todo.isCompleted {
+                approvedCalendarIDsByExternalID[todo.calendarEventExternalID, default: []].insert(todo.calendarSourceID)
+            }
+        }
+        for todo in todos where todo.todoSource == .calendar {
+            let observed: CalendarEventSummary?
+            if let local = todo.calendarEventID.flatMap({ observedByLocalID[$0] }) {
+                observed = local
+            } else if !ambiguousExternalIDs.contains(todo.calendarEventExternalID),
+                      let external = observedByExternalID[todo.calendarEventExternalID],
+                      todo.calendarSourceID.isEmpty || todo.calendarSourceID == external.calendarID
+                        || (todo.triage == .todo && !todo.isCompleted
+                            && availableCalendarIDs.contains(todo.calendarSourceID)
+                            && trackedCalendarIDsByExternalID[todo.calendarEventExternalID]?.count == 1) {
+                observed = external
+            } else {
+                observed = nil
+            }
+            if let observed, todo.triage == .review, !todo.isCompleted, todo.calendarSourceID.isEmpty,
+               !Self.isTaskAnalysisEvent(observed, selectedCalendarIDs: selectedCalendarIDs) {
+                continue
+            }
+            if let observed, todo.calendarSourceID != observed.calendarID {
+                todo.calendarSourceID = observed.calendarID
+                hasChanges = true
+            }
+        }
+
         let iso = ISO8601DateFormatter()
         var calendarTodosByRef: [String: Todo] = [:]
         var calendarTodosByExternalID: [String: Todo] = [:]
+        var calendarTodosByLocalID: [String: Todo] = [:]
+        var calendarTodosBySourceRef: [String: [String: Todo]] = [:]
+        var calendarTodosBySourceExternalID: [String: [String: Todo]] = [:]
         for todo in todos where todo.todoSource == .calendar {
-            calendarTodosByRef[todo.sourceRef] = todo
-            if !todo.calendarEventExternalID.isEmpty {
-                calendarTodosByExternalID[todo.calendarEventExternalID] = todo
+            if let localID = todo.calendarEventID { calendarTodosByLocalID[localID] = todo }
+            if todo.calendarSourceID.isEmpty {
+                calendarTodosByRef[todo.sourceRef] = todo
+                if !todo.calendarEventExternalID.isEmpty {
+                    calendarTodosByExternalID[todo.calendarEventExternalID] = todo
+                }
+            } else {
+                calendarTodosBySourceRef[todo.calendarSourceID, default: [:]][todo.sourceRef] = todo
+                if !todo.calendarEventExternalID.isEmpty {
+                    calendarTodosBySourceExternalID[todo.calendarSourceID, default: [:]][todo.calendarEventExternalID] = todo
+                }
             }
         }
 
@@ -883,7 +1162,8 @@ extension CalendarService {
             }
         }
         let eventsToProcess = Array(recurringNextByID.values) + nonRecurringEvents
-        let observedCalendarOccurrenceRefs = Set(eventsToProcess.flatMap { event -> [String] in
+        let ambiguousMarkerIDs = Self.ambiguousTodoMarkerIDs(in: eventsToProcess)
+        let observedCalendarOccurrenceRefs = Set(observedEvents.flatMap { event -> [String] in
             guard event.marker == nil else { return [] }
             var refs = ["\(event.identifier)#\(iso.string(from: event.startDate))"]
             if !event.externalIdentifier.isEmpty {
@@ -891,7 +1171,7 @@ extension CalendarService {
             }
             return refs
         })
-        let observedExternalIDs = Set(eventsToProcess.compactMap { event -> String? in
+        let observedExternalIDs = Set(observedEvents.compactMap { event -> String? in
             guard event.marker == nil, !event.externalIdentifier.isEmpty else { return nil }
             return event.externalIdentifier
         })
@@ -903,8 +1183,14 @@ extension CalendarService {
                     // Calendar tab에서 SIFT가 만든 독립 이벤트다. Todo로 역수입하지 않는다.
                     continue
                 }
+                guard !ambiguousMarkerIDs.contains(marker.identifier) else { continue }
 
                 if let existing = todosByID[marker.identifier] {
+                    guard existing.todoSource != .calendar else { continue }
+                    // Do not replace a still-resolving local event with a copy
+                    // observed in another calendar during this scan.
+                    if let linkedID = existing.calendarEventID, linkedID != event.identifier,
+                       self.event(withIdentifier: linkedID) != nil { continue }
                     let previousDueDate = existing.dueDate
                     let adoptTitle = Self.shouldAdoptCalendarTitle(
                         todoTitle: existing.title,
@@ -923,9 +1209,10 @@ extension CalendarService {
                         $0.startDate != existing.startDate || $0.dueDate != existing.dueDate
                     } ?? false
                     let isFixedScheduleChanged = existing.isFixedSchedule != event.isRecurring
+                    let isProvenanceChanged = Self.adoptRecoveredMarker(marker, for: existing)
                     let isLinkChanged = existing.calendarEventID != event.identifier
                         || existing.calendarEventExternalID != event.externalIdentifier
-                        || existing.calendarEventOrigin != marker.origin.rawValue
+                        || isProvenanceChanged
                     if adoptTitle || isNotesChanged || isTimeChanged || isFixedScheduleChanged || isLinkChanged {
                         if adoptTitle { existing.title = event.title }
                         existing.notes = event.notes
@@ -936,7 +1223,6 @@ extension CalendarService {
                         existing.isFixedSchedule = event.isRecurring
                         existing.calendarEventID = event.identifier
                         existing.calendarEventExternalID = event.externalIdentifier
-                        existing.calendarEventOrigin = marker.origin.rawValue
                         existing.updatedAt = Date()
                         hasChanges = true
                         if previousDueDate != existing.dueDate {
@@ -958,23 +1244,7 @@ extension CalendarService {
 
                 // 앱을 재설치했거나 동기화된 SwiftData를 아직 받기 전인 경우에도
                 // EventKit URL 마커의 안정 UUID로 SIFT가 만든 Todo를 복원한다.
-                let restoredWindow = Self.todoWindow(
-                    eventStart: event.startDate, eventEnd: event.endDate, isAllDay: event.isAllDay
-                )
-                let restored = Todo(
-                    id: marker.identifier,
-                    title: event.title,
-                    notes: event.notes,
-                    startDate: restoredWindow.startDate,
-                    dueDate: restoredWindow.dueDate,
-                    source: .manual,
-                    sourceRef: "sift-calendar://todo/\(marker.identifier.uuidString)"
-                )
-                restored.calendarEventID = event.identifier
-                restored.calendarEventExternalID = event.externalIdentifier
-                restored.calendarEventOrigin = marker.origin.rawValue
-                restored.isFixedSchedule = event.isRecurring
-                restored.calendarSyncedTitle = event.title
+                guard let restored = Self.restoredTodo(from: event) else { continue }
                 context.insert(restored)
                 todos.append(restored)
                 todosByID[restored.id] = restored
@@ -991,12 +1261,31 @@ extension CalendarService {
                 eventStart: event.startDate, eventEnd: event.endDate, isAllDay: event.isAllDay
             )
 
-            let matchedExisting = calendarTodosByRef[canonicalRef]
-                ?? calendarTodosByRef[localRef]
-                ?? (externalRef.flatMap { calendarTodosByRef[$0] })
-                ?? (!event.externalIdentifier.isEmpty ? calendarTodosByExternalID[event.externalIdentifier] : nil)
+            let hasAmbiguousExternalID = ambiguousExternalIDs.contains(event.externalIdentifier)
+            let sameSource = calendarTodosBySourceRef[event.calendarID]?[canonicalRef]
+                ?? calendarTodosBySourceRef[event.calendarID]?[localRef]
+                ?? calendarTodosByLocalID[event.identifier]
+                ?? calendarTodosBySourceExternalID[event.calendarID]?[event.externalIdentifier]
+            let matchedExisting: Todo?
+            if let sameSource {
+                matchedExisting = sameSource
+            } else if hasAmbiguousExternalID {
+                matchedExisting = nil
+            } else {
+                // Only unknown legacy provenance may use a globally unique UID.
+                matchedExisting = calendarTodosByRef[canonicalRef]
+                    ?? calendarTodosByRef[localRef]
+                    ?? (externalRef.flatMap { calendarTodosByRef[$0] })
+                    ?? (!event.externalIdentifier.isEmpty ? calendarTodosByExternalID[event.externalIdentifier] : nil)
+            }
 
             if let existing = matchedExisting {
+                guard existing.isCompleted || existing.triage != .review
+                    || Self.isTaskAnalysisEvent(event, selectedCalendarIDs: selectedCalendarIDs) else { continue }
+                if existing.calendarSourceID != event.calendarID {
+                    existing.calendarSourceID = event.calendarID
+                    hasChanges = true
+                }
                 let previousDueDate = existing.dueDate
                 // 동기화: 제목·마감·고정 여부만 갱신, triageStatus·isCompleted 보존
                 let adoptTitle = Self.shouldAdoptCalendarTitle(
@@ -1044,11 +1333,15 @@ extension CalendarService {
                 continue
 
             } else {
+                guard Self.isTaskAnalysisEvent(event, selectedCalendarIDs: selectedCalendarIDs) else { continue }
                 // 반복 일정: 이미 진행중(triage=.todo, 미완료)인 항목이 있으면 스킵
                 if event.isRecurring {
                     let hasActive = todos.contains {
                         $0.todoSource == .calendar
-                        && ($0.calendarEventID == event.identifier || (!event.externalIdentifier.isEmpty && $0.calendarEventExternalID == event.externalIdentifier))
+                        && ($0.calendarEventID == event.identifier || (!event.externalIdentifier.isEmpty
+                            && $0.calendarEventExternalID == event.externalIdentifier
+                            && ($0.calendarSourceID == event.calendarID
+                                || ($0.calendarSourceID.isEmpty && !hasAmbiguousExternalID))))
                         && $0.triage == .todo
                         && !$0.isCompleted
                     }
@@ -1059,6 +1352,10 @@ extension CalendarService {
                 let startLow  = event.startDate.addingTimeInterval(-60)
                 let startHigh = event.startDate.addingTimeInterval(60)
                 let isDuplicate = todos.contains { other in
+                    if other.calendarEventID == event.identifier { return true }
+                    if other.todoSource == .calendar, !other.calendarSourceID.isEmpty,
+                       other.calendarSourceID != event.calendarID { return false }
+                    if hasAmbiguousExternalID { return false }
                     if !event.externalIdentifier.isEmpty && other.calendarEventExternalID == event.externalIdentifier {
                         return true
                     }
@@ -1078,6 +1375,7 @@ extension CalendarService {
                     sourceRef: canonicalRef
                 )
                 todo.calendarEventID = event.identifier
+                todo.calendarSourceID = event.calendarID
                 todo.triageStatus = TodoTriage.review.rawValue
                 todo.isFixedSchedule = event.isRecurring
                 todo.calendarEventExternalID = event.externalIdentifier
@@ -1089,7 +1387,7 @@ extension CalendarService {
                     actor: event.isRecurring ? .recurrence : .calendarSync,
                     in: context
                 )
-                await TodoEligibilityReconciler.shared.reconcile(todo)
+                insertedReviewTodos.append(todo)
                 hasChanges = true
             }
         }
@@ -1098,6 +1396,10 @@ extension CalendarService {
             from: todos,
             observedOccurrenceRefs: observedCalendarOccurrenceRefs,
             observedExternalIDs: observedExternalIDs,
+            observedCalendarIDsByExternalID: observedCalendarIDsByExternalID,
+            approvedCalendarIDsByExternalID: approvedCalendarIDsByExternalID,
+            availableCalendarIDs: availableCalendarIDs,
+            selectedCalendarIDs: selectedCalendarIDs,
             now: now
         )
         for todo in todos where missingImportedIDs.contains(todo.id) {
@@ -1109,50 +1411,38 @@ extension CalendarService {
         if hasChanges {
             try? context.save()
         }
+        // New review suggestions never schedule notifications. Reconcile only
+        // after completing the atomic import pass, not between source decisions.
+        for todo in insertedReviewTodos {
+            await TodoEligibilityReconciler.shared.reconcile(todo)
+        }
         return hasChanges
     }
 
     /// 어플과 캘린더의 일정을 양방향으로 동기화하고, 충돌 시 최근 수정된 내용을 우선하여 갱신합니다.
     @MainActor
     func syncCalendarWithTodos(context: ModelContext) async {
-        guard isAuthorized else { return }
+        guard isAuthorized, !isSyncingCalendarWithTodos else { return }
+        isSyncingCalendarWithTodos = true
+        defer { isSyncingCalendarWithTodos = false }
 
-        // SwiftData fetch를 EK store 조작보다 먼저 수행.
-        // store.reset()이 EKEventStoreChangedNotification을 동기 트리거할 수 있어
-        // CloudKit import 중 fetch와 충돌 시 EXC_BREAKPOINT 트랩 발생.
+        // EventKit invalidates its snapshots when it posts a store-change
+        // notification. Resetting/refreshing here can post another notification
+        // and feed the app's observer back into this sync indefinitely.
         let descriptor = FetchDescriptor<Todo>()
         guard let todos = try? context.fetch(descriptor) else { return }
-
-        // fetch 완료 후 EK 캐시 리프레시 (for 루프 이전에 최신 이벤트 데이터 확보)
-        store.reset()
-        store.refreshSourcesIfNecessary()
+        clearUnresolvedEventIDs()
 
         var hasChanges = false
         hasChanges = reconcileStaleCalendarReferences(in: todos) || hasChanges
 
         for todo in todos {
-            if removePendingEmailCalendarLinkIfNeeded(for: todo) {
-                todo.updatedAt = Date()
-                hasChanges = true
-                continue
-            }
 
             // 캘린더에서 역수입한 todo는 이 메서드의 관리 대상이 아님
             if todo.todoSource == .calendar { continue }
 
             // 어플에서 생성된 할 일인데 자동 등록 대상이며 캘린더 ID가 없는 경우 -> 자동 등록
             if Self.isAutomaticRegistrationCandidate(todo) && todo.calendarEventID == nil {
-                if todo.todoSource == .email,
-                   let dueDate = todo.dueDate,
-                   !todo.sourceRef.isEmpty,
-                   let existing = findEmailEvent(sourceRef: todo.sourceRef, near: dueDate),
-                   let existingID = existing.eventIdentifier,
-                   !existingID.isEmpty {
-                    todo.calendarEventID = existingID
-                    todo.updatedAt = existing.lastModifiedDate ?? existing.creationDate ?? Date()
-                    hasChanges = true
-                    continue
-                }
                 if let eventID = try? registerOrUpdate(todo: todo) {
                     todo.calendarEventID = eventID
                     // 저장 성공 후 이벤트의 수정 시간을 어플의 updatedAt과 정확히 싱크
@@ -1169,8 +1459,8 @@ extension CalendarService {
             // 캘린더 ID가 매핑되어 있는 경우 -> 캘린더 변경분을 어플로 반영한다.
             // 제목은 마지막 동기화 기준선과 비교해 상류 변경만 채택한다. 다른 필드는
             // UI 즉시 내보내기 뒤 EventKit을 반영하는 기존 단방향 규칙을 유지한다.
-            if let eventID = todo.calendarEventID {
-                if let event = event(withIdentifier: eventID) {
+            if todo.calendarEventID != nil {
+                if let event = try? resolvedTodoEvent(for: todo) {
                     // 실제 데이터 차이가 있는지 명시적으로 검증
                     let eventTitle = event.title ?? ""
                     let adoptTitle = Self.shouldAdoptCalendarTitle(
@@ -1212,71 +1502,6 @@ extension CalendarService {
                     if todo.calendarSyncedTitle != eventTitle {
                         todo.calendarSyncedTitle = eventTitle
                         hasChanges = true
-                    }
-                } else {
-                    // eventIdentifier 무효화 방어: externalIdentifier로 재탐색
-                    var recovered = false
-                    if !todo.calendarEventExternalID.isEmpty {
-                        let items = store.calendarItems(withExternalIdentifier: todo.calendarEventExternalID)
-                        if let found = items.compactMap({ $0 as? EKEvent }).first {
-                            todo.calendarEventID = found.eventIdentifier
-                            let foundTitle = found.title ?? ""
-                            let adoptTitle = Self.shouldAdoptCalendarTitle(
-                                todoTitle: todo.title,
-                                syncedBaseline: todo.calendarSyncedTitle,
-                                eventTitle: foundTitle
-                            )
-                            let adoptedWindow = Self.adoptedTodoWindow(
-                                todoStart: todo.startDate,
-                                todoDue: todo.dueDate,
-                                eventStart: found.startDate,
-                                eventEnd: found.endDate,
-                                isAllDay: found.isAllDay
-                            )
-                            let isTimeChanged = adoptedWindow.map {
-                                $0.startDate != todo.startDate || $0.dueDate != todo.dueDate
-                            } ?? false
-                            let isNotesChanged = todo.notes != (found.notes ?? "")
-                            if adoptTitle || isTimeChanged || isNotesChanged {
-                                let previousDueDate = todo.dueDate
-                                if adoptTitle { todo.title = foundTitle }
-                                if isTimeChanged, let adoptedWindow {
-                                    todo.startDate = adoptedWindow.startDate
-                                    todo.dueDate = adoptedWindow.dueDate
-                                }
-                                todo.notes = found.notes ?? ""
-                                todo.updatedAt = found.lastModifiedDate ?? found.creationDate ?? Date()
-                                hasChanges = true
-                                TaskBehaviorRecorder.recordDueDateChange(
-                                    of: todo,
-                                    from: previousDueDate,
-                                    to: todo.dueDate,
-                                    actor: found.hasRecurrenceRules ? .recurrence : .calendarSync,
-                                    in: context
-                                )
-                            }
-                            if todo.calendarSyncedTitle != foundTitle {
-                                todo.calendarSyncedTitle = foundTitle
-                                hasChanges = true
-                            }
-                            recovered = true
-                        }
-                    }
-                    if !recovered {
-                        let previousDueDate = todo.dueDate
-                        // 캘린더에서 진짜 삭제된 경우 → 마감 정보 해제
-                        todo.calendarEventID = nil
-                        todo.dueDate = nil
-                        todo.startDate = nil
-                        todo.updatedAt = Date()
-                        hasChanges = true
-                        TaskBehaviorRecorder.recordDueDateChange(
-                            of: todo,
-                            from: previousDueDate,
-                            to: todo.dueDate,
-                            actor: .calendarSync,
-                            in: context
-                        )
                     }
                 }
             }
@@ -1399,11 +1624,75 @@ extension CalendarService {
         set { UserDefaults.standard.set(newValue, forKey: "pieroot.todo.defaultCalendarID") }
     }
 
-    /// 앱 기본 캘린더. 설정 저장값 조회 실패 시 시스템 기본 캘린더로 폴백.
+    static let systemDefaultCalendarID = "system-default"
+
+    /// Only an explicit system-default selection may follow a different account.
+    static func resolveDestinationID(
+        selection: String,
+        writableIDs: Set<String>,
+        systemDefaultID: String?
+    ) throws -> String {
+        guard !selection.isEmpty else { throw CalendarError.destinationNotSelected }
+        let resolvedID = selection == systemDefaultCalendarID ? systemDefaultID : selection
+        guard let resolvedID, writableIDs.contains(resolvedID) else {
+            throw CalendarError.destinationUnavailable
+        }
+        return resolvedID
+    }
+
+    private func destinationCalendar(preferredID: String? = nil) throws -> EKCalendar {
+        let selection = preferredID ?? defaultCalendarID
+        let calendars = store.calendars(for: .event).filter(\.allowsContentModifications)
+        let id = try Self.resolveDestinationID(
+            selection: selection,
+            writableIDs: Set(calendars.map(\.calendarIdentifier)),
+            systemDefaultID: store.defaultCalendarForNewEvents?.calendarIdentifier
+        )
+        guard let calendar = calendars.first(where: { $0.calendarIdentifier == id }) else {
+            throw CalendarError.destinationUnavailable
+        }
+        return calendar
+    }
+
     var preferredDefaultCalendar: EKCalendar? {
-        let id = defaultCalendarID
-        if !id.isEmpty, let cal = store.calendar(withIdentifier: id) { return cal }
-        return store.defaultCalendarForNewEvents
+        try? destinationCalendar()
+    }
+
+    var destinationError: CalendarError? {
+        do {
+            _ = try destinationCalendar()
+            return nil
+        } catch let error as CalendarError {
+            return error
+        } catch {
+            return .destinationUnavailable
+        }
+    }
+
+    // MARK: Automatic task-analysis sources (device-local explicit opt-in)
+
+    static let taskAnalysisCalendarIDsKey = "pieroot.todo.taskAnalysisCalendarIDs"
+
+    static func taskAnalysisCalendarIDs(defaults: UserDefaults = .standard) -> Set<String> {
+        Set(defaults.stringArray(forKey: taskAnalysisCalendarIDsKey) ?? [])
+    }
+
+    static func setTaskAnalysisCalendarIDs(
+        _ ids: Set<String>, defaults: UserDefaults = .standard
+    ) {
+        guard ids != taskAnalysisCalendarIDs(defaults: defaults) else { return }
+        // Do not normalize against currently available calendars. Missing IDs
+        // remain selected intent and must never silently follow another account.
+        defaults.set(ids.sorted(), forKey: taskAnalysisCalendarIDsKey)
+        defaults.removeObject(forKey: weeklyImportKey)
+        if defaults === UserDefaults.standard {
+            NotificationCenter.default.post(name: .calendarTaskAnalysisSourcesChanged, object: nil)
+        }
+    }
+
+    var taskAnalysisCalendarIDs: Set<String> {
+        get { Self.taskAnalysisCalendarIDs() }
+        set { Self.setTaskAnalysisCalendarIDs(newValue) }
     }
 
     // MARK: 비활성 캘린더 ID 집합 (기기별 로컬 영속)
@@ -1427,26 +1716,17 @@ extension CalendarService {
 
     // MARK: 활성 캘린더 필터링
 
-    /// 활성화된 EKCalendar 배열. 전체 활성이면 nil (predicateForEvents 최적화).
-    var activeEKCalendars: [EKCalendar]? {
-        let disabled = disabledCalendarIDs
-        guard !disabled.isEmpty else { return nil }
-        let filtered = store.calendars(for: .event).filter {
-            !disabled.contains($0.calendarIdentifier)
-        }
-        return filtered.isEmpty ? nil : filtered
-    }
 
     // MARK: 캘린더 소스 목록
 
     /// EKSource별로 그룹핑된 캘린더 목록 반환 (CalendarSourceSheet 전용).
-    func availableCalendars() -> [CalendarSourceGroup] {
+    func availableCalendars(writableOnly: Bool = false) -> [CalendarSourceGroup] {
         guard isAuthorized else { return [] }
-        store.refreshSourcesIfNecessary()
         return store.sources
             .sorted { $0.title < $1.title }
             .compactMap { source -> CalendarSourceGroup? in
                 let cals = source.calendars(for: .event)
+                    .filter { !writableOnly || $0.allowsContentModifications }
                     .sorted { $0.title < $1.title }
                 guard !cals.isEmpty else { return nil }
                 let infos = cals.map {
@@ -1466,24 +1746,13 @@ extension CalendarService {
 
     // MARK: 임의 날짜 범위 이벤트 조회 (활성 캘린더 필터 적용)
 
-    /// 과도한 호출을 막는 throttle — 30초에 한 번만 소스를 리프레시.
-    private func refreshStoreIfNeeded() {
-        guard Date().timeIntervalSince(lastStoreRefresh) > 30 else { return }
-        store.refreshSourcesIfNecessary()
-        lastStoreRefresh = Date()
-    }
-
-    /// CalendarTabView 전용 — 활성화된 캘린더만 쿼리.
-    /// 백그라운드 sync(`upcomingEvents`, `syncCalendarTodos`)는 filter 미적용.
-    func events(from start: Date, to end: Date) -> [CalendarEventSummary] {
-        guard isAuthorized else { return [] }
-        refreshStoreIfNeeded()
-        let predicate = store.predicateForEvents(
-            withStart: start, end: end, calendars: activeEKCalendars
+    /// UI reads are bounded to the visible grid. The reader owns its EventKit
+    /// objects on a separate actor; only immutable summaries cross to the UI.
+    func events(from start: Date, to end: Date) async -> [CalendarEventSummary] {
+        guard isAuthorized, start < end else { return [] }
+        return await CalendarVisibleEventReader.shared.events(
+            from: start, to: end, disabledIDs: disabledCalendarIDs
         )
-        return store.events(matching: predicate)
-            .map(summary(for:))
-            .sorted { $0.startDate < $1.startDate }
     }
 
     // MARK: 이벤트 메타데이터
@@ -1549,11 +1818,7 @@ extension CalendarService {
         event.startDate = startDate
         event.endDate   = endDate
         event.notes     = notes.isEmpty ? nil : notes
-        if let cid = calendarID, let cal = store.calendar(withIdentifier: cid) {
-            event.calendar = cal
-        } else {
-            event.calendar = preferredDefaultCalendar
-        }
+        event.calendar = try destinationCalendar(preferredID: calendarID)
         event.url = CalendarEventMarker.url(
             entity: .standaloneEvent,
             identifier: UUID(),
@@ -1630,5 +1895,25 @@ extension CalendarService {
             try store.save(fallback, span: span)
             markResolvedEventID(fallback.eventIdentifier)
         }
+    }
+}
+
+private actor CalendarVisibleEventReader {
+    static let shared = CalendarVisibleEventReader()
+    private let store = EKEventStore()
+
+    func events(from start: Date, to end: Date, disabledIDs: Set<String>) -> [CalendarService.CalendarEventSummary] {
+        guard !Task.isCancelled,
+              EKEventStore.authorizationStatus(for: .event) == .fullAccess else { return [] }
+        let calendars = store.calendars(for: .event).filter {
+            !disabledIDs.contains($0.calendarIdentifier)
+        }
+        // An empty calendar selection means no events, never the EventKit `nil`
+        // sentinel (which means every calendar).
+        guard !calendars.isEmpty else { return [] }
+        let predicate = store.predicateForEvents(withStart: start, end: end, calendars: calendars)
+        let events = store.events(matching: predicate)
+        guard !Task.isCancelled else { return [] }
+        return events.map(CalendarService.summary(for:)).sorted { $0.startDate < $1.startDate }
     }
 }

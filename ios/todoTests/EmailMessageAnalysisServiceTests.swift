@@ -63,11 +63,11 @@ private final class CancellableEmailSummaryProvider {
 @MainActor
 @Suite("Email message analysis service", .serialized)
 struct EmailMessageAnalysisServiceTests {
-    @Test("Real AFM opt-in ignores Laya and OpenAI task selections", arguments: [PersonaAIProvider.laya, .openAI])
+    @Test("AFM email analysis ignores Laya and OpenAI task selections", arguments: [PersonaAIProvider.laya, .openAI])
     func testRealAFMGate(selectedProvider: PersonaAIProvider) async throws {
         try await AIProviderTestIsolation.shared.withLock {
             let defaults = UserDefaults.standard
-            let keys = [SettingsStore.betaFoundationModelsEnabledKey, SettingsStore.betaLayaEnabledKey, SettingsStore.betaOpenAIEnabledKey, SettingsStore.betaSelectedProviderKey, "pieroot.todo.providerEmailAnalysisEnabled"]
+            let keys = [SettingsStore.betaLayaEnabledKey, SettingsStore.betaOpenAIEnabledKey, SettingsStore.betaSelectedProviderKey, "pieroot.todo.providerEmailAnalysisEnabled"]
             let previous = keys.map { defaults.object(forKey: $0) }
             defer {
                 for (key, value) in zip(keys, previous) {
@@ -75,7 +75,6 @@ struct EmailMessageAnalysisServiceTests {
                     else { defaults.removeObject(forKey: key) }
                 }
             }
-            SettingsStore.shared.setBetaProvider(.foundationModels, enabled: true)
             SettingsStore.shared.setBetaProvider(.laya, enabled: true)
             SettingsStore.shared.setBetaProvider(.openAI, enabled: true)
             defaults.set(selectedProvider.rawValue, forKey: SettingsStore.betaSelectedProviderKey)
@@ -97,12 +96,6 @@ struct EmailMessageAnalysisServiceTests {
             try await service.analyze(email, context: context)
             #expect(email.analysisSummary == "Apple summary")
             #expect(email.analysisFailureReasonRaw == nil)
-            #expect(calls == 1)
-            SettingsStore.shared.setBetaProvider(.foundationModels, enabled: false)
-            email.body = "Please review the updated plan by Monday."
-            try await service.analyze(email, context: context)
-            #expect(email.analysisSummary == EmailAnalysisContract.deterministicSummary(subject: email.subject, body: email.body).summary)
-            #expect(email.analysisFailureReasonRaw == RuleFallbackReason.providerDisabled.rawValue)
             #expect(calls == 1)
         }
     }

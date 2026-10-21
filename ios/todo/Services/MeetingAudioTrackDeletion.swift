@@ -26,23 +26,24 @@ enum MeetingAudioTrackDeletion {
             for (record, snapshot) in zip(pending, snapshots) { record.restore(snapshot) }
             throw error
         }
-        // These records now durably own their provisional text and FLAC. Clearing
-        // a marker first prevents a cleanup error from resurrecting a deleted row.
-        for id in ids {
-            try MeetingCaptureRecoveryStore.remove(meetingID: id, rootURL: rootURL)
-        }
+        // Fence every owned identity before journals or rows disappear. Late
+        // revisions for an unknown child also consult its parent's fence.
+        let newlyFenced = try ids.filter { try !MeetingDeletionFence.isDeleted(meetingID: $0, rootURL: rootURL) }
         do {
+            for id in ids { try MeetingDeletionFence.recordDeletion(meetingID: id, rootURL: rootURL) }
+            for id in ids { try MeetingCaptureRecoveryStore.remove(meetingID: id, rootURL: rootURL) }
             for record in records { context.delete(record) }
             try save(context)
         } catch {
             context.rollback()
+            // This local transaction never deleted its durably saved records.
+            // Abort only fences created by this attempt; retain older deletions.
+            for id in newlyFenced { try MeetingDeletionFence.recordAuthoritativeRestore(meetingID: id, rootURL: rootURL) }
             throw error
         }
         var cleanupError: Error?
         for id in ids {
-            let directory = rootURL.appendingPathComponent(id, isDirectory: true)
-            guard FileManager.default.fileExists(atPath: directory.path) else { continue }
-            do { try FileManager.default.removeItem(at: directory) }
+            do { try MeetingDeletionFence.removeDeletedContent(meetingID: id, rootURL: rootURL) }
             catch { cleanupError = cleanupError ?? error }
         }
         if let cleanupError { throw cleanupError }

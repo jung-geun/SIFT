@@ -24,8 +24,8 @@ enum QuickSortService {
     ///   - todo: 방금 삽입된 Todo 인스턴스.
     ///   - persona: 현재 페르소나 컨텍스트 (가중 키워드·설명 포함).
     static func analyzeOnAdd(_ todo: Todo, persona: PersonaContext, context: ModelContext) async {
-        // 수동 우선순위 설정 시 자동 분석 생략 (사용자 의도 존중)
-        guard todo.manualPriority == nil else { return }
+        // Preserve manual priority and review/completed state.
+        guard todo.isEligibleForAutomaticPriority else { return }
         let todoID = todo.id
 
         let results: [PriorityResult]
@@ -50,7 +50,7 @@ enum QuickSortService {
         )
         descriptor.fetchLimit = 1
         guard let liveTodo = try? context.fetch(descriptor).first,
-              liveTodo.manualPriority == nil else {
+              liveTodo.isEligibleForAutomaticPriority else {
             return
         }
 

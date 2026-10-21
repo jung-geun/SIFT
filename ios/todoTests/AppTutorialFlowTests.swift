@@ -98,4 +98,34 @@ struct AppTutorialFlowTests {
         tutorial.handleTodoListAppeared()
         #expect(tutorial.currentStep == .autoSort)
     }
+    @Test("closing shared to-do settings does not skip priority rules")
+    @MainActor
+    func closingTodoSettingsDoesNotSkipPriorityRules() {
+        let tutorial = AppTutorialState()
+        tutorial.start(tabVisibility: AppTabVisibility(calendarVisible: false, mailVisible: false))
+        tutorial.handleAddTodoDismissed()
+        tutorial.handlePersonaDetailClosed()
+
+        #expect(tutorial.currentStep == .priorityRules)
+        tutorial.handlePermissionsClosed()
+        #expect(tutorial.currentStep == .priorityRules)
+        tutorial.handlePriorityRulesDetailClosed()
+        #expect(tutorial.currentStep == .emailOptional)
+    }
+
+    @Test("notification permission remains optional in to-do settings")
+    @MainActor
+    func notificationsCanBeSkippedInTodoSettings() {
+        let tutorial = AppTutorialState()
+        tutorial.start(tabVisibility: AppTabVisibility(calendarVisible: false, mailVisible: false))
+        tutorial.handleAddTodoDismissed()
+        tutorial.handlePersonaDetailClosed()
+        tutorial.handlePriorityRulesDetailClosed()
+        tutorial.handleEmailDetailClosed()
+
+        #expect(tutorial.currentStep == .permissions)
+        tutorial.handlePermissionsClosed()
+        #expect(tutorial.currentStep == .autoSort)
+        #expect(tutorial.isActive)
+    }
 }

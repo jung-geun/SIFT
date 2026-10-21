@@ -1,7 +1,7 @@
 import Foundation
 import Network
 
-protocol IMAPCommandTransport: Sendable {
+nonisolated protocol IMAPCommandTransport: Sendable {
     func connect(username: String, password: String) async throws
     func execute(_ command: String) async throws -> [String]
     func close() async
@@ -228,7 +228,7 @@ nonisolated private final class NetworkIMAPWireConnection: Sendable, IMAPWireCon
 /// Callers that must inspect legacy-auth support (e.g. `LOGINDISABLED`) before
 /// sending credentials use `connectPreAuth()` + `login(username:password:)`
 /// instead of the combined `connect(username:password:)`.
-protocol IMAPPreAuthCapabilityProbing: IMAPCommandTransport {
+nonisolated protocol IMAPPreAuthCapabilityProbing: IMAPCommandTransport {
     /// Opens the TLS connection and returns the greeting lines, without sending `LOGIN`.
     func connectPreAuth() async throws -> [String]
     /// Sends `LOGIN` on a connection already opened by `connect`/`connectPreAuth`.
@@ -411,24 +411,24 @@ actor NetworkIMAPCommandTransport: IMAPPreAuthCapabilityProbing {
         }
     }
 
-    private static func status(in line: String) -> String? {
+    nonisolated private static func status(in line: String) -> String? {
         let tokens = line.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
         return tokens.count >= 2 ? tokens[1].uppercased() : nil
     }
 
-    private static func validateCommand(_ command: String) throws {
+    nonisolated private static func validateCommand(_ command: String) throws {
         guard !command.isEmpty, command.utf8.count <= 65_536,
               command.utf8.allSatisfy({ $0 >= 32 && $0 != 127 }),
               command.first != " " else { throw GmailIMAPError.invalidResponse }
     }
 
-    private static func loginCommand(username: String, password: String) throws -> String {
+    nonisolated private static func loginCommand(username: String, password: String) throws -> String {
         let command = "LOGIN \(try quote(username)) \(try quote(password))"
         try validateCommand(command)
         return command
     }
 
-    private static func quote(_ value: String) throws -> String {
+    nonisolated private static func quote(_ value: String) throws -> String {
         guard !value.isEmpty, value.utf8.allSatisfy({ $0 >= 32 && $0 < 127 }) else {
             throw GmailIMAPError.invalidResponse
         }

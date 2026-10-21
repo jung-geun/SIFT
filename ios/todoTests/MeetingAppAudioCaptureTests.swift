@@ -222,4 +222,100 @@ struct MeetingAppAudioCaptureTests {
         #expect(capture.selectedSourceDescription == nil)
         await capture.stop()
     }
+
+    @Test("A muted lane survives delayed activation but revocation never reopens")
+    func mutedAndRevokedDelivery() {
+        var delivery = MeetingAppAudioDeliveryState()
+        #expect(!delivery.acceptsSamples)
+        delivery.setEnabled(false)
+        delivery.activate()
+        #expect(!delivery.acceptsSamples)
+        delivery.setEnabled(true)
+        #expect(delivery.acceptsSamples)
+        let beforeMute = delivery.ticket
+        delivery.setEnabled(false)
+        delivery.setEnabled(true)
+        #expect(delivery.acceptsSamples)
+        #expect(!delivery.acceptsSamples(for: beforeMute))
+        #expect(delivery.acceptsSamples(for: delivery.ticket))
+        delivery.setEnabled(false)
+        let queuedResume = delivery.ticket
+        delivery.setEnabled(false) // Another disable supersedes a queued resume.
+        delivery.enable(ifCurrent: queuedResume)
+        #expect(!delivery.acceptsSamples)
+        delivery.enable(ifCurrent: delivery.ticket)
+        #expect(delivery.acceptsSamples)
+        delivery.revoke()
+        delivery.activate()
+        delivery.setEnabled(true)
+        #expect(!delivery.acceptsSamples)
+    }
+
+    @Test("Shutdown awaits pending start, retains outputs, and releases capacity only once")
+    func shutdownOwnsPendingStream() async {
+        let lifecycle = MeetingAppAudioStreamLifecycle()
+        let sessions = MeetingAppAudioPickerSessions()
+        #expect(sessions.reserve("old", supportsMultipleSources: false))
+        let enteredStart = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        let enteredStop = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        var releaseStart: CheckedContinuation<Void, Never>?
+        var releaseStop: CheckedContinuation<Void, Never>?
+        var events: [String] = []
+        lifecycle.startup = Task { @MainActor in
+            events.append("start")
+            await withCheckedContinuation { continuation in
+                releaseStart = continuation
+                enteredStart.continuation.yield(())
+            }
+            events.append("started")
+        }
+        var starts = enteredStart.stream.makeAsyncIterator()
+        _ = await starts.next()
+        var resource: NSObject? = NSObject()
+        weak let retainedResource = resource
+        let first = lifecycle.stop { [output = resource!] in
+            events.append("stop")
+            await withCheckedContinuation { continuation in
+                releaseStop = continuation
+                enteredStop.continuation.yield(())
+            }
+            withExtendedLifetime(output) { events.append("remove") }
+            #expect(sessions.release("old"))
+            events.append("release")
+        }
+        resource = nil
+        let duplicate = lifecycle.stop { events.append("duplicate stop") }
+        #expect(events == ["start"])
+        #expect(retainedResource != nil)
+        #expect(!sessions.reserve("new", supportsMultipleSources: false))
+        releaseStart?.resume()
+        var stops = enteredStop.stream.makeAsyncIterator()
+        _ = await stops.next()
+        #expect(events == ["start", "started", "stop"])
+        #expect(retainedResource != nil)
+        #expect(!sessions.reserve("new", supportsMultipleSources: false))
+        releaseStop?.resume()
+        await first.value
+        await duplicate.value
+        let late = lifecycle.stop { events.append("late stop") }
+        await late.value
+        #expect(events == ["start", "started", "stop", "remove", "release"])
+        #expect(sessions.reserve("new", supportsMultipleSources: false))
+        _ = sessions.release("new")
+        enteredStart.continuation.finish()
+        enteredStop.continuation.finish()
+    }
+
+    @Test("Failed startup still runs teardown without repeating the start")
+    func failedStartStillStops() async {
+        struct StartFailure: Error {}
+        let lifecycle = MeetingAppAudioStreamLifecycle()
+        lifecycle.startup = Task { @MainActor in throw StartFailure() }
+        var stops = 0
+        let first = lifecycle.stop { stops += 1 }
+        await first.value
+        let duplicate = lifecycle.stop { stops += 1 }
+        await duplicate.value
+        #expect(stops == 1)
+    }
 }

@@ -2,18 +2,10 @@ import Foundation
 import Testing
 @testable import todo
 
-// MARK: - Tier 2: FM 라이브 스모크 테스트
+// MARK: - Foundation Models availability and deterministic adapters
 //
-// Apple Foundation Models(@Generable)가 올바른 구조체 필드를 채우는지 실기기/시뮬레이터에서 검증.
-// 각 테스트는 `if #available(iOS 26.0, *)` + `guard FoundationModelsAvailability.isAvailable` 패턴으로 게이팅:
-//   - iOS 26 미만: 가용성 블록 진입 안 함 → 테스트 즉시 pass
-//   - FM 미지원 기기/시뮬레이터: FoundationModelsAvailability.isAvailable == false → return (trivial pass)
-//   - FM 지원 환경: 전체 검증 실행
-//
-// 실행 조건:
-//   - iPhone 15 Pro+ 또는 M-시리즈 iPad (Apple Intelligence 활성화)
-//   - iOS 26.0+, Xcode 26+
-//   - 설정 > Apple Intelligence & Siri 활성화
+// Adapter tests inject typed runtime responses; native model quality and guardrail
+// behavior belong to manual smoke runs, not the default regression suite.
 
 // MARK: - 가용성 메시징
 
@@ -85,14 +77,23 @@ import FoundationModels
 
 
 @available(iOS 26.0, *)
-private final class CapturingEmailSummaryRuntime: @unchecked Sendable, FoundationModelsRuntime {
-    private let output: FMEmailSummaryOutput
+private final class CapturingEmailRuntime: @unchecked Sendable, FoundationModelsRuntime {
+    private enum Output {
+        case summary(FMEmailSummaryOutput)
+        case deadline(FMEmailOutput)
+    }
+
+    private let output: Output
     private let lock = NSLock()
     private var lastInstructions = ""
     private var lastPrompt = ""
 
     init(output: FMEmailSummaryOutput) {
-        self.output = output
+        self.output = .summary(output)
+    }
+
+    init(output: FMEmailOutput) {
+        self.output = .deadline(output)
     }
 
     func rankTodos(
@@ -104,12 +105,20 @@ private final class CapturingEmailSummaryRuntime: @unchecked Sendable, Foundatio
     func analyzeEmail(
         instructions: String,
         userPrompt: String
-    ) async throws -> FMEmailOutput { fatalError("unexpected runtime call") }
+    ) async throws -> FMEmailOutput {
+        guard case .deadline(let output) = output else { fatalError("unexpected runtime call") }
+        lock.withLock {
+            lastInstructions = instructions
+            lastPrompt = userPrompt
+        }
+        return output
+    }
 
     func summarizeEmail(
         instructions: String,
         userPrompt: String
     ) async throws -> FMEmailSummaryOutput {
+        guard case .summary(let output) = output else { fatalError("unexpected runtime call") }
         lock.withLock {
             lastInstructions = instructions
             lastPrompt = userPrompt
@@ -198,23 +207,6 @@ private struct NarrativeRuntime: FoundationModelsRuntime {
         userPrompt: String
     ) async throws -> FMEmailTodoDraftOutput { fatalError("unexpected runtime call") }
 }
-// MARK: - 가용성 프로브
-
-@Suite("FM 가용성 프로브")
-struct FMAvailabilityProbeTests {
-
-    /// availability 값을 콘솔에 출력하는 프로브.
-    /// .available: Tier 2 실행 가능. 그 외: FM 미지원 환경 — Tier 2 skip(정상).
-    @Test("Apple Intelligence availability 콘솔 출력")
-    func probeAvailability() {
-        print("[FM 프로브] FoundationModelsAvailability.isAvailable = \(FoundationModelsAvailability.isAvailable)")
-        if let reason = FoundationModelsAvailability.unavailableExplanation {
-            print("[FM 프로브] FoundationModelsAvailability.unavailableExplanation = \(reason)")
-        }
-        // 이 테스트는 환경 무관 항상 pass — 콘솔 출력으로 지원 여부 확인
-        #expect(Bool(true))
-    }
-}
 
 @Suite("FM email summary adapter", .serialized)
 @MainActor
@@ -224,34 +216,26 @@ struct FMEmailSummaryAdapterTests {
         guard #available(iOS 26.0, *) else { return }
         try await AIProviderTestIsolation.shared.withLock {
             let defaults = UserDefaults.standard
-            let enabledKey = SettingsStore.betaFoundationModelsEnabledKey
             let selectedKey = SettingsStore.betaSelectedProviderKey
-            let originalEnabled = defaults.object(forKey: enabledKey)
             let originalSelection = defaults.object(forKey: selectedKey)
             defer {
-                if let originalEnabled {
-                    defaults.set(originalEnabled, forKey: enabledKey)
-                } else {
-                    defaults.removeObject(forKey: enabledKey)
-                }
                 if let originalSelection {
                     defaults.set(originalSelection, forKey: selectedKey)
                 } else {
                     defaults.removeObject(forKey: selectedKey)
                 }
             }
-            defaults.set(true, forKey: enabledKey)
             defaults.set(PersonaAIProvider.foundationModels.rawValue, forKey: selectedKey)
 
             let body = String(repeating: "x", count: 1_500) + "TRUNCATED"
-            let runtime = CapturingEmailSummaryRuntime(
+            let runtime = CapturingEmailRuntime(
                 output: FMEmailSummaryOutput(
                     summary: "  Submit the proposal by Friday.  ",
                     keyPoints: [" Deadline: Friday ", "", "Owner: Product team"],
                     actionItems: [" Reply with the final proposal ", ""]
                 )
             )
-            let service = FoundationModelsService(runtime: runtime)
+            let service = FoundationModelsService(runtime: runtime, policy: BetaFeaturePolicy(selectionReader: { .foundationModels }))
             let result = try await service.summarizeEmail(
                 subject: "Proposal review",
                 sender: "Product team <product@example.com>",
@@ -279,17 +263,12 @@ struct FMEmailSummaryAdapterTests {
         guard #available(iOS 26.0, *) else { return }
         try await AIProviderTestIsolation.shared.withLock {
             let defaults = UserDefaults.standard
-            let enabledKey = SettingsStore.betaFoundationModelsEnabledKey
             let selectedKey = SettingsStore.betaSelectedProviderKey
-            let originalEnabled = defaults.object(forKey: enabledKey)
             let originalSelection = defaults.object(forKey: selectedKey)
             defer {
-                if let originalEnabled { defaults.set(originalEnabled, forKey: enabledKey) }
-                else { defaults.removeObject(forKey: enabledKey) }
                 if let originalSelection { defaults.set(originalSelection, forKey: selectedKey) }
                 else { defaults.removeObject(forKey: selectedKey) }
             }
-            defaults.set(true, forKey: enabledKey)
             defaults.set(PersonaAIProvider.foundationModels.rawValue, forKey: selectedKey)
 
             let runtime = NarrativeRuntime(
@@ -302,7 +281,7 @@ struct FMEmailSummaryAdapterTests {
                     insights: ["Observed insight."]
                 )
             )
-            let service = FoundationModelsService(runtime: runtime)
+            let service = FoundationModelsService(runtime: runtime, policy: BetaFeaturePolicy(selectionReader: { .foundationModels }))
             let baseline = MemoryService.computeAnalysis(todos: [], language: .english)
             let persona = try await service.generatePersonaNarrative(
                 existingPersona: "",
@@ -333,93 +312,49 @@ struct FMEmailSummaryAdapterTests {
 }
 
 
-// MARK: - 우선순위 랭킹 스모크
-
-@Suite("FM 우선순위 랭킹 스모크")
+@Suite("FM email deadline adapter")
 @MainActor
-struct FMRankingsSmokeTests {
-
-    @Test("rankTodos: score 0.01~1.0, todoID 역참조 성공")
-    func rankTodosSmoke() async throws {
-        if #available(iOS 26.0, *) {
-            guard FoundationModelsAvailability.isAvailable else { return }
-            let service = FoundationModelsService()
-            let todos = makeTodos(["iOS 26 마이그레이션", "주간 회의 준비", "유닛 테스트 작성"])
-            todos[0].dueDate = Date().addingTimeInterval(86_400 * 3)   // 3일 후 마감
-            let persona = PersonaContext(types: [], description: "iOS 개발자")
-            let results = try await service.rankTodos(todos: todos, events: [], persona: persona)
-
-            #expect(!results.isEmpty, "랭킹 결과가 비어 있어서는 안 됩니다")
-            for r in results {
-                #expect(r.score >= 0.01, "score 하한 위반: \(r.score)")
-                #expect(r.score <= 1.0, "score 상한 위반: \(r.score)")
-                let matched = todos.contains { $0.id == r.todoID }
-                #expect(matched, "역참조 실패: \(r.todoID)")
-            }
-        }
-    }
-
-}
-
-// MARK: - 이메일 마감 추출 스모크
-
-@Suite("FM 이메일 마감 추출 스모크")
-@MainActor
-struct FMEmailSmokeTests {
-
-    @Test("마감 포함 메일 → dueDate > now (추론 정상)")
-    func analyzeEmailWithDeadline() async throws {
-        if #available(iOS 26.0, *) {
-            guard FoundationModelsAvailability.isAvailable else { return }
-            let now = Date()
-            let service = FoundationModelsService()
-            let msg = GmailMessage(
-                id: "smoke-1", threadID: "t1", messageID: "<smoke1@test>",
-                subject: "프로젝트 제안서 제출 요청",
-                from: "김팀장 <manager@company.com>",
-                snippet: "이번 주 금요일까지 제출 부탁드립니다",
-                body: "안녕하세요. 프로젝트 제안서를 이번 주 금요일(2026년 6월 26일)까지 제출해 주시기 바랍니다. 감사합니다.",
-                htmlBody: nil,
-                receivedAt: now,
-                labelIds: [], isBulk: false
+struct FMEmailDeadlineAdapterTests {
+    @Test("An empty typed deadline produces no email extraction")
+    func missingDeadlineDoesNotInventExtraction() async throws {
+        guard #available(iOS 26.0, *) else { return }
+        let now = Date(timeIntervalSince1970: 1_782_432_000)
+        let runtime = CapturingEmailRuntime(output: FMEmailOutput(
+            dueDateISO: "",
+            isAllDay: false,
+            sender: "동료",
+            senderEmail: "colleague@company.com",
+            keywordScore: 0,
+            deadlineSentence: "",
+            notes: "점심 메뉴 추천"
+        ))
+        let policy = BetaFeaturePolicy(accessReader: {
+            BetaProviderAccess(
+                foundationModelsEnabled: true,
+                onDeviceEnabled: false,
+                openAIEnabled: false,
+                layaEnabled: false,
+                meetingVoiceProcessingEnabled: false
             )
-            if let extraction = try await service.analyzeEmail(msg, now: now) {
-                #expect(extraction.dueDate > now, "추출된 마감일이 현재보다 미래여야 합니다")
-                #expect(!extraction.sender.isEmpty, "발신자가 비어 있어서는 안 됩니다")
-            }
-            // nil도 허용 — smoke test는 crash 부재만 보장
-        }
-    }
+        }, selectionReader: { .foundationModels })
+        let service = FoundationModelsService(runtime: runtime, policy: policy)
+        let message = GmailMessage(
+            id: "no-deadline", threadID: "thread", messageID: "<no-deadline@test>",
+            subject: "점심 메뉴 추천",
+            from: "동료 <colleague@company.com>",
+            snippet: "오늘 점심 뭐 먹을까요?",
+            body: "오늘 점심 메뉴 추천해주세요. 한식? 중식?",
+            htmlBody: nil,
+            receivedAt: now,
+            labelIds: [], isBulk: false
+        )
 
-    @Test("마감 없는 메일 → nil (추측 금지 검증)")
-    func analyzeEmailWithoutDeadline() async throws {
-        if #available(iOS 26.0, *) {
-            guard FoundationModelsAvailability.isAvailable else { return }
-            let now = Date()
-            let service = FoundationModelsService()
-            let msg = GmailMessage(
-                id: "smoke-2", threadID: "t2", messageID: "<smoke2@test>",
-                subject: "점심 메뉴 추천",
-                from: "동료 <colleague@company.com>",
-                snippet: "오늘 점심 뭐 먹을까요?",
-                body: "오늘 점심 메뉴 추천해주세요. 한식? 중식?",
-                htmlBody: nil,
-                receivedAt: now,
-                labelIds: [], isBulk: false
-            )
-            let result = try await service.analyzeEmail(msg, now: now)
-            #expect(result == nil, "마감 없는 메일에서 EmailExtraction 반환 금지 (dueDateISO 추측 금지)")
-        }
-    }
-}
+        let result = try await service.analyzeEmail(message, now: now, language: .korean)
+        let request = await runtime.request()
 
-// MARK: - 헬퍼
-
-private func makeTodos(_ titles: [String]) -> [Todo] {
-    titles.map { title in
-        let t = Todo()
-        t.title = title
-        return t
+        // Prove the nonempty message reached the adapter, rather than an early nil return.
+        #expect(request.prompt.contains(message.body))
+        #expect(result == nil)
     }
 }
 

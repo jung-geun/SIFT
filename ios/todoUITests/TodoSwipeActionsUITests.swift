@@ -58,7 +58,7 @@ final class TodoSwipeActionsUITests: SIFTUITestCase {
             throw XCTSkip("Review queue is created by dragging between iPad board columns.")
         }
         if !app.staticTexts["항목 없음"].firstMatch.exists {
-            tap(app.buttons["todo.boardVisibilityMenu"], message: "보드 보기 설정을 열 수 없습니다.")
+            tap(app.buttons["todo.moreActionsMenu"], message: "더보기에서 보드 보기 설정을 열 수 없습니다.")
             tap(app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "보드 보기")).firstMatch,
                 message: "보드 보기로 전환할 수 없습니다.")
         }
@@ -69,12 +69,12 @@ final class TodoSwipeActionsUITests: SIFTUITestCase {
             tap(field, message: "제목 필드가 없습니다.")
             field.typeText(title)
             tap(app.buttons["todo.add.saveButton"], message: "추가 버튼이 없습니다.")
-            let card = app.staticTexts[title]
+            let card = app.buttons[title]
             require(card, message: "보드에 생성한 할 일이 없습니다.")
             let reviewColumn = app.staticTexts["항목 없음"].firstMatch
             require(reviewColumn, message: "등록 대기열 드롭 영역을 찾지 못했습니다.")
             card.press(forDuration: 1.0, thenDragTo: reviewColumn, withVelocity: .slow, thenHoldForDuration: 0.5)
-            tap(app.buttons["todo.boardVisibilityMenu"], message: "보드 보기 설정을 열 수 없습니다.")
+            tap(app.buttons["todo.moreActionsMenu"], message: "더보기에서 보기 방식을 열 수 없습니다.")
             tap(app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "목록 보기")).firstMatch,
                 message: "목록 보기로 전환할 수 없습니다.")
             selectFilter("review")

@@ -48,17 +48,20 @@ final class GmailIMAPIngestionService {
     /// Separate from the email content container so a durable analysis claim
     /// cannot substitute for a missing local email row after that store resets.
     private let ledgerStore: MailAnalysisLedgerStore
+    private let analysisService: EmailMessageAnalysisService
 
     init(
         emailContext: ModelContext,
         imapService: GmailIMAPService? = nil,
         cursorStore: GmailIMAPIngestionCursorStore? = nil,
-        ledgerStore: MailAnalysisLedgerStore? = nil
+        ledgerStore: MailAnalysisLedgerStore? = nil,
+        analysisService: EmailMessageAnalysisService? = nil
     ) {
         self.emailContext = emailContext
         self.imapService = imapService ?? .shared
         self.cursorStore = cursorStore ?? .init()
         self.ledgerStore = ledgerStore ?? .shared
+        self.analysisService = analysisService ?? .shared
     }
 
     /// Deterministic baseline/update policy:
@@ -190,14 +193,18 @@ final class GmailIMAPIngestionService {
         var analyzed = 0
         var skipped = 0
 
+        let identityKeys = try MailAnalysisLedgerKeyStore.keysChecked()
         for metadata in page.messages {
             guard !metadata.providerGlobalMessageID.isEmpty else { continue }
-            let fingerprint = MailAnalysisFingerprint.make(
-                provider: "gmail-imap",
-                canonicalAccount: account,
-                gmailMessageID: metadata.providerGlobalMessageID,
-                key: MailAnalysisLedgerKeyStore.key()
-            )
+            let fingerprints = identityKeys.map { identityKey in
+                MailAnalysisFingerprint.make(
+                    provider: "gmail-imap",
+                    canonicalAccount: account,
+                    gmailMessageID: metadata.providerGlobalMessageID,
+                    key: identityKey
+                )
+            }
+            let fingerprint = try ledgerStore.preferredFingerprint(in: fingerprints, revision: Self.analysisRevision)
             let key = EmailMessageKey(
                 providerRawValue: MailProvider.gmail.rawValue,
                 sourceAccountNamespace: account,
@@ -208,7 +215,7 @@ final class GmailIMAPIngestionService {
                 continue
             }
             if page.requiresInboxReconcile {
-                try ledgerStore.reset(fingerprint)
+                for candidate in fingerprints { try ledgerStore.reset(candidate) }
             }
             var claimOutcome = try ledgerStore.claimOutcome(
                 fingerprint,
@@ -289,7 +296,7 @@ final class GmailIMAPIngestionService {
             }
             try emailContext.save()
             knownKeys.insert(key)
-            try await EmailMessageAnalysisService.shared.analyze(email, context: emailContext)
+            try await analysisService.analyze(email, context: emailContext)
             guard email.analysisState == .analyzed else {
                 throw GmailIMAPError.analysisFailed
             }

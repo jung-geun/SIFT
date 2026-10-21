@@ -63,10 +63,7 @@ final class RealDeviceDiarizationAcceptanceTests: XCTestCase {
     func testA_InstallSpeakerModel() throws {
         launch(tab: 0)
         openSettings()
-        let advanced = app.buttons["settings.advanced"]
-        scrollTo(advanced)
-        advanced.tap()
-        let row = app.buttons["settings.betaFeaturesRow"]
+        let row = app.buttons["settings.betaRow"]
         scrollTo(row)
         row.tap()
 

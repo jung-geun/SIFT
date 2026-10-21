@@ -241,23 +241,18 @@ struct MeetingSeekAndImportTests {
         #expect(record.confirmedTodoIDs.contains(todo.id.uuidString))
     }
 
-    @Test("analysis engine falls back to the heuristic when AFM is unavailable")
+    @Test("analysis engine falls back to the heuristic without an eligible provider")
     func analysisHeuristicFallback() async throws {
         try await AIProviderTestIsolation.shared.withLock {
-            UserDefaults.standard.set(false, forKey: SettingsStore.betaFoundationModelsEnabledKey)
-            UserDefaults.standard.set(false, forKey: SettingsStore.betaOnDeviceModelEnabledKey)
-            UserDefaults.standard.set(false, forKey: SettingsStore.betaOpenAIEnabledKey)
-            defer {
-                UserDefaults.standard.removeObject(forKey: SettingsStore.betaFoundationModelsEnabledKey)
-                UserDefaults.standard.removeObject(forKey: SettingsStore.betaOnDeviceModelEnabledKey)
-                UserDefaults.standard.removeObject(forKey: SettingsStore.betaOpenAIEnabledKey)
-            }
-
             let segment = MeetingSegment(id: "seg-1", startMs: 0, endMs: 1_000, text: "김대리가 보고서를 제출해주세요")
             let result = MeetingResult(segments: [segment])
-            let outcome = try await MeetingAnalysisEngine().analyze(
+            let outcome = try await MeetingAnalysisEngine(
+                policy: BetaFeaturePolicy(accessReader: { .disabled }, selectionReader: { nil })
+            ).analyze(
                 meetingID: meetingID,
                 result: result,
+                sourceLanguageTag: "ko-KR",
+                summaryLanguageTag: "ko-KR",
                 language: .korean
             )
             #expect(outcome.usedOnDeviceLLM == false)

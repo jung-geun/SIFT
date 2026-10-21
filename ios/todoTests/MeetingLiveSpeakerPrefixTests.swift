@@ -8,7 +8,7 @@ struct MeetingLiveSpeakerPrefixTests {
     @Test("a growing untimed entry gets a provisional speaker before EOS without splitting text")
     func growingUntimedPrefix() {
         var builder = MeetingLiveTranscriptRowBuilder()
-        var timeline = MeetingLiveSpeakerTimeline(sessionID: UUID())
+        var timeline = MeetingLiveSpeakerTimeline(meetingID: "source", sessionID: UUID())
         update(&timeline, coverageMs: 400, open: [interval("A", 0, 400)])
         let first = LiveTranscriptEntry(id: "growing", startMs: 0, endMs: 1_000, text: "  안녕하세요 👋\n")
         #expect(builder.rows(for: [first], timeline: timeline) == [
@@ -26,7 +26,7 @@ struct MeetingLiveSpeakerPrefixTests {
     @Test("a sequential second speaker invalidates an untimed prefix label without fabricating boundaries")
     func sequentialMixedPrefixStaysUnknown() {
         var builder = MeetingLiveTranscriptRowBuilder()
-        var timeline = MeetingLiveSpeakerTimeline(sessionID: UUID())
+        var timeline = MeetingLiveSpeakerTimeline(meetingID: "source", sessionID: UUID())
         let entry = LiveTranscriptEntry(id: "mixed", startMs: 0, endMs: 3_000, text: "A speaks. B replies.", isFinal: true)
         update(&timeline, coverageMs: 800, open: [interval("A", 0, 800)])
         #expect(builder.rows(for: [entry], timeline: timeline).map(\.speakerIDs) == [["A"]])
@@ -49,7 +49,7 @@ struct MeetingLiveSpeakerPrefixTests {
         ]
         for sample in cases {
             var builder = MeetingLiveTranscriptRowBuilder()
-            var timeline = MeetingLiveSpeakerTimeline(sessionID: UUID())
+            var timeline = MeetingLiveSpeakerTimeline(meetingID: "source", sessionID: UUID())
             update(&timeline, coverageMs: sample.coverage, open: sample.intervals)
             #expect(builder.rows(for: [entry], timeline: timeline) == [
                 MeetingLiveTranscriptRow(id: entry.id, startMs: entry.startMs, endMs: entry.endMs, text: entry.text, speakerIDs: [])
@@ -60,7 +60,7 @@ struct MeetingLiveSpeakerPrefixTests {
     @Test("200 ms of unique live speaker evidence is not diluted by long silence")
     func uniqueEvidenceAcrossSilence() {
         var builder = MeetingLiveTranscriptRowBuilder()
-        var timeline = MeetingLiveSpeakerTimeline(sessionID: UUID())
+        var timeline = MeetingLiveSpeakerTimeline(meetingID: "source", sessionID: UUID())
         update(&timeline, coverageMs: 8_000, closed: [interval("A", 1_000, 1_200)])
         let entry = LiveTranscriptEntry(id: "silence", startMs: 0, endMs: 10_000, text: "one short phrase")
         #expect(builder.rows(for: [entry], timeline: timeline).map(\.speakerIDs) == [["A"]])
@@ -69,7 +69,7 @@ struct MeetingLiveSpeakerPrefixTests {
     @Test("covered timed text is labeled separately from the pending suffix, then B gets its own label")
     func coveredPrefixKeepsUncoveredSuffixUnknown() {
         var builder = MeetingLiveTranscriptRowBuilder()
-        var timeline = MeetingLiveSpeakerTimeline(sessionID: UUID())
+        var timeline = MeetingLiveSpeakerTimeline(meetingID: "source", sessionID: UUID())
         let entry = timedEntry()
         update(&timeline, coverageMs: 500, open: [interval("A", 0, 500)])
         let partial = builder.rows(for: [entry], timeline: timeline)
@@ -89,7 +89,7 @@ struct MeetingLiveSpeakerPrefixTests {
     @Test("a word crossing coverage waits for its whole duration before splitting to a new speaker")
     func crossingWordWaitsForCoverage() {
         var builder = MeetingLiveTranscriptRowBuilder()
-        var timeline = MeetingLiveSpeakerTimeline(sessionID: UUID())
+        var timeline = MeetingLiveSpeakerTimeline(meetingID: "source", sessionID: UUID())
         let entry = timedEntry()
         for coverage: Int64 in [501, 999] {
             update(&timeline, coverageMs: coverage, open: [interval("A", 0, 500), interval("B", 500, coverage)])
@@ -106,7 +106,7 @@ struct MeetingLiveSpeakerPrefixTests {
     @Test("covered but insufficient word evidence stays unknown instead of adopting the prior speaker")
     func coveredUnknownWordKeepsUnknownLabel() {
         var builder = MeetingLiveTranscriptRowBuilder()
-        var timeline = MeetingLiveSpeakerTimeline(sessionID: UUID())
+        var timeline = MeetingLiveSpeakerTimeline(meetingID: "source", sessionID: UUID())
         let entry = timedEntry()
         update(&timeline, coverageMs: 1_000, open: [interval("A", 0, 500)])
         #expect(builder.rows(for: [entry], timeline: timeline).map(\.speakerIDs) == [["A"], []])
@@ -116,7 +116,7 @@ struct MeetingLiveSpeakerPrefixTests {
     @Test("fixed entries are relabeled when evidence arrives without additional coverage")
     func evidenceChangesInvalidateCache() {
         var builder = MeetingLiveTranscriptRowBuilder()
-        var timeline = MeetingLiveSpeakerTimeline(sessionID: UUID())
+        var timeline = MeetingLiveSpeakerTimeline(meetingID: "source", sessionID: UUID())
         let entry = timedEntry()
         update(&timeline, coverageMs: 1_000)
         #expect(builder.rows(for: [entry], timeline: timeline).map(\.speakerIDs) == [[]])

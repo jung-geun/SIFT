@@ -41,7 +41,7 @@ struct MeetingTranscriptAnalysisService {
         var copy = result
         copy.actionDrafts = Array(Dictionary(uniqueKeysWithValues: drafts.map { ($0.id, $0) }).values)
             .sorted { $0.id < $1.id }
-        return copy
+        return MeetingActionAttribution.applying(to: copy, meetingID: meetingID)
     }
 
     private func isExplicitAction(_ text: String) -> Bool {

@@ -1190,7 +1190,7 @@ final class EmailService: NSObject, MailboxPagingProvider {
         }
         let tokens = try JSONDecoder().decode(TokenResponse.self, from: data)
         try saveTokens(accessToken: tokens.access_token, refreshToken: tokens.refresh_token,
-                       idToken: tokens.id_token, expiresIn: tokens.expires_in)
+                       idToken: tokens.id_token, expiresIn: tokens.expires_in, explicitSignIn: true)
     }
 
     private static func formBody(_ fields: [String: String]) -> Data {
@@ -1343,20 +1343,21 @@ final class EmailService: NSObject, MailboxPagingProvider {
         return tokens
     }
 
-    private func saveTokens(accessToken: String, refreshToken: String?, idToken: String?, expiresIn: Int?) throws {
+    private func saveTokens(accessToken: String, refreshToken: String?, idToken: String?, expiresIn: Int?, explicitSignIn: Bool = false) throws {
         guard !accessToken.isEmpty else { throw EmailError.authorizationFailed }
         try persist(StoredTokens(
             accessToken: accessToken, refreshToken: refreshToken, idToken: idToken,
             accessTokenExpiry: Date().addingTimeInterval(TimeInterval(expiresIn ?? 3600)),
             scopeVersion: requiredTokenScopeVersion
-        ))
+        ), explicitSignIn: explicitSignIn)
         signedOut = false
     }
 
-    private func persist(_ tokens: StoredTokens) throws {
+    private func persist(_ tokens: StoredTokens, explicitSignIn: Bool = false) throws {
         let value = String(decoding: try JSONEncoder().encode(tokens), as: UTF8.self)
         // One Keychain update commits every account-bound field together.
-        try KeychainStore.setChecked(service: keychainService, account: "oauth_tokens", value: value)
+        if explicitSignIn { try KeychainStore.setGmailAfterExplicitSignIn(value: value) }
+        else { try KeychainStore.setChecked(service: keychainService, account: "oauth_tokens", value: value) }
         for account in Self.legacyTokenAccounts {
             KeychainStore.deleteAny(service: keychainService, account: account)
         }

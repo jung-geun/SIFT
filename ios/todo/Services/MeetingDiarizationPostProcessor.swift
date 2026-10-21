@@ -136,7 +136,7 @@ enum MeetingSpeakerLabelApplier {
     }
 }
 
-/// Stable speaker identities for one meeting.
+/// Stable speaker identities for one source-child record, never a recording group.
 enum MeetingSpeakerProfileBook {
     static let maximumActiveSpeakers = 8
 
@@ -255,6 +255,7 @@ enum MeetingDiarizationCommitter {
         save: () throws -> Void
     ) throws -> Outcome {
         guard let payload = record.diarization, payload.generation == generation,
+              payload.manifestDigest == manifestDigest, evidence.manifestDigest == manifestDigest,
               let manifest = record.audioManifest,
               (try? MeetingDiarizationFingerprint.manifest(manifest)) == manifestDigest,
               let current = record.result,
@@ -268,7 +269,7 @@ enum MeetingDiarizationCommitter {
         if !payload.intervals.isEmpty {
             reference = payload.intervals
             referenceProfiles = payload.profiles
-        } else if let liveTimeline {
+        } else if let liveTimeline, liveTimeline.meetingID == record.meetingID {
             reference = liveTimeline.intervals
             referenceProfiles = liveTimeline.ordinals.map { MeetingSpeakerProfile(id: $0.key, ordinal: $0.value, displayName: nil) }
         } else {
@@ -384,6 +385,9 @@ enum MeetingDiarizationPostProcessor {
         let meetingID = record.meetingID
         guard runs[meetingID] == nil else { return .busy }
         let manifestDigest = try MeetingDiarizationFingerprint.manifest(manifest)
+        // Never rebind another recording's persisted identities to this audio.
+        guard record.diarization.map({ $0.manifestDigest == manifestDigest }) ?? true else { return .superseded }
+        let liveTimeline = liveTimeline.flatMap { $0.meetingID == meetingID ? $0 : nil }
         let sourceDigest = try MeetingDiarizationFingerprint.source(source)
         let sourceGeneration = record.diarization?.generation
         let runID = UUID()
@@ -516,6 +520,7 @@ enum MeetingDiarizationPostProcessor {
         return try MeetingDiarizationFingerprint.manifest(manifest) == manifestDigest
             && MeetingDiarizationFingerprint.source(source) == sourceDigest
             && record.diarization?.generation == generation
+            && (record.diarization.map { $0.manifestDigest == manifestDigest } ?? true)
     }
 
     /// Foreground resume, once per launch, of passes the process lost mid-run.
@@ -529,14 +534,22 @@ enum MeetingDiarizationPostProcessor {
         }
     }
 
-    /// Payload preserved across runs, or a first payload that protects legacy labels.
+    /// Preserve only evidence bound to this audio. Transcript edits may change the
+    /// source digest without changing speaker identity; a different manifest may not.
     static func seed(
         record: MeetingRecord,
         source: MeetingResult,
         manifestDigest: String,
         sourceDigest: String
     ) throws -> MeetingDiarizationPayload {
-        if let existing = record.diarization { return existing }
+        guard let manifest = record.audioManifest,
+              try MeetingDiarizationFingerprint.manifest(manifest) == manifestDigest else {
+            throw MeetingDiarizationFailure.timelineMismatch
+        }
+        if let existing = record.diarization {
+            guard existing.manifestDigest == manifestDigest else { throw MeetingDiarizationFailure.timelineMismatch }
+            return existing
+        }
         let legacy = try MeetingSpeakerProfileBook.legacySeed(result: source)
         return MeetingDiarizationPayload(
             status: .notProcessed, generation: UUID(), manifestDigest: manifestDigest,

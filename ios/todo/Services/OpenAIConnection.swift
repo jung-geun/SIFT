@@ -8,30 +8,71 @@ import CryptoKit
     @Published private(set) var activeProfileID: String?
     @Published private(set) var isSigningIn = false
     @Published private(set) var statusMessage: String?
-    private(set) var sessionGeneration = UUID()
+    @Published private(set) var sessionGeneration = UUID()
     var activeProfile: OpenAIProfile? { profiles.first { $0.id == activeProfileID } }
     var hasPlanPermission: Bool { activeProfile?.hasPlanPermission == true }
+    var synchronizationIssue: OpenAIConnectionError? { store.synchronizationIssue }
+    var refreshOwnedElsewhere: Bool {
+        guard let tokens = activeTokens else { return false }
+        return tokens.refreshOwnerID != localRefreshOwnerID
+    }
+    var needsLocalReauthorization: Bool {
+        guard let tokens = activeTokens else { return false }
+        return tokens.expiresAt.timeIntervalSince(now()) <= 60 && tokens.refreshOwnerID != localRefreshOwnerID
+    }
+    private var activeTokens: Tokens? {
+        snapshot.registrations.first { $0.clientID == snapshot.activeID }?.tokens
+    }
+    private var refreshOwnerIdentity: (host: String, id: String)?
+    private var localRefreshOwnerID: String {
+        if let owner = refreshOwnerIdentity, owner.host == snapshot.hostID { return owner.id }
+        let id = OpenAIOAuth.refreshOwnerID(for: snapshot.hostID)
+        refreshOwnerIdentity = (snapshot.hostID, id)
+        return id
+    }
 
-    private struct Tokens: Codable {
+    struct Tokens: Codable, Equatable {
         let access: String
         let refresh: String?
         let identity: String
         let nonce: String
         let scopes: Set<String>
         let expiresAt: Date
+        var refreshOwnerID: String? = nil
+        var rotation: UInt64? = nil
+        var quarantineID: String {
+            OpenAIOAuth.base64URL(Data(SHA256.hash(data: Data((nonce + "\u{0}" + (refresh ?? access)).utf8))))
+        }
+        func isNewerRotation(than other: Tokens) -> Bool {
+            nonce == other.nonce && (rotation ?? 0) > (other.rotation ?? 0)
+        }
     }
-    private struct Registration: Codable {
+    struct Registration: Codable, Equatable {
         let clientID: String
         var subject: String?
         var email: String?
         var tokens: Tokens?
     }
-    private struct Snapshot: Codable {
+    struct Snapshot: Codable, Equatable {
         var hostID = "urn:uuid:\(UUID().uuidString.lowercased())"
         var registrations: [Registration] = []
         var selectedID: String?
         var activeID: String?
         var incompleteID: String?
+    }
+    /// Deliberately excludes ext_agent_host_id: a transferred registration is not a transferred host.
+    struct PortableSnapshot: Codable {
+        var registrations: [Registration]
+        var selectedID: String?
+        var activeID: String?
+        var incompleteID: String?
+
+        init(_ snapshot: Snapshot) {
+            registrations = snapshot.registrations
+            selectedID = snapshot.selectedID
+            activeID = snapshot.activeID
+            incompleteID = snapshot.incompleteID
+        }
     }
     private struct Discovery: Decodable {
         let issuer: String
@@ -57,38 +98,79 @@ import CryptoKit
     private var snapshot = Snapshot()
     private var storageAvailable = true
     private let store: any OpenAICredentialStore
+    private var synchronizationStatusMessage: String?
     private let transport: any OpenAIAuthTransport
     private let now: @MainActor () -> Date
     private let sleep: @MainActor (Duration) async throws -> Void
     private let makeListener: @MainActor () -> any OpenAILoopbackListening
     private let makeBrowser: @MainActor () -> any OpenAIAuthenticationBrowser
+    private let regionAllowed: @MainActor () -> Bool
     private var pending: Pending?
     private var refreshes: [String: (id: UUID, generation: UUID, task: Task<String, Error>)] = [:]
     private var discoveryCache: Discovery?
+    private var synchronizationEnabled: Bool
 
     init(store: (any OpenAICredentialStore)? = nil,
          transport: (any OpenAIAuthTransport)? = nil,
          now: @escaping @MainActor () -> Date = { Date() },
          sleep: @escaping @MainActor (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
          makeListener: @escaping @MainActor () -> any OpenAILoopbackListening = { OpenAILoopbackListener() },
-         makeBrowser: @escaping @MainActor () -> any OpenAIAuthenticationBrowser = { OpenAISystemAuthenticationBrowser() }) {
-        self.store = store ?? OpenAIDeviceCredentialStore()
+         makeBrowser: @escaping @MainActor () -> any OpenAIAuthenticationBrowser = { OpenAISystemAuthenticationBrowser() },
+         regionAllowed: @escaping @MainActor () -> Bool = { OpenAIRegionalAvailability.allowsRequests }) {
+        self.store = store ?? OpenAIKeychainCredentialStore()
         self.transport = transport ?? OpenAIURLSessionTransport()
         self.now = now; self.sleep = sleep
         self.makeListener = makeListener; self.makeBrowser = makeBrowser
+        self.regionAllowed = regionAllowed
+        synchronizationEnabled = self.store.synchronizationEnabled
+        refreshCredentials()
+    }
+
+    /// Reconcile late iCloud Keychain delivery on foreground, policy changes, and before use.
+    /// This updates authentication only; provider toggles and app-data consents remain device-local.
+    func refreshCredentials() {
         do {
-            if let data = try self.store.load() { snapshot = try JSONDecoder().decode(Snapshot.self, from: data) }
-            let blocked = self.store.blockedClientIDs()
-            for index in snapshot.registrations.indices where blocked.contains(snapshot.registrations[index].clientID) {
-                snapshot.registrations[index].tokens = nil
+            var loaded = snapshot
+            if let data = try store.load() { loaded = try JSONDecoder().decode(Snapshot.self, from: data) }
+            else { loaded.registrations = []; loaded.selectedID = nil; loaded.activeID = nil; loaded.incompleteID = nil }
+            let blocked = store.blockedClientIDs()
+            let quarantined = store.quarantinedCredentialIDs()
+            var migrated = false
+            for index in loaded.registrations.indices {
+                let registration = loaded.registrations[index]
+                if blocked.contains(registration.clientID)
+                    || registration.tokens.map({ quarantined[registration.clientID]?.contains($0.quarantineID) == true }) == true {
+                    loaded.registrations[index].tokens = nil
+                } else if var tokens = registration.tokens, tokens.refreshOwnerID == nil {
+                    // Only a legacy device record can lack ownership. Imports are marked by the store.
+                    tokens.refreshOwnerID = OpenAIOAuth.refreshOwnerID(for: loaded.hostID)
+                    loaded.registrations[index].tokens = tokens
+                    migrated = true
+                }
             }
-            if let active = snapshot.activeID,
-               !snapshot.registrations.contains(where: { $0.clientID == active && $0.subject != nil && $0.tokens != nil }) {
-                snapshot.activeID = nil
+            if let active = loaded.activeID,
+               !loaded.registrations.contains(where: { $0.clientID == active && $0.subject != nil && $0.tokens != nil }) {
+                loaded.activeID = nil
             }
-            publish()
+            if migrated { try store.save(JSONEncoder().encode(loaded)) }
+            let policy = store.synchronizationEnabled
+            if loaded != snapshot || policy != synchronizationEnabled {
+                cancelSignIn(); invalidateSession()
+                snapshot = loaded
+                synchronizationEnabled = policy
+                publish()
+            }
+            if !storageAvailable { statusMessage = nil }
+            storageAvailable = true
+            updateSynchronizationStatus()
         } catch {
+            cancelSignIn(); invalidateSession()
             storageAvailable = false
+            snapshot.registrations = snapshot.registrations.map {
+                var registration = $0; registration.tokens = nil; return registration
+            }
+            snapshot.activeID = nil
+            publish()
             statusMessage = OpenAIConnectionError.storage.errorDescription
         }
     }
@@ -101,6 +183,8 @@ import CryptoKit
     }
 
     private func signIn(newAccount: Bool, requestPlanConsent: Bool) async throws {
+        try requireRegion()
+        refreshCredentials()
         cancelSignIn()
         try Task.checkCancellation()
         guard storageAvailable else { throw OpenAIConnectionError.storage }
@@ -187,8 +271,7 @@ import CryptoKit
                 updated.activeID = accepted.clientID; updated.selectedID = accepted.clientID
                 if updated.incompleteID == accepted.clientID { updated.incompleteID = nil }
                 try checkAttempt(attempt.id)
-                try persist(updated)
-                store.unblock(accepted.clientID)
+                try persist(updated, reauthorizing: accepted.clientID)
                 uncommitted = nil
                 invalidateSession()
                 pending = nil; isSigningIn = false
@@ -217,7 +300,15 @@ import CryptoKit
         attempt.listener.stop(); attempt.browser.cancel()
     }
 
+    /// Stop active work without erasing credentials or the user's existing opt-ins.
+    func suspendForRegionalRestriction() {
+        cancelSignIn()
+        invalidateSession()
+    }
+
     func selectProfile(_ id: String) throws {
+        try requireRegion()
+        refreshCredentials()
         guard let registration = snapshot.registrations.first(where: { $0.clientID == id && $0.subject != nil }) else {
             throw OpenAIConnectionError.signInRequired
         }
@@ -232,9 +323,11 @@ import CryptoKit
         updated.activeID = id
         try persist(updated)
         invalidateSession(); publish(); statusMessage = nil
+        updateSynchronizationStatus()
     }
 
     func signOut() async {
+        refreshCredentials()
         cancelSignIn(); invalidateSession()
         guard let id = snapshot.activeID,
               let index = snapshot.registrations.firstIndex(where: { $0.clientID == id }) else { return }
@@ -322,11 +415,19 @@ import CryptoKit
 
     func authorizedAccessToken() async throws -> String {
         try Task.checkCancellation()
+        try requireRegion()
+        refreshCredentials()
+        guard storageAvailable else { throw OpenAIConnectionError.storage }
         guard let id = snapshot.activeID,
               let registration = snapshot.registrations.first(where: { $0.clientID == id }),
               let tokens = registration.tokens else { throw OpenAIConnectionError.signInRequired }
         guard tokens.scopes.contains("chatgpt.tokens.use.direct") else { throw OpenAIConnectionError.permissionRequired }
         if tokens.expiresAt.timeIntervalSince(now()) > 60 { return tokens.access }
+        guard tokens.refreshOwnerID == localRefreshOwnerID else {
+            statusMessage = OpenAIConnectionError.refreshOwnerRequired.errorDescription
+            publish()
+            throw OpenAIConnectionError.refreshOwnerRequired
+        }
         if let refresh = refreshes[id] {
             let generation = sessionGeneration
             let access = try await refresh.task.value
@@ -346,6 +447,7 @@ import CryptoKit
     }
 
     private func refreshTokens(clientID: String, generation: UUID) async throws -> String {
+        try requireRegion()
         guard let registration = snapshot.registrations.first(where: { $0.clientID == clientID }),
               let previous = registration.tokens, let refreshToken = previous.refresh else {
             throw OpenAIConnectionError.signInRequired
@@ -383,39 +485,36 @@ import CryptoKit
             guard tokens.scopes.contains("chatgpt.tokens.use.direct") else { throw OpenAIConnectionError.permissionRequired }
             return tokens.access
         } catch {
-            if let (response, configuration) = uncommitted {
+            // Reconcile before cleanup: a transferred session may have rotated on another host.
+            refreshCredentials()
+            let current = snapshot.registrations.first { $0.clientID == clientID }?.tokens
+            let hasSharedReplacement = current.map { $0 != previous && $0.nonce == previous.nonce } ?? false
+            if let (response, configuration) = uncommitted, !hasSharedReplacement {
                 await discard(response, clientID: clientID, configuration: configuration)
+                // Revocation suspends; delivery may also occur during its bounded retries.
+                refreshCredentials()
             }
             let sanitized: OpenAIConnectionError = sessionGeneration == generation ? sanitize(error) : .cancelled
-            if sanitized == .cancelled, refreshDispatched {
-                quarantineAbandonedRefresh(clientID: clientID, previous: previous)
+            if refreshDispatched, sanitized == .cancelled || !regionAllowed() {
+                quarantineRefresh(clientID: clientID, previous: previous)
             }
             if sessionGeneration == generation, sanitized == .signInRequired || sanitized == .invalidIdentity {
-                store.block(clientID)
-                var updated = snapshot
-                if let index = updated.registrations.firstIndex(where: { $0.clientID == clientID }) {
-                    updated.registrations[index].tokens = nil
-                }
-                do { try persist(updated) } catch { snapshot = updated }
-                invalidateSession(); publish()
+                quarantineRefresh(clientID: clientID, previous: previous)
             }
             throw sanitized
         }
     }
 
-    private func quarantineAbandonedRefresh(clientID: String, previous: Tokens) {
+    private func quarantineRefresh(clientID: String, previous: Tokens) {
         guard let index = snapshot.registrations.firstIndex(where: { $0.clientID == clientID }),
               let current = snapshot.registrations[index].tokens,
-              current.nonce == previous.nonce, current.refresh == previous.refresh,
-              current.access == previous.access else { return }
-        // The server may have consumed this rotating grant even if cancellation hid its response.
-        // Do not retry it or let A -> B -> A create a concurrent exchange; fresh OAuth is required.
-        store.block(clientID)
-        var updated = snapshot
-        updated.registrations[index].tokens = nil
-        let wasActive = updated.activeID == clientID
-        if wasActive { updated.activeID = nil }
-        do { try persist(updated) } catch { snapshot = updated }
+              current == previous else { return }
+        // A rejected/abandoned rotating grant is not a sign-out. Keep the shared record intact:
+        // a replacement may arrive later, even after this process restarts.
+        store.quarantine(clientID: clientID, credentialID: previous.quarantineID)
+        snapshot.registrations[index].tokens = nil
+        let wasActive = snapshot.activeID == clientID
+        if wasActive { snapshot.activeID = nil }
         if wasActive { invalidateSession() }
         publish()
     }
@@ -430,10 +529,12 @@ import CryptoKit
         else { scopes = [] } // Missing granted scope never implies plan permission on initial exchange.
         return Tokens(access: response.access_token, refresh: response.refresh_token ?? previous?.refresh,
                       identity: identity, nonce: nonce, scopes: scopes,
-                      expiresAt: now().addingTimeInterval(response.expires_in))
+                      expiresAt: now().addingTimeInterval(response.expires_in),
+                      refreshOwnerID: localRefreshOwnerID, rotation: previous.map { ($0.rotation ?? 0) + 1 } ?? 0)
     }
 
     private func discovery() async throws -> Discovery {
+        try requireRegion()
         if let discoveryCache { return discoveryCache }
         let data = try await get(URL(string: "https://auth.openai.com/.well-known/openid-configuration")!)
         let value: Discovery
@@ -454,13 +555,17 @@ import CryptoKit
     }
 
     private func get(_ url: URL) async throws -> Data {
+        try requireRegion()
         var request = URLRequest(url: url); request.cachePolicy = .reloadIgnoringLocalCacheData
         let (data, status) = try await transport.send(request)
+        try requireRegion()
         guard status == 200 else { throw OpenAIConnectionError.network }
         return data
     }
     private func tokenRequest(_ endpoint: URL, values: [String: String], isRefresh: Bool = false) async throws -> TokenResponse {
+        try requireRegion()
         let (data, status) = try await transport.send(formRequest(endpoint, values: values))
+        try requireRegion()
         guard status == 200 else {
             let code = (try? JSONDecoder().decode(OAuthError.self, from: data))?.error
             if code == "invalid_client" { throw OpenAIConnectionError.invalidClient }
@@ -485,6 +590,7 @@ import CryptoKit
     private func endRenewableSessions(_ sessions: [(String, String)], using configuration: Discovery? = nil) async -> Bool {
         await Task { @MainActor in
             guard !sessions.isEmpty else { return true }
+            guard regionAllowed() else { return false }
             do {
                 let metadata: Discovery
                 if let configuration { metadata = configuration }
@@ -501,10 +607,12 @@ import CryptoKit
 
     private func performRevocation(_ token: String, clientID: String, endpoint: URL) async -> Bool {
         for attempt in 0..<3 {
+            guard regionAllowed() else { return false }
             do {
                 let (_, status) = try await transport.send(formRequest(endpoint, values: [
                     "token": token, "token_type_hint": "refresh_token", "client_id": clientID
                 ]))
+                guard regionAllowed() else { return false }
                 if status == 200 { return true }
                 if status < 500 { return false }
             } catch { }
@@ -517,11 +625,22 @@ import CryptoKit
             _ = await endRenewableSessions([(clientID, token)], using: configuration)
         }
     }
-    private func persist(_ updated: Snapshot) throws {
-        do { try store.save(JSONEncoder().encode(updated)) }
+    private func persist(_ updated: Snapshot, reauthorizing clientID: String? = nil) throws {
+        do {
+            try store.save(JSONEncoder().encode(updated))
+            if let clientID { try store.unblock(clientID) }
+        }
         catch { throw OpenAIConnectionError.storage }
         snapshot = updated
+        updateSynchronizationStatus()
     }
+    private func updateSynchronizationStatus() {
+        let message = snapshot.activeID == nil ? nil : store.synchronizationIssue?.errorDescription
+        if let message { statusMessage = message }
+        else if statusMessage == synchronizationStatusMessage { statusMessage = nil }
+        synchronizationStatusMessage = message
+    }
+
     private func publish() {
         profiles = snapshot.registrations.compactMap { registration in
             guard let subject = registration.subject else { return nil }
@@ -539,10 +658,17 @@ import CryptoKit
         // another exchange against an abandoned rotating refresh token.
         for flight in refreshes.values where flight.generation == previous { flight.task.cancel() }
     }
+    private func requireRegion() throws {
+        guard regionAllowed() else { throw OpenAIConnectionError.unavailable }
+    }
     private func checkAttempt(_ id: UUID) throws {
+        try requireRegion()
+        refreshCredentials()
         guard !Task.isCancelled, pending?.id == id else { throw OpenAIConnectionError.cancelled }
     }
     private func checkSession(_ id: String, _ generation: UUID) throws {
+        try requireRegion()
+        refreshCredentials()
         guard !Task.isCancelled, sessionGeneration == generation, snapshot.activeID == id else {
             throw OpenAIConnectionError.cancelled
         }

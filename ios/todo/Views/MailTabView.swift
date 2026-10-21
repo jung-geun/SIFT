@@ -637,15 +637,33 @@ struct MailTabView: View {
                     notConnectedView
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .appScreenStyle()
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if let tutorial {
+                    AppTutorialTipHost(tutorial: tutorial, screen: .mailTab)
+                }
+            }
             .navigationTitle("메일")
             .navigationBarTitleDisplayMode(horizontalSizeClass == .regular ? .inline : .large)
             .disableNavigationBarMinimization()
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
-                    Button {
-                        Task { await analyzeInbox() }
-                    } label: {
-                        Label(AppLanguage.localized("mail.analyze", defaultValue: "정리", language: .current, comment: "Analyze mail action."), systemImage: "sparkles")
+                    Group {
+                        #if targetEnvironment(macCatalyst)
+                        CatalystToolbarButton(
+                            title: AppLanguage.localized("mail.analyze", defaultValue: "정리", language: .current, comment: "Analyze mail action."),
+                            systemImage: "sparkles", accessibilityIdentifier: "mail.analyzeButton"
+                        ) {
+                            Task { await analyzeInbox() }
+                        }
+                        #else
+                        Button {
+                            Task { await analyzeInbox() }
+                        } label: {
+                            Label(AppLanguage.localized("mail.analyze", defaultValue: "정리", language: .current, comment: "Analyze mail action."), systemImage: "sparkles")
+                        }
+                        #endif
                     }
                     .disabled(
                         startupPresentation.showsAuthenticationCheckingStatus
@@ -660,6 +678,15 @@ struct MailTabView: View {
                         || isAnalyzing {
                         ProgressView().controlSize(.small)
                     } else {
+                        #if targetEnvironment(macCatalyst)
+                        CatalystToolbarButton(
+                            title: AppLanguage.localized("mail.refresh.accessibilityLabel", defaultValue: "메일 새로고침", language: .current, comment: "Mail refresh button."),
+                            systemImage: "arrow.clockwise", accessibilityIdentifier: "mail.refreshButton"
+                        ) {
+                            Task { await refreshSelectedMailbox(showSuccess: true) }
+                        }
+                        .disabled(selectedProvider == nil || startupPresentation.showsAuthenticationCheckingStatus)
+                        #else
                         Button {
                             Task { await refreshSelectedMailbox(showSuccess: true) }
                         } label: {
@@ -668,6 +695,7 @@ struct MailTabView: View {
                         .accessibilityLabel(AppLanguage.localized("mail.refresh.accessibilityLabel", defaultValue: "메일 새로고침", language: .current, comment: "Mail refresh button."))
                         .accessibilityIdentifier("mail.refreshButton")
                         .disabled(selectedProvider == nil || startupPresentation.showsAuthenticationCheckingStatus)
+                        #endif
                     }
                 }
             }
@@ -765,10 +793,8 @@ struct MailTabView: View {
                     }
                     .padding(.horizontal, 16)
                     .padding(.vertical, 12)
-                    .background(.regularMaterial, in: Capsule())
-                }
-                if let tutorial {
-                    AppTutorialTipHost(tutorial: tutorial, screen: .mailTab)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous))
+                    .padding(.horizontal)
                 }
             }
         }
@@ -811,12 +837,12 @@ struct MailTabView: View {
     }
 
     private var compactMailboxControls: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: AppTheme.Spacing.item) {
             if startupPresentation.visibleProviders.count > 1 {
                 providerMenu
             } else if let selectedProvider {
                 Label(providerDisplayName(selectedProvider), systemImage: "envelope")
-                    .font(.caption.weight(.semibold))
+                    .font(.subheadline.weight(.medium))
                     .foregroundStyle(.secondary)
                     .labelStyle(.titleAndIcon)
                     .lineLimit(1)
@@ -825,8 +851,8 @@ struct MailTabView: View {
             categoryControl
         }
         .padding(.horizontal)
-        .padding(.vertical, 6)
-        .background(.bar)
+        .padding(.vertical, AppTheme.Spacing.item)
+        .background(AppTheme.canvas)
     }
 
     private var providerMenu: some View {
@@ -850,11 +876,12 @@ struct MailTabView: View {
                 selectedProvider.map(providerDisplayName) ?? AppLanguage.localized("search.scope.mail", defaultValue: "메일", language: .current),
                 systemImage: "line.3.horizontal.decrease.circle"
             )
-            .font(.caption.weight(.semibold))
+            .font(.subheadline.weight(.medium))
             .lineLimit(1)
         }
         .buttonStyle(.bordered)
-        .controlSize(.small)
+        .controlSize(.regular)
+        .frame(minHeight: 44)
         .accessibilityIdentifier("mail.provider.menu")
     }
 
@@ -876,7 +903,7 @@ struct MailTabView: View {
                 }
             }
         }
-        .frame(height: 32)
+        .fixedSize(horizontal: false, vertical: true)
 
     }
     private func categoryButton(
@@ -888,19 +915,20 @@ struct MailTabView: View {
     ) -> some View {
         Button(action: action) {
             Label(title, systemImage: systemImage)
-                .font(.caption.weight(.semibold))
+                .font(.subheadline.weight(isSelected ? .semibold : .regular))
                 .lineLimit(1)
                 .fixedSize(horizontal: true, vertical: false)
-                .padding(.horizontal, 10)
-                .frame(height: 30)
+                .padding(.horizontal, AppTheme.Spacing.item)
+                .frame(minHeight: 44)
                 .background(
-                    isSelected ? AppTheme.accentSoft : Color.clear,
-                    in: Capsule()
+                    isSelected ? AppTheme.neutralFill : Color.clear,
+                    in: RoundedRectangle(cornerRadius: AppTheme.controlRadius, style: .continuous)
                 )
         }
         .buttonStyle(.plain)
-        .foregroundStyle(isSelected ? AppTheme.accent : .secondary)
+        .foregroundStyle(isSelected ? .primary : .secondary)
         .accessibilityIdentifier(accessibilityID)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 
     private func selectProvider(_ provider: MailProvider) {
@@ -932,7 +960,7 @@ struct MailTabView: View {
             .accessibilityLabel("메일 분류 기준")
         }
         .padding(.horizontal)
-        .padding(.bottom, 8)
+        .padding(.vertical, AppTheme.Spacing.item)
         .accessibilityIdentifier("mail.mailboxHeader")
     }
 
@@ -1011,7 +1039,7 @@ struct MailTabView: View {
                 pageFooter(autoLoadsOlder: true)
                     .listRowSeparator(.hidden)
             }
-            .listStyle(.plain)
+            .appListStyle()
         }
     }
 
@@ -1544,7 +1572,7 @@ private struct MailCategoryGuideView: View {
                     ForEach(GmailInboxCategory.allCases) { category in
                         HStack(alignment: .top, spacing: 12) {
                             Image(systemName: category.systemImage)
-                                .foregroundStyle(AppTheme.accent)
+                                .foregroundStyle(.secondary)
                                 .frame(width: 24)
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(category.title)
@@ -1554,7 +1582,7 @@ private struct MailCategoryGuideView: View {
                                     .foregroundStyle(.secondary)
                             }
                         }
-                        .padding(.vertical, 2)
+                        .padding(.vertical, AppTheme.Spacing.compact)
                     }
                     Text(AppLanguage.localized(
                         "mail.category.guide.gmailSource",
@@ -1570,6 +1598,7 @@ private struct MailCategoryGuideView: View {
                     Text("아직 불러오지 않은 이전 메일이 있으면 목록 아래에서 계속 불러올 수 있습니다.")
                 }
             }
+            .appListStyle()
             .navigationTitle("메일 분류 기준")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -1589,19 +1618,16 @@ struct MailMessageRow: View {
     let email: EmailMessage
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: AppTheme.Spacing.compact) {
             HStack {
                 Text(senderName)
                     .font(.subheadline)
                     .fontWeight(email.isRead ? .regular : .semibold)
-                    .lineLimit(1)
+                    .lineLimit(2)
                 Text(email.provider == .gmail ? "Gmail" : "Outlook")
                     .font(.caption2)
-                    .fontWeight(.semibold)
+                    .fontWeight(.medium)
                     .foregroundStyle(.secondary)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(.quaternary, in: Capsule())
                 analysisBadge
                 Spacer()
                 Text(email.receivedAt.formatted(.dateTime.month(.abbreviated).day().hour().minute()))
@@ -1610,8 +1636,8 @@ struct MailMessageRow: View {
             }
             Text(email.subject.isEmpty ? "(제목 없음)" : email.subject)
                 .font(.body)
-                .fontWeight(email.isRead ? .regular : .medium)
-                .lineLimit(1)
+                .fontWeight(email.isRead ? .regular : .semibold)
+                .lineLimit(2)
             if email.analysisTodoCandidate == true {
                 Label(
                     AppLanguage.localized(
@@ -1623,14 +1649,14 @@ struct MailMessageRow: View {
                     systemImage: "checkmark.circle"
                 )
                 .font(.caption2.weight(.semibold))
-                .foregroundStyle(AppTheme.accent)
+                .foregroundStyle(AppTheme.success)
             }
             Text(email.snippet)
-                .font(.caption)
+                .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, AppTheme.Spacing.compact)
         .foregroundStyle(email.isRead ? .secondary : .primary)
     }
 
@@ -1644,7 +1670,7 @@ struct MailMessageRow: View {
         case .analyzed:
             Image(systemName: "sparkles")
                 .font(.caption)
-                .foregroundStyle(AppTheme.accent)
+                .foregroundStyle(.secondary)
                 .accessibilityLabel("AI 정리 완료")
         case .failed:
             Image(systemName: "exclamationmark.triangle")
@@ -1788,7 +1814,7 @@ struct MailRegisterSheet: View {
                     Section("메모") {
                         TextEditor(text: $notes)
                             .frame(minHeight: 80)
-                            .font(.footnote)
+                            .font(.body)
                             .accessibilityIdentifier("mail.register.notes")
                     }
                 }
@@ -1801,6 +1827,7 @@ struct MailRegisterSheet: View {
                     }
                 }
             }
+            .appFormStyle()
             .navigationTitle(Self.saveActionTitle)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -1884,7 +1911,7 @@ struct MailRegisterSheet: View {
 
     private var deadlineSection: some View {
         Section {
-            Toggle(isOn: $hasDueDate.animation()) {
+            Toggle(isOn: $hasDueDate) {
                 Text(Self.localized("mail.register.deadlineToggle", ko: "마감 설정", en: "Set Deadline"))
             }
             .accessibilityIdentifier("mail.register.deadlineToggle")
@@ -1945,8 +1972,12 @@ struct MailRegisterSheet: View {
             .disabled(isRequestingCalendarAccess)
             .accessibilityIdentifier("mail.register.calendarToggle")
 
-            if addToCalendar && isCalendarAuthorized && !calendarSources.isEmpty {
+            if addToCalendar && isCalendarAuthorized {
                 Picker("캘린더 선택", selection: $calendarID) {
+                    if !calendarSources.flatMap(\.calendars).contains(where: { $0.id == calendarID }) {
+                        Text((calendarID.isEmpty ? CalendarError.destinationNotSelected : CalendarError.destinationUnavailable).localizedDescription)
+                            .tag(calendarID)
+                    }
                     ForEach(calendarSources) { source in
                         ForEach(source.calendars) { info in
                             calendarLabel(info).tag(info.id)
@@ -1966,8 +1997,8 @@ struct MailRegisterSheet: View {
                     )
                     : Self.localized(
                         "mail.register.calendarLaterSync",
-                        ko: "마감이 있으면 나중에 캘린더 동기화 과정에서 자동 등록될 수 있어요.",
-                        en: "To-dos with deadlines may also be added during a later calendar sync."
+                        ko: "자동 캘린더 등록에 동의한 경우에만, 출처 필터에 맞는 진행중 할 일이 나중에 자동 등록됩니다.",
+                        en: "Active to-dos may be exported later only when automatic export is enabled and their source matches your filter."
                     )
             )
         }
@@ -2026,13 +2057,10 @@ struct MailRegisterSheet: View {
     }
 
     private func loadCalendars() {
-        calendarSources = CalendarService.shared.availableCalendars()
-        let ids = Set(calendarSources.flatMap { $0.calendars.map(\.id) })
-        guard !ids.contains(calendarID) else { return }
-        let defaultID = CalendarService.shared.defaultCalendarID
-        calendarID = ids.contains(defaultID)
-            ? defaultID
-            : (calendarSources.first?.calendars.first?.id ?? "")
+        calendarSources = CalendarService.shared.availableCalendars(writableOnly: true)
+        guard calendarID.isEmpty else { return }
+        calendarID = CalendarService.shared.preferredDefaultCalendar?.calendarIdentifier
+            ?? CalendarService.shared.defaultCalendarID
     }
 
     @MainActor
@@ -2238,12 +2266,7 @@ struct MailRegisterSheet: View {
 
     @ViewBuilder
     private func calendarLabel(_ info: CalendarService.CalendarInfo) -> some View {
-        let color: Color = {
-            if let ek = CalendarService.shared.ekCalendar(withIdentifier: info.id) {
-                return Color(cgColor: ek.cgColor)
-            }
-            return .accentColor
-        }()
+        let color = CalendarPresentation.color(forCalendarID: info.id)
         Label {
             Text(info.title)
         } icon: {

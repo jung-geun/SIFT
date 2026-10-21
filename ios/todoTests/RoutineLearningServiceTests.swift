@@ -69,7 +69,8 @@ struct RoutineLearningServiceTests {
         let restoredMeeting = completed("Read", at: date(3)); restoredMeeting.sourceRef = "meeting:private:action:1"
         let calendarEmail = completed("Read", at: date(3)); calendarEmail.calendarEventOrigin = "siftEmail"
         let calendarMeeting = completed("Read", at: date(3)); calendarMeeting.calendarEventOrigin = "siftMeeting"
-        let rows = valid + [email, meeting, imported, review, fixed, external, future, missing, active, impossible, old, unknown, restoredEmail, restoredMeeting, calendarEmail, calendarMeeting]
+        let health = completed("Read", at: date(3)); health.sourceRef = "health:workout:occurrence"
+        let rows = valid + [email, meeting, imported, review, fixed, external, future, missing, active, impossible, old, unknown, restoredEmail, restoredMeeting, calendarEmail, calendarMeeting, health]
         #expect(RoutineLearningService.learn(todos: rows, now: date(4), calendar: calendar).isEmpty)
     }
 
