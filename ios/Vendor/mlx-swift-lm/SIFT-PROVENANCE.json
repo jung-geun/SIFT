@@ -1,0 +1,11 @@
+{
+  "upstream": "https://github.com/ml-explore/mlx-swift-lm",
+  "version": "3.32.3",
+  "revision": "3b339ad6e3b3f44c8121ecff5131c7fd55e075e6",
+  "localChanges": [
+    "Package.swift: macOS and iOS deployment floors raised to 26 to match the vendored mlx-swift dependency and SIFT.",
+    "MLXLMCommon/Lora+Data.swift: replace deprecated String(contentsOf:) with the encoding-detecting initializer while preserving existing text decoding behavior."
+  ],
+  "omittedTooling": [".git", ".build", "default.profraw"],
+  "license": "LICENSE"
+}
