@@ -20,7 +20,7 @@ SIFT는 **기기 내 분석을 기본으로 하는 할 일 관리 앱**입니다
 - **현재 개발 소스**: 아래 기능 설명은 이 저장소의 구현을 기준으로 합니다. 최근 완료 기록 기반 루틴, 승인 일정, 공식 ChatGPT 연결과 소스별 회의 기록 변경이 다운로드한 출시 바이너리에 모두 포함됐다고 주장하지 않습니다. 소스의 버전 번호나 빌드 성공만으로 배포 여부를 판단할 수 없습니다.
 - **무료의 범위**: 앱 다운로드가 무료라는 뜻이지 ChatGPT 구독, 외부 제공자 사용량, 네트워크 비용이나 무제한 AI 요청이 포함된다는 뜻은 아닙니다. 선택형 제공자에는 해당 계정의 권한·모델 가용성·사용량 제한과 약관이 적용됩니다.
 
-**[1.0.11 (9) 변경 요약·사용 경로·심사 상태](docs/changes.md#version-1-0-11-9)**에서 공개 `1.0.10`과 제출 버전의 차이를 먼저 확인할 수 있습니다. 날짜별 개발 변경과 검증 범위는 같은 [변경사항](docs/changes.md)에 보존하며, 기기별 확인 항목은 [UI 테스트 계획](ios/UI_TEST_PLAN.md)에 따로 기록합니다.
+**[1.0.11 (9) 변경 요약·사용 경로·심사 상태](docs/changes.md#version-1-0-11-9)**에서 공개 `1.0.10`과 제출 버전의 차이를 먼저 확인할 수 있습니다. 날짜별 개발 변경과 검증 범위는 [내부 개발 이력](docs/internal/development-history.md)에 보존하며, 기기별 확인 항목은 [UI 테스트 계획](ios/UI_TEST_PLAN.md)에 따로 기록합니다.
 
 ### 광고 준비 — 1.0.11 심사 제출·공개 전
 
@@ -31,19 +31,11 @@ SIFT는 **기기 내 분석을 기본으로 하는 할 일 관리 앱**입니다
 - **크롤러 호스트**: [Google 규칙](https://support.google.com/admob/answer/9363762?hl=en)은 `sift.pieroot.xyz`의 HTTPS·HTTP `/app-ads.txt`를 먼저, `pieroot.xyz`를 fallback으로 조회합니다. 부모 HTTPS 파일도 404였고 HTTP 후보는 조회하지 않았습니다. 부모 fallback 파일/리디렉션은 별도 호스팅 변경이며 이 Pages 파일 추가에 포함되지 않습니다.
 - **개인정보 고지·심사 신고**: 2026-10-20 [개정 개인정보처리방침](https://sift.pieroot.xyz/privacy-policy.html)을 게시하고 실제 페이지를 확인했습니다. 시행일은 **2026-10-27**이며 기존 7일 사전 고지 약속에 맞춰 앱 출시도 같은 날 이후로 예약했습니다. App Store 개인정보 라벨에는 SDK의 대략적 위치·기기 ID·상호작용·광고·진단/성능 수집을 반영했습니다. AdMob **Privacy & messaging** 구성, 광고 단위 자동 새로고침 해제, 실제 지역별 필수 동의 화면과 광고 계정 재크롤링 완료는 이 제출 확인만으로 검증되지 않습니다.
 
-## 앱 미리보기와 현재 작업 흐름
+## 사용자 안내와 제작 자료
 
-[![합성 할 일 데이터를 표시한 현재 SIFT iPhone 앱 미리보기](docs/assets/media/ko/web-preview.png)](docs/media.md)
+[앱 소개](https://sift.pieroot.xyz/) · [사용 안내](https://sift.pieroot.xyz/workflows.html) · [이메일 연결](https://sift.pieroot.xyz/email-setup.html) · [버전별 변경사항](https://sift.pieroot.xyz/changes.html)
 
-[소개 이미지와 규격](docs/media.md) · [현재 앱 화면 갤러리](https://sift.pieroot.xyz/#screens) · [이미지 묶음 ZIP](docs/assets/media/sift-media-kit.zip)
-
-한국어·영어 iPhone/iPad 스토어용 정적 이미지와 웹 미리보기를 제공합니다. 실제 QA 시뮬레이터 화면에 합성 예시 데이터를 사용했으며, App Preview 동영상이나 App Store 업로드 완료를 뜻하지 않습니다. 현재 출시 바이너리와 기능이 일치하는지 확인한 뒤 사용하세요.
-
-[![직접 입력·메일·회의 초안에서 할 일과 선택형 루틴으로 이어지는 현재 흐름](docs/assets/workflows/overview.visual-check.2048x1320.light.png)](docs/workflows.md)
-
-[작업 흐름·회의 처리·데이터 경계 설명](docs/workflows.md) · [사용 안내](https://sift.pieroot.xyz/workflows.html) · [편집 가능한 도표 원본](docs/assets/workflows/overview.workflow.json)
-
-메일은 조건에 따라 진행중 또는 등록 대기로 분류하고, 회의 초안·루틴 제안은 사용자 검토를 거칩니다. 완료 기록은 실제 활동의 측정값이 아닙니다. 도표는 개발 소스 기준이며 선택형 모델·외부 연결의 권한과 지원 조건을 생략한 출시 기능 목록이 아닙니다.
+일반 사용자에게는 확대가 필요한 개발 도표 대신 바로 읽을 수 있는 사용 순서를 제공합니다. [소개 이미지·규격](docs/media.md), [이미지 묶음 ZIP](docs/assets/media/sift-media-kit.zip), [편집 가능한 도표 원본](docs/assets/workflows/overview.workflow.json)과 생성·검증 자료는 저장소 내부 제작용이며 공개 사이트 빌드에서 제외합니다.
 
 ## 할 일을 다루는 방식
 
@@ -65,7 +57,7 @@ SIFT는 **기기 내 분석을 기본으로 하는 할 일 관리 앱**입니다
 
 메일 목록·상세의 **할 일로 저장**에서 발신자와 원본 제목을 확인하고, 제안된 제목·메모·기한을 수정한 뒤 저장합니다. 원문에서 기한을 찾지 못하면 **기한 없이 저장**합니다. 저장한 할 일에는 원본 메일 참조와 발신자 정보가 남습니다.
 
-현재 메일 탭은 `MailboxProviderRegistry`를 통해 **Gmail IMAP·Outlook IMAP**을 사용합니다. Gmail은 앱 비밀번호 연결 경로이며, `EmailService`의 Gmail OAuth/REST 경로도 별도로 남아 있습니다. 읽음 처리·휴지통 이동은 연결한 원래 제공자의 서버에 반영하는 동작입니다. Outlook의 레거시 앱 비밀번호 인증은 서버 정책에 따라 거부될 수 있고, Microsoft 365의 기본 인증 차단을 우회하지 않습니다. [Outlook 연결 조건](docs/outlook-imap-setup.md)을 먼저 확인하세요.
+현재 메일 탭은 `MailboxProviderRegistry`를 통한 **IMAP 연결**을 사용하며, 실제 연결이 검증된 제공자는 **Gmail IMAP**입니다. Google 계정의 일반 비밀번호가 아닌 앱 비밀번호를 사용합니다. 읽음 처리·휴지통 이동은 연결한 원래 제공자의 서버에 반영됩니다. Outlook 항목도 있지만 Microsoft의 인증 정책에 따라 앱 비밀번호 연결이 거부될 수 있으므로 성공을 보장하지 않습니다. [이메일 연결 안내](docs/email-setup.md)를 확인하세요. `EmailService`의 Gmail OAuth/REST 구현은 별도로 남아 있으며 현재 메일 탭의 연결 절차와 구분합니다.
 
 자동 메일 분석을 켠 경우, 설치·활성화한 **Laya**가 할 일 후보를 추천하고 사용 가능한 **Apple Foundation Models**가 요약·정리 초안을 만듭니다. 지원·설치·허용 조건이 없거나 실패하면 로컬 날짜·요약 규칙을 사용합니다. Laya는 요약이나 날짜를 생성하는 모델이 아닙니다. 기한 없는 후보나 불확실한 자동 판단은 **등록 대기열**에 두며, 후보가 아니라고 판단된 메일도 사용자가 직접 확인해 저장할 수 있습니다.
 
@@ -331,18 +323,44 @@ npm run dev
 
 Cloudflare Workers Free와 별도 0 USD Zero Trust Free 구독을 실제 계정 API·요금제 화면으로 확인했고, 전용 D1 원격 마이그레이션·운영 Worker 배포·실제 Swift URLSession HTTPS 전송과 동일 접수번호 재전송·진단 원문 일치를 검증했습니다. 앱의 새 직접 전송 UI는 개발 소스이며 기존 App Store 심사 제출 빌드에 포함됐다는 뜻이 아닙니다.
 
+## 비공개 피드백 수신 서비스
+
+운영 API는 `https://sift-feedback-api.jgbong0306.workers.dev`, 관리자 화면은 `https://sift.pieroot.xyz/feedback-admin.html`입니다. 사용자 접수에는 로그인·이메일 연결이 없지만 목록·본문·상태·메모·삭제에는 별도 운영 Bearer 키가 필요합니다. 브라우저는 키를 탭 메모리에만 유지하며 연결 해제·새로고침·이탈 시 지웁니다. 기존 App Store 앱의 메일·공유 경로가 자동으로 갱신되는 것은 아니며 앱 내 직접 전송 UI는 별도 앱 업데이트에 포함해야 합니다.
+
+`backend/feedback-api`에서 Node.js 22 이상과 고정 lockfile을 사용합니다. 로컬 검증은 `npm ci`, `node scripts/local-secrets.mjs`, `npm run migrate:local`, `npm run dev` 순서입니다. `.dev.vars`와 `.wrangler`는 Git에서 제외합니다. `npm run check`와 `npm test`는 타입 및 workerd/D1 동작을 검사합니다.
+
+운영 배포는 `CLOUDFLARE_ACCOUNT_ID`와 Billing Read·Workers Scripts Write·D1 Write 토큰을 안전한 프로세스 환경으로 전달한 후 `npm run guard:free`, `npm run migrate:remote`, `npm run deploy` 순서입니다. 계정 구독 전체 목록에서 Workers 구독이 없는 기본 Free만 사용합니다. 별도 Zero Trust Free(`teams_free`/`prod_teams`, 50석·0 USD·비시험·비계약) 외의 유료·알 수 없는 상품, 불완전 목록과 조회 실패는 차단하며 우회 옵션은 없습니다. 구독·결제 변경은 수행하지 않습니다.
+
+`ADMIN_TOKEN`과 `NETWORK_HMAC_SECRET`은 Worker secrets로만 설정합니다. 이 워크스테이션의 운영 키는 Keychain의 서비스 `xyz.pieroot.sift.feedback.admin.production`, 계정 `operator`에 저장되어 있으며 소스·앱·사이트·URL에는 포함하지 않습니다. 키 유출 시 Worker secret을 교체하고 관리자 탭을 다시 연결하세요. 접수 중지는 `wrangler.jsonc`의 `INTAKE_ENABLED=false`를 검증·배포하며, 인증된 조회·삭제는 계속 사용할 수 있습니다.
+
+접수는 UTC 하루 전체 100건·일별 HMAC 네트워크당 10건, 본문 768KiB·진단 512KiB, 보관 원장 100MiB로 제한합니다. 원장은 요청·메모 크기와 건당 여유를 합한 값이며 D1 물리 파일 크기가 아닙니다. 내용·첨부·메모는 30일 후 조회에서 제외하고 매일 삭제합니다. 정기 작업 지연 및 D1 Free 복구 이력 최대 7일의 한계는 [개인정보 처리방침](docs/privacy-policy.md#앱-내-오류-보고기능-제안)을 확인하세요. Free 플랫폼 한도 초과는 실패할 수 있으며 유료로 자동 전환하지 않습니다. 운영자가 나중에 요금제를 바꾸면 무료 전제도 달라집니다.
+
+## 버전별 릴리스와 공개 사이트 배포
+
+공개 변경사항은 `release-notes/<정확한 태그>.json`으로 작성하고, 실제 태그를 가리키는 GitHub Release가 발행된 뒤에만 표시합니다. `tag`, `date`, 짧은 `summary`, 최대 다섯 개의 `details`를 사용합니다. 기록이 없는 중간 버전은 추정하지 않으며, 개발·검증 이력을 릴리스 노트에 섞지 않습니다.
+
+1. 출시할 버전의 노트를 작성하고 `python3 scripts/release_notes.py validate --tag "$TAG"`로 확인합니다. 날짜는 한국 시간 기준의 `YYYY-MM-DD`입니다.
+2. 노트를 `main`에 병합하고 **태그가 가리킬 커밋에도 같은 노트**가 포함돼 있는지 확인합니다.
+3. 버전 태그가 올라오면 `.github/workflows/release.yml`이 태그·노트를 확인하고 GitHub Release를 만듭니다. 누락·불일치·이미 존재하는 다른 내용은 덮어쓰거나 자동 생성하지 않고 실패합니다.
+4. 성공 후 `.github/workflows/pages.yml`을 직접 호출해 공개된 정식 릴리스만 읽고 `/changes.html`을 서버에서 렌더링·배포합니다. `GITHUB_TOKEN`으로 생성한 Release 이벤트에 의존하지 않으며 공개 페이지에 GitHub 인증이나 브라우저 JavaScript가 필요하지 않습니다.
+
+`v*`와 숫자로 시작하는 태그는 **기존 TestFlight 워크플로도 실행**합니다. 릴리스 문서를 확인하려고 임의의 버전 태그를 만들지 마세요. 이미 기록된 `1.0.5`는 확인된 기존 커밋에 한해서만 과거 노트 보완을 허용하며, `gh workflow run release.yml --ref main -f tag=1.0.5`로 새 태그 없이 발행합니다.
+
+Pages의 빌드 소스는 GitHub Actions입니다. `github-pages` 환경은 `main` 브랜치와 버전 태그의 배포를 허용해야 합니다. 공개 빌드는 `docs/internal`, 소개 이미지·도표 제작 파일과 개발 전용 문서를 제외합니다. 회귀 검사는 `python3 -m unittest discover -s scripts/tests -p 'test_release_notes.py' -v`이며 Pages 빌드에서도 실행합니다.
+
 ## 문서와 검증 범위
 
 | 문서 | 내용 |
 |---|---|
-| [앱 소개 이미지](docs/media.md) · [웹](https://sift.pieroot.xyz/media.html) | 한국어·영어 iPhone/iPad 스토어 이미지, 웹 미리보기와 원본 캡처 |
-| [작업 흐름](docs/workflows.md) · [웹](https://sift.pieroot.xyz/workflows.html) | 현재 할 일·메일·회의·루틴 흐름과 로컬/선택형 외부 데이터 경계 |
-| [변경사항](docs/changes.md) · [웹](https://sift.pieroot.xyz/changes.html) | 기능 변경, 배포/아카이브와 실제 검증의 구분 |
+| [앱 소개 이미지](docs/media.md) | 저장소 내부 제작용 이미지·규격·원본 캡처; 공개 사이트 제외 |
+| [사용 안내](docs/workflows.md) · [웹](https://sift.pieroot.xyz/workflows.html) | 할 일·메일·일정·회의를 사용하는 순서 |
+| [변경사항](docs/changes.md) · [웹](https://sift.pieroot.xyz/changes.html) | 발행된 버전별 릴리스 노트 |
+| [내부 개발 이력](docs/internal/development-history.md) | 기존 미분류 개발·배포·검증 기록; 공개 사이트 제외 |
 | [개인정보 처리방침](docs/privacy-policy.md) · [웹](https://sift.pieroot.xyz/privacy-policy.html) | 선택형 전송·동기화, 보관·삭제, 제공자 정책 |
 | [서비스 약관](docs/terms-of-service.md) · [웹](https://sift.pieroot.xyz/terms-of-service.html) | 앱·서비스 이용 조건; 소스 라이선스와 구분 |
 | [UI 테스트 계획](ios/UI_TEST_PLAN.md) | 재현 흐름, QA 격리, 기기/시뮬레이터 한계와 진단 기록 |
 | [회의 마일스톤](docs/meeting-milestones.md) | 음성 원본·모델 귀속·소스 캡처 경계·미검증 품질 |
-| [Outlook IMAP 설정](docs/outlook-imap-setup.md) | 레거시 인증의 실제 제한 |
+| [이메일 연결](docs/email-setup.md) | 검증된 Gmail IMAP의 앱 비밀번호 설정과 연결 절차 |
 | [국제화 정책](docs/i18n-policy.md) | 8개 언어, 시스템/수동 선택, 원문 보존과 모델 언어 지원 경계 |
 
 테스트 통과·합성 UI·작은 실제 모델 샘플은 출시 완료, 실제 계정 연결, 한국어 정확도나 모든 하드웨어의 성능 보장이 아닙니다. 진단 보고서는 전송 전에 로컬에서 내용을 검토·승인하며, 취소·실패하면 로컬 기록을 유지합니다.

@@ -7,3 +7,20 @@ feedback_api_url: "https://sift-feedback-api.jgbong0306.workers.dev"
 
 github:
   is_project_page: false
+
+# Repository-only authoring assets and engineering records are not public help.
+exclude:
+  - internal
+  - media.md
+  - assets/media
+  - assets/workflows
+  - assets/css/media.css
+  - assets/css/workflows.css
+  - meeting-milestones.md
+  - i18n-policy.md
+  - coreai-migration.md
+  - Gemfile
+  - Gemfile.lock
+  - vendor
+  - .bundle
+  - .jekyll-cache
