@@ -24,13 +24,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Select newest available Xcode
+      - name: Select stable Xcode 27
         uses: maxim-lobanov/setup-xcode@v1
         with:
-          xcode-version: latest
+          xcode-version: latest-stable
 
       - name: Print Xcode version
         run: xcodebuild -version
+
+      - name: Install Metal compiler component
+        run: xcodebuild -downloadComponent MetalToolchain
 
       - name: Verify Package.resolved integrity
         run: sh ci_scripts/ci_pre_xcodebuild.sh
