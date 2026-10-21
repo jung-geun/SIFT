@@ -10,20 +10,24 @@ SIFT는 **기기 내 분석을 기본으로 하는 할 일 관리 앱**입니다
 
 ## 다운로드와 개발 소스의 차이
 
-현재 배포 대상은 **iOS/iPadOS 앱과 macOS용 Mac Catalyst 앱**입니다. 이번 `1.0.10 (6)` 후보는 iOS/iPadOS 26.0 이상과 macOS 26.0 이상을 대상으로 하며 Mac 패키지는 Apple Silicon·Intel 통합 바이너리입니다. Mac 경로는 별도의 네이티브 AppKit 제품이 아니며, 온디바이스 AI의 하드웨어·모델 지원 조건은 별도입니다. Android 소스가 저장소에 있지만 현재 배포 중인 Android 제품이나 iOS와 동등한 지원을 뜻하지 않습니다.
+현재 배포 대상은 **iOS/iPadOS 앱과 macOS용 Mac Catalyst 앱**입니다. 새 심사 제출 후보 `1.0.11 (9)`는 iOS/iPadOS 26.0 이상과 macOS 26.0 이상을 대상으로 하며 Mac 패키지는 Apple Silicon·Intel 통합 바이너리입니다. 최신 앱 개발 변경은 **`dev` 브랜치**, 공개 사이트는 **`main:/docs`**에서 관리합니다. Android 소스가 저장소에 있지만 Android 신규 배포나 모든 기기의 AI 지원을 뜻하지 않습니다.
 
 - **출시 앱**: App Store 소개·버전 기록에는 할 일 관리, 온디바이스 정리, 이메일·캘린더 연동, 회의 기록과 Laya 메일 분류·화자/후처리 기능이 안내되어 있습니다. 실제 설치 버전의 기능은 앱 화면과 스토어의 버전 기록을 기준으로 확인하세요.
-- **2026-10-16 제출 상태**: iOS와 macOS의 `1.0.10 (6)` 모두 App Store Connect에서 **Waiting for Review**로 접수됐으며 승인 후 자동 출시하도록 설정했습니다. 공개 버전은 여전히 `1.0.9`이고, 심사 승인이나 새 버전 공개 완료를 주장하지 않습니다.
+- **2026-10-21 상태**: 현재 확인된 공개 앱은 **1.0.10**입니다. **1.0.11 (9)**는 iOS/iPadOS가 스토어 문구·이미지 보정 후 **15:52 KST 재접수·Waiting for Review**, macOS가 **In Review**입니다. 승인 후 **2026-10-27 09:00 KST 이후 자동 출시** 예약을 유지하며, 심사 승인이나 공개 완료를 뜻하지 않습니다. [이번 버전의 변경사항과 사용 위치](https://sift.pieroot.xyz/changes.html#version-1-0-11-9)를 확인하세요.
 - **현재 개발 소스**: 아래 기능 설명은 이 저장소의 구현을 기준으로 합니다. 최근 완료 기록 기반 루틴, 승인 일정, 공식 ChatGPT 연결과 소스별 회의 기록 변경이 다운로드한 출시 바이너리에 모두 포함됐다고 주장하지 않습니다. 소스의 버전 번호나 빌드 성공만으로 배포 여부를 판단할 수 없습니다.
 - **무료의 범위**: 앱 다운로드가 무료라는 뜻이지 ChatGPT 구독, 외부 제공자 사용량, 네트워크 비용이나 무제한 AI 요청이 포함된다는 뜻은 아닙니다. 선택형 제공자에는 해당 계정의 권한·모델 가용성·사용량 제한과 약관이 적용됩니다.
 
-개발 변경과 검증 범위는 [내부 개발 이력](docs/internal/development-history.md), 기기별 확인 항목은 [UI 테스트 계획](ios/UI_TEST_PLAN.md)에 기록합니다. 공개 [변경사항](https://sift.pieroot.xyz/changes.html)은 실제 발행한 버전별 릴리스만 보여줍니다.
+개발 변경과 검증 범위는 [dev의 UI 검증 기록](https://github.com/jung-geun/SIFT/blob/dev/ios/UI_TEST_PLAN.md)과 [내부 개발 이력](docs/internal/development-history.md)에 기록합니다. 공개 [변경사항](https://sift.pieroot.xyz/changes.html)은 **심사 중인 1.0.11 요약**과 **이미 발행한 버전별 릴리스**를 구분합니다.
 
 ## 사용자 안내와 제작 자료
 
 [앱 소개](https://sift.pieroot.xyz/) · [사용 안내](https://sift.pieroot.xyz/workflows.html) · [이메일 연결](https://sift.pieroot.xyz/email-setup.html) · [버전별 변경사항](https://sift.pieroot.xyz/changes.html)
 
 일반 사용자에게는 확대가 필요한 개발 도표 대신 바로 읽을 수 있는 사용 순서를 제공합니다. [소개 이미지·규격](docs/media.md), [이미지 묶음 ZIP](docs/assets/media/sift-media-kit.zip), [편집 가능한 도표 원본](docs/assets/workflows/overview.workflow.json)과 생성·검증 자료는 저장소 내부 제작용이며 공개 사이트 빌드에서 제외합니다.
+
+[![현재 SIFT 1.0.11 QA 앱의 합성 할 일 예시 화면](docs/assets/media/ko/web-preview.png)](https://sift.pieroot.xyz/#screens)
+
+소개 이미지는 2026-10-21 현재 앱 소스로 다시 촬영했습니다. 한국어·영어 iPhone/iPad 화면에 합성 예시 데이터만 사용하며, 현재 공개 앱 1.0.10·App Store 이미지 업로드·심사 승인과 구분합니다.
 
 ## 할 일을 다루는 방식
 
