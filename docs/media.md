@@ -11,7 +11,7 @@ image: /assets/media/en/social-preview.png
 
 할 일을 기록하고, 마감을 확인하고, 날짜별로 살펴보는 화면. **실행한 앱의 네이티브 캡처**에 SIFT의 색과 짧은 설명을 더했습니다. 앱 UI를 이미지 생성 모델로 그리거나, 실행하지 않은 AI 분석 결과를 합성하지 않았습니다.
 
-> **1.0.11 (10) · 배포 후보 · 예시 데이터** — 2026년 10월 22일 현재 소스에서 광고 없는 테스트 모드로 다시 실행·촬영한 iPhone·iPad QA 화면입니다. 화면의 할 일은 소개용 샘플이며 실제 개인·메일·회의 데이터가 아닙니다. 공개 앱·심사 승인·이 이미지의 App Store 업로드 완료와 구분합니다. 여기서 제공하는 것은 **정적 스크린샷과 미리보기 이미지**이며, Apple의 동영상 형식인 **App Preview**가 아닙니다. [최신 변경사항](changes.html)을 확인하세요.
+> **1.0.11 (10) · 심사 접수 · 예시 데이터** — 2026년 10월 22일 현재 소스에서 광고 없는 테스트 모드로 다시 실행·촬영한 iPhone·iPad QA 화면입니다. 화면의 할 일은 소개용 샘플이며 실제 개인·메일·회의 데이터가 아닙니다. 공개 앱·심사 승인·이 이미지의 App Store 업로드 완료와 구분합니다. 여기서 제공하는 것은 **정적 스크린샷과 미리보기 이미지**이며, Apple의 동영상 형식인 **App Preview**가 아닙니다. [최신 변경사항](changes.html#version-1-0-11-10)을 확인하세요.
 
 [전체 이미지 ZIP 다운로드](assets/media/sift-media-kit.zip) · [파일 크기·언어·출처 명세](assets/media/manifest.json) · [네이티브 캡처 출처](assets/media/captures/manifest.json)
 
@@ -49,7 +49,7 @@ image: /assets/media/en/social-preview.png
 2732×2048 픽셀, 불투명 RGB PNG. Apple이 허용하는 **13인치 iPad** 가로 스크린샷 크기입니다. iPhone 화면을 늘린 것이 아니라 iPad에서 직접 캡처한 화면을 사용합니다.
 
 <div class="media-previews">
-  <figure><a href="assets/media/ko/ipad-01-tasks.png"><img src="assets/media/ko/ipad-01-tasks.png" width="2732" height="2048" alt="한국어 iPad의 넓은 할 일 보드 소개 이미지" loading="lazy"></a><figcaption>iPad · 할 일 보드</figcaption></figure>
+  <figure><a href="assets/media/ko/ipad-01-tasks.png"><img src="assets/media/ko/ipad-01-tasks.png" width="2732" height="2048" alt="한국어 iPad의 넓은 할 일 목록 소개 이미지" loading="lazy"></a><figcaption>iPad · 할 일 목록</figcaption></figure>
   <figure><a href="assets/media/en/ipad-03-calendar.png"><img src="assets/media/en/ipad-03-calendar.png" width="2732" height="2048" alt="English iPad calendar promotional image" loading="lazy"></a><figcaption>iPad · Calendar</figcaption></figure>
 </div>
 

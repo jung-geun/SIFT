@@ -167,7 +167,7 @@ image: /assets/images/app-icon.webp
         <p>할 일을 정리하는 방법과 이메일 연결 순서를 안내합니다.</p>
       </div>
       <div class="resource-links">
-        <a href="{{ '/changes.html#version-1-0-11-9' | relative_url }}"><strong>1.0.11 변경사항 <span aria-hidden="true">↗</span></strong><span>할 일 중심 설정·선택형 캘린더 분석·기억하는 회의 언어와 안정성 개선. 심사 중이며 공개 앱 1.0.10과 구분합니다.</span></a>
+        <a href="{{ '/changes.html#version-1-0-11-10' | relative_url }}"><strong>1.0.11 변경사항 <span aria-hidden="true">↗</span></strong><span>할 일 중심 설정·연속 캘린더·새 할 일 편집과 안정성 개선. 빌드 10 심사 접수 상태이며 공개 앱과 구분합니다.</span></a>
         <a href="{{ '/workflows.html' | relative_url }}"><strong>SIFT 사용 안내 <span aria-hidden="true">↗</span></strong><span>할 일 기록부터 메일·일정·회의 정리까지, 필요한 기능을 차근차근</span></a>
         <a href="{{ '/email-setup.html' | relative_url }}"><strong>이메일 연결하기 <span aria-hidden="true">↗</span></strong><span>Gmail 앱 비밀번호 준비부터 SIFT 연결까지</span></a>
       </div>
