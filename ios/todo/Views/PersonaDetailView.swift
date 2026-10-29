@@ -6,6 +6,9 @@ struct PersonaDetailView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.appTutorialState) private var tutorial
     @ObservedObject private var regionalAvailability = OpenAIRegionalAvailability.shared
+    @ObservedObject private var settings = SettingsStore.shared
+    @ObservedObject private var connection = OpenAIConnection.shared
+    @AppStorage(OpenAIPrivacy.consentKey(for: .persona)) private var allowsOpenAIPersona = false
     @Query(sort: \Persona.updatedAt, order: .reverse) private var personas: [Persona]
     @Query private var todos: [Todo]
     @Query private var auditEvents: [TaskAuditEvent]
@@ -18,8 +21,22 @@ struct PersonaDetailView: View {
     @State private var showOnboardingResetup = false
     @State private var generationTask: Task<Void, Never>?
     @State private var showAdvancedRequest = false
+    @State private var activeAdvancedSession: UUID?
+    @State private var pendingAdvancedSession: UUID?
     
     private let generationService = PersonaGenerationService()
+
+    private var canRequestAdvanced: Bool {
+        regionalAvailability.isAvailable
+            && SettingsStore.betaProviderAccess().openAIEnabled
+            && connection.activeProfile != nil
+    }
+
+    private var canUsePendingResult: Bool {
+        guard pendingAdvancedSession != nil || generationResult?.processorDescription.hasPrefix("OpenAI") == true else { return true }
+        return canRequestAdvanced && allowsOpenAIPersona
+            && pendingAdvancedSession == connection.sessionGeneration
+    }
     
     var body: some View {
         Form {
@@ -69,7 +86,7 @@ struct PersonaDetailView: View {
                             }
                         } else {
                             Label(
-                                personas.first?.descriptionText.isEmpty ?? true ? AppLanguage.localized("persona.detail.generate", defaultValue: "Generate Pattern-Based Persona", language: .current, comment: "Action generating a persona from behavior patterns.") : AppLanguage.localized("persona.detail.improve", defaultValue: "Improve Pattern-Based Persona", language: .current, comment: "Action improving an existing persona from behavior patterns."),
+                                personas.first?.descriptionText.isEmpty ?? true ? AppLanguage.localized("persona.detail.generate", defaultValue: "Generate Persona", language: .current, comment: "Action generating a persona from behavior patterns.") : AppLanguage.localized("persona.detail.improve", defaultValue: "Update Persona", language: .current, comment: "Action improving an existing persona from behavior patterns."),
                                 systemImage: "person.crop.circle.badge.checkmark"
                             )
                             .fontWeight(.medium)
@@ -77,8 +94,8 @@ struct PersonaDetailView: View {
                     }
                     .buttonStyle(.borderless)
                     .disabled(isGenerating)
-                    if regionalAvailability.isAvailable {
-                        Button(AppLanguage.localized("memory.analysis.advancedRequest", defaultValue: "Re-request with gpt-6.1-sol", language: .current, comment: "Explicit advanced persona analysis request.")) {
+                    if canRequestAdvanced {
+                        Button(AppLanguage.localized("memory.analysis.advancedRequest", defaultValue: "Analyze with gpt-6.1-sol", language: .current, comment: "Explicit advanced persona analysis request.")) {
                             showAdvancedRequest = true
                         }
                         .disabled(isGenerating)
@@ -90,7 +107,7 @@ struct PersonaDetailView: View {
                     
                     
                     if let result = generationResult,
-                       regionalAvailability.isAvailable || !result.processorDescription.hasPrefix("OpenAI") {
+                       canUsePendingResult {
                         generationResultCard(
                             result,
                             existingDescription: desc,
@@ -103,9 +120,11 @@ struct PersonaDetailView: View {
                         .padding(.vertical, 8)
                 }
             } footer: {
-                Text("최근 행동 기록을 결정론적으로 분석합니다. 모든 지원 기기에서 같은 근거, 계산 규칙, 신뢰도를 사용합니다.")
+                Text(AppLanguage.localized("persona.detail.evidenceSummary", defaultValue: "Uses local behavior records, consistent rules, and confidence levels.", language: .current, comment: "Local persona evidence and confidence boundary."))
             }
-            OpenAIConsentSection(scope: .persona)
+            if canRequestAdvanced {
+                OpenAIConsentSection(scope: .persona)
+            }
         }
         .appFormStyle()
         .navigationTitle("나의 페르소나")
@@ -126,14 +145,14 @@ struct PersonaDetailView: View {
             generationTask?.cancel()
             tutorial?.handlePersonaDetailClosed()
         }
-        .onChange(of: regionalAvailability.isAvailable) { _, available in
-            guard !available else { return }
-            showAdvancedRequest = false
-            if generationResult?.processorDescription.hasPrefix("OpenAI") == true {
-                generationResult = nil
-            }
-            showError = false
-            errorMessage = nil
+        .onChange(of: canRequestAdvanced) { _, available in
+            if !available { invalidateAdvancedRequest() }
+        }
+        .onChange(of: connection.sessionGeneration) { _, _ in
+            invalidateAdvancedRequest()
+        }
+        .onChange(of: allowsOpenAIPersona) { _, allowed in
+            if !allowed { invalidateAdvancedRequest() }
         }
         .safeAreaInset(edge: .top, spacing: 0) {
             if let tutorial {
@@ -217,7 +236,7 @@ struct PersonaDetailView: View {
                 }
             }
 
-            Text("적용하기 전에는 현재 설명과 유형이 변경되지 않습니다.")
+            Text(AppLanguage.localized("analysis.preview.applyNotice", defaultValue: "Nothing changes until you apply this preview.", language: .current, comment: "Analysis previews require manual application."))
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -237,16 +256,36 @@ struct PersonaDetailView: View {
         .padding(.vertical, AppTheme.Spacing.compact)
     }
     
-    private func startGeneration(tier: OpenAIAnalysisTier = .basic) {
-        guard !isGenerating, tier != .advanced || regionalAvailability.isAvailable else { return }
-        generationTask?.cancel()
-        generationTask = Task { await runGeneration(tier: tier) }
+    private func invalidateAdvancedRequest() {
+        showAdvancedRequest = false
+        if activeAdvancedSession != nil {
+            generationTask?.cancel()
+        }
+        if pendingAdvancedSession != nil || generationResult?.processorDescription.hasPrefix("OpenAI") == true {
+            generationResult = nil
+            pendingAdvancedSession = nil
+        }
+        showError = false
+        errorMessage = nil
     }
 
-    private func runGeneration(tier: OpenAIAnalysisTier = .basic) async {
-        guard !isGenerating, tier != .advanced || regionalAvailability.isAvailable else { return }
+    private func startGeneration(tier: OpenAIAnalysisTier = .basic) {
+        guard !isGenerating, tier != .advanced || canRequestAdvanced else { return }
+        generationTask?.cancel()
+        let session = tier == .advanced ? connection.sessionGeneration : nil
+        activeAdvancedSession = session
+        generationTask = Task { await runGeneration(tier: tier, session: session) }
+    }
+
+    private func runGeneration(tier: OpenAIAnalysisTier = .basic, session: UUID? = nil) async {
+        guard !Task.isCancelled, !isGenerating,
+              tier != .advanced || (canRequestAdvanced && session == connection.sessionGeneration) else { return }
         isGenerating = true
-        defer { isGenerating = false }
+        activeAdvancedSession = session
+        defer {
+            isGenerating = false
+            activeAdvancedSession = nil
+        }
         do {
             let existing = personas.first?.descriptionText ?? ""
             let now = Date()
@@ -274,12 +313,17 @@ struct PersonaDetailView: View {
                 tier: tier
             )
             try Task.checkCancellation()
+            guard tier != .advanced || (canRequestAdvanced && allowsOpenAIPersona
+                && session == connection.sessionGeneration) else { return }
             guard regionalAvailability.isAvailable || !result.processorDescription.hasPrefix("OpenAI") else { return }
+            pendingAdvancedSession = session
             generationResult = result
         } catch is CancellationError {
             return
         } catch {
             guard !Task.isCancelled else { return }
+            if tier == .advanced,
+               !canRequestAdvanced || session != connection.sessionGeneration { return }
             if !regionalAvailability.isAvailable,
                error is OpenAIRequestError || error is OpenAIConnectionError { return }
             errorMessage = error.localizedDescription
@@ -289,7 +333,7 @@ struct PersonaDetailView: View {
     }
     private func applyGeneratedPersona() {
         guard let result = generationResult, let p = personas.first,
-              regionalAvailability.isAvailable || !result.processorDescription.hasPrefix("OpenAI") else { return }
+              canUsePendingResult else { return }
         do {
             if modelContext.hasChanges { try modelContext.save() }
         } catch {

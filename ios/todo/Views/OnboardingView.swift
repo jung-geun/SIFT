@@ -190,7 +190,7 @@ struct OnboardingView: View {
                     .font(.title2.bold())
                     .padding(.horizontal, 20)
 
-                Text("해당되는 항목을 선택하거나 직접 입력하세요. AI 우선순위 조정에 사용됩니다.")
+                Text(AppLanguage.localized("onboarding.persona.descriptionPrompt", defaultValue: "해당되는 항목을 선택하거나 직접 입력하세요.", language: .current))
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 20)

@@ -27,8 +27,8 @@ nonisolated enum BetaProvider: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
-/// Only these providers have an explicit activation preference. Platform AFM
-/// availability and installed general-purpose local models need no second opt-in.
+/// Remote analysis and downloaded fallback models require explicit opt-in.
+/// Platform Apple Intelligence is the default on eligible hardware.
 nonisolated enum BetaProviderOptIn: Equatable, Sendable {
     case openAI
     case laya
@@ -96,6 +96,7 @@ nonisolated enum ProviderUse: Sendable {
     case standardAnalysis
     case meetingAnalysis
     case emailAnalysis
+    case personalNarrative
     case transcriptRefinement
     case modelManagement
     case layaModelManagement
@@ -178,17 +179,21 @@ nonisolated struct BetaFeaturePolicy: Sendable {
         let access = accessReader()
 
         switch use {
-        case .standardAnalysis, .meetingAnalysis:
+        case .standardAnalysis:
             guard access.foundationModelsEnabled || access.onDeviceEnabled || access.openAIEnabled || access.layaEnabled else {
                 return .rules(.noProviderOptIn)
             }
             guard let selection = selectionReader(), access.isEnabled(selection) else {
                 return .rules(.providerDisabled)
             }
-            if case .meetingAnalysis = use, selection != .foundationModels && selection != .onDevice {
-                return .rules(.providerNotApplicable)
-            }
             return .providers([selection])
+
+        case .meetingAnalysis, .personalNarrative:
+            // Meeting summaries and personal narratives never inherit a remote
+            // or experimental priority-model choice from the To-Do screen.
+            if access.foundationModelsEnabled { return .providers([.foundationModels]) }
+            if access.onDeviceEnabled { return .providers([.onDevice]) }
+            return .rules(.noEligibleProvider)
 
         case .emailAnalysis:
             // Mail summaries and drafts are local AFM work, independent of the selected task-priority provider.
@@ -196,9 +201,9 @@ nonisolated struct BetaFeaturePolicy: Sendable {
                 ? .providers([.foundationModels])
                 : .rules(.providerDisabled)
         case .transcriptRefinement:
-            let providers = [PersonaAIProvider.foundationModels, .onDevice]
-                .filter(access.isEnabled)
-            return providers.isEmpty ? .rules(.noEligibleProvider) : .providers(providers)
+            if access.foundationModelsEnabled { return .providers([.foundationModels]) }
+            if access.onDeviceEnabled { return .providers([.onDevice]) }
+            return .rules(.noEligibleProvider)
 
         case .modelManagement:
             return access.onDeviceEnabled

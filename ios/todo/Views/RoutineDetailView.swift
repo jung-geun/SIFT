@@ -7,6 +7,9 @@ struct RoutineDetailView: View {
     @Query private var todos: [Todo]
     @ObservedObject private var store = RoutineStore.shared
     @ObservedObject private var regionalAvailability = OpenAIRegionalAvailability.shared
+    @ObservedObject private var settings = SettingsStore.shared
+    @ObservedObject private var connection = OpenAIConnection.shared
+    @AppStorage(OpenAIPrivacy.consentKey(for: .routines)) private var allowsOpenAIRoutines = false
     @State private var now = Date()
     @State private var editingRoutine: LearnedRoutine?
     @State private var reviewingSuggestion: RoutineSuggestion?
@@ -21,6 +24,12 @@ struct RoutineDetailView: View {
 
     private var suggestions: [RoutineSuggestion] { store.suggestions(now: now, todos: todos) }
 
+    private var canRequestRemote: Bool {
+        regionalAvailability.isAvailable
+            && SettingsStore.betaProviderAccess().openAIEnabled
+            && connection.activeProfile != nil
+    }
+
     var body: some View {
         Form {
             if !HealthHistoryReader.availableCategories.isEmpty || HealthRoutineStore.shared.hasLocalData {
@@ -30,6 +39,7 @@ struct RoutineDetailView: View {
                 } label: {
                     Label(HealthCopy.text("health.title", "Health & fitness history", "건강·운동 기록"), systemImage: "heart.text.square")
                 }
+                .accessibilityIdentifier("routines.healthRow")
                 Text(HealthCopy.text("health.entry.explanation", "Connect real HealthKit history separately. Manual task checkoffs below are not health records.", "실제 HealthKit 기록을 별도로 연결합니다. 아래의 수동 할 일 완료 기록은 건강 기록이 아닙니다."))
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
@@ -46,7 +56,7 @@ struct RoutineDetailView: View {
                 Button(copy("routines.analyze", fallback: "완료 기록에서 루틴 후보 분석")) { refresh() }
                     .disabled(!store.isLearningEnabled)
                     .accessibilityIdentifier("routines.analyze")
-                Text(copy("routines.learning.explanation", fallback: "기기 내에서 최근 90일의 완료된 수동 할 일을 활동별 동일 제목으로 묶습니다. 최소 3일의 완료 기록이 필요합니다. 메일·회의·캘린더·등록 대기·삭제 기록은 제외합니다. 완료 시각은 실제 복약·운동·수면의 수행 시각이나 건강 상태가 아닙니다."))
+                Text(copy("routines.learning.explanation", fallback: "기기에서 최근 90일의 완료된 수동 할 일을 활동과 같은 제목별로 묶습니다. 최소 3일의 기록이 필요하며 메일·회의·캘린더·검토 대기·삭제 기록은 제외합니다."))
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -146,7 +156,7 @@ struct RoutineDetailView: View {
                 }
             }
 
-            if regionalAvailability.isAvailable {
+            if canRequestRemote {
                 OpenAIConsentSection(scope: .routines)
                 Section(copy("routines.remote.title", fallback: "OpenAI 해석 · 검토용 미리보기")) {
                     Button(copy("routines.remote.basic", fallback: "기초 해석 요청 · gpt-6-luna")) { requestRemote(.basic) }
@@ -227,12 +237,12 @@ struct RoutineDetailView: View {
         .task { reconcile() }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in reconcile() }
         .onDisappear { analysisTask?.cancel() }
-        .onChange(of: regionalAvailability.isAvailable) { _, available in
-            guard !available else { return }
-            confirmRemote = false
-            analysisTask?.cancel()
-            narrative = nil
-            errorMessage = nil
+        .onChange(of: canRequestRemote) { _, available in
+            if !available { invalidateRemoteRequest() }
+        }
+        .onChange(of: connection.sessionGeneration) { _, _ in invalidateRemoteRequest() }
+        .onChange(of: allowsOpenAIRoutines) { _, allowed in
+            if !allowed { invalidateRemoteRequest() }
         }
         .sheet(item: $editingRoutine) { RoutineEditView(routine: $0) }
         .sheet(item: $reviewingSuggestion, onDismiss: { now = Date() }) { ScheduleApprovalView(suggestion: $0) }
@@ -275,26 +285,35 @@ struct RoutineDetailView: View {
             now = Date()
         } catch { errorMessage = RoutineViewCopy.errorMessage(error) }
     }
+    private func invalidateRemoteRequest() {
+        confirmRemote = false
+        analysisTask?.cancel()
+        narrative = nil
+        errorMessage = nil
+    }
+
     private func requestRemote(_ tier: OpenAIAnalysisTier) {
-        guard regionalAvailability.isAvailable else { return }
+        guard canRequestRemote else { return }
         requestedTier = tier
         confirmRemote = true
     }
     private func analyzeRemote() {
-        guard regionalAvailability.isAvailable, !isAnalyzing, store.isLearningEnabled else { return }
+        guard canRequestRemote, !isAnalyzing, store.isLearningEnabled else { return }
         analysisTask?.cancel()
         let records = store.routines
         let tier = requestedTier
+        let session = connection.sessionGeneration
         analysisTask = Task {
             isAnalyzing = true
             defer { isAnalyzing = false }
             do {
                 let result = try await OpenAIAnalysisService().routines(records, tier: tier)
                 try Task.checkCancellation()
-                guard regionalAvailability.isAvailable, store.isLearningEnabled, records == store.routines else { return }
+                guard canRequestRemote, allowsOpenAIRoutines, session == connection.sessionGeneration,
+                      store.isLearningEnabled, records == store.routines else { return }
                 narrative = result
             } catch is CancellationError { }
-            catch { if !Task.isCancelled, regionalAvailability.isAvailable { errorMessage = OpenAIViewCopy.errorMessage(error) } }
+            catch { if !Task.isCancelled, canRequestRemote, session == connection.sessionGeneration { errorMessage = OpenAIViewCopy.errorMessage(error) } }
         }
     }
     private func copy(_ key: String, fallback: String) -> String { RoutineViewCopy.copy(key, fallback: fallback) }

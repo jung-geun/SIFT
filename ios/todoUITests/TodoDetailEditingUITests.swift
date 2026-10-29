@@ -12,6 +12,9 @@ final class TodoLifecycleUITests: SIFTUITestCase {
             let title = app.textFields["todo.add.titleField"]
             tap(title, message: "제목 필드가 없습니다.")
             title.typeText(source)
+            #if targetEnvironment(macCatalyst)
+            assertTrailingEditorActions(prefix: "todo.add")
+            #endif
             tap(app.buttons["todo.add.saveButton"], message: "할 일 저장 버튼이 없습니다.")
             require(taskTitle(source), message: "생성한 할 일이 목록에 없습니다.")
         }
@@ -19,6 +22,9 @@ final class TodoLifecycleUITests: SIFTUITestCase {
         step("수정 후 폐기하기") {
             tap(taskTitle(source), message: "생성한 할 일을 찾지 못했습니다.")
             replaceText(in: app.textFields["todo.detail.titleField"], with: changed)
+            #if targetEnvironment(macCatalyst)
+            assertTrailingEditorActions(prefix: "todo.detail")
+            #endif
             tap(app.buttons["todo.detail.cancelButton"], message: "취소 버튼이 없습니다.")
             tap(app.buttons["폐기"], message: "폐기 확인 버튼이 없습니다.")
             require(taskTitle(source), message: "원래 제목이 보존되지 않았습니다.")
@@ -72,6 +78,18 @@ final class TodoLifecycleUITests: SIFTUITestCase {
             XCTAssertEqual(app.textFields["todo.detail.notesField"].value as? String, notes)
         }
     }
+
+    #if targetEnvironment(macCatalyst)
+    private func assertTrailingEditorActions(prefix: String) {
+        let cancel = app.buttons["\(prefix).cancelButton"]
+        let save = app.buttons["\(prefix).saveButton"]
+        require(cancel, message: "취소 버튼이 없습니다.")
+        require(save, message: "저장 버튼이 없습니다.")
+        XCTAssertEqual(cancel.frame.midY, save.frame.midY, accuracy: 8)
+        XCTAssertLessThanOrEqual(cancel.frame.maxX, save.frame.minX + 1)
+        XCTAssertLessThanOrEqual(save.frame.minX - cancel.frame.maxX, 44)
+    }
+    #endif
 
     private func taskTitle(_ title: String) -> XCUIElement {
         app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", title)).firstMatch

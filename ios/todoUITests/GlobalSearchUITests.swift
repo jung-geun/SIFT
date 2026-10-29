@@ -26,10 +26,8 @@ final class GlobalSearchUITests: SIFTUITestCase {
             require(app.staticTexts[todoTitle], message: "검색용 할 일이 생성되지 않았습니다.")
         }
 
-        step("검색 drawer 열고 할 일 찾기") {
-            app.swipeDown()
+        step("고정 검색 필드로 할 일 찾기") {
             let search = app.searchFields.firstMatch
-            if !search.waitForExistence(timeout: 3) { app.swipeDown() }
             tap(search, message: "검색 필드가 없습니다.")
             search.typeText(todoTitle)
             let result = app.buttons.matching(identifier: "search.result.todo").firstMatch
@@ -48,9 +46,7 @@ final class GlobalSearchUITests: SIFTUITestCase {
         launchSearchFixture()
 
         step("메일 fixture 검색") {
-            app.swipeDown()
             let search = app.searchFields.firstMatch
-            if !search.waitForExistence(timeout: 3) { app.swipeDown() }
             tap(search, message: "검색 필드가 없습니다.")
             search.typeText(mailQuery)
             search.typeText(XCUIKeyboardKey.return.rawValue)

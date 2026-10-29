@@ -11,15 +11,21 @@ struct MeetingLiveSpeakerPrefixTests {
         var timeline = MeetingLiveSpeakerTimeline(meetingID: "source", sessionID: UUID())
         update(&timeline, coverageMs: 400, open: [interval("A", 0, 400)])
         let first = LiveTranscriptEntry(id: "growing", startMs: 0, endMs: 1_000, text: "  안녕하세요 👋\n")
-        #expect(builder.rows(for: [first], timeline: timeline) == [
-            MeetingLiveTranscriptRow(id: first.id, startMs: 0, endMs: 1_000, text: first.text, speakerIDs: ["A"])
-        ])
+        let initialRows = builder.rows(for: [first], timeline: timeline)
+        #expect(initialRows.map(\.id) == [first.id])
+        #expect(initialRows.map(\.startMs) == [0])
+        #expect(initialRows.map(\.endMs) == [1_000])
+        #expect(initialRows.map(\.text) == [first.text])
+        #expect(initialRows.map(\.speakerIDs) == [["A"]])
 
         update(&timeline, coverageMs: 800, open: [interval("A", 0, 800)])
         let growing = LiveTranscriptEntry(id: first.id, startMs: 0, endMs: 2_000, text: first.text + "계속 이야기합니다.")
-        #expect(builder.rows(for: [growing], timeline: timeline) == [
-            MeetingLiveTranscriptRow(id: growing.id, startMs: 0, endMs: 2_000, text: growing.text, speakerIDs: ["A"])
-        ])
+        let growingRows = builder.rows(for: [growing], timeline: timeline)
+        #expect(growingRows.map(\.id) == [growing.id])
+        #expect(growingRows.map(\.startMs) == [0])
+        #expect(growingRows.map(\.endMs) == [2_000])
+        #expect(growingRows.map(\.text) == [growing.text])
+        #expect(growingRows.map(\.speakerIDs) == [["A"]])
         #expect(!growing.isFinal)
     }
 
@@ -32,9 +38,12 @@ struct MeetingLiveSpeakerPrefixTests {
         #expect(builder.rows(for: [entry], timeline: timeline).map(\.speakerIDs) == [["A"]])
 
         update(&timeline, coverageMs: 1_000, closed: [interval("A", 0, 800)], open: [interval("B", 800, 1_000)])
-        #expect(builder.rows(for: [entry], timeline: timeline) == [
-            MeetingLiveTranscriptRow(id: entry.id, startMs: 0, endMs: 3_000, text: entry.text, speakerIDs: [])
-        ])
+        let mixedRows = builder.rows(for: [entry], timeline: timeline)
+        #expect(mixedRows.map(\.id) == [entry.id])
+        #expect(mixedRows.map(\.startMs) == [0])
+        #expect(mixedRows.map(\.endMs) == [3_000])
+        #expect(mixedRows.map(\.text) == [entry.text])
+        #expect(mixedRows.map(\.speakerIDs) == [[]])
     }
 
     @Test("no coverage, silence and less than 200 ms of actual evidence stay unknown")
@@ -51,9 +60,12 @@ struct MeetingLiveSpeakerPrefixTests {
             var builder = MeetingLiveTranscriptRowBuilder()
             var timeline = MeetingLiveSpeakerTimeline(meetingID: "source", sessionID: UUID())
             update(&timeline, coverageMs: sample.coverage, open: sample.intervals)
-            #expect(builder.rows(for: [entry], timeline: timeline) == [
-                MeetingLiveTranscriptRow(id: entry.id, startMs: entry.startMs, endMs: entry.endMs, text: entry.text, speakerIDs: [])
-            ])
+            let rows = builder.rows(for: [entry], timeline: timeline)
+            #expect(rows.map(\.id) == [entry.id])
+            #expect(rows.map(\.startMs) == [entry.startMs])
+            #expect(rows.map(\.endMs) == [entry.endMs])
+            #expect(rows.map(\.text) == [entry.text])
+            #expect(rows.map(\.speakerIDs) == [[]])
         }
     }
 
@@ -73,10 +85,11 @@ struct MeetingLiveSpeakerPrefixTests {
         let entry = timedEntry()
         update(&timeline, coverageMs: 500, open: [interval("A", 0, 500)])
         let partial = builder.rows(for: [entry], timeline: timeline)
-        #expect(partial == [
-            MeetingLiveTranscriptRow(id: entry.id, startMs: 0, endMs: 500, text: "first", speakerIDs: ["A"]),
-            MeetingLiveTranscriptRow(id: "\(entry.id)#1", startMs: 500, endMs: 1_000, text: "second", speakerIDs: [])
-        ])
+        #expect(partial.map(\.id) == [entry.id, "\(entry.id)#1"])
+        #expect(partial.map(\.startMs) == [0, 500])
+        #expect(partial.map(\.endMs) == [500, 1_000])
+        #expect(partial.map(\.text) == ["first", "second"])
+        #expect(partial.map(\.speakerIDs) == [["A"], []])
 
         update(&timeline, coverageMs: 1_000, closed: [interval("A", 0, 500), interval("B", 500, 1_000)])
         let covered = builder.rows(for: [entry], timeline: timeline)

@@ -139,9 +139,11 @@ struct MeetingProcessingStatusView: View {
         case .idle:
             EmptyView()
         case .transcribing:
-            label(offlineTranscription
-                ? AppLanguage.localized("meeting.processing.offlineTranscribing", defaultValue: AppLanguage.current == .english ? "Transcribing saved audio with on-device Whisper" : "기기 내 Whisper로 저장된 음성을 다시 전사하는 중", language: .current, comment: "WhisperKit saved audio processing stage.")
-                : AppLanguage.localized("meeting.processing.retranscribing", defaultValue: "저장된 음성을 다시 전사하는 중이에요", language: .current, comment: "Meeting processing status."))
+            if transcriptionProgress == nil {
+                label(offlineTranscription
+                    ? AppLanguage.localized("meeting.processing.offlineTranscribing", defaultValue: AppLanguage.current == .english ? "Transcribing saved audio with on-device Whisper" : "기기 내 Whisper로 저장된 음성을 다시 전사하는 중", language: .current, comment: "WhisperKit saved audio processing stage.")
+                    : AppLanguage.localized("meeting.processing.retranscribing", defaultValue: "저장된 음성을 다시 전사하는 중이에요", language: .current, comment: "Meeting processing status."))
+            }
         case .proofreading:
             label(AppLanguage.localized("meeting.processing.proofreading", defaultValue: "AI가 전사를 검수하는 중이에요", language: .current, comment: "Meeting processing status."))
         case .summarizing:

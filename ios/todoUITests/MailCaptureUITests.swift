@@ -9,9 +9,7 @@ final class MailCaptureUITests: SIFTUITestCase {
         ]))
 
         step("마감 문구가 없는 로컬 메일 열기") {
-            app.swipeDown()
             let search = app.searchFields.firstMatch
-            if !search.waitForExistence(timeout: 3) { app.swipeDown() }
             tap(search, message: "메일을 찾을 검색 필드가 없습니다.")
             search.typeText("SIFT UI Test Fixture")
             search.typeText(XCUIKeyboardKey.return.rawValue)

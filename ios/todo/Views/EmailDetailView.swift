@@ -376,11 +376,9 @@ struct EmailDetailView: View {
             } header: {
                 Label("이메일 연동", systemImage: "envelope")
             } footer: {
-                Text(
-                    isGmailAuthenticated
-                        ? AppLanguage.localized("mail.connection.automaticFooter", defaultValue: "'메일 자동 분석'을 켜면 연결된 Gmail을 분석해 할 일 후보를 자동으로 정리합니다. 실행 시각은 기기 상태나 네트워크 상황에 따라 달라질 수 있습니다.", language: .current, comment: "Gmail automatic analysis settings explanation.")
-                        : AppLanguage.localized("mail.connection.manualFooter", defaultValue: "연결된 메일 계정으로 수동 메일 확인 및 받은편지함 조회가 가능합니다.", language: .current, comment: "Connected mail accounts support manual refresh and inbox access.")
-                )
+                if isGmailAuthenticated {
+                    Text(AppLanguage.localized("mail.connection.automaticFooter", defaultValue: "'메일 자동 분석'을 켜면 연결된 Gmail을 분석해 할 일 후보를 자동으로 정리합니다. 실행 시각은 기기 상태나 네트워크 상황에 따라 달라질 수 있습니다.", language: .current, comment: "Gmail automatic analysis settings explanation."))
+                }
             }
 
             if isGmailAuthenticated && !suppressedSendersList.isEmpty {

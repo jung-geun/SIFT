@@ -7,6 +7,7 @@ struct MeetingView: View {
     @Query(filter: #Predicate<MeetingRecord> { $0.parentMeetingID == nil }, sort: \MeetingRecord.updatedAt, order: .reverse) private var meetings: [MeetingRecord]
     @StateObject private var coordinator = MeetingCaptureCoordinator()
     @ObservedObject private var languagePreferences = MeetingLanguagePreferences.shared
+    private let recordingActivity = MeetingRecordingActivityCenter.shared
     @State private var appleLanguages: [MeetingLanguageOption] = []
     @State private var recordingLanguageOptions: [MeetingLanguageOption] = []
     @State private var summaryLanguageOptions: [MeetingLanguageOption] = []
@@ -39,6 +40,7 @@ struct MeetingView: View {
     @ObservedObject private var speakerModel = MeetingDiarizationModelController.shared
     @ObservedObject private var settings = SettingsStore.shared
     @State private var meetingScreenVisible = false
+    @State private var navigationPath: [String] = []
 
 
     private var showsSourceControlsBeforeRecording: Bool {
@@ -71,7 +73,8 @@ struct MeetingView: View {
 
 
     var body: some View {
-        NavigationStack {
+        ScrollViewReader { scrollProxy in
+        NavigationStack(path: $navigationPath) {
             List {
                 Section {
                     MeetingLanguagePicker(title: MeetingLanguageCopy.sourceTitle,
@@ -87,6 +90,14 @@ struct MeetingView: View {
                             options: summaryLanguageOptions, identifier: "meeting.languages.summary")
                             .disabled(!showsSourceControlsBeforeRecording || sourceChangeInProgress || finalizingCaptureID != nil)
                     }
+                } header: {
+                    Label(copy("meeting.section.languages", fallback: "언어"), systemImage: "character.bubble")
+                        .foregroundStyle(AppTheme.accent)
+                        .textCase(nil)
+                }
+                .listRowBackground(AppTheme.surface)
+
+                Section {
 
                     settingToggle(
                         title: "녹음 고지 및 동의 확인",
@@ -104,8 +115,34 @@ struct MeetingView: View {
                     if showsSourceControlsBeforeRecording {
                         captureSourceControls
                     }
+                } header: {
+                    Label(copy("meeting.section.sources", fallback: "녹음 소스 및 동의"), systemImage: "mic.badge.plus")
+                        .foregroundStyle(AppTheme.accent)
+                        .textCase(nil)
+                }
+                .listRowBackground(AppTheme.surface)
+
+                Section {
 
                     captureControls
+                    if coordinator.status == .recording || coordinator.status == .paused {
+                        ForEach(coordinator.liveTracks) { track in
+                            if let warning = track.liveTranscriptionWarning {
+                                Label {
+                                    VStack(alignment: .leading, spacing: AppTheme.Spacing.compact) {
+                                        Text(track.conversationSourceLabel).font(.caption.weight(.semibold))
+                                        Text(warning).font(.callout)
+                                    }
+                                } icon: {
+                                    Image(systemName: "exclamationmark.triangle")
+                                }
+                                .foregroundStyle(AppTheme.warning)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .accessibilityElement(children: .combine)
+                                .accessibilityIdentifier("meeting.capture.transcriptionWarning.\(track.meetingID)")
+                            }
+                        }
+                    }
                     if coordinator.status != .recording && coordinator.status != .paused {
                         if speakerPrewarmer.phase == .preparing {
                             Text(copy("meeting.diarization.prewarming", fallback: AppLanguage.current == .english
@@ -122,11 +159,13 @@ struct MeetingView: View {
                         }
                     }
                 } header: {
-                    Text(copy("meeting.section.new", fallback: "새 회의"))
+                    Label(copy("meeting.section.new", fallback: "새 회의"), systemImage: "waveform")
+                        .foregroundStyle(AppTheme.accent)
+                        .textCase(nil)
                 } footer: {
                     VStack(alignment: .leading, spacing: AppTheme.Spacing.compact) {
                         MeetingAIAccuracyNotice()
-                        Text(MeetingLanguageCopy.text("meeting.languages.engineNotice", "Apple languages depend on this device. Enable and install Whisper in Settings → Beta features for additional recording languages; those languages are transcribed after recording stops. Summary languages also depend on the selected provider and downloaded model."))
+                        Text(MeetingLanguageCopy.text("meeting.languages.engineNotice", "Apple provides live transcription for supported languages. Optional Whisper runs only after Stop; enable and install it in Settings → Meeting."))
                         if automaticLanguageDetection {
                             MeetingAutomaticLanguageNotice()
                             if !automaticDetectionAvailable {
@@ -135,9 +174,11 @@ struct MeetingView: View {
                         }
                     }
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(AppTheme.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
                 }
+                .id("meeting.captureControls")
+                .listRowBackground(AppTheme.surface)
 
                 if processingReporter.phase != .idle {
                     Section(copy("meeting.section.processing", fallback: "회의 정리")) {
@@ -186,9 +227,7 @@ struct MeetingView: View {
                         NavigationLink(copy(
                             "meeting.diarization.openToRetry",
                             fallback: AppLanguage.current == .english ? "Open meeting to retry" : "다시 분석할 회의 열기"
-                        )) {
-                            MeetingDetailView(meeting: interruptedMeeting)
-                        }
+                        ), value: interruptedMeeting.meetingID)
                     }
                 }
 
@@ -199,6 +238,9 @@ struct MeetingView: View {
                             Text(copy("meeting.transcript.temporary", fallback: "임시 전사"))
                             Spacer()
                             Text(duration(coordinator.elapsedMediaMs)).monospacedDigit()
+                        }
+                        if let activity = coordinator.recordingActivity {
+                            MeetingRecordingWaveformPanel(snapshot: activity)
                         }
                         Text(copy("meeting.audioTrack.independentCapture", fallback: AppLanguage.current == .english
                             ? "Sources are saved and processed separately. App or screen audio can still contain several participants; speaker IDs belong only to their track."
@@ -217,27 +259,46 @@ struct MeetingView: View {
                 }
 
                 if !meetings.isEmpty {
-                    Section(copy("meeting.section.deviceMeetings", fallback: "이 기기의 회의")) {
+                    Section {
                         ForEach(meetings) { meeting in
-                            NavigationLink {
-                                MeetingDetailView(meeting: meeting)
-                            } label: {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text(meeting.result?.title.isEmpty == false ? meeting.result!.title
-                                         : (meeting.importedAudioFileName ?? copy("meeting.title.untitled", fallback: "회의")))
-                                    Text(meeting.updatedAt, format: .dateTime.year().month().day().hour().minute())
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
+                            NavigationLink(value: meeting.meetingID) {
+                                HStack(alignment: .top, spacing: AppTheme.Spacing.item) {
+                                    Image(systemName: "waveform")
+                                        .foregroundStyle(AppTheme.accent)
+                                        .frame(width: 24)
+                                        .accessibilityHidden(true)
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text(meeting.result?.title.isEmpty == false ? meeting.result!.title
+                                             : (meeting.importedAudioFileName ?? copy("meeting.title.untitled", fallback: "회의")))
+                                            .font(.body.weight(.medium))
+                                        Text(meeting.updatedAt, format: .dateTime.year().month().day().hour().minute())
+                                            .font(.caption)
+                                            .foregroundStyle(AppTheme.secondaryText)
+                                    }
                                 }
                             }
                             .accessibilityIdentifier("meeting.row.\(meeting.meetingID)")
                         }
                         .onDelete(perform: deleteMeetings)
+                    } header: {
+                        HStack {
+                            Label(copy("meeting.section.deviceMeetings", fallback: "이 기기의 회의"), systemImage: "folder")
+                            Spacer()
+                            Text("\(meetings.count)").monospacedDigit()
+                        }
+                        .foregroundStyle(AppTheme.accent)
+                        .textCase(nil)
                     }
+                    .listRowBackground(AppTheme.surface)
                 }
             }
             .appListStyle()
             .navigationTitle(copy("meeting.navigationTitle", fallback: "회의"))
+            .navigationDestination(for: String.self) { meetingID in
+                if let meeting = navigationRecord(for: meetingID) {
+                    MeetingDetailView(meeting: meeting)
+                }
+            }
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
                     Button {
@@ -316,26 +377,41 @@ struct MeetingView: View {
                     )
                 }
             }
-            .sheet(isPresented: $showingAudioImport) {
-                MeetingAudioImportSheet { record in
-                    importingMeetingID = record.meetingID
-                    Task { @MainActor in
-                        defer { importingMeetingID = nil }
-                        do {
-                            let outcome = try await MeetingOfflineTranscriptionOrchestrator().run(
-                                record: record, context: modelContext,
-                                reporter: processingReporter)
-                            processingReporter.set(.idle)
-                            guard outcome == .committed else { return }
-                            await processCapturedTrack(record, captureEnabledAtStart: settings.effectiveMeetingDiarizationEnabled)
-                        } catch {
-                            processingReporter.reset()
-                            if !(error is CancellationError) {
-                                coordinator.reportFailure(error, message: offlineFailureMessage(for: record))
-                            }
+        }
+        .sheet(isPresented: $showingAudioImport) {
+            MeetingAudioImportSheet { record in
+                importingMeetingID = record.meetingID
+                Task { @MainActor in
+                    defer { importingMeetingID = nil }
+                    do {
+                        let outcome = try await MeetingOfflineTranscriptionOrchestrator().run(
+                            record: record, context: modelContext,
+                            reporter: processingReporter)
+                        processingReporter.set(.idle)
+                        guard outcome == .committed else { return }
+                        await processCapturedTrack(record, captureEnabledAtStart: settings.effectiveMeetingDiarizationEnabled)
+                    } catch {
+                        processingReporter.reset()
+                        if !(error is CancellationError) {
+                            coordinator.reportFailure(error, message: offlineFailureMessage(for: record))
                         }
                     }
                 }
+            }
+        }
+        #if targetEnvironment(macCatalyst)
+        .background(MeetingRecordingMacSceneAnchor(sessionID: coordinator.recordingActivity?.sessionID))
+        #endif
+        .onReceive(recordingActivity.$navigationRequestID) { requestID in
+            guard requestID != nil else { return }
+            if let sessionID = recordingActivity.current?.sessionID {
+                guard sessionID == coordinator.recordingActivity?.sessionID else { return }
+            }
+            navigationPath.removeAll()
+            Task { @MainActor in
+                await Task.yield()
+                guard recordingActivity.navigationRequestID == requestID else { return }
+                scrollProxy.scrollTo("meeting.captureControls", anchor: .top)
             }
         }
         .onAppear { meetingScreenVisible = true }
@@ -386,6 +462,16 @@ struct MeetingView: View {
             guard !Task.isCancelled, meetingScreenVisible else { return }
             await speakerPrewarmer.prepareIfAvailable()
         }
+        }
+    }
+
+    private func navigationRecord(for meetingID: String) -> MeetingRecord? {
+        if let meeting = meetings.first(where: { $0.meetingID == meetingID }) { return meeting }
+        // Source children are excluded by the root query. Resolve their identity
+        // independently of transient diarization status throughout a retry.
+        var descriptor = FetchDescriptor<MeetingRecord>(predicate: #Predicate { $0.meetingID == meetingID })
+        descriptor.fetchLimit = 1
+        return try? modelContext.fetch(descriptor).first
     }
     private func copy(_ key: String, fallback: String, comment: String = "Meeting user-facing copy.") -> String {
         AppLanguage.localized(key, defaultValue: fallback, language: .current, comment: comment)
@@ -407,20 +493,6 @@ struct MeetingView: View {
                     .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
             }
             .accessibilityIdentifier("meeting.audioTrack.live.\(track.meetingID)")
-            if track.isDetectingLanguage {
-                Text(MeetingLanguageCopy.text("meeting.languages.waitingForDetection", "Waiting for this source's language estimate · about 10 seconds of audio needed"))
-                    .font(.caption).foregroundStyle(.secondary)
-                    .accessibilityIdentifier("meeting.audioTrack.language.waiting.\(track.meetingID)")
-            } else if let detectedLanguageTag = track.detectedLanguageTag {
-                Text(String(format: MeetingLanguageCopy.text("meeting.languages.detected", "Detected language: %@"),
-                    locale: AppLanguage.current.locale,
-                    MeetingLanguageOption(id: detectedLanguageTag).displayName(locale: AppLanguage.current.locale)))
-                    .font(.caption).foregroundStyle(.secondary)
-                    .accessibilityIdentifier("meeting.audioTrack.language.detected.\(track.meetingID)")
-            }
-            if let warning = track.liveTranscriptionWarning {
-                Text(warning).font(.caption).foregroundStyle(AppTheme.warning)
-            }
             if let warning = track.liveDiarizationWarning {
                 Text(warning).font(.caption).foregroundStyle(AppTheme.warning)
             }
@@ -440,7 +512,7 @@ struct MeetingView: View {
                     .font(.caption).foregroundStyle(.secondary)
             case .inactive, .stopped: EmptyView()
             }
-            if track.liveTranscriptRows.isEmpty {
+            if track.liveTranscriptRows.isEmpty && !coordinator.recordingDefersTranscription {
                 Text(copy("meeting.audioTrack.waitingForTranscript", fallback: AppLanguage.current == .english
                     ? "Waiting for speech from this source" : "이 소스의 음성 전사 대기 중"))
                     .font(.caption).foregroundStyle(.secondary)
@@ -454,24 +526,38 @@ struct MeetingView: View {
         let profiles = tracks.mapValues { MeetingSpeakerLabelFormatter.liveProfiles($0.liveSpeakerOrdinals) }
         return ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 16) {
+                LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(timeline.rows) { row in
+                        let presentation = timeline.speakerPresentation[row.id]
+                        let startsTurn = presentation?.startsTurn ?? true
+                        let speakerLabel = MeetingSpeakerLabelFormatter.label(
+                            for: presentation?.speakerIDs ?? row.speakerIDs,
+                            profiles: profiles[row.id.trackID] ?? [:], state: .provisional,
+                            kind: presentation?.kind ?? .speaker)
                         VStack(alignment: .leading, spacing: 4) {
-                            Text(tracks[row.id.trackID]?.conversationSourceLabel ?? "")
-                                .font(.subheadline.weight(.medium)).foregroundStyle(.primary)
-                            HStack(alignment: .firstTextBaseline) {
-                                Text(MeetingSpeakerLabelFormatter.label(for: row.speakerIDs,
-                                    profiles: profiles[row.id.trackID] ?? [:], state: .provisional))
-                                Spacer()
+                            if startsTurn {
+                                Text(tracks[row.id.trackID]?.conversationSourceLabel ?? "")
+                                    .font(.subheadline.weight(.medium)).foregroundStyle(.primary)
+                                Text(speakerLabel)
+                                    .font(.caption).foregroundStyle(AppTheme.secondaryText)
+                            }
+                            HStack(alignment: .firstTextBaseline, spacing: AppTheme.Spacing.compact) {
+                                Text(row.text).textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
                                 if let sample = row.startSample {
-                                    Text(duration(sample * 1_000 / MeetingMediaTimeline.sampleRate)).monospacedDigit()
+                                    Text(duration(sample * 1_000 / MeetingMediaTimeline.sampleRate))
+                                        .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                                        .fixedSize(horizontal: true, vertical: false)
                                 }
                             }
-                            .font(.caption).foregroundStyle(.secondary)
-                            Text(row.text).textSelection(.enabled)
                         }
+                        .padding(.top, startsTurn && row.id != timeline.rows.first?.id ? AppTheme.Spacing.item : 2)
+                        .padding(.bottom, 2)
                         .id(row.id)
                         .accessibilityElement(children: .combine)
+                        .accessibilityValue(MeetingSpeakerLabelFormatter.accessibilityValue(
+                            speakerLabel: speakerLabel, source: tracks[row.id.trackID]?.conversationSourceLabel,
+                            inherited: presentation?.isInherited == true))
                         .accessibilityIdentifier("meeting.liveTranscript.\(row.id.trackID).\(row.id.localID)")
                     }
                 }
@@ -736,7 +822,14 @@ struct MeetingView: View {
                     .foregroundStyle(.secondary)
             }
         default:
-            Button(copy("녹음 시작", fallback: "녹음 시작")) { showingDisclosure = true }
+            Button { showingDisclosure = true } label: {
+                Label(copy("녹음 시작", fallback: "녹음 시작"), systemImage: "mic.fill")
+                    .fontWeight(.semibold)
+                    .frame(minHeight: 32)
+            }
+                .buttonStyle(.borderedProminent)
+                .tint(AppTheme.primaryActionFill)
+                .foregroundStyle(AppTheme.onAccent)
                 .accessibilityIdentifier("meeting.action.startRecording")
                 .disabled(sourceChangeInProgress || finalizingCaptureID != nil || importingMeetingID != nil
                           || processingReporter.isBusy || diarizingMeetingID != nil || !consentAccepted
@@ -750,7 +843,7 @@ struct MeetingView: View {
               finalizingCaptureID == nil, !sourceChangeInProgress, microphoneRequested || appAudioRequested,
               automaticLanguageDetection ? automaticDetectionAvailable : !languageTag.isEmpty else { return }
         sourceChangeInProgress = true
-        let chosenLanguages = (source: languageTag.isEmpty ? summaryLanguageTag : languageTag,
+        let chosenLanguages = (source: automaticLanguageDetection ? "" : languageTag,
                                summary: summaryLanguageTag, automatic: automaticLanguageDetection)
         recordingLanguages = chosenLanguages
         let id = UUID().uuidString.lowercased()
@@ -767,7 +860,7 @@ struct MeetingView: View {
                     : await MeetingTranscriptionLanguages.supportsApple(chosenLanguages.source)
                 let offlineInstalled = await MeetingWhisperModelStore.shared.isInstalled()
                 let offlineEnabled = settings.meetingAdvancedTranscriptionEnabled && offlineInstalled
-                let deferred = !chosenLanguages.automatic && !appleSupported && offlineEnabled
+                let deferred = chosenLanguages.automatic || (!appleSupported && offlineEnabled)
                 if chosenLanguages.automatic {
                     guard offlineEnabled else {
                         coordinator.reportFailure(MeetingLanguageCopy.automaticRequiresWhisper)
@@ -883,7 +976,9 @@ struct MeetingView: View {
             do {
                 let baseline = try coordinator.transcriptionResult(for: record.meetingID)
                 let failure = coordinator.transcriptionFailure(for: record.meetingID) ?? finalizationFailure
-                if let failure { coordinator.reportFailure(failure) }
+                if let error = coordinator.transcriptionFinalizationFailure(for: record.meetingID) ?? finalizationFailure {
+                    coordinator.reportFailure(error)
+                }
                 let committed = try MeetingCaptureTranscriptPersister.persist(
                     record: record, baseline: baseline, failed: failure != nil,
                     expectedResultData: expectedData, in: modelContext)

@@ -23,14 +23,22 @@ final class SettingsStore: ObservableObject {
     nonisolated static let betaMeetingAdvancedTranscriptionEnabledKey = "pieroot.todo.beta.meetingAdvancedTranscriptionEnabled"
     nonisolated static let betaSelectedProviderKey = "pieroot.todo.beta.selectedProvider"
     nonisolated static let betaLegacySelectionMigratedKey = "pieroot.todo.beta.legacySelectionMigrated.v1"
+    nonisolated static let localModelFallbackEnabledKey = "pieroot.todo.beta.localModelFallbackEnabled"
+
 
     nonisolated static func betaProviderEnabled(_ provider: BetaProvider) -> Bool {
         if provider == .openAI, !OpenAIRegionalAvailability.allowsRequests { return false }
         let key: String
         switch provider {
-        case .foundationModels, .onDevice: return true
+        case .foundationModels: return FoundationModelsAvailability.isDeviceEligible
+        case .onDevice:
+            return !FoundationModelsAvailability.isDeviceEligible
+                && UserDefaults.standard.bool(forKey: localModelFallbackEnabledKey)
         case .openAI: key = betaOpenAIEnabledKey
-        case .laya: key = betaLayaEnabledKey
+        case .laya:
+            return !FoundationModelsAvailability.isDeviceEligible
+                && UserDefaults.standard.bool(forKey: localModelFallbackEnabledKey)
+                && UserDefaults.standard.bool(forKey: betaLayaEnabledKey)
         }
         let defaults = UserDefaults.standard
         return defaults.bool(forKey: key)
@@ -58,10 +66,12 @@ final class SettingsStore: ObservableObject {
             foundationModelsAvailable: FoundationModelsAvailability.isAvailable,
             onDeviceModelUsable: localModel.isCapable && !localModel.isDeleting
                 && OnDeviceLLMService.modelCatalog.contains { $0.id == modelID && memoryGiB >= $0.minMemoryGiB }
+                && !FoundationModelsAvailability.isDeviceEligible
                 && (localModel.loadedModelIdentifier == modelID || localModel.isModelCachedOnDisk),
             openAIAccountConnected: connection.activeProfile != nil,
             openAIPlanPermitted: connection.hasPlanPermission && !connection.needsLocalReauthorization,
-            layaModelUsable: laya.isCapable && laya.isModelInstalled && !laya.isLoading && !laya.isDeleting
+            layaModelUsable: !FoundationModelsAvailability.isDeviceEligible
+                && laya.isCapable && laya.isModelInstalled && !laya.isLoading && !laya.isDeleting
         )
     }
 
@@ -74,6 +84,7 @@ final class SettingsStore: ObservableObject {
 
     func setBetaProvider(_ provider: BetaProviderOptIn, enabled: Bool) {
         guard provider != .openAI || !enabled || OpenAIRegionalAvailability.allowsRequests else { return }
+        guard provider != .laya || !enabled || !FoundationModelsAvailability.isDeviceEligible else { return }
         let key: String
         switch provider {
         case .openAI: key = Self.betaOpenAIEnabledKey
@@ -129,7 +140,8 @@ final class SettingsStore: ObservableObject {
             Self.betaMeetingAdvancedTranscriptionEnabledKey,
             Self.betaLayaEnabledKey,
             Self.betaSelectedProviderKey,
-            Self.betaLegacySelectionMigratedKey
+            Self.betaLegacySelectionMigratedKey,
+            Self.localModelFallbackEnabledKey,
         ].forEach(local.removeObject(forKey:))
         objectWillChange.send()
     }
@@ -150,6 +162,16 @@ final class SettingsStore: ObservableObject {
     #endif
 
 
+    /// An explicit opt-in; installation alone never enables local inference.
+    var localModelFallbackEnabled: Bool {
+        get { local.bool(forKey: Self.localModelFallbackEnabledKey) }
+        set {
+            local.set(newValue, forKey: Self.localModelFallbackEnabledKey)
+            if !newValue { OnDeviceLLMService.shared.unloadModel() }
+            objectWillChange.send()
+        }
+    }
+
     /// Processing stays on device; the preference is included in full storage.
     var meetingVoiceProcessingEnabled: Bool {
         get { Self.betaProviderAccess().meetingVoiceProcessingEnabled }
@@ -166,7 +188,7 @@ final class SettingsStore: ObservableObject {
     /// Full storage includes this preference, not the device's model installation.
     /// Enabling it alone does not install or download a model.
     var meetingDiarizationEnabled: Bool {
-        get { local.bool(forKey: Self.betaMeetingDiarizationEnabledKey) }
+        get { (local.object(forKey: Self.betaMeetingDiarizationEnabledKey) as? Bool) ?? true }
         set {
             local.set(newValue, forKey: Self.betaMeetingDiarizationEnabledKey)
             objectWillChange.send()

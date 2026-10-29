@@ -7,14 +7,13 @@ struct MeetingLanguagePicker: View {
     let identifier: String
     var automaticLanguageDetection: Binding<Bool>? = nil
     var automaticDetectionAvailable = true
-    var savedAudioOnly = false
 
     var body: some View {
         NavigationLink {
             MeetingLanguagePickerDestination(selection: $selection, options: options,
                 title: title, identifier: identifier,
                 automaticLanguageDetection: automaticLanguageDetection,
-                automaticDetectionAvailable: automaticDetectionAvailable, savedAudioOnly: savedAudioOnly)
+                automaticDetectionAvailable: automaticDetectionAvailable)
         } label: {
             LabeledContent(title, value: automaticLanguageDetection?.wrappedValue == true
                 ? MeetingLanguageCopy.automaticTitle
@@ -34,7 +33,6 @@ private struct MeetingLanguagePickerDestination: View {
     let identifier: String
     let automaticLanguageDetection: Binding<Bool>?
     let automaticDetectionAvailable: Bool
-    let savedAudioOnly: Bool
     @State private var search = ""
 
     var body: some View {
@@ -53,7 +51,7 @@ private struct MeetingLanguagePickerDestination: View {
                 }
                 .accessibilityIdentifier("\(identifier).automatic")
                 .accessibilityAddTraits(automaticLanguageDetection.wrappedValue ? .isSelected : [])
-                MeetingAutomaticLanguageNotice(savedAudioOnly: savedAudioOnly)
+                MeetingAutomaticLanguageNotice()
             }
             ForEach(filtered) { option in
                 Button {
@@ -124,7 +122,7 @@ private struct MeetingLanguagePickerDestination: View {
 
 struct MeetingAIAccuracyNotice: View {
     var body: some View {
-        Label(MeetingLanguageCopy.text("meeting.languages.accuracy", "AI can make mistakes at any time. Transcripts, translations, summaries, speaker names and tasks may be inaccurate or incomplete. Choose automatic detection or a spoken language and choose a summary language, compare results with the original audio, and review before use."), systemImage: "exclamationmark.triangle")
+        Label(MeetingLanguageCopy.text("meeting.languages.accuracy", "AI results may be inaccurate or incomplete. Review them against the original audio."), systemImage: "exclamationmark.triangle")
             .font(.caption)
             .foregroundStyle(.secondary)
             .accessibilityIdentifier("meeting.languages.accuracy")
@@ -132,12 +130,8 @@ struct MeetingAIAccuracyNotice: View {
 }
 
 struct MeetingAutomaticLanguageNotice: View {
-    var savedAudioOnly = false
-
     var body: some View {
-        Text(savedAudioOnly
-             ? MeetingLanguageCopy.text("meeting.languages.automaticSavedNotice", "Whisper estimates the language separately for each saved-audio window and each source. It cannot guarantee recognition of language switches within a window or overlapping voices.")
-             : MeetingLanguageCopy.text("meeting.languages.automaticLiveNotice", "Whisper initially estimates the language from about 10 seconds of audio per source. Sources are detected separately. After recording stops, it detects the language again for each saved-audio window. It cannot guarantee recognition of language switches within a window or overlapping voices."))
+        Text(MeetingLanguageCopy.text("meeting.languages.automaticSavedNotice", "After Stop, Whisper detects the language for each saved-audio window and source. No live transcription. Language switches and overlapping voices may be missed."))
             .font(.caption).foregroundStyle(.secondary)
     }
 }
@@ -150,5 +144,5 @@ enum MeetingLanguageCopy {
     static var sourceTitle: String { text("meeting.languages.source", "Spoken language") }
     static var summaryTitle: String { text("meeting.languages.summary", "Summary language") }
     static var automaticTitle: String { text("meeting.languages.automatic", "Automatic detection") }
-    static var automaticRequiresWhisper: String { text("meeting.languages.automaticRequiresWhisper", "To record with automatic detection, enable advanced Whisper transcription and install its model in Settings → Beta features. Your language selection is kept; no model is downloaded automatically.") }
+    static var automaticRequiresWhisper: String { text("meeting.languages.automaticRequiresWhisper", "Enable Whisper and install its model in Settings → Meeting for automatic language detection after Stop. No live transcription or automatic download.") }
 }

@@ -812,6 +812,9 @@ struct GmailServiceTests {
 
         #expect(result.prunedMessageCount == 1)
         #expect(result.prunedTodoCount == 0)
+        #expect(result.insertedMessageIDs == Set((1...100).map { "msg-\($0)" }))
+        #expect(storedEmails.filter { result.insertedMessageIDs.contains($0.id) }.allSatisfy { $0.isNewlyImportedUnseen })
+        #expect(storedEmails.first { $0.id == "msg-101" }?.hasBeenViewedInApp == true)
         #expect(storedEmails.contains(where: { $0.id == "msg-101" }))
         #expect(storedEmails.contains(where: { $0.id == "msg-old-local" }))
         #expect(storedEmails.contains(where: { $0.id == "msg-delete" }) == false)
@@ -820,6 +823,14 @@ struct GmailServiceTests {
         #expect(storedTodos.contains(where: { $0.sourceRef == "msg-delete-no-cache" }))
         #expect(storedTodos.contains(where: { $0.sourceRef == "msg-trash" }))
         #expect(EmailLearningStore.shared.isDismissed("msg-delete") == false)
+
+        let freshContainer = try makeEmailContainer()
+        let freshContext = ModelContext(freshContainer)
+        let initial = try await sut.syncRecentMessageCache(emailContext: freshContext)
+        let initialRows = try freshContext.fetch(FetchDescriptor<EmailMessage>())
+        #expect(initial.insertedMessageIDs == Set((1...101).map { "msg-\($0)" }))
+        #expect(initialRows.allSatisfy { $0.isNewlyImportedUnseen })
+        #expect(try await sut.syncRecentMessageCache(emailContext: freshContext).insertedMessageIDs.isEmpty)
         }
     }
 

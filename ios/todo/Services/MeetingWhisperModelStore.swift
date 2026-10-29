@@ -60,7 +60,7 @@ actor MeetingWhisperModelStore {
         leases += 1
     }
 
-    /// One model and one decoder consumer at a time, including live detectors.
+    /// One saved-audio model and decoder consumer at a time.
     /// Queued source jobs reuse the verified load; the final job unloads it.
     /// Downloads and the SDK's tokenizer fallback remain disabled.
     func withLoadedModel<T: Sendable>(

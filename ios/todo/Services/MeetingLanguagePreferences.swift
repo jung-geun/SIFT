@@ -37,8 +37,8 @@ final class MeetingLanguagePreferences: ObservableObject {
     }
 
     func selectAutomaticDetection(_ enabled: Bool) {
-        // In particular, choosing automatic must not save an effective fallback
-        // as the last manual language.
+        // Automatic selection applies to each saved track after Stop. It must
+        // never overwrite the last manual language or invent a live language.
         defaults.set(enabled, forKey: Self.automaticKey)
         automaticLanguageDetection = enabled
     }

@@ -4,6 +4,14 @@ import Testing
 
 actor AIProviderTestIsolation {
     static let shared = AIProviderTestIsolation()
+    @MainActor
+    static var foundationPolicy: BetaFeaturePolicy {
+        BetaFeaturePolicy(accessReader: {
+            BetaProviderAccess(foundationModelsEnabled: true, onDeviceEnabled: false,
+                openAIEnabled: false, layaEnabled: false, meetingVoiceProcessingEnabled: false)
+        }, selectionReader: { .foundationModels })
+    }
+
 
     private var locked = false
     private var waiters: [CheckedContinuation<Void, Never>] = []

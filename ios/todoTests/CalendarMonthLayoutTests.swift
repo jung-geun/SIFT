@@ -149,4 +149,108 @@ struct CalendarMonthLayoutTests {
             #expect(CalendarMonthGeometry.weekStart(containing: next, calendar: calendar) == next)
         }
     }
+
+    @Test("continuous window indices round-trip through years and both DST transitions")
+    func continuousWindowDateIdentity() {
+        for firstWeekday in [1, 2, 7] {
+            let calendar = calendar(firstWeekday: firstWeekday)
+            let anchor = date(2026, 12, 31, hour: 14, calendar: calendar)
+            let window = CalendarWeekWindow(centeredOn: anchor, calendar: calendar)
+            #expect(window.index(containing: anchor) == CalendarWeekWindow.center)
+            #expect(Set(window.starts).count == CalendarWeekWindow.count)
+            for index in window.starts.indices {
+                let days = window.days(at: index)
+                #expect(days.count == 7)
+                #expect(calendar.component(.weekday, from: days[0]) == firstWeekday)
+                for day in days {
+                    #expect(window.index(containing: day) == index)
+                    #expect(day == calendar.startOfDay(for: day))
+                }
+                let next = calendar.date(byAdding: .day, value: 7, to: days[0])!
+                #expect(next == (index + 1 < window.starts.count ? window.starts[index + 1] : window.end))
+            }
+        }
+    }
+
+    @Test("mixed-month weeks keep the leading date's month until it scrolls away")
+    func leadingDateOwnsVisibleMonth() {
+        let calendar = calendar()
+        let october = date(2026, 10, 1, calendar: calendar)
+        let november = date(2026, 11, 1, calendar: calendar)
+        let window = CalendarWeekWindow(centeredOn: october, calendar: calendar)
+        #expect(window.months[window.index(containing: date(2026, 10, 31, calendar: calendar))] == october)
+        #expect(window.months[window.index(containing: november)] == november)
+        #expect(window.months[window.index(containing: date(2026, 11, 30, calendar: calendar))] == november)
+    }
+
+    @Test("moving events and tasks refreshes old and new weeks without losing other occurrences")
+    func weekContentChangesFollowOccurrences() {
+        let calendar = calendar()
+        let first = date(2026, 10, 5, hour: 9, calendar: calendar)
+        let second = date(2026, 10, 12, hour: 9, calendar: calendar)
+        let third = date(2026, 10, 19, hour: 9, calendar: calendar)
+        let window = CalendarWeekWindow(centeredOn: first, calendar: calendar)
+        let recurring = event("series", start: third, end: third.addingTimeInterval(3600))
+        let before = CalendarWeekContentIndex(window: window,
+            events: [event("moved", start: first, end: first.addingTimeInterval(3600)), recurring],
+            todos: [CalendarMonthTodo(title: "Task", date: first, eventID: nil)])
+        let after = CalendarWeekContentIndex(window: window,
+            events: [event("moved", start: second, end: second.addingTimeInterval(3600)), recurring],
+            todos: [CalendarMonthTodo(title: "Task", date: second, eventID: nil)])
+        let oldIndex = window.index(containing: first), newIndex = window.index(containing: second)
+        #expect(after.changedWeeks(from: before) == [oldIndex, newIndex])
+        let oldWeek = CalendarMonthWeekLayout(days: window.days(at: oldIndex),
+            events: after.events[oldIndex], todos: after.todos[oldIndex], calendar: calendar)
+        #expect(oldWeek.items.allSatisfy { $0.isEmpty })
+        let newWeek = CalendarMonthWeekLayout(days: window.days(at: newIndex),
+            events: after.events[newIndex], todos: after.todos[newIndex], calendar: calendar)
+        #expect(Set(newWeek.items.flatMap { $0 }.map(\.title)) == ["moved", "Task"])
+        #expect(after.events[window.index(containing: third)].map(\.identifier) == ["series"])
+        let removed = CalendarWeekContentIndex(window: window, events: [recurring], todos: [])
+        #expect(removed.changedWeeks(from: after) == [newIndex])
+    }
+
+    @Test("calendar header ignores clipped boundary rows after resize")
+    func stableHeaderAtFractionalWeekBoundary() {
+        let rowHeight: CGFloat = 971.5 / 6
+        let boundary = CGFloat(CalendarWeekWindow.center) * rowHeight
+        #expect(CalendarWeekWindow.headerIndex(offset: boundary.nextDown, rowHeight: rowHeight) == CalendarWeekWindow.center)
+        #expect(CalendarWeekWindow.headerIndex(offset: boundary - rowHeight * 0.49, rowHeight: rowHeight) == CalendarWeekWindow.center)
+        #expect(CalendarWeekWindow.headerIndex(offset: boundary - rowHeight * 0.51, rowHeight: rowHeight) == CalendarWeekWindow.center - 1)
+        #expect(CalendarWeekWindow.headerIndex(offset: boundary + rowHeight, rowHeight: rowHeight) == CalendarWeekWindow.center + 1)
+        #expect(CalendarWeekWindow.headerIndex(offset: -rowHeight, rowHeight: rowHeight) == 0)
+    }
+
+    @Test("rebasing preserves visible week dates")
+    func continuousWindowRebase() {
+        let calendar = calendar(firstWeekday: 2)
+        let window = CalendarWeekWindow(centeredOn: date(2026, 11, 1, calendar: calendar), calendar: calendar)
+        for index in [10, 510] {
+            let rebased = CalendarWeekWindow(centeredOn: window.starts[index], calendar: calendar)
+            #expect(rebased.days(at: CalendarWeekWindow.center) == window.days(at: index))
+            #expect(rebased.days(at: CalendarWeekWindow.center + 1) == window.days(at: index + 1))
+        }
+    }
+
+    @Test("week lookup honors exclusive ends and clips spanning events to its window")
+    func continuousWindowEventCoverage() {
+        let calendar = calendar()
+        let start = date(2026, 10, 31, hour: 23, calendar: calendar)
+        let boundary = date(2026, 11, 1, calendar: calendar)
+        let window = CalendarWeekWindow(centeredOn: start, calendar: calendar)
+        let first = window.index(containing: start)
+        #expect(Array(window.occupiedWeekIndices(from: start, to: boundary)) == [first])
+        let afterDST = date(2026, 11, 2, calendar: calendar)
+        #expect(Array(window.occupiedWeekIndices(from: start, to: afterDST)) == [first, first + 1])
+        #expect(Array(window.occupiedWeekIndices(from: start, to: start)) == [first])
+        #expect(window.occupiedWeekIndices(from: boundary, to: boundary).isEmpty)
+        let midweekMidnight = date(2026, 11, 3, calendar: calendar)
+        #expect(window.occupiedWeekIndices(from: midweekMidnight, to: midweekMidnight).isEmpty)
+        let instant = event("instant", start: start, end: start)
+        #expect(CalendarMonthGeometry.occupies(instant, day: start, calendar: calendar))
+        #expect(window.occupiedWeekIndices(from: window.end, to: calendar.date(byAdding: .day, value: 1, to: window.end)!).isEmpty)
+        let before = calendar.date(byAdding: .day, value: -1, to: window.starts[0])!
+        let after = calendar.date(byAdding: .day, value: 1, to: window.end)!
+        #expect(window.occupiedWeekIndices(from: before, to: after) == 0..<CalendarWeekWindow.count)
+    }
 }

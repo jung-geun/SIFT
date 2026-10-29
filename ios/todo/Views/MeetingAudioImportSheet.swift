@@ -13,7 +13,11 @@ struct MeetingAudioImportSheet: View {
     @State private var selectedURL: URL?
     @ObservedObject private var languagePreferences = MeetingLanguagePreferences.shared
     @State private var summaryLanguageOptions: [MeetingLanguageOption] = []
+    #if targetEnvironment(macCatalyst)
+    @StateObject private var nativeFilePicker = MeetingAudioFilePicker()
+    #else
     @State private var showingFilePicker = false
+    #endif
     @State private var importTask: Task<Void, Never>?
     @State private var progress = 0.0
     @State private var cancelling = false
@@ -47,7 +51,17 @@ struct MeetingAudioImportSheet: View {
                     Button {
                         errorMessage = nil
                         cancelled = false
+                        #if targetEnvironment(macCatalyst)
+                        nativeFilePicker.choose { result in
+                            switch result {
+                            case .success(let url):
+                                if let url { selectedURL = url }
+                            case .failure(let error): errorMessage = error.localizedDescription
+                            }
+                        }
+                        #else
                         showingFilePicker = true
+                        #endif
                     } label: {
                         Label(copy("meeting.audioImport.chooseFile", fallback: "오디오 파일 선택"), systemImage: "doc.badge.plus")
                     }
@@ -69,7 +83,7 @@ struct MeetingAudioImportSheet: View {
                         options: MeetingTranscriptionLanguages.whisper, identifier: "meeting.audioImport.language",
                         automaticLanguageDetection: Binding(get: { automaticLanguageDetection },
                             set: { languagePreferences.selectAutomaticDetection($0) }),
-                        automaticDetectionAvailable: whisperModel.isInstalled, savedAudioOnly: true)
+                        automaticDetectionAvailable: whisperModel.isInstalled)
                         .disabled(importing)
                     if !summaryLanguageOptions.isEmpty {
                         MeetingLanguagePicker(title: MeetingLanguageCopy.summaryTitle,
@@ -78,9 +92,9 @@ struct MeetingAudioImportSheet: View {
                             .disabled(importing)
                     }
                     MeetingAIAccuracyNotice()
-                    if automaticLanguageDetection { MeetingAutomaticLanguageNotice(savedAudioOnly: true) }
+                    if automaticLanguageDetection { MeetingAutomaticLanguageNotice() }
                     if !whisperModel.isInstalled {
-                        Text(copy("meeting.audioImport.modelNotice", fallback: "오프라인 Whisper 모델이 없습니다. 음성은 저장할 수 있으며 설정 → 베타 기능에서 모델을 설치한 후 회의에서 전사를 다시 시도할 수 있습니다. 전사문을 임의로 만들지 않습니다."))
+                        Text(copy("meeting.audioImport.modelNotice", fallback: "Whisper 모델이 설치되지 않았습니다. 음성을 저장하고 설정 → 회의에서 모델을 설치한 뒤 전사할 수 있습니다."))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .accessibilityIdentifier("meeting.audioImport.modelRequired")
@@ -123,22 +137,24 @@ struct MeetingAudioImportSheet: View {
                         .disabled(importing)
                 }
             }
-            .fileImporter(isPresented: $showingFilePicker,
-                          allowedContentTypes: MeetingAudioImportService.allowedContentTypes,
-                          allowsMultipleSelection: false) { result in
-                switch result {
-                case .success(let urls):
-                    selectedURL = urls.first
-                    errorMessage = nil
-                case .failure(let error):
-                    // System picker cancellation is not an import failure.
-                    let cocoa = error as NSError
-                    if cocoa.domain != NSCocoaErrorDomain || cocoa.code != NSUserCancelledError {
-                        errorMessage = MeetingAudioImportService.Failure.unavailableInput.localizedDescription
-                    }
+        }
+        #if !targetEnvironment(macCatalyst)
+        .fileImporter(isPresented: $showingFilePicker,
+                      allowedContentTypes: MeetingAudioImportService.allowedContentTypes,
+                      allowsMultipleSelection: false) { result in
+            switch result {
+            case .success(let urls):
+                selectedURL = urls.first
+                errorMessage = nil
+            case .failure(let error):
+                // System picker cancellation is not an import failure.
+                let cocoa = error as NSError
+                if cocoa.domain != NSCocoaErrorDomain || cocoa.code != NSUserCancelledError {
+                    errorMessage = MeetingAudioImportService.Failure.unavailableInput.localizedDescription
                 }
             }
         }
+        #endif
         .interactiveDismissDisabled(importing)
         .task {
             refreshSummaryLanguageOptions()
@@ -146,8 +162,13 @@ struct MeetingAudioImportSheet: View {
         }
         .onChange(of: localModel.loadedModelIdentifier) { _, _ in refreshSummaryLanguageOptions() }
         .onChange(of: localModel.modelID) { _, _ in refreshSummaryLanguageOptions() }
-        .onChange(of: SettingsStore.betaSelectedProvider()) { _, _ in refreshSummaryLanguageOptions() }
-        .onDisappear { importTask?.cancel() }
+        .onChange(of: BetaFeaturePolicy().routingDecision(for: .meetingAnalysis)) { _, _ in refreshSummaryLanguageOptions() }
+        .onDisappear {
+            importTask?.cancel()
+            #if targetEnvironment(macCatalyst)
+            nativeFilePicker.cancel()
+            #endif
+        }
     }
 
     private func copy(_ key: String, fallback: String) -> String {

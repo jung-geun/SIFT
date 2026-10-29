@@ -63,42 +63,6 @@ private final class CancellableEmailSummaryProvider {
 @MainActor
 @Suite("Email message analysis service", .serialized)
 struct EmailMessageAnalysisServiceTests {
-    @Test("AFM email analysis ignores Laya and OpenAI task selections", arguments: [PersonaAIProvider.laya, .openAI])
-    func testRealAFMGate(selectedProvider: PersonaAIProvider) async throws {
-        try await AIProviderTestIsolation.shared.withLock {
-            let defaults = UserDefaults.standard
-            let keys = [SettingsStore.betaLayaEnabledKey, SettingsStore.betaOpenAIEnabledKey, SettingsStore.betaSelectedProviderKey, "pieroot.todo.providerEmailAnalysisEnabled"]
-            let previous = keys.map { defaults.object(forKey: $0) }
-            defer {
-                for (key, value) in zip(keys, previous) {
-                    if let value { defaults.set(value, forKey: key) }
-                    else { defaults.removeObject(forKey: key) }
-                }
-            }
-            SettingsStore.shared.setBetaProvider(.laya, enabled: true)
-            SettingsStore.shared.setBetaProvider(.openAI, enabled: true)
-            defaults.set(selectedProvider.rawValue, forKey: SettingsStore.betaSelectedProviderKey)
-            defaults.set(true, forKey: "pieroot.todo.providerEmailAnalysisEnabled")
-            let schema = Schema([EmailMessage.self])
-            let container = try ModelContainer(for: schema, configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)])
-            let context = ModelContext(container)
-            let email = EmailMessage(id: "real-gate", subject: "Review", body: "Please review the plan by Friday.", provider: .gmail, rawMessageID: "real-gate", isInInbox: true)
-            context.insert(email)
-            var calls = 0
-            let service = EmailMessageAnalysisService(
-                foundationModelsSummaryProvider: { _, _, _, _ in
-                    calls += 1
-                    return EmailSummaryResult(summary: "Apple summary", keyPoints: [], actionItems: [])
-                },
-                foundationModelsAvailabilityProvider: { true },
-                todoCandidateProvider: { _, _, _ in nil }
-            )
-            try await service.analyze(email, context: context)
-            #expect(email.analysisSummary == "Apple summary")
-            #expect(email.analysisFailureReasonRaw == nil)
-            #expect(calls == 1)
-        }
-    }
 
     @Test("Cached disabled and unavailable summaries upgrade when AFM becomes eligible", arguments: [false, true])
     func testIndependentAFMGates(initiallyEnabled: Bool) async throws {

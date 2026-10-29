@@ -153,10 +153,13 @@ nonisolated enum MeetingTranscriptionLanguages {
             displayLocale: AppLanguage.current.locale)
     }
 
-    static func supportsApple(_ tag: String) async -> Bool {
+    static func supportsApple(
+        _ tag: String,
+        capabilityProbe: MeetingTranscriptionCapabilityProbe = DefaultMeetingTranscriptionSessionFactory.liveLanguageCapabilityProbe
+    ) async -> Bool {
         guard MeetingLanguageCatalog.isLanguageTag(tag) else { return false }
         for backend in [MeetingTranscriptionBackend.speechTranscriber, .dictationTranscriber] {
-            if case .supported = await DefaultMeetingTranscriptionSessionFactory.liveCapabilityProbe(backend, Locale(identifier: tag)) {
+            if case .supported = await capabilityProbe(backend, Locale(identifier: tag)) {
                 return true
             }
         }

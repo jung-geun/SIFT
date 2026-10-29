@@ -143,6 +143,7 @@ final class MailboxLocalStore {
         let sourceAccountNamespace: String; let threadID: String; let subject: String
         let from: String; let snippet: String; let body: String; let htmlBody: String?; let receivedAt: Date
         let isRead: Bool; let labelIDs: [String]; let isInInbox: Bool
+        let hasBeenViewedInApp: Bool
         let outlookInferenceClassificationRawValue: String; let providerCategoryNames: [String]; let providerFolderID: String
         let analysisStateRaw: String; let analysisSummary: String; let analysisDetail: String
         let analysisKeyPoints: [String]; let analysisActionItems: [String]; let analysisError: String
@@ -155,6 +156,7 @@ final class MailboxLocalStore {
             threadID = email.threadID; subject = email.subject
             from = email.from; snippet = email.snippet; body = email.body; htmlBody = email.htmlBody; receivedAt = email.receivedAt
             isRead = email.isRead; labelIDs = email.labelIDs; isInInbox = email.isInInbox
+            hasBeenViewedInApp = email.hasBeenViewedInApp
             outlookInferenceClassificationRawValue = email.outlookInferenceClassificationRawValue; providerCategoryNames = email.providerCategoryNames; providerFolderID = email.providerFolderID
             analysisStateRaw = email.analysisStateRaw; analysisSummary = email.analysisSummary; analysisDetail = email.analysisDetail
             analysisKeyPoints = email.analysisKeyPoints; analysisActionItems = email.analysisActionItems; analysisError = email.analysisError
@@ -169,6 +171,7 @@ final class MailboxLocalStore {
             email.threadID = threadID; email.subject = subject
             email.from = from; email.snippet = snippet; email.body = body; email.htmlBody = htmlBody; email.receivedAt = receivedAt
             email.isRead = isRead; email.labelIDs = labelIDs; email.isInInbox = isInInbox
+            email.hasBeenViewedInApp = hasBeenViewedInApp
             email.outlookInferenceClassificationRawValue = outlookInferenceClassificationRawValue; email.providerCategoryNames = providerCategoryNames; email.providerFolderID = providerFolderID
             email.analysisStateRaw = analysisStateRaw; email.analysisSummary = analysisSummary; email.analysisDetail = analysisDetail
             email.analysisKeyPoints = analysisKeyPoints; email.analysisActionItems = analysisActionItems; email.analysisError = analysisError
@@ -178,13 +181,22 @@ final class MailboxLocalStore {
         }
     }
 
+    /// Returns exact inserted identities after persistence succeeds, never a count delta.
+    @discardableResult
     func upsert(
         _ page: MailboxPage,
         into context: ModelContext,
         resetNamespace: String? = nil
-    ) throws {
+    ) throws -> Set<EmailMessageKey> {
         let originalRows = try context.fetch(FetchDescriptor<EmailMessage>())
         let originalStates = Dictionary(uniqueKeysWithValues: originalRows.map { (ObjectIdentifier($0), EmailState($0)) })
+        // IMAP UIDVALIDITY can re-key the same Gmail message. Preserve app-viewed
+        // state using immutable X-GM-MSGID, scoped strictly to its source account.
+        var gmailViewedByNamespace: [String: [String: Bool]] = [:]
+        for row in originalRows where row.provider == .gmail && !row.providerGlobalMessageID.isEmpty {
+            let wasViewed = gmailViewedByNamespace[row.sourceAccountNamespace]?[row.providerGlobalMessageID] ?? false
+            gmailViewedByNamespace[row.sourceAccountNamespace, default: [:]][row.providerGlobalMessageID] = wasViewed || row.hasBeenViewedInApp
+        }
         let gmailNamespace = resetNamespace ?? page.messages.first(where: { $0.provider == .gmail })?.sourceAccountNamespace
         if page.requiresInboxReconcile, let gmailNamespace {
             // A head-page reset means rows absent from this page are no longer in
@@ -222,6 +234,7 @@ final class MailboxLocalStore {
         }
 
         var seenPageKeys = Set<EmailMessageKey>()
+        var insertedKeys = Set<EmailMessageKey>()
         for metadata in page.messages {
             let key = EmailMessageKey(
                 providerRawValue: metadata.provider.rawValue,
@@ -240,8 +253,12 @@ final class MailboxLocalStore {
                     rawMessageID: metadata.providerMessageID,
                     sourceAccountNamespace: metadata.sourceAccountNamespace
                 )
+                email.hasBeenViewedInApp = metadata.provider == .gmail
+                    ? gmailViewedByNamespace[metadata.sourceAccountNamespace]?[metadata.providerGlobalMessageID] ?? false
+                    : false
                 context.insert(email)
                 survivorByKey[key] = email
+                insertedKeys.insert(key)
             }
             apply(metadata, to: email)
             invalidateAnalysisIfStale(for: email)
@@ -260,6 +277,19 @@ final class MailboxLocalStore {
             for email in originalRows {
                 originalStates[ObjectIdentifier(email)]?.restore(email)
             }
+            throw error
+        }
+        return insertedKeys
+    }
+
+    /// Viewing affects only local attention state; it does not enqueue provider mutations.
+    func markViewedInApp(_ email: EmailMessage, in context: ModelContext) throws {
+        guard !email.hasBeenViewedInApp else { return }
+        email.hasBeenViewedInApp = true
+        do {
+            try saveContext(context)
+        } catch {
+            email.hasBeenViewedInApp = false
             throw error
         }
     }
@@ -729,6 +759,8 @@ final class MailboxLocalStore {
         from rows: [EmailMessage],
         into survivor: EmailMessage
     ) {
+        // Collapsing duplicates must never make a previously viewed message new again.
+        survivor.hasBeenViewedInApp = rows.contains(where: \.hasBeenViewedInApp)
         if let bodySource = preferredSurvivor(in: rows.filter(hasContent)) {
             survivor.body = bodySource.body
             survivor.htmlBody = bodySource.htmlBody

@@ -24,11 +24,6 @@ struct IntelligenceDetailView: View {
                     .fixedSize(horizontal: false, vertical: true)
                 Label("행동 프로필은 신뢰도와 갱신 시점이 충분할 때만 규칙을 개인화합니다.", systemImage: "brain.head.profile")
                     .fixedSize(horizontal: false, vertical: true)
-            } header: {
-                Text("TODO 우선순위 규칙")
-            } footer: {
-                Text("규칙 기반 정렬은 베타 provider를 켜지 않아도 항상 사용할 수 있습니다.")
-                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .appFormStyle()

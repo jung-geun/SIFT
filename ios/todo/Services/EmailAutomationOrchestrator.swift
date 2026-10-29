@@ -54,7 +54,7 @@ final class EmailAutomationOrchestrator: ObservableObject {
             context: context,
             allowFoundationModels: BetaFeaturePolicy().authorizes(
                 .foundationModels,
-                for: .standardAnalysis
+                for: .emailAnalysis
             )
         )
     }

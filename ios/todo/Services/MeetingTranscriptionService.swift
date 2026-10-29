@@ -247,7 +247,18 @@ struct DefaultMeetingTranscriptionSessionFactory: MeetingTranscriptionSessionFac
         }
     }
 
-    nonisolated static let liveCapabilityProbe: MeetingTranscriptionCapabilityProbe = { backend, requestedLocale in
+    /// Recording remains available when an optional live recognizer cannot run.
+    nonisolated static let liveLanguageCapabilityProbe: MeetingTranscriptionCapabilityProbe = { backend, locale in
+        await probe(backend, requestedLocale: locale, checkingInputFormat: false)
+    }
+
+    nonisolated static let liveCapabilityProbe: MeetingTranscriptionCapabilityProbe = { backend, locale in
+        await probe(backend, requestedLocale: locale, checkingInputFormat: true)
+    }
+
+    nonisolated private static func probe(
+        _ backend: MeetingTranscriptionBackend, requestedLocale: Locale, checkingInputFormat: Bool
+    ) async -> MeetingTranscriptionCapability {
         if backend == .speechTranscriber, !SpeechTranscriber.isAvailable {
             return .unavailable
         }
@@ -266,10 +277,22 @@ struct DefaultMeetingTranscriptionSessionFactory: MeetingTranscriptionSessionFac
         case .dictationTranscriber:
             module = DictationTranscriber(locale: locale, preset: .progressiveLongDictation)
         }
-        guard await AssetInventory.status(forModules: [module]) != .unsupported else {
-            return .unsupportedAsset
+        let status = await AssetInventory.status(forModules: [module])
+        let format = checkingInputFormat && status == .installed
+            ? await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [module]) : nil
+        return assetCapability(status: status, audioFormat: format, localeIdentifier: locale.identifier,
+                               checkingInputFormat: checkingInputFormat)
+    }
+
+    nonisolated static func assetCapability(
+        status: AssetInventory.Status, audioFormat: AVAudioFormat?, localeIdentifier: String,
+        checkingInputFormat: Bool
+    ) -> MeetingTranscriptionCapability {
+        guard status != .unsupported else { return .unsupportedAsset }
+        if checkingInputFormat && status == .installed {
+            guard let audioFormat, audioFormat.sampleRate > 0, audioFormat.channelCount > 0 else { return .unavailable }
         }
-        return .supported(resolvedLocaleIdentifier: locale.identifier)
+        return .supported(resolvedLocaleIdentifier: localeIdentifier)
     }
 
     private static let liveSessionBuilder: MeetingTranscriptionSessionBuilder = { backend, locale, purpose, snapshot in

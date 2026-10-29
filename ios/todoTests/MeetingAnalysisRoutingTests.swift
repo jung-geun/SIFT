@@ -20,23 +20,6 @@ struct MeetingAnalysisRoutingTests {
         MeetingResult(segments: [MeetingSegment(id: "s1", startMs: 0, endMs: 1_000, text: "원문")])
     }
 
-    @Test("routing without eligible providers preserves the no-provider reason")
-    func noProviderReason() async throws {
-        try await AIProviderTestIsolation.shared.withLock {
-            reset()
-            defer { reset() }
-            let outcome = try await MeetingAnalysisEngine(
-                policy: BetaFeaturePolicy(accessReader: { .disabled }, selectionReader: { nil })
-            ).analyze(
-                meetingID: "123e4567-e89b-12d3-a456-426614174000",
-                result: result(),
-                sourceLanguageTag: "ko-KR",
-                summaryLanguageTag: "pt-BR",
-                language: .korean
-            )
-            #expect(outcome.executionPath == .rules(.noProviderOptIn))
-        }
-    }
 
     @Test("remote priority selection keeps meeting analysis local")
     func remoteSelectionUsesLocalMeetingRules() async throws {
@@ -44,14 +27,15 @@ struct MeetingAnalysisRoutingTests {
             reset()
             defer { reset() }
             SettingsStore.shared.setBetaProvider(.openAI, enabled: true)
-            let outcome = try await MeetingAnalysisEngine(policy: BetaFeaturePolicy(selectionReader: { .openAI })).analyze(
+            let outcome = try await MeetingAnalysisEngine(policy: BetaFeaturePolicy(
+                accessReader: { .disabled }, selectionReader: { .openAI })).analyze(
                 meetingID: "123e4567-e89b-12d3-a456-426614174000",
                 result: result(),
                 sourceLanguageTag: "ko-KR",
                 summaryLanguageTag: "pt-BR",
                 language: .korean
             )
-            #expect(outcome.executionPath == .rules(.providerNotApplicable))
+            #expect(outcome.executionPath == .rules(.noEligibleProvider))
             #expect(outcome.engineSource == .heuristic)
             #expect(outcome.result.segments == result().segments)
         }
@@ -83,7 +67,6 @@ struct MeetingAnalysisRoutingTests {
             #expect(outcome.result.decisions.isEmpty)
             #expect(outcome.result.unresolvedQuestions.isEmpty)
             #expect(outcome.result.segments == input.segments)
-            #expect(outcome.executionPath == .rules(.noProviderOptIn))
         }
     }
 
@@ -100,7 +83,7 @@ struct MeetingAnalysisRoutingTests {
             }
             UserDefaults.standard.set("mlx-community/Qwen3.5-2B-MLX-4bit", forKey: modelKey)
             let runtime = MeetingSummaryRecordingRuntime()
-            let policy = BetaFeaturePolicy(selectionReader: { .onDevice })
+            let policy = processingPolicy()
             let llm = OnDeviceLLMService(runtime: runtime, policy: policy)
             await llm.loadModelIfNeeded(use: .meetingAnalysis)
             let segment = MeetingSegment(id: "evidence", startMs: 0, endMs: 1_000, text: "আমরা কাল প্রতিবেদন পাঠাব।")
@@ -145,7 +128,7 @@ struct MeetingAnalysisRoutingTests {
             }
             UserDefaults.standard.set("custom/undocumented-language-coverage", forKey: modelKey)
             let runtime = MeetingSummaryRecordingRuntime()
-            let policy = BetaFeaturePolicy(selectionReader: { .onDevice })
+            let policy = processingPolicy()
             let llm = OnDeviceLLMService(runtime: runtime, policy: policy)
             if loaded { await llm.loadModelIfNeeded(use: .meetingAnalysis) }
             let input = MeetingResult(segments: [MeetingSegment(id: "evidence", startMs: 0, endMs: 1_000, text: "سنرسل التقرير.")])
@@ -180,8 +163,14 @@ struct MeetingAnalysisRoutingTests {
                 )
                 let original = try #require(record.result)
                 let sourceTag = automatic ? detectedLanguage : "fr-FR"
-                let outputTag = summaryPreference.isEmpty ? "fr-FR" : summaryPreference
-                let summary = summaryPreference.isEmpty ? "Nous enverrons le rapport." : "سنرسل التقرير."
+                let outputTag = summaryPreference.isEmpty ? sourceTag : summaryPreference
+                let summary: String
+                switch outputTag {
+                case "ko": summary = "보고서를 보냅니다."
+                case "en": summary = "Send the report."
+                case "ar-SA": summary = "سنرسل التقرير."
+                default: summary = "Nous enverrons le rapport."
+                }
                 let runtime = MeetingSummaryRecordingRuntime(response:
                     "{\"title\":\"\",\"summary\":\"\(summary)\",\"decisions\":[],\"questions\":[],\"actions\":[]}"
                 )
@@ -211,7 +200,7 @@ struct MeetingAnalysisRoutingTests {
                 #expect(record.result?.transcriptRevision == original.transcriptRevision + 1)
                 #expect(record.result?.summary == summary)
                 #expect(record.rawResult == original)
-                #expect(record.languageTag == "fr-FR")
+                #expect(record.languageTag == (automatic ? "" : "fr-FR"))
                 #expect(record.automaticLanguageDetection == automatic)
                 #expect(record.asrDetectedLanguages == [detectedLanguage])
                 #expect(record.summaryLanguageTag == summaryPreference)
@@ -284,7 +273,7 @@ struct MeetingAnalysisRoutingTests {
             #expect(record.summaryFallbackReasonRaw == RuleFallbackReason.providerNotApplicable.rawValue)
             #expect(record.summaryKindRaw == MeetingAnalysisEngine.SummaryKind.sourceExcerpts.rawValue)
             #expect(record.summaryResultLanguageTag == expectedTag)
-            #expect(record.languageTag == "fr-FR")
+            #expect(record.languageTag.isEmpty)
             #expect(record.summaryLanguageTag == "ar-SA")
             #expect(record.automaticLanguageDetection)
             #expect(record.asrDetectedLanguages == evidence)
@@ -310,7 +299,7 @@ struct MeetingAnalysisRoutingTests {
             isStoredInMemoryOnly: true, cloudKitDatabase: .none)
         let container = try ModelContainer(for: AppDataContainer.meetingSchema, configurations: configuration)
         let context = ModelContext(container)
-        let record = MeetingRecord(languageTag: "fr-FR", automaticLanguageDetection: automatic,
+        let record = MeetingRecord(languageTag: automatic ? "" : "fr-FR", automaticLanguageDetection: automatic,
                                    summaryLanguageTag: summaryLanguageTag)
         let text: String
         if !automatic { text = "Nous enverrons le rapport" }

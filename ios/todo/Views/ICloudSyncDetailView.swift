@@ -34,7 +34,7 @@ struct ICloudSyncDetailView: View {
                 }
             } footer: {
                 if SettingsStore.supportsICloud {
-                    Text(copy("settings.sync.full.offline", "Local models and offline use remain available without iCloud or ChatGPT. Turning sync off retains local data and does not erase other devices.", "iCloud나 ChatGPT 없이도 로컬 모델과 오프라인 실행을 사용할 수 있습니다. 동기화를 꺼도 현재 기기의 데이터와 다른 기기의 데이터는 삭제하지 않습니다."))
+                    Text(copy("settings.sync.full.offline", "Turning sync off retains local data and does not erase other devices.", "동기화를 꺼도 현재 기기와 다른 기기의 데이터는 삭제하지 않습니다."))
                 } else {
                     Text(AppLanguage.localized("settings.sync.unavailableMessage", defaultValue: "이 빌드에서는 iCloud 동기화를 사용할 수 없습니다. 기존 데이터는 기기에만 보존됩니다.", language: .current))
                 }

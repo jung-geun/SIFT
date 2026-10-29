@@ -12,6 +12,35 @@ private enum EmailStoreFixtureError: Error {
 @MainActor
 @Suite("Email store migration")
 struct EmailStoreMigrationTests {
+    @Test("App-viewed state persists when the local email store is reopened")
+    func testAppViewedStateSurvivesStoreReopen() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let storeURL = directory.appendingPathComponent("attention.store")
+
+        do {
+            let container = try AppDataContainer.makeEmailContainer(storeURL: storeURL)
+            let context = ModelContext(container)
+            let opened = EmailMessage(id: "opened", isInInbox: true)
+            opened.hasBeenViewedInApp = false
+            let unopened = EmailMessage(id: "unopened", isInInbox: true)
+            unopened.hasBeenViewedInApp = false
+            context.insert(opened)
+            context.insert(unopened)
+            try context.save()
+            let defaults = try #require(UserDefaults(suiteName: "EmailStoreMigrationTests.\(UUID().uuidString)"))
+            let store = MailboxLocalStore(defaults: defaults, saveContext: { try $0.save() })
+            try store.markViewedInApp(opened, in: context)
+        }
+
+        let reopened = try AppDataContainer.makeEmailContainer(storeURL: storeURL)
+        let context = ModelContext(reopened)
+        let rows = try context.fetch(FetchDescriptor<EmailMessage>())
+        #expect(rows.first { $0.id == "opened" }?.hasBeenViewedInApp == true)
+        #expect(rows.first { $0.id == "unopened" }?.isNewlyImportedUnseen == true)
+    }
+
     @Test("pre-provider metadata rows migrate without data loss")
     func testPreProviderMetadataStoreMigration() throws {
         let bundle = Bundle(for: EmailStoreFixtureBundleToken.self)
@@ -52,6 +81,9 @@ struct EmailStoreMigrationTests {
         let context = ModelContext(container)
         let messages = try context.fetch(FetchDescriptor<EmailMessage>())
         #expect(messages.count == 2)
+        // Legacy cache is not newly imported merely because the app adds attention state.
+        #expect(messages.allSatisfy { $0.hasBeenViewedInApp })
+        #expect(messages.allSatisfy { !$0.isNewlyImportedUnseen })
 
         let gmail = try #require(
             messages.first { $0.providerRawValue == MailProvider.gmail.rawValue }

@@ -48,6 +48,11 @@ nonisolated final class MeetingAudioSourceRouter: @unchecked Sendable {
         let microphoneRMS: Double
         let appAudioRMS: Double
     }
+    struct MeterSnapshot: Sendable {
+        /// Group media clock, including silence and excluding every pause.
+        let elapsedSamples: Int64
+        let levels: [Source: Double]
+    }
     private nonisolated struct Level {
         var rms = 0.0
         var updatedAt = 0.0
@@ -397,12 +402,28 @@ nonisolated final class MeetingAudioSourceRouter: @unchecked Sendable {
         return lock.withLock {
             var mic = 0.0, app = 0.0
             for case let lane? in lanes {
-                let age = now - lane.level.updatedAt
-                let rms = age >= 0 && age < 0.5 ? lane.level.rms : 0
+                let rms = meterLevelLocked(lane, now: now)
                 if lane.source == .microphone { mic = rms } else { app = max(app, rms) }
             }
             return SourceLevels(microphoneRMS: mic, appAudioRMS: app)
         }
+    }
+    /// Poll off the audio callback. Only the existing RMS scalar is sampled;
+    /// separate application lanes never share their aggregate UI maximum.
+    func meterSnapshot() -> MeterSnapshot {
+        let now = clock()
+        return lock.withLock {
+            var levels: [Source: Double] = [:]
+            levels.reserveCapacity(5)
+            for case let lane? in lanes { levels[lane.source] = meterLevelLocked(lane, now: now) }
+            return MeterSnapshot(elapsedSamples: mediaSampleLocked(now), levels: levels)
+        }
+    }
+    private func meterLevelLocked(_ lane: Lane, now: Double) -> Double {
+        guard started, terminal == nil, activeEpoch != nil, lane.enabled,
+              !lane.finished, lane.failure == nil, lane.closingAt == nil else { return 0 }
+        let age = now - lane.level.updatedAt
+        return age >= 0 && age < 0.5 ? lane.level.rms : 0
     }
     func captureSourceMetadata(for source: Source) async -> MeetingCaptureSourceMetadata {
         await fence()
@@ -526,7 +547,8 @@ nonisolated final class MeetingAudioSourceRouter: @unchecked Sendable {
         if first < count, terminal == nil, activeEpoch === state.epoch, lane.closingAt == nil {
             var energy = 0.0
             for index in first..<count { let value = Double(samples[index]) / 32_768; energy += value * value }
-            lane.level = Level(rms: min(1, sqrt(energy / Double(count - first))), updatedAt: clock())
+            lane.level = Level(rms: min(1, sqrt(energy / Double(count - first))),
+                               updatedAt: min(clock(), state.expectedHostTime))
         }
         state.nextSample += Int64(count)
     }

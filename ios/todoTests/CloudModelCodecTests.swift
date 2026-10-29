@@ -313,6 +313,29 @@ struct CloudModelCodecTests {
         #expect(analysis.behaviorProfileData == Data([0, 255, 7, 12]))
     }
 
+    @Test("Mail app attention stays device-local across cloud restores")
+    func mailAttentionStaysDeviceLocal() throws {
+        let source = try Stores(), destination = try Stores()
+        let rows = seed(source)
+        rows.email.hasBeenViewedInApp = false
+        let unseenPayload = try source.capture()
+        rows.email.hasBeenViewedInApp = true
+        #expect(try source.capture() == unseenPayload)
+        let mailKey = try #require(unseenPayload.keys.first { $0.hasPrefix("EmailMessage/") })
+        let mailData = try #require(unseenPayload[mailKey])
+        let envelope = try #require(JSONSerialization.jsonObject(with: mailData) as? [String: Any])
+        let fields = try #require(envelope["fields"] as? [String: Any])
+        #expect(fields["hasBeenViewedInApp"] == nil)
+        try destination.apply(unseenPayload)
+        let restored = try #require(destination.email.fetch(FetchDescriptor<EmailMessage>()).first)
+        #expect(restored.hasBeenViewedInApp)
+        restored.hasBeenViewedInApp = false
+        rows.email.subject = "Remote subject update"
+        try destination.apply(source.capture())
+        #expect(restored.subject == "Remote subject update")
+        #expect(!restored.hasBeenViewedInApp)
+    }
+
     @Test("Upsert clears optional values and arrays instead of keeping stale destination values")
     func clearsNilsAndArrays() throws {
         let source = try Stores(), destination = try Stores()

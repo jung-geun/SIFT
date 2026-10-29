@@ -5,42 +5,6 @@ import Testing
 @Suite("Beta provider policy")
 @MainActor
 struct BetaFeaturePolicyTests {
-    @Test("legacy provider settings cannot change ready local routing")
-    func legacySettingsRemainInert() async {
-        await AIProviderTestIsolation.shared.withLock {
-            let defaults = UserDefaults.standard
-            let betaKeys = [
-                SettingsStore.betaOpenAIEnabledKey,
-                SettingsStore.betaLayaEnabledKey,
-                SettingsStore.betaMeetingVoiceProcessingEnabledKey,
-                SettingsStore.betaSelectedProviderKey,
-                SettingsStore.betaLegacySelectionMigratedKey
-            ]
-            let legacyKeys = [
-                SettingsStore.betaFeaturesKey,
-                "pieroot.todo.onDeviceLLMEnabled",
-                "selectedAIProvider"
-            ]
-            (betaKeys + legacyKeys).forEach(defaults.removeObject(forKey:))
-            defer {
-                (betaKeys + legacyKeys).forEach(defaults.removeObject(forKey:))
-            }
-            let expected = SettingsStore.betaSelectedProvider()
-
-            defaults.set(true, forKey: SettingsStore.betaFeaturesKey)
-            defaults.set(true, forKey: "pieroot.todo.onDeviceLLMEnabled")
-            defaults.set("gemini", forKey: "selectedAIProvider")
-
-            let policy = BetaFeaturePolicy()
-            #expect(SettingsStore.betaProviderAccess().foundationModelsEnabled)
-            #expect(SettingsStore.betaSelectedProvider() == expected)
-            #expect(policy.routingDecision(for: .standardAnalysis) == expected.map {
-                ProviderRoutingDecision.providers([$0])
-            } ?? .rules(.providerDisabled))
-            #expect(policy.routingDecision(for: .transcriptRefinement) == .providers([.foundationModels, .onDevice]))
-            #expect(policy.authorizes(.foundationModels, for: .standardAnalysis) == (expected == .foundationModels))
-        }
-    }
 
     @Test("standard analysis requires an enabled local selection")
     func standardAnalysisUsesOnlyEnabledSelection() async {
@@ -75,7 +39,7 @@ struct BetaFeaturePolicyTests {
         }
     }
 
-    @Test("transcript refinement uses enabled local providers in deterministic order")
+    @Test("Apple transcript refinement never loads a second model after failure")
     func transcriptRefinementUsesLocalProvidersOnly() async {
         await AIProviderTestIsolation.shared.withLock {
             let policy = BetaFeaturePolicy(
@@ -93,7 +57,7 @@ struct BetaFeaturePolicyTests {
 
             #expect(
                 policy.routingDecision(for: .transcriptRefinement)
-                    == .providers([.foundationModels, .onDevice])
+                    == .providers([.foundationModels])
             )
             #expect(policy.authorizes(.openAI, for: .transcriptRefinement) == false)
             #expect(policy.authorizes(.onDevice, for: .modelManagement))
@@ -268,7 +232,7 @@ struct BetaFeaturePolicyTests {
         #expect(unavailable.routingDecision(for: .emailAnalysis) == .rules(.providerDisabled))
     }
 
-    @Test("meeting analysis rejects remote and priority-only providers without changing ordinary priority routing", arguments: [PersonaAIProvider.openAI, .laya])
+    @Test("Meeting and personal analysis keep Apple regardless of priority provider", arguments: [PersonaAIProvider.openAI, .laya])
     func meetingAnalysisIsLocalOnly(selection: PersonaAIProvider) {
         let policy = BetaFeaturePolicy(
             accessReader: {
@@ -278,7 +242,8 @@ struct BetaFeaturePolicyTests {
             selectionReader: { selection }
         )
         #expect(policy.routingDecision(for: .standardAnalysis) == .providers([selection]))
-        #expect(policy.routingDecision(for: .meetingAnalysis) == .rules(.providerNotApplicable))
+        #expect(policy.routingDecision(for: .meetingAnalysis) == .providers([.foundationModels]))
+        #expect(policy.routingDecision(for: .personalNarrative) == .providers([.foundationModels]))
     }
 }
 

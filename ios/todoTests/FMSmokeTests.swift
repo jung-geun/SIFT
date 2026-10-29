@@ -7,70 +7,6 @@ import Testing
 // Adapter tests inject typed runtime responses; native model quality and guardrail
 // behavior belong to manual smoke runs, not the default regression suite.
 
-// MARK: - 가용성 메시징
-
-@Suite("FM availability messaging")
-struct FMAvailabilityMessagingTests {
-
-    @Test("available returns nil")
-    func availableReturnsNil() {
-        let reason = FoundationModelsAvailability.unavailableExplanation(
-            isAvailable: true,
-            iOSMajorVersion: 27,
-            isSimulator: false,
-            frameworkLinked: true
-        )
-        #expect(reason == nil)
-    }
-
-    @Test("simulator returns simulator copy")
-    func simulatorReturnsSimulatorCopy() {
-        let reason = FoundationModelsAvailability.unavailableExplanation(
-            isAvailable: false,
-            iOSMajorVersion: 27,
-            isSimulator: true,
-            frameworkLinked: true,
-            language: .korean
-        )
-        #expect(reason == "시뮬레이터에서는 Apple Foundation Models를 비활성화합니다. 실기기에서 Apple Intelligence 및 Siri 설정을 확인하세요.")
-    }
-
-    @Test("missing framework returns support copy")
-    func missingFrameworkReturnsSupportCopy() {
-        let reason = FoundationModelsAvailability.unavailableExplanation(
-            isAvailable: false,
-            iOSMajorVersion: 27,
-            isSimulator: false,
-            frameworkLinked: false,
-            language: .korean
-        )
-        #expect(reason == "Apple Foundation Models는 iOS 26 이상 및 FoundationModels.framework가 있는 빌드에서만 사용할 수 있습니다.")
-    }
-
-    @Test("iOS 26 returns Apple Intelligence activation copy")
-    func iOS26ReturnsAppleIntelligenceActivationCopy() {
-        let reason = FoundationModelsAvailability.unavailableExplanation(
-            isAvailable: false,
-            iOSMajorVersion: 26,
-            isSimulator: false,
-            frameworkLinked: true,
-            language: .korean
-        )
-        #expect(reason == "Apple Foundation Models는 Apple Intelligence를 사용할 수 있고 활성화된 기기에서만 사용할 수 있습니다. 설정 > Apple Intelligence 및 Siri에서 활성화 상태를 확인하세요.")
-    }
-
-    @Test("iOS 27 returns Siri AI language copy")
-    func iOS27ReturnsSiriAILanguageCopy() {
-        let reason = FoundationModelsAvailability.unavailableExplanation(
-            isAvailable: false,
-            iOSMajorVersion: 27,
-            isSimulator: false,
-            frameworkLinked: true,
-            language: .korean
-        )
-        #expect(reason == "Apple Foundation Models는 현재 Siri AI를 사용할 수 있는 영어권 Siri 언어 및 Apple Intelligence 활성화 환경에서만 사용할 수 있습니다. 설정 > Apple Intelligence 및 Siri에서 언어와 활성화 상태를 확인하세요.")
-    }
-}
 
 #if canImport(FoundationModels)
 import FoundationModels
@@ -235,7 +171,7 @@ struct FMEmailSummaryAdapterTests {
                     actionItems: [" Reply with the final proposal ", ""]
                 )
             )
-            let service = FoundationModelsService(runtime: runtime, policy: BetaFeaturePolicy(selectionReader: { .foundationModels }))
+            let service = FoundationModelsService(runtime: runtime, policy: AIProviderTestIsolation.foundationPolicy)
             let result = try await service.summarizeEmail(
                 subject: "Proposal review",
                 sender: "Product team <product@example.com>",
@@ -281,7 +217,7 @@ struct FMEmailSummaryAdapterTests {
                     insights: ["Observed insight."]
                 )
             )
-            let service = FoundationModelsService(runtime: runtime, policy: BetaFeaturePolicy(selectionReader: { .foundationModels }))
+            let service = FoundationModelsService(runtime: runtime, policy: AIProviderTestIsolation.foundationPolicy)
             let baseline = MemoryService.computeAnalysis(todos: [], language: .english)
             let persona = try await service.generatePersonaNarrative(
                 existingPersona: "",

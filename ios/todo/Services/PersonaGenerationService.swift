@@ -17,7 +17,7 @@ enum PersonaAIProvider: String, CaseIterable, Identifiable, Sendable {
     nonisolated func displayName(language: AppLanguage) -> String {
         switch self {
         case .foundationModels:
-            return AppLanguage.localized("beta.foundationModels.toggle", defaultValue: "Apple Foundation Models (AFM)", language: language)
+            return "Apple Intelligence"
         case .onDevice:
             return AppLanguage.localized("intelligence.engine.onDevice", defaultValue: "On Device AI", language: language)
         case .openAI:
@@ -66,19 +66,24 @@ struct PersonaGenerationService {
     typealias AvailabilityProvider = () -> Bool
 
     private let narrativeProvider: NarrativeProvider
+    private let localNarrativeProvider: NarrativeProvider
     private let routingDecisionProvider: RoutingDecisionProvider
     private let availabilityProvider: AvailabilityProvider
 
     init(
         narrativeProvider: @escaping NarrativeProvider = Self.liveNarrative,
         routingDecisionProvider: @escaping RoutingDecisionProvider = {
-            BetaFeaturePolicy().routingDecision(for: .standardAnalysis)
+            BetaFeaturePolicy().routingDecision(for: .personalNarrative)
         },
         availabilityProvider: @escaping AvailabilityProvider = {
             FoundationModelsAvailability.isAvailable
+        },
+        localNarrativeProvider: @escaping NarrativeProvider = { existing, draft, profile, language in
+            try await LocalNarrativeService.persona(existing: existing, draft: draft, profile: profile, language: language)
         }
     ) {
         self.narrativeProvider = narrativeProvider
+        self.localNarrativeProvider = localNarrativeProvider
         self.routingDecisionProvider = routingDecisionProvider
         self.availabilityProvider = availabilityProvider
     }
@@ -101,8 +106,7 @@ struct PersonaGenerationService {
             now: now,
             language: language
         )
-        if tier == .advanced || routingDecisionProvider() == .providers([.openAI]) {
-            if tier == .basic, !OpenAIPrivacy.allows(.persona) { return fallback }
+        if tier == .advanced {
             let narrative = try await OpenAIAnalysisService().persona(
                 existing: existingPersona, draft: fallback, tier: tier, language: language
             )
@@ -114,14 +118,14 @@ struct PersonaGenerationService {
                 processorDescription: "OpenAI · \(tier.modelID)"
             )
         }
-        guard routingDecisionProvider() == .providers([.foundationModels]),
-              availabilityProvider()
-        else {
+        let route = routingDecisionProvider()
+        let usesLocalModel = route == .providers([.onDevice])
+        guard usesLocalModel || (route == .providers([.foundationModels]) && availabilityProvider()) else {
             return fallback
         }
 
         do {
-            let narrative = try await narrativeProvider(
+            let narrative = try await (usesLocalModel ? localNarrativeProvider : narrativeProvider)(
                 existingPersona,
                 fallback,
                 context.behaviorProfile,
@@ -134,7 +138,7 @@ struct PersonaGenerationService {
                 descriptionText: description,
                 evidence: fallback.evidence,
                 confidence: fallback.confidence,
-                processorDescription: "Apple Foundation Models"
+                processorDescription: usesLocalModel ? "On-device model" : "Apple Intelligence"
             )
         } catch is CancellationError {
             throw CancellationError()

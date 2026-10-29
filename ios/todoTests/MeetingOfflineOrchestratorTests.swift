@@ -91,10 +91,10 @@ struct MeetingOfflineOrchestratorTests {
         gate.endFinal()
     }
 
-    @Test("automatic mode passes nil and commits detected languages without changing either selected locale")
-    func automaticCommitKeepsLocales() async throws {
+    @Test("automatic mode passes nil and commits detected languages without inventing an unknown source locale", arguments: ["", "ko-KR"])
+    func automaticCommitKeepsLocales(source: String) async throws {
         let (context, record, apple) = try fixture()
-        record.languageTag = "ko-KR"
+        record.languageTag = source
         record.summaryLanguageTag = "fr-FR"
         record.automaticLanguageDetection = true
         try context.save()
@@ -107,7 +107,7 @@ struct MeetingOfflineOrchestratorTests {
         let savedContext = ModelContext(context.container)
         let saved = try #require(savedContext.fetch(FetchDescriptor<MeetingRecord>()).first)
         #expect(saved.automaticLanguageDetection)
-        #expect(saved.languageTag == "ko-KR")
+        #expect(saved.languageTag == source)
         #expect(saved.summaryLanguageTag == "fr-FR")
         #expect(saved.asrDetectedLanguages == ["en"])
         #expect(saved.result == produced.result)

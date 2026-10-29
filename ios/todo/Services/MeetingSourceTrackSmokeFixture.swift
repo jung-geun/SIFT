@@ -12,13 +12,15 @@ enum MeetingSourceTrackSmokeFixture {
 
     static func seedIfNeeded(into container: ModelContainer) {
         guard Bundle.main.bundleIdentifier == "pieroot.sift-todo.qa",
-              ProcessInfo.processInfo.arguments.contains("-ui-test-source-track-smoke"),
+              (ProcessInfo.processInfo.arguments.contains("-ui-test-source-track-smoke")
+                || ProcessInfo.processInfo.arguments.contains("-ui-test-speaker-continuity")),
               ProcessInfo.processInfo.arguments.contains("-ui-test-in-memory-store") else { return }
         do {
             let context = container.mainContext
+            let continuity = ProcessInfo.processInfo.arguments.contains("-ui-test-speaker-continuity")
             let specs: [(String, MeetingAudioTrackKind, String, String, Double, Int64)] = [
                 (microphoneID, .microphone, "Synthetic microphone", "마이크 트랙의 독립 전사", 220, 0),
-                (applicationID, .application, "Synthetic application", "앱 트랙의 독립 전사", 440, 32_000)
+                (applicationID, .application, "Synthetic application", "앱 트랙의 독립 전사", 440, continuity ? 160_000 : 32_000)
             ]
             var artifacts = [MeetingCaptureTrackArtifact]()
             for (id, kind, label, text, frequency, offset) in specs {
@@ -45,6 +47,10 @@ enum MeetingSourceTrackSmokeFixture {
             for track in try MeetingAudioTrackStore.tracks(for: parent, in: context) {
                 let artifact = artifacts.first { $0.meetingID == track.meetingID }!
                 try track.replaceTranscriptionBase(artifact.provisionalResult, status: .ready)
+                if continuity {
+                    try seedSpeakerContinuity(track, manifest: artifact.audioManifest)
+                    continue
+                }
                 guard ProcessInfo.processInfo.arguments.contains("-ui-test-task-provenance") else { continue }
                 let label = track.audioTrackDisplayName
                 // Reused speaker IDs and aliases must resolve within each source, not across the group.
@@ -73,7 +79,7 @@ enum MeetingSourceTrackSmokeFixture {
                     manualAssignments: [:], failureCode: nil))
             }
             try MeetingAudioTrackStore.refresh(parent: parent, in: context)
-            var groupResult = MeetingResult(title: "Source tracks smoke")
+            var groupResult = MeetingResult(title: continuity ? "Speaker continuity · synthetic" : "Source tracks smoke")
             if ProcessInfo.processInfo.arguments.contains("-ui-test-task-provenance"),
                !ProcessInfo.processInfo.arguments.contains("-ui-test-no-extracted-tasks") {
                 let tracks = try MeetingAudioTrackStore.tracks(for: parent, in: context)
@@ -96,6 +102,38 @@ enum MeetingSourceTrackSmokeFixture {
         } catch {
             print("Source-track QA fixture failed: \((error as NSError).domain) \((error as NSError).code)")
         }
+    }
+
+    /// Deterministic display QA, not an ASR or diarization quality claim.
+    private static func seedSpeakerContinuity(_ track: MeetingRecord, manifest: MeetingAudioManifest) throws {
+        let segments = [
+            MeetingSegment(id: "leading", startMs: 0, endMs: 100, text: "Leading unknown stays unknown."),
+            MeetingSegment(id: "a", startMs: 100, endMs: 1_000, speakerIDs: ["speaker-1"], text: "Alex starts this source-local turn."),
+            MeetingSegment(id: "short-a", startMs: 1_000, endMs: 2_200, text: "Brief undecided fragment."),
+            MeetingSegment(id: "a-again", startMs: 2_200, endMs: 2_500, speakerIDs: ["speaker-1"], text: "Alex continues without another speaker heading."),
+            MeetingSegment(id: "short-before-b", startMs: 2_500, endMs: 2_650, text: "Another brief undecided fragment."),
+            MeetingSegment(id: "b", startMs: 2_650, endMs: 3_500, speakerIDs: ["speaker-2"], text: "Blair begins an actual new turn."),
+            MeetingSegment(id: "overlap", startMs: 3_500, endMs: 4_500, speakerIDs: ["speaker-1", "speaker-2"], text: "Overlapping speech retains both speakers."),
+            MeetingSegment(id: "long-unknown", startMs: 4_500, endMs: 6_000, text: "This longer unknown must not inherit a speaker."),
+            MeetingSegment(id: "a-return", startMs: 6_000, endMs: 6_500, speakerIDs: ["speaker-1"], text: "Alex returns after the unknown."),
+            MeetingSegment(id: "manual-unknown", startMs: 6_500, endMs: 6_650, text: "Manually unknown stays unknown."),
+            MeetingSegment(id: "a-final", startMs: 6_650, endMs: 8_000, speakerIDs: ["speaker-1"], text: "Alex finishes this source's original transcript.")
+        ]
+        let result = MeetingResult(title: "Speaker continuity · synthetic", segments: segments)
+        try track.replaceTranscriptionBase(result, status: .ready)
+        let intervals = segments.flatMap { segment in
+            segment.speakerIDs.map { speaker in
+                MeetingSpeakerInterval(speakerID: speaker, startSample: segment.startMs * 16, endSample: segment.endMs * 16)
+            }
+        }
+        try track.update(diarization: MeetingDiarizationPayload(status: .completed, generation: UUID(),
+            manifestDigest: try MeetingDiarizationFingerprint.manifest(manifest),
+            sourceTranscriptRevision: result.transcriptRevision,
+            sourceContentDigest: try MeetingDiarizationFingerprint.source(result), modelRevision: "qa-synthetic-continuity",
+            preset: "finalPass", coveredThroughSample: 128_000, intervals: intervals,
+            profiles: [MeetingSpeakerProfile(id: "speaker-1", ordinal: 1, displayName: "Alex"),
+                       MeetingSpeakerProfile(id: "speaker-2", ordinal: 2, displayName: "Blair")],
+            manualAssignments: ["manual-unknown": []], failureCode: nil))
     }
 }
 #endif

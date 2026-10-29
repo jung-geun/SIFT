@@ -14,7 +14,7 @@ struct MeetingAudioTrackPersistenceTests {
         let artifact = try capture(root: root)
         let child = artifact.tracks[0]
         let recovery = PendingMeetingCaptureRecovery(
-            meetingID: child.meetingID, languageTag: "bn-BD", timezoneIdentifier: "UTC",
+            meetingID: child.meetingID, languageTag: automatic ? "" : "bn-BD", timezoneIdentifier: "UTC",
             manifest: child.audioManifest, provisionalResult: MeetingResult(segments: []), errorMessage: nil,
             parentMeetingID: artifact.meetingID, sourceKind: child.sourceKind,
             sourceLabel: child.sourceLabel, sessionStartSample: child.sessionStartSample,
@@ -29,7 +29,7 @@ struct MeetingAudioTrackPersistenceTests {
         }
         let context = ModelContext(try diskContainer(at: store))
         let saved = try record(child.meetingID, in: context)
-        #expect(saved.languageTag == "bn-BD")
+        #expect(saved.languageTag == (automatic ? "" : "bn-BD"))
         #expect(saved.summaryLanguageTag == "ar-SA")
         #expect(saved.automaticLanguageDetection == automatic)
         #expect(try record(artifact.meetingID, in: context).automaticLanguageDetection == automatic)
@@ -63,6 +63,8 @@ struct MeetingAudioTrackPersistenceTests {
         let children = try MeetingAudioTrackStore.tracks(for: parent, in: context)
         #expect(parent.automaticLanguageDetection == automatic)
         #expect(children.allSatisfy { $0.automaticLanguageDetection == automatic })
+        #expect(parent.languageTag == (automatic ? "" : "en-US"))
+        #expect(children.allSatisfy { $0.languageTag == (automatic ? "" : "en-US") })
         #expect(children.allSatisfy { $0.asrSource == (automatic ? .savedAudio : .apple) })
         if automatic { #expect(children.allSatisfy { $0.appleRawResultData == nil }) }
         #expect(children.map(\.meetingID) == artifact.tracks.map(\.meetingID))
@@ -550,7 +552,7 @@ struct MeetingAudioTrackPersistenceTests {
     }
 
     private func persist(_ artifact: MeetingCaptureArtifact, automatic: Bool = false, in context: ModelContext) throws -> MeetingRecord {
-        try MeetingInitialCapturePersister.persist(artifact: artifact, languageTag: "en-US", timezoneIdentifier: "UTC",
+        try MeetingInitialCapturePersister.persist(artifact: artifact, languageTag: automatic ? "" : "en-US", timezoneIdentifier: "UTC",
             automaticLanguageDetection: automatic, in: context)
     }
 

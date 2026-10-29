@@ -20,8 +20,7 @@ struct MeetingTrackGroupDetailView: View {
     @State private var isPreparing = true
     @State private var timeline = MeetingConversationTimeline(sources: [])
     @State private var sourceNames: [String: String] = [:]
-    @State private var speakerDisplays: [String: MeetingSpeakerDisplay] = [:]
-    @State private var conversationTurnStarts: Set<MeetingConversationTimeline.Row.ID> = []
+    @State private var speakerProfiles: [String: [String: MeetingSpeakerProfile]] = [:]
     @ScaledMetric(relativeTo: .body) private var transcriptViewportHeight = 300
 
     private var contentInset: CGFloat {
@@ -133,7 +132,7 @@ struct MeetingTrackGroupDetailView: View {
     private func conversationRows(_ rows: [MeetingConversationTimeline.Row]) -> some View {
         LazyVStack(alignment: .leading, spacing: 0) {
             ForEach(rows) { row in
-                let startsTurn = conversationTurnStarts.contains(row.id)
+                let startsTurn = timeline.speakerPresentation[row.id]?.startsTurn ?? true
                 conversationRow(row, startsTurn: startsTurn)
                     .padding(.top, row.id != rows.first?.id && startsTurn ? AppTheme.Spacing.compact : 0)
                     .id(row.id)
@@ -142,25 +141,6 @@ struct MeetingTrackGroupDetailView: View {
         .padding(.vertical, AppTheme.Spacing.compact)
     }
 
-    /// Compare source-local identities, never display names or source-local speaker ordinals.
-    /// Build once with the transcript rather than on every playback-progress update.
-    private func turnStarts(in rows: [MeetingConversationTimeline.Row]) -> Set<MeetingConversationTimeline.Row.ID> {
-        var starts: Set<MeetingConversationTimeline.Row.ID> = []
-        for index in rows.indices {
-            let row = rows[index]
-            guard index > rows.startIndex else {
-                starts.insert(row.id)
-                continue
-            }
-            let previous = rows[index - 1]
-            // An overlap's speaker set is the same even if its stored ordering changes.
-            let sameSpeakers = row.id.trackID == previous.id.trackID
-                && row.speakerIDs.allSatisfy { previous.speakerIDs.contains($0) }
-                && previous.speakerIDs.allSatisfy { row.speakerIDs.contains($0) }
-            if !sameSpeakers { starts.insert(row.id) }
-        }
-        return starts
-    }
 
 
     private func conversationRow(_ row: MeetingConversationTimeline.Row, startsTurn: Bool) -> some View {
@@ -170,14 +150,16 @@ struct MeetingTrackGroupDetailView: View {
             && row.endSample.map { sample < $0 } == true
         let timeRange = row.startSample.flatMap { start in row.endSample.map { "\(duration(start))–\(duration($0))" } }
             ?? "\(localDuration(row.localStartMs))–\(localDuration(row.localEndMs))"
+        let presentation = timeline.speakerPresentation[row.id]
+        let speakerLabel = MeetingSpeakerLabelFormatter.label(for: presentation?.speakerIDs ?? row.speakerIDs,
+            profiles: speakerProfiles[row.id.trackID] ?? [:],
+            state: presentation?.isInherited == true ? .provisional : .final,
+            kind: presentation?.kind ?? .speaker)
         return VStack(alignment: .leading, spacing: 4) {
             if startsTurn {
                 HStack(alignment: .firstTextBaseline, spacing: AppTheme.Spacing.compact) {
-                    if !row.speakerIDs.isEmpty {
-                        Text(MeetingSpeakerLabelFormatter.label(for: row.speakerIDs,
-                            profiles: speakerDisplays[row.id.trackID]?.profiles ?? [:], state: .final))
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
+                    Text(speakerLabel)
+                        .font(.caption).foregroundStyle(AppTheme.secondaryText)
                     Spacer(minLength: AppTheme.Spacing.compact)
                     Text(timeRange).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                         .fixedSize(horizontal: true, vertical: false)
@@ -200,6 +182,9 @@ struct MeetingTrackGroupDetailView: View {
         .contentShape(Rectangle())
         .onTapGesture { seek(to: row) }
         .accessibilityElement(children: .combine)
+        .accessibilityValue(MeetingSpeakerLabelFormatter.accessibilityValue(
+            speakerLabel: speakerLabel, source: sourceNames[row.id.trackID],
+            inherited: presentation?.isInherited == true))
         .accessibilityAddTraits(isActive ? [.isSelected, .isButton] : .isButton)
         .accessibilityIdentifier("meeting.conversation.saved.\(row.id.trackID).\(row.id.localID)")
     }
@@ -271,13 +256,14 @@ struct MeetingTrackGroupDetailView: View {
 
     private func preparePresentation() async {
         timeline = MeetingConversationTimeline.saved(tracks, groupID: meeting.meetingID)
-        var starts = turnStarts(in: timeline.rows)
-        for source in timeline.unalignedSources {
-            starts.formUnion(turnStarts(in: source.rows))
-        }
-        conversationTurnStarts = starts
         sourceNames = Dictionary(tracks.map { ($0.meetingID, $0.audioTrackDisplayName) }, uniquingKeysWith: { first, _ in first })
-        speakerDisplays = Dictionary(tracks.map { ($0.meetingID, MeetingSpeakerDisplay(record: $0)) }, uniquingKeysWith: { first, _ in first })
+        speakerProfiles = Dictionary(tracks.map { track in
+            let profiles = track.diarization?.profiles ?? []
+            let attribution = MeetingTranscriptAttribution(meetingID: track.meetingID,
+                result: track.result ?? MeetingResult(), profiles: profiles)
+            let resolved = attribution.applyingNames(to: profiles)
+            return (track.meetingID, Dictionary(resolved.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first }))
+        }, uniquingKeysWith: { first, _ in first })
         isPreparing = true
         preparationError = nil
         defer { if !Task.isCancelled { isPreparing = false } }

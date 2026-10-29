@@ -73,6 +73,8 @@ struct MailDetailView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var regionalAvailability = OpenAIRegionalAvailability.shared
+    @ObservedObject private var openAIConnection = OpenAIConnection.shared
+    @AppStorage(SettingsStore.betaOpenAIEnabledKey) private var openAIEnabled = false
     @State private var webViewHeight: CGFloat = 300
     @State private var showRegisterSheet = false
     @State private var isLoadingBody = false
@@ -82,6 +84,11 @@ struct MailDetailView: View {
     @State private var alert: MailDetailAlert?
     @State private var showOpenAIAnalysis = false
     @State private var openAITier: OpenAIAnalysisTier = .basic
+    @State private var showAnalysisChoices = false
+
+    private var offersOpenAIAnalysis: Bool {
+        openAIEnabled && regionalAvailability.isAvailable && openAIConnection.activeProfile != nil
+    }
 
     private var analysisCardTitle: String {
         if email.analysisVersion != EmailAnalysisContract.summaryContractVersion {
@@ -161,21 +168,7 @@ struct MailDetailView: View {
                                     .font(.headline)
                                     .foregroundStyle(.primary)
                                 Spacer()
-                                Button {
-                                    Task { await reanalyzeCurrentEmail() }
-                                } label: {
-                                    if isReanalyzing || email.analysisState == .analyzing {
-                                        ProgressView().controlSize(.mini)
-                                    } else {
-                                        Label("다시 요약", systemImage: "arrow.triangle.2.circlepath")
-                                            .labelStyle(.titleAndIcon)
-                                    }
-                                }
-                                .font(.caption.weight(.semibold))
-                                .buttonStyle(.bordered)
-                                .controlSize(.small)
-                                .disabled(isReanalyzing || isLoadingBody || email.analysisState == .analyzing)
-                                .accessibilityIdentifier("mail.detail.reanalyze")
+                                reanalyzeButton
                             }
                             Text(email.analysisSummary)
                                 .font(.body)
@@ -226,20 +219,7 @@ struct MailDetailView: View {
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
-                            Button {
-                                Task { await reanalyzeCurrentEmail() }
-                            } label: {
-                                if isReanalyzing {
-                                    ProgressView().controlSize(.mini)
-                                } else {
-                                    Label("다시 요약", systemImage: "arrow.triangle.2.circlepath")
-                                }
-                            }
-                            .font(.caption.weight(.semibold))
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-                            .disabled(isReanalyzing || isLoadingBody)
-                            .accessibilityIdentifier("mail.detail.reanalyze")
+                            reanalyzeButton
                         }
                         .padding(AppTheme.Spacing.section)
                         .background(
@@ -263,38 +243,9 @@ struct MailDetailView: View {
                         )
                         .padding(.horizontal, AppTheme.Spacing.section)
                         .padding(.top, AppTheme.Spacing.section)
-                    }
-                    if regionalAvailability.isAvailable {
-                        VStack(alignment: .leading, spacing: AppTheme.Spacing.item) {
-                            Button(AppLanguage.localized(
-                                "mail.openai.basicRequest",
-                                defaultValue: "OpenAI 기초 분석 · gpt-6-luna",
-                                language: .current,
-                                comment: "Open the optional basic OpenAI analysis for this email. Keep the model name unchanged."
-                            )) {
-                                openAITier = .basic
-                                showOpenAIAnalysis = true
-                            }
-                            .accessibilityIdentifier("mail.detail.openAIBasic")
-                            Button(AppLanguage.localized(
-                                "mail.openai.advancedRequest",
-                                defaultValue: "중요 내용 고급 재요청 · gpt-6.1-sol",
-                                language: .current,
-                                comment: "Open an explicit advanced re-request for important email content. Keep the model name unchanged."
-                            )) {
-                                openAITier = .advanced
-                                showOpenAIAnalysis = true
-                            }
-                            .accessibilityIdentifier("mail.detail.openAIAdvanced")
-                            Text(AppLanguage.localized(
-                                "mail.openai.explanation",
-                                defaultValue: "선택적 외부 분석에는 별도 전송 동의가 필요합니다. 자동 메일 분석은 계속 기기 내에서 처리합니다.",
-                                language: .current,
-                                comment: "Explain that optional remote email analysis needs separate sharing consent and automatic analysis stays on device."
-                            ))
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                        .padding(AppTheme.Spacing.section)
+                    } else {
+                        reanalyzeButton
+                            .padding(AppTheme.Spacing.section)
                     }
                     if let html = email.htmlBody, !html.isEmpty {
                         EmailWebView(htmlBody: html, contentHeight: $webViewHeight)
@@ -385,8 +336,40 @@ struct MailDetailView: View {
             .sheet(isPresented: $showOpenAIAnalysis) {
                 OpenAIEmailAnalysisView(selection: MailDetailSelection(email), tier: openAITier)
             }
-            .onChange(of: regionalAvailability.isAvailable) { _, available in
-                if !available { showOpenAIAnalysis = false }
+            .confirmationDialog(
+                AppLanguage.localized("mail.analysis.chooseMethod", defaultValue: "Summarize again", language: .current),
+                isPresented: $showAnalysisChoices,
+                titleVisibility: .visible
+            ) {
+                Button(AppLanguage.localized("mail.analysis.onDeviceRequest", defaultValue: "On-device summary", language: .current)) {
+                    Task { await reanalyzeCurrentEmail() }
+                }
+                .accessibilityIdentifier("mail.detail.reanalyzeLocal")
+                if offersOpenAIAnalysis {
+                    Button(AppLanguage.localized("mail.openai.basicRequest", defaultValue: "OpenAI basic analysis · gpt-6-luna", language: .current)) {
+                        presentOpenAIAnalysis(.basic)
+                    }
+                    .accessibilityIdentifier("mail.detail.openAIBasic")
+                    Button(AppLanguage.localized("mail.openai.advancedRequest", defaultValue: "Re-request important content · gpt-6.1-sol", language: .current)) {
+                        presentOpenAIAnalysis(.advanced)
+                    }
+                    .accessibilityIdentifier("mail.detail.openAIAdvanced")
+                }
+                Button(AppLanguage.localized("action.cancel", defaultValue: "Cancel", language: .current), role: .cancel) {}
+            } message: {
+                if offersOpenAIAnalysis {
+                    Text(AppLanguage.localized(
+                        "mail.openai.explanation",
+                        defaultValue: "Optional external analysis needs separate sharing consent. Automatic email analysis stays on device.",
+                        language: .current
+                    ))
+                }
+            }
+            .onChange(of: offersOpenAIAnalysis) { _, available in
+                if !available {
+                    showAnalysisChoices = false
+                    showOpenAIAnalysis = false
+                }
             }
             .task {
                 await synchronizeReadLoadContentAndAnalyze()
@@ -401,8 +384,43 @@ struct MailDetailView: View {
         }
     }
 
+    private var reanalyzeButton: some View {
+        Button {
+            if offersOpenAIAnalysis {
+                showAnalysisChoices = true
+            } else {
+                Task { await reanalyzeCurrentEmail() }
+            }
+        } label: {
+            if isReanalyzing || email.analysisState == .analyzing {
+                ProgressView().controlSize(.mini)
+            } else {
+                Label("다시 요약", systemImage: "arrow.triangle.2.circlepath")
+            }
+        }
+        .font(.caption.weight(.semibold))
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .disabled(isReanalyzing || isLoadingBody || email.analysisState == .analyzing)
+        .accessibilityIdentifier("mail.detail.reanalyze")
+    }
+
+    private func presentOpenAIAnalysis(_ tier: OpenAIAnalysisTier) {
+        guard offersOpenAIAnalysis else { return }
+        openAITier = tier
+        showOpenAIAnalysis = true
+    }
+
     @MainActor
     private func synchronizeReadLoadContentAndAnalyze() async {
+        do {
+            try MailboxLocalStore.live.markViewedInApp(email, in: modelContext)
+        } catch {
+            alert = MailDetailAlert(
+                title: AppLanguage.localized("mail.alert.statusSaveError", defaultValue: "메일 상태 저장 오류", language: .current),
+                message: error.localizedDescription
+            )
+        }
         let key = EmailMessageKey(email)
         let provider = MailboxProviderRegistry.provider(for: email.provider)
         if !email.isRead {

@@ -215,58 +215,24 @@ struct MeetingRefinementEngine {
         let source: Source
         switch engine {
         case .afm:
-            do {
-                guard #available(iOS 26.0, *) else { throw RefinementError.engineUnavailable }
-                let batchResult: TranscriptCorrectionBatchResult
-                if let afmProvider {
-                    batchResult = try await afmProvider.correct(
-                        segments: mapped,
-                        glossaryHint: vocabulary.promptHint,
-                        sourceLanguageTag: sourceLanguageTag,
-                        language: language
-                    )
-                } else {
-                    batchResult = try await FoundationModelsService()
-                        .correctTranscript(
-                            segments: mapped,
-                            glossaryHint: vocabulary.promptHint,
-                            sourceLanguageTag: sourceLanguageTag,
-                            language: language
-                        )
-                }
-                guard batchResult.succeededBatchCount > 0 || batchResult.failedBatchCount == 0 else {
-                    throw RefinementError.invalidModelResponse
-                }
-                corrected = batchResult.segments
-                source = .appleIntelligence
-            } catch is CancellationError {
-                throw CancellationError()
-            } catch {
-                guard policy.authorizes(.onDevice, for: .transcriptRefinement) else {
-                    throw error
-                }
-                if let onDeviceProvider {
-                    let batchResult = try await onDeviceProvider.correct(
-                        segments: mapped,
-                        glossaryHint: vocabulary.promptHint,
-                        sourceLanguageTag: sourceLanguageTag,
-                        language: language
-                    )
-                    guard batchResult.succeededBatchCount > 0 || batchResult.failedBatchCount == 0 else {
-                        throw RefinementError.invalidModelResponse
-                    }
-                    corrected = batchResult.segments
-                } else {
-                    corrected = try await correctViaLocalLLM(
-                        segments: mapped,
-                        glossaryHint: vocabulary.promptHint,
-                        sourceLanguageTag: sourceLanguageTag,
-                        language: language,
-                        allowModelLoad: allowModelLoad
-                    )
-                }
-                source = .qwen
+            guard #available(iOS 26.0, *) else { throw RefinementError.engineUnavailable }
+            let batchResult: TranscriptCorrectionBatchResult
+            if let afmProvider {
+                batchResult = try await afmProvider.correct(
+                    segments: mapped, glossaryHint: vocabulary.promptHint,
+                    sourceLanguageTag: sourceLanguageTag, language: language
+                )
+            } else {
+                batchResult = try await FoundationModelsService().correctTranscript(
+                    segments: mapped, glossaryHint: vocabulary.promptHint,
+                    sourceLanguageTag: sourceLanguageTag, language: language
+                )
             }
+            guard batchResult.succeededBatchCount > 0 || batchResult.failedBatchCount == 0 else {
+                throw RefinementError.invalidModelResponse
+            }
+            corrected = batchResult.segments
+            source = .appleIntelligence
         case .localLLM:
             if let onDeviceProvider {
                 let batchResult = try await onDeviceProvider.correct(

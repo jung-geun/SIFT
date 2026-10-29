@@ -3,6 +3,8 @@
 <plist version="1.0">
 <!-- Keep runtime keys in sync with Info.plist; omit production Gmail OAuth and feedback endpoints. -->
 <dict>
+	<key>NSSupportsLiveActivities</key>
+	<true/>
 	<key>GADApplicationIdentifier</key>
 	<string>ca-app-pub-3940256099942544~1458002511</string>
 	<key>SKAdNetworkItems</key>

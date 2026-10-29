@@ -359,7 +359,8 @@ final class AppTutorialState: ObservableObject {
         case (.emailOptional, .emailDetail):
             return AppTutorialHint(
                 title: "메일 연결",
-                body: "필요하면 여기서 메일 계정을 연결하세요. 메일 연동은 건너뛰어도 됩니다. 확인했으면 뒤로 돌아가 계속하세요."
+                body: "필요하면 계정을 연결하고 뒤로 돌아가 계속하세요.",
+                bodyKey: "tutorial.emailDetail.connect.body"
             )
 
         case (.permissions, .settings):

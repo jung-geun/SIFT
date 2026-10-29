@@ -90,7 +90,7 @@ struct MeetingDetailView: View {
                             selection: Binding(get: { meeting.languageTag }, set: { saveLanguage($0, summary: false) }),
                             options: transcriptionLanguages, identifier: "meeting.detail.sourceLanguage",
                             automaticLanguageDetection: Binding(get: { meeting.automaticLanguageDetection }, set: saveAutomaticLanguageDetection),
-                            automaticDetectionAvailable: offlineModelInstalled, savedAudioOnly: true)
+                            automaticDetectionAvailable: offlineModelInstalled)
                     }
                     if !summaryLanguageOptions.isEmpty {
                         MeetingLanguagePicker(title: MeetingLanguageCopy.summaryTitle,
@@ -101,9 +101,9 @@ struct MeetingDetailView: View {
                         .font(.caption).foregroundStyle(.secondary)
                     MeetingAIAccuracyNotice()
                     if meeting.automaticLanguageDetection {
-                        MeetingAutomaticLanguageNotice(savedAudioOnly: true)
+                        MeetingAutomaticLanguageNotice()
                         if !offlineModelInstalled {
-                            Text(AppLanguage.localized("meeting.offlineTranscription.installRequired", defaultValue: "Install the offline transcription model in Settings → Beta features to use this option.", language: .current, comment: "Offline transcription requires installing its model."))
+                            Text(AppLanguage.localized("meeting.offlineTranscription.installRequired", defaultValue: "Install the Whisper model in Settings → Meeting to use offline transcription.", language: .current, comment: "Offline transcription requires installing its model."))
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                     }
@@ -198,7 +198,7 @@ struct MeetingDetailView: View {
         .onChange(of: meeting.status) { _, _ in Task { await refreshLanguageChoices() } }
         .onChange(of: localModel.loadedModelIdentifier) { _, _ in summaryLanguageOptions = MeetingSummaryLanguages.available }
         .onChange(of: localModel.modelID) { _, _ in summaryLanguageOptions = MeetingSummaryLanguages.available }
-        .onChange(of: SettingsStore.betaSelectedProvider()) { _, _ in summaryLanguageOptions = MeetingSummaryLanguages.available }
+        .onChange(of: BetaFeaturePolicy().routingDecision(for: .meetingAnalysis)) { _, _ in summaryLanguageOptions = MeetingSummaryLanguages.available }
         // Speaker names and pass status change the payload without a new result.
         .task(id: meeting.diarizationData) {
             speakerDisplay = MeetingSpeakerDisplay(record: meeting)
@@ -466,7 +466,7 @@ struct MeetingDetailView: View {
             .disabled(isReprocessing || !offlineModelInstalled)
             }
             if !offlineModelInstalled {
-                Text(AppLanguage.localized("meeting.offlineTranscription.installRequired", defaultValue: "Install the offline transcription model in Settings → Beta features to use this option.", language: .current, comment: "Offline transcription requires installing its model."))
+                Text(AppLanguage.localized("meeting.offlineTranscription.installRequired", defaultValue: "Install the Whisper model in Settings → Meeting to use offline transcription.", language: .current, comment: "Offline transcription requires installing its model."))
                     .font(.caption).foregroundStyle(.secondary)
             }
             if let retryError {
@@ -533,12 +533,14 @@ struct MeetingDetailView: View {
             } else {
                 ScrollViewReader { proxy in
                     ScrollView(.vertical) {
-                        LazyVStack(alignment: .leading, spacing: AppTheme.Spacing.compact) {
+                        LazyVStack(alignment: .leading, spacing: 0) {
                             ForEach(visibleSegments) { segment in
                                 transcriptRow(
                                     segment,
                                     result: result,
                                     isActive: segment.id == activeSegmentID,
+                                    presentation: speakerDisplay.continuity[.init(trackID: meeting.meetingID,
+                                        localID: segment.stableLineageID)],
                                     correction: correction(for: segment.id)
                                 )
                                 .id(segment.id)
@@ -600,7 +602,7 @@ struct MeetingDetailView: View {
         Section {
             if let failure = meeting.offlineASRFailure {
                 Text(failure == .modelUnavailable
-                     ? AppLanguage.localized("meeting.offlineTranscription.modelUnavailable", defaultValue: "Offline model unavailable. Install it in Settings → Beta features and retry.", language: .current, comment: "Offline transcription could not run because its model is unavailable.")
+                     ? AppLanguage.localized("meeting.offlineTranscription.modelUnavailable", defaultValue: "Whisper model unavailable. Install it in Settings → Meeting and retry.", language: .current, comment: "Offline transcription could not run because its model is unavailable.")
                      : (result.segments.isEmpty
                         ? AppLanguage.localized("meeting.offlineTranscription.failedAudioPreserved", defaultValue: "Offline transcription failed. The saved audio is intact and can be retried.", language: .current, comment: "Offline transcription failed without an earlier transcript; saved audio is preserved.")
                         : AppLanguage.localized("meeting.audioTrack.offlineFailed", defaultValue: "Offline transcription failed. Your earlier transcript is intact.", language: .current, comment: "Offline transcription failed while preserving the previous valid transcript.")))
@@ -658,9 +660,6 @@ struct MeetingDetailView: View {
     private func transcriptMetadata(_ segment: MeetingSegment, correction: MeetingProofread.SegmentCorrection?) -> some View {
         Text("\(duration(segment.startMs))–\(duration(segment.endMs))")
             .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-        Text(speakerLabel(for: segment))
-            .font(.caption)
-            .foregroundStyle(segment.speakerIDs.isEmpty ? Color.secondary : AppTheme.accent)
         if let confidence = segment.confidence, confidence < 0.5 {
             Label("확인 필요", systemImage: "exclamationmark.triangle.fill")
                 .font(.caption).foregroundStyle(AppTheme.warning)
@@ -671,38 +670,30 @@ struct MeetingDetailView: View {
         }
     }
 
-    @ViewBuilder
     private func transcriptRow(
         _ segment: MeetingSegment,
         result: MeetingResult,
         isActive: Bool,
+        presentation: MeetingSpeakerContinuity.Presentation?,
         correction: MeetingProofread.SegmentCorrection?
     ) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            ViewThatFits(in: .horizontal) {
-                HStack(alignment: .firstTextBaseline, spacing: AppTheme.Spacing.compact) {
+        let startsTurn = presentation?.startsTurn ?? true
+        return VStack(alignment: .leading, spacing: 4) {
+            if startsTurn {
+                Text(speakerLabel(for: segment, presentation: presentation))
+                    .font(.caption.weight(.medium)).foregroundStyle(AppTheme.secondaryText)
+            }
+            HStack(alignment: .firstTextBaseline, spacing: AppTheme.Spacing.compact) {
+                transcriptText(segment, isActive: isActive, correction: correction)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                VStack(alignment: .trailing, spacing: 2) {
                     transcriptMetadata(segment, correction: correction)
                 }
                 .fixedSize(horizontal: true, vertical: false)
-                VStack(alignment: .leading, spacing: AppTheme.Spacing.compact) {
-                    transcriptMetadata(segment, correction: correction)
-                }
-            }
-            if let correction {
-                Text(inlineAttributed(correction.tokens))
-                    .fontWeight(isActive ? .semibold : .regular)
-            } else {
-                Text(segment.text)
-                    .fontWeight(isActive ? .semibold : .regular)
-                    .foregroundStyle(
-                        (player.isPlaying || player.isPaused) && !isActive
-                            ? Color.secondary
-                            : Color.primary
-                    )
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, AppTheme.Spacing.compact)
+        .padding(.top, startsTurn ? AppTheme.Spacing.compact : 2)
+        .padding(.bottom, 2)
         .padding(.horizontal, AppTheme.Spacing.item)
         .contentShape(Rectangle())
         .onTapGesture {
@@ -726,9 +717,12 @@ struct MeetingDetailView: View {
             ? AppLanguage.localized("meeting.transcript.playbackHint.active", defaultValue: "Current playback segment. Double-tap to play from this segment.", language: .current, comment: "Accessibility hint for the currently playing transcript segment.")
             : AppLanguage.localized("meeting.transcript.playbackHint", defaultValue: "Double-tap to play from this segment.", language: .current, comment: "Accessibility hint for a playable transcript segment."))
         .accessibilityValue(
-            correction.map {
-                String(format: AppLanguage.localized("meeting.transcript.correction.accessibilityValue", defaultValue: "Before correction: %1$@. After correction: %2$@.", language: .current, comment: "Accessibility comparison of original and corrected transcript text."), locale: AppLanguage.current.locale, $0.before, $0.after)
-            } ?? segment.text
+            MeetingSpeakerLabelFormatter.accessibilityValue(
+                speakerLabel: speakerLabel(for: segment, presentation: presentation),
+                transcript: correction.map {
+                    String(format: AppLanguage.localized("meeting.transcript.correction.accessibilityValue", defaultValue: "Before correction: %1$@. After correction: %2$@.", language: .current, comment: "Accessibility comparison of original and corrected transcript text."), locale: AppLanguage.current.locale, $0.before, $0.after)
+                } ?? segment.text,
+                inherited: presentation?.isInherited == true)
         )
         .contextMenu {
             Button("내용 수정") {
@@ -757,6 +751,19 @@ struct MeetingDetailView: View {
         }
     }
 
+    @ViewBuilder
+    private func transcriptText(_ segment: MeetingSegment, isActive: Bool,
+                                correction: MeetingProofread.SegmentCorrection?) -> some View {
+        if let correction {
+            Text(inlineAttributed(correction.tokens))
+                .fontWeight(isActive ? .semibold : .regular)
+        } else {
+            Text(segment.text)
+                .fontWeight(isActive ? .semibold : .regular)
+                .foregroundStyle((player.isPlaying || player.isPaused) && !isActive ? Color.secondary : Color.primary)
+        }
+    }
+
     private func seek(to segment: MeetingSegment) {
         guard let manifest = meeting.audioManifest else { return }
         let total = totalMs(manifest)
@@ -772,7 +779,8 @@ struct MeetingDetailView: View {
         meeting.status == .finalizingTranscript || isAnalyzing || isRetryingTranscript || isDiarizing
     }
 
-    private func speakerLabel(for segment: MeetingSegment) -> String {
+    private func speakerLabel(for segment: MeetingSegment,
+                              presentation: MeetingSpeakerContinuity.Presentation?) -> String {
         if segment.speakerIDs.isEmpty, speakerDisplay.mixedSegmentIDs.contains(segment.id) {
             return AppLanguage.localized(
                 "meeting.speaker.mixed",
@@ -784,7 +792,9 @@ struct MeetingDetailView: View {
             )
         }
         return MeetingSpeakerLabelFormatter.label(
-            for: segment.speakerIDs, profiles: speakerDisplay.profiles, state: .final
+            for: presentation?.speakerIDs ?? segment.speakerIDs, profiles: speakerDisplay.profiles,
+            state: presentation?.isInherited == true ? .provisional : .final,
+            kind: presentation?.kind ?? .speaker
         )
     }
 

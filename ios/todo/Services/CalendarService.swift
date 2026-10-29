@@ -354,13 +354,14 @@ final class CalendarService {
     }
 
     /// Direct Calendar-tab user action. Todo callers must use removeTodoEvent instead.
-    /// - Returns: whether the selected EventKit event was found and removed.
-    func removeEvent(eventID: String) throws -> Bool {
-        guard isAuthorized,
-              let event = event(withIdentifier: eventID) else { return false }
+    func removeEvent(eventID: String) throws -> CommittedMutation {
+        guard isAuthorized else { throw CalendarError.notAuthorized }
+        guard let event = event(withIdentifier: eventID) else { throw CalendarError.eventUnavailable }
+        guard event.calendar?.allowsContentModifications == true else { throw CalendarError.destinationUnavailable }
+        let original = Self.summary(for: event)
         try store.remove(event, span: .thisEvent)
         markUnresolvedEventID(eventID)
-        return true
+        return CommittedMutation(original: original, saved: nil, scope: .thisEvent)
     }
 
     /// 반복 이벤트 삭제 범위:
@@ -371,25 +372,24 @@ final class CalendarService {
         eventID: String,
         on date: Date,
         scope: CalendarRecurrenceScope = .thisEvent
-    ) throws {
-        guard isAuthorized else { return }
-
-        if scope == .allEvents, let series = event(withIdentifier: eventID) {
-            try store.remove(series, span: .futureEvents)
-            markUnresolvedEventID(eventID)
-            return
+    ) throws -> CommittedMutation {
+        guard isAuthorized else { throw CalendarError.notAuthorized }
+        guard let occurrence = exactOccurrence(identifier: eventID, on: date) else {
+            throw CalendarError.eventUnavailable
         }
-
-        let start = date.addingTimeInterval(-60)
-        let end   = date.addingTimeInterval(60)
-        let predicate = store.predicateForEvents(withStart: start, end: end, calendars: nil)
-        if let occurrence = store.events(matching: predicate)
-            .first(where: { $0.eventIdentifier == eventID }) {
-            let span: EKSpan = scope == .thisEvent ? .thisEvent : .futureEvents
-            try store.remove(occurrence, span: span)
+        let original = Self.summary(for: occurrence)
+        let target: EKEvent
+        if scope == .allEvents {
+            guard let series = event(withIdentifier: eventID) else { throw CalendarError.eventUnavailable }
+            target = series
         } else {
-            _ = try removeEvent(eventID: eventID)
+            target = occurrence
         }
+        guard target.calendar?.allowsContentModifications == true else { throw CalendarError.destinationUnavailable }
+        try store.remove(target, span: scope == .thisEvent ? .thisEvent : .futureEvents)
+        // Deleting a single occurrence does not invalidate the surviving series.
+        if scope == .allEvents { markUnresolvedEventID(eventID) }
+        return CommittedMutation(original: original, saved: nil, scope: scope)
     }
 
     /// A local link or inferred origin alone is not proof of ownership.
@@ -786,6 +786,8 @@ enum CalendarError: LocalizedError, Equatable {
     case destinationNotSelected
     case destinationUnavailable
     case ownershipNotVerified
+    case eventUnavailable
+    case invalidRange
 
     var errorDescription: String? {
         errorDescription(language: .current)
@@ -799,6 +801,10 @@ enum CalendarError: LocalizedError, Equatable {
             AppLanguage.localized("calendar.destination.notSelected", defaultValue: "Choose a writable calendar in Calendar Settings before exporting.", language: language)
         case .destinationUnavailable:
             AppLanguage.localized("calendar.destination.unavailable", defaultValue: "The selected calendar is missing or read-only. Reconnect its account in system settings or choose another writable calendar.", language: language)
+        case .eventUnavailable:
+            AppLanguage.localized("calendar.timeline.unavailable", defaultValue: "This event is no longer available. Refresh the calendar and try again.", language: language)
+        case .invalidRange:
+            AppLanguage.localized("calendar.event.invalidRange", defaultValue: "The end time must be after the start time.", language: language)
         case .ownershipNotVerified:
             AppLanguage.localized("calendar.ownership.notVerified", defaultValue: language == .korean
                 ? "SIFT가 소유한 캘린더 일정을 하나로 확인할 수 없어 캘린더를 변경하지 않았습니다. 원래 캘린더 계정을 다시 연결하거나 캘린더에서 중복 일정을 확인하세요."
@@ -1777,11 +1783,7 @@ extension CalendarService {
     /// occurrenceDate가 non-nil이면 EventEditSheet 저장 시 updateOccurrence로 분기됨.
     func occurrenceDetail(identifier: String, on date: Date) -> CalendarEventDetail? {
         guard isAuthorized else { return nil }
-        let scanStart = date.addingTimeInterval(-60)
-        let scanEnd   = date.addingTimeInterval(60)
-        let pred = store.predicateForEvents(withStart: scanStart, end: scanEnd, calendars: nil)
-        if let occurrence = store.events(matching: pred)
-            .first(where: { $0.eventIdentifier == identifier }) {
+        if let occurrence = exactOccurrence(identifier: identifier, on: date) {
             return CalendarEventDetail(
                 identifier: identifier,
                 title: occurrence.title ?? "",
@@ -1794,8 +1796,36 @@ extension CalendarService {
                 occurrenceDate: date
             )
         }
-        // ±60초 스캔 실패 시 첫 발생분 폴백 (occurrenceDate: nil)
-        return eventDetail(identifier: identifier)
+        return nil
+    }
+
+    private func exactOccurrence(identifier: String, on date: Date) -> EKEvent? {
+        let predicate = store.predicateForEvents(withStart: date.addingTimeInterval(-1),
+                                               end: date.addingTimeInterval(1), calendars: nil)
+        return store.events(matching: predicate).first {
+            $0.eventIdentifier == identifier && abs($0.startDate.timeIntervalSince(date)) < 1
+        }
+    }
+
+    static func shiftedSeriesRange(seriesStart: Date, seriesEnd: Date,
+                                   occurrenceStart: Date, occurrenceEnd: Date,
+                                   newStart: Date, newEnd: Date,
+                                   calendar: Calendar = .current) -> (start: Date, end: Date) {
+        var civil = calendar
+        civil.timeZone = TimeZone(secondsFromGMT: 0)!
+        let fields: Set<Calendar.Component> = [.era, .year, .month, .day, .hour, .minute, .second]
+        func shift(_ base: Date, from old: Date, to new: Date) -> Date {
+            guard old != new else { return base }
+            // Project wall-clock components onto a no-DST calendar before taking
+            // the displacement; elapsed hours across a spring gap are not civil hours.
+            let oldCivil = civil.date(from: calendar.dateComponents(fields, from: old))!
+            let newCivil = civil.date(from: calendar.dateComponents(fields, from: new))!
+            let baseCivil = civil.date(from: calendar.dateComponents(fields, from: base))!
+            let shifted = baseCivil.addingTimeInterval(newCivil.timeIntervalSince(oldCivil))
+            return calendar.date(from: civil.dateComponents(fields, from: shifted))!
+        }
+        return (shift(seriesStart, from: occurrenceStart, to: newStart),
+                shift(seriesEnd, from: occurrenceEnd, to: newEnd))
     }
 
     func ekCalendar(withIdentifier id: String) -> EKCalendar? {
@@ -1813,6 +1843,7 @@ extension CalendarService {
         calendarID: String?
     ) throws -> String {
         guard isAuthorized else { throw CalendarError.notAuthorized }
+        guard endDate > startDate else { throw CalendarError.invalidRange }
         let event       = EKEvent(eventStore: store)
         event.title     = title.isEmpty ? "(제목 없음)" : title
         event.startDate = startDate
@@ -1835,15 +1866,19 @@ extension CalendarService {
         startDate: Date,
         endDate: Date,
         notes: String
-    ) throws {
-        guard isAuthorized,
-              let event = event(withIdentifier: identifier) else { return }
+    ) throws -> CommittedMutation {
+        guard isAuthorized else { throw CalendarError.notAuthorized }
+        guard let event = event(withIdentifier: identifier) else { throw CalendarError.eventUnavailable }
+        guard event.calendar?.allowsContentModifications == true else { throw CalendarError.destinationUnavailable }
+        guard endDate > startDate else { throw CalendarError.invalidRange }
+        let original = Self.summary(for: event)
         event.title     = title.isEmpty ? "(제목 없음)" : title
         event.startDate = startDate
         event.endDate   = endDate
         event.notes     = notes.isEmpty ? nil : notes
         try store.save(event, span: .thisEvent)
         markResolvedEventID(event.eventIdentifier)
+        return CommittedMutation(original: original, saved: Self.summary(for: event), scope: .thisEvent)
     }
 
     func deleteEvent(identifier: String) throws {
@@ -1863,38 +1898,42 @@ extension CalendarService {
         endDate: Date,
         notes: String,
         scope: CalendarRecurrenceScope = .thisEvent
-    ) throws {
+    ) throws -> CommittedMutation {
         guard isAuthorized else { throw CalendarError.notAuthorized }
-
-        func applyChanges(to event: EKEvent) {
-            event.title = title.isEmpty ? "(제목 없음)" : title
-            event.startDate = startDate
-            event.endDate = endDate
-            event.notes = notes.isEmpty ? nil : notes
+        guard endDate > startDate else { throw CalendarError.invalidRange }
+        guard let occurrence = exactOccurrence(identifier: identifier, on: occurrenceDate) else {
+            throw CalendarError.eventUnavailable
         }
-
-        if scope == .allEvents, let series = event(withIdentifier: identifier) {
-            applyChanges(to: series)
-            try store.save(series, span: .futureEvents)
-            markResolvedEventID(series.eventIdentifier)
-            return
+        let original = Self.summary(for: occurrence)
+        var mutationCalendar = Calendar(identifier: .gregorian)
+        mutationCalendar.timeZone = occurrence.timeZone ?? .current
+        let target: EKEvent
+        let range: (start: Date, end: Date)
+        if scope == .allEvents {
+            guard let series = event(withIdentifier: identifier) else { throw CalendarError.eventUnavailable }
+            target = series
+            range = Self.shiftedSeriesRange(seriesStart: series.startDate, seriesEnd: series.endDate,
+                occurrenceStart: occurrence.startDate, occurrenceEnd: occurrence.endDate,
+                newStart: startDate, newEnd: endDate, calendar: mutationCalendar)
+        } else {
+            target = occurrence
+            range = (startDate, endDate)
         }
-
-        let scanStart = occurrenceDate.addingTimeInterval(-60)
-        let scanEnd = occurrenceDate.addingTimeInterval(60)
-        let predicate = store.predicateForEvents(withStart: scanStart, end: scanEnd, calendars: nil)
-        if let occurrence = store.events(matching: predicate)
-            .first(where: { $0.eventIdentifier == identifier }) {
-            applyChanges(to: occurrence)
-            let span: EKSpan = scope == .thisEvent ? .thisEvent : .futureEvents
-            try store.save(occurrence, span: span)
-            markResolvedEventID(occurrence.eventIdentifier)
-        } else if let fallback = event(withIdentifier: identifier) {
-            applyChanges(to: fallback)
-            let span: EKSpan = scope == .thisEvent ? .thisEvent : .futureEvents
-            try store.save(fallback, span: span)
-            markResolvedEventID(fallback.eventIdentifier)
-        }
+        guard target.calendar?.allowsContentModifications == true else { throw CalendarError.destinationUnavailable }
+        guard range.end > range.start else { throw CalendarError.invalidRange }
+        target.title = title.isEmpty ? "(제목 없음)" : title
+        target.startDate = range.start
+        target.endDate = range.end
+        target.notes = notes.isEmpty ? nil : notes
+        try store.save(target, span: scope == .thisEvent ? .thisEvent : .futureEvents)
+        markResolvedEventID(target.eventIdentifier)
+        let saved = Self.summary(for: target)
+        let selected = CalendarEventSummary(title: saved.title, notes: saved.notes,
+            startDate: startDate, endDate: endDate, isRecurring: saved.isRecurring,
+            isAllDay: saved.isAllDay, identifier: saved.identifier,
+            externalIdentifier: saved.externalIdentifier, marker: saved.marker,
+            calendarTitle: saved.calendarTitle, calendarID: saved.calendarID)
+        return CommittedMutation(original: original, saved: selected, scope: scope, calendar: mutationCalendar)
     }
 }
 

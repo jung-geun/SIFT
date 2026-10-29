@@ -207,8 +207,8 @@ struct MemoryServiceTests {
         #expect(result.behaviorProfile.insight(for: .deletedCompletedShare)?.denominator == 2)
     }
 
-    @Test("AFM behavior narration preserves deterministic metrics and profile")
-    func AFMNarrationPreservesDeterministicMetrics() async throws {
+    @Test("local and Apple narratives preserve verified metrics", arguments: [PersonaAIProvider.foundationModels, .onDevice])
+    func narrationPreservesDeterministicMetrics(provider: PersonaAIProvider) async throws {
         let now = makeDate(day: 10, hour: 12)
         let completed = completedTodo(
             title: "confidential",
@@ -216,15 +216,17 @@ struct MemoryServiceTests {
             completedAt: makeDate(day: 2, hour: 10)
         )
         let baseline = MemoryService.computeAnalysis(todos: [completed], now: now, language: .english)
-        let service = BehaviorNarrationService(
-            narrativeProvider: { _, _ in
+        let narrative: BehaviorNarrationService.NarrativeProvider = { _, _ in
                 BehaviorNarrative(
                     summary: "  Completion records are concentrated in the observed window.  ",
                     insights: ["  One deterministic observation. ", ""]
                 )
-            },
-            routingDecisionProvider: { .providers([.foundationModels]) },
-            availabilityProvider: { true }
+        }
+        let service = BehaviorNarrationService(
+            narrativeProvider: narrative,
+            routingDecisionProvider: { .providers([provider]) },
+            availabilityProvider: { provider == .foundationModels },
+            localNarrativeProvider: narrative
         )
 
         let result = try await service.enrich(baseline, language: .english)
@@ -238,17 +240,16 @@ struct MemoryServiceTests {
         #expect(result.recordTitle == baseline.recordTitle)
         #expect(result.accessScopeSummary == baseline.accessScopeSummary)
         #expect(result.behaviorProfile == baseline.behaviorProfile)
-        #expect(result.processorDescription == "Apple Foundation Models · deterministic metrics")
     }
 
-    @Test("explicit local selection retains the deterministic behavior result")
-    func explicitLocalSelectionDoesNotInvokeAFMNarration() async throws {
+    @Test("a remote priority choice cannot send a basic behavior analysis")
+    func basicAnalysisNeverInheritsRemotePriority() async throws {
         let now = makeDate(day: 10, hour: 12)
         let baseline = MemoryService.computeAnalysis(todos: [], now: now, language: .english)
         let service = BehaviorNarrationService(
             narrativeProvider: { _, _ in throw CancellationError() },
-            routingDecisionProvider: { .providers([.onDevice]) },
-            availabilityProvider: { true }
+            routingDecisionProvider: { .providers([.openAI]) },
+            availabilityProvider: { false }
         )
 
         let result = try await service.enrich(baseline, language: .english)

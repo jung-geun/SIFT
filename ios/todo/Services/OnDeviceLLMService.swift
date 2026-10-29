@@ -74,7 +74,7 @@ final class OnDeviceLLMService: ObservableObject {
         // ── MiniCPM5 1B (MLX Community 4bit, HuggingFace chat template 사용) ─────────
         ModelOption(
             id: "mlx-community/MiniCPM5-1B-4bit",
-            displayName: "MiniCPM5-1B · 4bit (경량 범용, ~0.62GB)",
+            displayName: "MiniCPM5-1B · 4bit (~0.62 GB)",
             sizeMB: 620,
             minMemoryGiB: 5.0,
             promptPrefix: "<s>",
@@ -83,13 +83,13 @@ final class OnDeviceLLMService: ObservableObject {
         // ── 범용 Qwen 모델 (성능 비교용) ──────────────────────────
         ModelOption(
             id: "mlx-community/Qwen3.5-2B-MLX-4bit",
-            displayName: "Qwen3.5-2B · 4bit (범용, ~1.4GB)",
+            displayName: "Qwen3.5-2B · 4bit (~1.4 GB)",
             sizeMB: 1400,
             minMemoryGiB: 5.0
         ),
         ModelOption(
             id: "mlx-community/Qwen3.5-4B-MLX-4bit",
-            displayName: "Qwen3.5-4B · 4bit (범용 고품질, ~2.4GB)",
+            displayName: "Qwen3.5-4B · 4bit (~2.4 GB)",
             sizeMB: 2400,
             minMemoryGiB: 7.0
         ),
@@ -165,6 +165,7 @@ final class OnDeviceLLMService: ObservableObject {
     private var loadingTask: Task<Void, Never>?
     /// 현재 실행 중인 generate() 태스크 — 백그라운드 진입 시 즉시 취소에 사용.
     private var generationTask: Task<String, Error>?
+    private var generationSequence: UInt64 = 0
     /// generate()가 CancellationError를 LLMError.cancelled로 변환할 때 첨부할 사유.
     private(set) var lastUnloadReason: UnloadReason?
 
@@ -317,6 +318,7 @@ final class OnDeviceLLMService: ObservableObject {
             defer { isLoading = false }
             do {
                 try await runtime.load()
+                try Task.checkCancellation()
                 loadedModelID = selectedID
                 isModelLoaded = true
                 downloadProgress = 1
@@ -333,7 +335,12 @@ final class OnDeviceLLMService: ObservableObject {
         }
         let task = Task<Void, Never> { [weak self] in await self?.performLoad(idToLoad: selectedID) }
         loadingTask = task
-        await task.value
+        isLoading = true
+        await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
+        }
     }
 
     private func performLoad(idToLoad: String) async {
@@ -369,7 +376,7 @@ final class OnDeviceLLMService: ObservableObject {
                 return
             }
             let config = ModelConfiguration(id: idToLoad)
-            container = try await LLMModelFactory.shared.loadContainer(
+            let loadedContainer = try await LLMModelFactory.shared.loadContainer(
                 from: HuggingFaceHubDownloader(),
                 using: tokenizerLoader(for: idToLoad),
                 configuration: config,
@@ -379,6 +386,8 @@ final class OnDeviceLLMService: ObservableObject {
                     }
                 }
             )
+            try Task.checkCancellation()
+            container = loadedContainer
             loadedModelID = idToLoad
             isModelLoaded = true
             downloadInterrupted = false
@@ -519,12 +528,15 @@ final class OnDeviceLLMService: ObservableObject {
             )
         }
         if let runtime {
-            return try await runtime.generate(
+            let result = try await runtime.generate(
                 systemPrompt: systemPrompt,
                 userPrompt: userPrompt,
                 maxTokens: maxTokens,
                 contextLength: contextLength
             )
+            try Task.checkCancellation()
+            guard policy.authorizes(.onDevice, for: use) else { throw CancellationError() }
+            return result
         }
         guard let container else { throw LLMError.modelNotLoaded }
         guard UIApplication.shared.applicationState == .active else { throw LLMError.appInBackground }
@@ -616,15 +628,26 @@ final class OnDeviceLLMService: ObservableObject {
                         lastProgressLog = Date()
                     }
                 }
+                try Task.checkCancellation()
                 return output
             }
         }
         generationTask = task
-        defer { generationTask = nil }
+        generationSequence &+= 1
+        let sequence = generationSequence
+        defer {
+            if generationSequence == sequence { generationTask = nil }
+        }
 
         let result: String
         do {
-            result = try await task.value
+            result = try await withTaskCancellationHandler {
+                try await task.value
+            } onCancel: {
+                task.cancel()
+            }
+            try Task.checkCancellation()
+            guard policy.authorizes(.onDevice, for: use) else { throw CancellationError() }
         } catch is CancellationError {
             Self.trace(requestID, "stage=cancelled reason=\(lastUnloadReason?.rawValue ?? "unknown") elapsedMS=\(Self.elapsedMS(since: startedAt))")
             throw CancellationError()
@@ -1192,9 +1215,9 @@ final class OnDeviceLLMService: ObservableObject {
         var sizeMB: Int { 0 }
     }
     static let modelCatalog: [ModelOption] = [
-        ModelOption(id: "mlx-community/MiniCPM5-1B-4bit", displayName: "MiniCPM5-1B · 4bit (경량 범용, ~0.62GB)", sizeMB: 620, minMemoryGiB: 5.0),
-        ModelOption(id: "mlx-community/Qwen3.5-2B-MLX-4bit", displayName: "Qwen3.5-2B · 4bit (범용, ~1.4GB)", sizeMB: 1400, minMemoryGiB: 5.0),
-        ModelOption(id: "mlx-community/Qwen3.5-4B-MLX-4bit", displayName: "Qwen3.5-4B · 4bit (범용 고품질, ~2.4GB)", sizeMB: 2400, minMemoryGiB: 7.0),
+        ModelOption(id: "mlx-community/MiniCPM5-1B-4bit", displayName: "MiniCPM5-1B · 4bit (~0.62 GB)", sizeMB: 620, minMemoryGiB: 5.0),
+        ModelOption(id: "mlx-community/Qwen3.5-2B-MLX-4bit", displayName: "Qwen3.5-2B · 4bit (~1.4 GB)", sizeMB: 1400, minMemoryGiB: 5.0),
+        ModelOption(id: "mlx-community/Qwen3.5-4B-MLX-4bit", displayName: "Qwen3.5-4B · 4bit (~2.4 GB)", sizeMB: 2400, minMemoryGiB: 7.0),
     ]
     static var physicalMemoryGiB: Double { Double(ProcessInfo.processInfo.physicalMemory) / (1_024 * 1_024 * 1_024) }
     static let minCapableMemoryGiB: Double = 5.0

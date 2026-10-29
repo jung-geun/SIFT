@@ -43,19 +43,13 @@ struct OpenAISettingsView: View {
                     }
                 ))
                 .accessibilityIdentifier("openai.enabled")
-                Text(copy("openai.settings.optionalNotice", fallback: "OpenAI 연결은 선택 사항입니다. ChatGPT Plus·Pro의 사용 가능한 한도와 승인된 앱 권한을 사용합니다. 로그인만으로 데이터 전송에 동의한 것으로 처리하지 않습니다."))
-                    .font(.footnote)
                 Text(copy("openai.settings.models", fallback: "기초 분석: gpt-6-luna\n직접 누른 고급 재요청: gpt-6.1-sol"))
                     .font(.footnote.monospaced())
-                Text(copy("openai.settings.subscriptionNotice", fallback: "이 구독 연결은 로컬 개인 프로젝트·오픈소스 및 승인된 앱에 제공됩니다. 유료·원격 호스팅 배포에는 OpenAI 승인이 필요합니다. 계정별 모델 제공 여부와 한도는 OpenAI가 결정합니다."))
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                Text(copy("openai.settings.syncNotice", fallback: "앱의 iCloud 동기화와 iCloud 키체인이 켜져 있으면 같은 Apple 계정의 다른 기기에서 ChatGPT 연결을 복원합니다. Apple의 동기화 완료 후 적용되며, 제공자 활성화와 데이터 전송 동의는 각 기기에서 따로 설정합니다."))
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+            } footer: {
+                Text(copy("openai.settings.connectionNotice", fallback: "선택 사항입니다. ChatGPT Plus·Pro 한도와 승인된 앱 권한을 사용하며, 로그인은 데이터 전송 동의가 아닙니다. 로컬 개인 프로젝트·오픈소스·승인된 앱에서 제공되며 유료·원격 호스팅 배포에는 OpenAI 승인이 필요합니다. 모델과 한도는 OpenAI가 정합니다."))
             }
 
-            Section(copy("openai.account.section", fallback: "ChatGPT 계정")) {
+            Section {
                 if let active = connection.activeProfile {
                     Label(active.email ?? copy("openai.account.connected", fallback: "연결된 ChatGPT 계정"), systemImage: "person.crop.circle.badge.checkmark")
                         .accessibilityIdentifier("openai.activeAccount")
@@ -140,6 +134,10 @@ struct OpenAISettingsView: View {
                     Text(status).font(.footnote).foregroundStyle(.secondary)
                 }
                 Link(copy("openai.account.manageUsage", fallback: "ChatGPT 사용량·앱 권한 관리"), destination: URL(string: "https://chatgpt.com/settings/usage")!)
+            } header: {
+                Text(copy("openai.account.section", fallback: "ChatGPT 계정"))
+            } footer: {
+                Text(copy("openai.settings.syncNotice", fallback: "앱의 iCloud 동기화와 iCloud 키체인을 켜면 같은 Apple 계정에서 연결을 복원할 수 있습니다. Apple의 동기화 완료 후 적용되며, 제공자 활성화와 전송 동의는 기기마다 설정합니다."))
             }
 
             OpenAIModelCatalogSection(connection: connection)
@@ -172,7 +170,7 @@ struct OpenAISettingsView: View {
                         .accessibilityIdentifier("openai.testConnectionResult")
                 }
             } footer: {
-                Text(copy("openai.connection.testExplanation", fallback: "짧고 고정된 테스트 메시지만 전송하며, 저장된 앱 데이터는 보내지 않습니다. 외부 분석 제공자가 꺼져 있거나 할 일·메일·루틴·페르소나 전송에 동의하지 않아도 직접 테스트할 수 있습니다. 구독 사용 한도를 일부 사용할 수 있습니다."))
+                Text(copy("openai.connection.testExplanation", fallback: "테스트는 저장된 앱 데이터 대신 고정 메시지만 전송하며 구독 한도를 사용합니다. 제공자 활성화나 데이터별 전송 동의 없이 실행할 수 있습니다."))
             }
 
             ForEach(OpenAIDataScope.allCases, id: \.rawValue) { scope in
@@ -355,10 +353,10 @@ private struct OpenAIModelCatalogSection: View {
                     .accessibilityIdentifier("openai.modelCatalog")
             } footer: {
                 VStack(alignment: .leading, spacing: AppTheme.Spacing.compact) {
-                    Text(copy("openai.models.notice", "연결된 계정의 목록만 조회하며 추론이나 저장된 앱 데이터 전송을 하지 않습니다. 목록에 있다는 것이 모든 API 사용 권한을 뜻하지는 않습니다."))
+                    Text(copy("openai.models.notice", "계정의 모델 목록만 조회합니다. 추론이나 저장된 앱 데이터 전송은 없으며, 목록이 모든 API 사용 권한을 뜻하지는 않습니다."))
                     Text(copy("openai.models.subscriptionCapabilities", AppLanguage.current == .english
-                        ? "ChatGPT plan usage supports eligible Responses API requests. This subscription flow does not support audio/video input or the transcription API, including speaker diarization. A listed model does not grant access to these capabilities."
-                        : "ChatGPT 요금제로 지원 대상 Responses API 요청을 사용할 수 있습니다. 이 구독 연결은 음성·영상 입력이나 화자 분리를 포함한 전사 API를 지원하지 않습니다. 모델 목록에 표시되어도 이러한 기능의 사용 권한이 부여되지는 않습니다."))
+                        ? "This subscription connection supports eligible Responses API requests, not audio/video input or transcription APIs such as speaker diarization."
+                        : "이 구독 연결은 지원 대상 Responses API 요청에만 사용하며 음성·영상 입력과 화자 분리 등 전사 API는 지원하지 않습니다."))
                 }
                 .font(.footnote)
                 .fixedSize(horizontal: false, vertical: true)
