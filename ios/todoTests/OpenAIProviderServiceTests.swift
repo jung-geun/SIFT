@@ -536,6 +536,7 @@ private final class ProviderConsent: @unchecked Sendable {
         }
     }
 
+
     @Test("a completed structured object also accepts the documented optional response status")
     func optionalStatusAcceptsValidAnalysis() async throws {
         let transport = ResponseTransport()
@@ -586,15 +587,17 @@ private final class ProviderConsent: @unchecked Sendable {
 }
 
 /// IPv4 loopback only; no real account, external requests, or stored app data.
-@MainActor private final class ProviderHTTPFixture {
+private nonisolated final class ProviderHTTPFixture: @unchecked Sendable {
     let generation = UUID()
     private let listener: NWListener
     private let queue = DispatchQueue(label: "todo.tests.openai.responses")
     private let sse: String
     private let inferenceStatus: Int
+    // Mutable socket state is confined to queue, never the test's busy MainActor.
     private var readiness: CheckedContinuation<URL, Error>?
     private var connections: [UUID: NWConnection] = [:]
-    private var timeout: Task<Void, Never>?
+    private var timeout: DispatchWorkItem?
+    private var stopped = false
 
     init(sse: String, inferenceStatus: Int = 200) throws {
         self.sse = sse
@@ -605,83 +608,100 @@ private final class ProviderConsent: @unchecked Sendable {
     }
 
     func start() async throws -> URL {
-        listener.stateUpdateHandler = { [weak self] state in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                switch state {
-                case .ready:
-                    if let port = self.listener.port {
-                        self.timeout?.cancel()
-                        self.timeout = nil
-                        self.readiness?.resume(returning: URL(string: "http://127.0.0.1:\(port.rawValue)")!)
-                        self.readiness = nil
-                    }
-                case .failed(let error):
-                    self.readiness?.resume(throwing: error); self.readiness = nil
-                default: break
+        try await withCheckedThrowingContinuation { continuation in
+            queue.async { [self] in
+                guard !self.stopped else {
+                    continuation.resume(throwing: CancellationError())
+                    return
                 }
+                self.readiness = continuation
+                self.listener.stateUpdateHandler = { [weak self] state in
+                    guard let self, !self.stopped else { return }
+                    switch state {
+                    case .ready:
+                        if let port = self.listener.port {
+                            self.timeout?.cancel()
+                            self.timeout = nil
+                            let waiting = self.readiness
+                            self.readiness = nil
+                            waiting?.resume(returning: URL(string: "http://127.0.0.1:\(port.rawValue)")!)
+                        }
+                    case .failed(let error):
+                        let waiting = self.readiness
+                        self.readiness = nil
+                        self.stopOnQueue()
+                        waiting?.resume(throwing: error)
+                    default: break
+                    }
+                }
+                self.listener.newConnectionHandler = { [weak self] connection in
+                    guard let self, !self.stopped else { connection.cancel(); return }
+                    let id = UUID()
+                    self.connections[id] = connection
+                    connection.start(queue: self.queue)
+                    self.receive(connection, id: id, buffer: Data())
+                }
+                let timeout = DispatchWorkItem { [weak self] in self?.stopOnQueue() }
+                self.timeout = timeout
+                self.queue.asyncAfter(deadline: .now() + 10, execute: timeout)
+                self.listener.start(queue: self.queue)
             }
-        }
-        listener.newConnectionHandler = { [weak self] connection in
-            Task { @MainActor [weak self] in
-                guard let self else { connection.cancel(); return }
-                let id = UUID()
-                self.connections[id] = connection
-                connection.start(queue: self.queue)
-                self.receive(connection, id: id, buffer: Data())
-            }
-        }
-        timeout = Task { [weak self] in
-            do { try await Task.sleep(for: .seconds(10)) } catch { return }
-            self?.stop()
-        }
-        return try await withCheckedThrowingContinuation {
-            readiness = $0
-            listener.start(queue: queue)
         }
     }
 
     func stop() {
+        queue.sync { stopOnQueue() }
+    }
+
+    private func stopOnQueue() {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard !stopped else { return }
+        stopped = true
         timeout?.cancel()
+        timeout = nil
         listener.cancel()
-        readiness?.resume(throwing: URLError(.timedOut)); readiness = nil
+        let waiting = readiness
+        readiness = nil
+        waiting?.resume(throwing: URLError(.timedOut))
         for connection in connections.values { connection.cancel() }
         connections.removeAll()
     }
 
     private func receive(_ connection: NWConnection, id: UUID, buffer: Data) {
+        dispatchPrecondition(condition: .onQueue(queue))
         connection.receive(minimumIncompleteLength: 1, maximumLength: 16384) { [weak self] data, _, complete, error in
-            Task { @MainActor [weak self] in
-                guard let self, self.connections[id] != nil else { return }
-                var bytes = buffer
-                if let data { bytes.append(data) }
-                guard error == nil, bytes.count <= 32768 else { self.close(id); return }
-                if let separator = bytes.range(of: Data("\r\n\r\n".utf8)) {
-                    let headers = String(decoding: bytes[..<separator.lowerBound], as: UTF8.self)
-                    let lines = headers.components(separatedBy: "\r\n")
-                    let length = lines.first { $0.lowercased().hasPrefix("content-length:") }
-                        .flatMap { Int($0.dropFirst(15).trimmingCharacters(in: .whitespaces)) } ?? 0
-                    if bytes.count - separator.upperBound >= length {
-                        let catalog = #"{"models":[{"slug":"gpt-6-luna","display_name":"GPT-6 Luna","visibility":"list"}]}"#
-                        let isCatalog = lines.first == "GET /v1/models HTTP/1.1"
-                        let isInference = lines.first == "POST /v1/responses HTTP/1.1"
-                        let body = isCatalog ? catalog : isInference ? self.sse : "{}"
-                        let type = isInference && self.inferenceStatus == 200 ? "text/event-stream; charset=utf-8" : "application/json"
-                        let status = isCatalog ? "200 OK" : isInference ? "\(self.inferenceStatus) Fixture" : "404 Not Found"
-                        // CRLF exercises the real byte framer's empty-line handling.
-                        let payload = isInference ? body.replacingOccurrences(of: "\n", with: "\r\n") : body
-                        let response = "HTTP/1.1 \(status)\r\nContent-Type: \(type)\r\nContent-Length: \(payload.utf8.count)\r\nConnection: close\r\n\r\n\(payload)"
-                        connection.send(content: Data(response.utf8), completion: .contentProcessed { [weak self] _ in
-                            Task { @MainActor [weak self] in self?.close(id) }
-                        })
-                        return
-                    }
+            guard let self, self.connections[id] != nil else { return }
+            var bytes = buffer
+            if let data { bytes.append(data) }
+            guard error == nil, bytes.count <= 32768 else { self.close(id); return }
+            if let separator = bytes.range(of: Data("\r\n\r\n".utf8)) {
+                let headers = String(decoding: bytes[..<separator.lowerBound], as: UTF8.self)
+                let lines = headers.components(separatedBy: "\r\n")
+                let length = lines.first { $0.lowercased().hasPrefix("content-length:") }
+                    .flatMap { Int($0.dropFirst(15).trimmingCharacters(in: .whitespaces)) } ?? 0
+                if bytes.count - separator.upperBound >= length {
+                    let catalog = #"{"models":[{"slug":"gpt-6-luna","display_name":"GPT-6 Luna","visibility":"list"}]}"#
+                    let isCatalog = lines.first == "GET /v1/models HTTP/1.1"
+                    let isInference = lines.first == "POST /v1/responses HTTP/1.1"
+                    let body = isCatalog ? catalog : isInference ? self.sse : "{}"
+                    let type = isInference && self.inferenceStatus == 200 ? "text/event-stream; charset=utf-8" : "application/json"
+                    let status = isCatalog ? "200 OK" : isInference ? "\(self.inferenceStatus) Fixture" : "404 Not Found"
+                    // CRLF exercises the real byte framer's empty-line handling.
+                    let payload = isInference ? body.replacingOccurrences(of: "\n", with: "\r\n") : body
+                    let response = "HTTP/1.1 \(status)\r\nContent-Type: \(type)\r\nContent-Length: \(payload.utf8.count)\r\nConnection: close\r\n\r\n\(payload)"
+                    connection.send(content: Data(response.utf8), completion: .contentProcessed { [weak self] _ in
+                        self?.close(id)
+                    })
+                    return
                 }
-                if complete { self.close(id) }
-                else { self.receive(connection, id: id, buffer: bytes) }
             }
+            if complete { self.close(id) }
+            else { self.receive(connection, id: id, buffer: bytes) }
         }
     }
 
-    private func close(_ id: UUID) { connections.removeValue(forKey: id)?.cancel() }
+    private func close(_ id: UUID) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        connections.removeValue(forKey: id)?.cancel()
+    }
 }
