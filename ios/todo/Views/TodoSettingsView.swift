@@ -31,30 +31,44 @@ struct TodoSettingsView: View {
     private var readiness: BetaProviderReadiness { SettingsStore.betaProviderReadiness() }
 
     private var selectableProviders: [PersonaAIProvider] {
-        readiness.selectableProviders(access: access)
-            .filter { $0 != .openAI || regionalAvailability.isAvailable }
+        readiness.selectableProviders(access: access).filter { provider in
+            if provider == .openAI { return regionalAvailability.isAvailable }
+            if provider == .onDevice {
+                return !FoundationModelsAvailability.isDeviceEligible && settingsStore.localModelFallbackEnabled
+            }
+            return true
+        }
     }
 
     private var selectedProviderBinding: Binding<PersonaAIProvider?> {
         Binding(
             get: {
                 let selected = SettingsStore.betaSelectedProvider()
-                return selected == .openAI && !regionalAvailability.isAvailable ? nil : selected
+                return selectableProviders.contains(where: { $0 == selected }) ? selected : nil
             },
-            set: {
-                guard $0 != .openAI || regionalAvailability.isAvailable else { return }
-                settingsStore.setBetaSelectedProvider($0)
-            }
+            set: { settingsStore.setBetaSelectedProvider($0) }
         )
     }
 
+
     var body: some View {
-        let providers = selectableProviders
         Form {
             notificationSection
 
             Section {
-                if providers.isEmpty {
+                if !selectableProviders.isEmpty {
+                    Picker(copy("todo.settings.priority.provider", korean: "정렬에 사용할 AI", english: "AI for Sorting"), selection: selectedProviderBinding) {
+                        if selectedProviderBinding.wrappedValue == nil {
+                            Text("없음").tag(Optional<PersonaAIProvider>.none)
+                        }
+                        ForEach(selectableProviders) { provider in
+                            Label(provider.displayName, systemImage: provider.systemImage)
+                                .tag(Optional(provider))
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .accessibilityIdentifier("beta.providerPicker")
+                } else {
                     Text(copy(
                         "todo.settings.priority.unavailable",
                         korean: "사용 가능한 AI가 없어 규칙 기반으로 정렬합니다.",
@@ -62,24 +76,6 @@ struct TodoSettingsView: View {
                     ))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                } else {
-                    Picker(
-                        copy("todo.settings.priority.provider", korean: "정렬에 사용할 AI", english: "AI for Sorting"),
-                        selection: selectedProviderBinding
-                    ) {
-                        // A ready local provider is the normalized default; nil is only
-                        // meaningful when the ready options contain no local provider.
-                        if selectedProviderBinding.wrappedValue == nil {
-                            Text("없음")
-                                .tag(Optional<PersonaAIProvider>.none)
-                        }
-                        ForEach(providers) { provider in
-                            Label(provider.displayName, systemImage: provider.systemImage)
-                                .tag(Optional(provider))
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .accessibilityIdentifier("beta.providerPicker")
                 }
 
                 NavigationLink(destination: IntelligenceDetailView()) {
@@ -90,22 +86,13 @@ struct TodoSettingsView: View {
                 .accessibilityIdentifier("todo.priority.rules.row")
                 .appTutorialAnchor(screen: .todoSettings, steps: [.priorityRules], above: true)
 
-                NavigationLink(destination: AISettingsView()) {
-                    Label(copy(
-                        "todo.settings.priority.manageProviders",
-                        korean: "AI 제공자 설정",
-                        english: "AI Provider Settings"
-                    ), systemImage: "brain.head.profile")
-                    .labelStyle(SettingsRowLabelStyle())
-                }
-                .accessibilityIdentifier("todo.aiSettings.row")
             } header: {
                 Text(copy("todo.settings.priority.section", korean: "우선순위 정렬", english: "Priority Sorting"))
             } footer: {
                 Text(copy(
                     "todo.settings.priority.footer",
-                    korean: "사용 가능한 AI만 표시합니다. 사용할 수 없으면 마감·중요도 규칙으로 정렬하며 직접 고정한 우선순위는 유지합니다. 계정 연결과 외부 전송 동의는 별도로 필요합니다. 모델 설치는 베타 기능에서 관리합니다.",
-                    english: "Only available AI options are shown. If AI is unavailable, sorting uses due-date and importance rules while preserving manually pinned priorities. Account connection and consent to external data transfers are required separately. Manage model installation in Beta Features."
+                    korean: "AI를 사용할 수 없으면 마감·중요도 규칙으로 정렬합니다. 직접 고정한 우선순위는 유지됩니다.",
+                    english: "When AI is unavailable, sorting uses due-date and importance rules. Manually pinned priorities are preserved."
                 ))
             }
         }

@@ -73,6 +73,10 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterD
     @objc private func openAppSettings(_ sender: UIKeyCommand) {
         NotificationCenter.default.post(name: .settingsRequested, object: nil)
     }
+
+    func applicationWillTerminate(_ application: UIApplication) {
+        MeetingRecordingMacStatusItem.shared.invalidate()
+    }
     #endif
 
     func application(
@@ -298,6 +302,7 @@ struct todoApp: App {
     /// iCloud 동기화 모니터 — 앱 레벨로 승격하여 어느 탭에서든 알림 수신.
     @StateObject private var syncMonitor = CloudSyncMonitor()
     @StateObject private var unexpectedTerminationRecovery = UnexpectedTerminationRecoveryService.shared
+    private let recordingActivity = MeetingRecordingActivityCenter.shared
 
     /// 선택된 탭 (lastUsed 복원용).
     @AppStorage("pieroot.todo.selectedTab") private var selectedTab = 0
@@ -441,6 +446,7 @@ struct todoApp: App {
     // MARK: - Init
 
     init() {
+        _ = MeetingRecordingLiveActivity.shared
         #if DEBUG
         let launchArguments = ProcessInfo.processInfo.arguments
         if launchArguments.contains("-ui-test-reset-beta") {
@@ -464,6 +470,7 @@ struct todoApp: App {
         #if DEBUG
         MailUITestFixture.seedIfNeeded(into: container.emailContainer)
         MeetingSourceTrackSmokeFixture.seedIfNeeded(into: container.meetingContainer)
+        MacPresentationQA.seed(into: container.container)
         #endif
         let service = UserVocabularyService(modelContainer: container.meetingContainer)
         FullCloudSyncService.shared.configure(vocabulary: service)
@@ -510,6 +517,10 @@ struct todoApp: App {
             let tabBinding = Binding<Int>(
                 get: { tabVisibility.clamped(selectedTab) },
                 set: { newTab in
+                    recordingActivity.clearNavigationIntent()
+                    #if targetEnvironment(macCatalyst)
+                    MeetingRecordingMacSceneRegistry.shared.clearNavigationIntent()
+                    #endif
                     let clamped = tabVisibility.clamped(newTab)
                     if tabVisibility.calendarVisible
                         && clamped == AppTabID.calendar.rawValue
@@ -542,6 +553,18 @@ struct todoApp: App {
                     .tag(AppTabID.meeting.rawValue)
             }
             .disableTabBarMinimization()
+            .modifier(MeetingRecordingActivityOverlay {
+                recordingActivity.requestOpenRecording()
+            })
+            #if DEBUG
+            .preferredColorScheme(MacPresentationQA.colorScheme)
+            #endif
+            .modifier(MeetingRecordingNavigationHandler {
+                selectedTab = AppTabID.meeting.rawValue
+                #if !targetEnvironment(macCatalyst)
+                showSettings = false
+                #endif
+            })
             #if targetEnvironment(macCatalyst)
             .modifier(CatalystSettingsPresenter())
             #else
@@ -553,6 +576,9 @@ struct todoApp: App {
                 }
             }) {
                 NavigationStack { PersonaSettingsView() }
+                    .modifier(MeetingRecordingActivityOverlay {
+                        recordingActivity.requestOpenRecording()
+                    })
             }
             #endif
             .environment(\.locale, appLanguage.locale)
@@ -585,7 +611,9 @@ struct todoApp: App {
                 unexpectedTerminationRecovery.enterForeground()
                 Task {
                     await refreshTabVisibility()
-                    if launchBehavior == "fixed" {
+                    if recordingActivity.navigationRequestID != nil {
+                        selectedTab = AppTabID.meeting.rawValue
+                    } else if launchBehavior == "fixed" {
                         selectedTab = launchTab
                     }
                     if hasOnboarded && !hasCompletedTutorial {
@@ -719,9 +747,19 @@ struct todoApp: App {
                     }
                     Task {
                         await refreshTabVisibility()
-                        if launchBehavior == "fixed" {
+                        #if targetEnvironment(macCatalyst)
+                        if MeetingRecordingMacSceneRegistry.shared.hasPendingRecordingNavigation {
+                            selectedTab = AppTabID.meeting.rawValue
+                        } else if launchBehavior == "fixed" {
                             selectedTab = launchTab
                         }
+                        #else
+                        if recordingActivity.navigationRequestID != nil {
+                            selectedTab = AppTabID.meeting.rawValue
+                        } else if launchBehavior == "fixed" {
+                            selectedTab = launchTab
+                        }
+                        #endif
                         await appUpdate.refreshIfNeeded()
                     }
                     if let ctx = appDelegate.modelContext {
@@ -806,6 +844,7 @@ struct todoApp: App {
             CatalystSettingsWindowContent()
                 .modelContainer(appData.container)
                 .appScreenStyle()
+                .modifier(MeetingRecordingActivityOverlay())
                 .tint(AppTheme.accent)
                 .toggleStyle(.switch)
                 .environmentObject(syncMonitor)

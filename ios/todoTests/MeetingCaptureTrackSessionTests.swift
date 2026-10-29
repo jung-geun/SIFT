@@ -23,6 +23,41 @@ struct MeetingCaptureTrackSessionTests {
         #expect(try savedPCM(artifact).allSatisfy { $0 == 12_000 })
     }
 
+    @Test("automatic language selection saves each source without starting live ASR, even past the former detection window",
+          arguments: [0, 4_000, 160_000, 192_000])
+    func automaticLanguageWaitsForSavedAudio(count: Int) async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let mic = try track(root: root, kind: .microphone)
+        let app = try track(root: root, kind: .application, offset: 72_000)
+        let group = UUID().uuidString.lowercased()
+        for child in [mic, app] {
+            await child.prepare(factory: FailingFactory(), languageTag: "", diarizationEnabled: false,
+                                groupID: group, automaticLanguageDetection: true)
+            #expect(child.snapshot.liveTranscriptionWarning != nil)
+            #expect(child.transcriptionError == nil)
+        }
+        if count > 0 {
+            try mic.input.append(pcm(value: 1_000, count: count))
+            try app.input.append(pcm(value: -2_000, count: count))
+        }
+        let microphone = try mic.finishAudio(metadata: nil)
+        let application = try app.finishAudio(metadata: nil)
+        await mic.finalize(timeout: .seconds(1))
+        await app.finalize(timeout: .seconds(1))
+        #expect(mic.transcriptionError == nil && app.transcriptionError == nil)
+        #expect(mic.transcriptionFinalizationError == nil && app.transcriptionFinalizationError == nil)
+        #expect(mic.snapshot.liveTranscriptRows.isEmpty && app.snapshot.liveTranscriptRows.isEmpty)
+        #expect(microphone.provisionalResult.segments.isEmpty && application.provisionalResult.segments.isEmpty)
+        #expect(microphone.audioManifest.totalSamples == Int64(count))
+        #expect(application.audioManifest.totalSamples == Int64(count))
+        #expect(application.sessionStartSample == 72_000)
+        if count > 0 {
+            #expect(try savedPCM(microphone) == Array(repeating: Int16(1_000), count: count))
+            #expect(try savedPCM(application) == Array(repeating: Int16(-2_000), count: count))
+        }
+    }
+
     @Test("mute during suspended speech preparation cannot reopen an old microphone request", arguments: [false, true])
     func mutedPreparationCannotReopen(renewConsent: Bool) async throws {
         let root = temporaryRoot()
@@ -143,13 +178,14 @@ struct MeetingCaptureTrackSessionTests {
         await app.cancel(removeAudio: false)
     }
 
-    @Test("ASR setup failure does not close its FLAC writer or poison another child")
-    func speechFailureIsIndependent() async throws {
+    @Test("known live transcription failures preserve audio without becoming new Stop failures",
+          arguments: [MeetingTranscriptionError.incompatibleAudioFormat, .setupFailed, .runtimeFailed])
+    func speechFailureIsIndependent(error: MeetingTranscriptionError) async throws {
         let root = temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let failed = try track(root: root, kind: .application)
         let other = try track(root: root, kind: .microphone)
-        await failed.prepare(factory: FailingFactory(), languageTag: "en-US", diarizationEnabled: false,
+        await failed.prepare(factory: FailingFactory(error: error), languageTag: "en-US", diarizationEnabled: false,
                              groupID: UUID().uuidString.lowercased())
         try failed.input.append(pcm(value: 5_000))
         try other.input.append(pcm(value: -7_000))
@@ -157,7 +193,8 @@ struct MeetingCaptureTrackSessionTests {
         let otherAudio = try other.finishAudio(metadata: nil)
         await failed.finalize(timeout: .seconds(1))
         await other.finalize(timeout: .seconds(1))
-        #expect(failed.transcriptionError != nil)
+        #expect(failed.transcriptionError as? MeetingTranscriptionError == error)
+        #expect(failed.transcriptionFinalizationError == nil)
         #expect(other.transcriptionError == nil)
         #expect(failed.snapshot.liveTranscriptionWarning != nil)
         #expect(failedAudio.audioManifest.totalSamples == 16_000)
@@ -165,6 +202,26 @@ struct MeetingCaptureTrackSessionTests {
         #expect(try savedPCM(failedAudio).allSatisfy { $0 == 5_000 })
         #expect(try savedPCM(otherAudio).allSatisfy { $0 == -7_000 })
         #expect(throws: Error.self) { try failed.transcriptionResult() }
+    }
+
+    @Test("a new end-of-input transcription failure remains reportable and preserves original audio")
+    func newFinalizationFailureIsNotSuppressed() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let child = try track(root: root, kind: .microphone)
+        let speech = ScriptedTrackSpeechSession(failAtEnd: true)
+        await child.prepare(factory: ScriptedTrackFactory(session: speech), languageTag: "en-US",
+                            diarizationEnabled: false, groupID: UUID().uuidString.lowercased())
+        try child.input.append(pcm(value: 9_000))
+        let audio = try child.finishAudio(metadata: nil)
+        #expect(child.transcriptionError == nil)
+        await child.finalize(timeout: .seconds(2))
+        #expect(child.transcriptionError as? MeetingTranscriptionError == .runtimeFailed)
+        #expect(child.transcriptionFinalizationError as? MeetingTranscriptionError == .runtimeFailed)
+        #expect(child.snapshot.liveTranscriptionWarning != nil)
+        #expect(audio.audioManifest.totalSamples == 16_000)
+        #expect(try savedPCM(audio).allSatisfy { $0 == 9_000 })
+        #expect(throws: Error.self) { try child.transcriptionResult() }
     }
 
     @Test("audio durability precedes ASR finalization and closes late PCM admission")
@@ -265,8 +322,9 @@ private nonisolated final class TrackInputs: @unchecked Sendable {
 }
 
 private struct FailingFactory: MeetingTranscriptionSessionFactory {
+    var error: MeetingTranscriptionError = .setupFailed
     func make(languageTag: String, purpose: MeetingTranscriptionPurpose) async throws -> any MeetingTranscriptionSession {
-        throw MeetingTranscriptionError.setupFailed
+        throw error
     }
 }
 
@@ -283,8 +341,10 @@ private final class ScriptedTrackSpeechSession: MeetingTranscriptionSession, @un
                                     channels: 1, interleaved: true)!
     let results: AsyncThrowingStream<MeetingTranscriptionResult, Error>
     private let continuation: AsyncThrowingStream<MeetingTranscriptionResult, Error>.Continuation
+    private let failAtEnd: Bool
 
-    init() {
+    init(failAtEnd: Bool = false) {
+        self.failAtEnd = failAtEnd
         let stream = AsyncThrowingStream<MeetingTranscriptionResult, Error>.makeStream(bufferingPolicy: .bufferingOldest(16))
         results = stream.stream
         continuation = stream.continuation
@@ -300,6 +360,10 @@ private final class ScriptedTrackSpeechSession: MeetingTranscriptionSession, @un
 
     func analyze(_ input: AsyncStream<AnalyzerInput>) async throws {
         for await _ in input { try Task.checkCancellation() }
+        if failAtEnd {
+            continuation.finish(throwing: MeetingTranscriptionError.runtimeFailed)
+            throw MeetingTranscriptionError.runtimeFailed
+        }
         continuation.finish()
     }
 

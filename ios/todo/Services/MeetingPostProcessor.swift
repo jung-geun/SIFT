@@ -48,10 +48,10 @@ enum MeetingPostProcessor {
             savedSourceLanguageTag = record.languageTag
             automaticLanguageDetection = record.automaticLanguageDetection
             detectedLanguages = record.asrDetectedLanguages
-            // Preserve the intentionally existing legacy output preference.
-            // Actual source evidence must not change the requested summary language.
+            // An explicit output choice wins; Automatic without one follows
+            // the saved ASR evidence, never an empty/manual source placeholder.
             summaryLanguageTag = MeetingSummaryLanguages.requestedLanguageTag(
-                sourceLanguageTag: record.languageTag, savedSummaryLanguageTag: record.summaryLanguageTag
+                sourceLanguageTag: record.processingSourceLanguageTag, savedSummaryLanguageTag: record.summaryLanguageTag
             )
         }
     }
@@ -64,7 +64,7 @@ enum MeetingPostProcessor {
               record.automaticLanguageDetection == languages.automaticLanguageDetection,
               record.asrDetectedLanguages == languages.detectedLanguages,
               MeetingSummaryLanguages.requestedLanguageTag(
-                sourceLanguageTag: record.languageTag, savedSummaryLanguageTag: record.summaryLanguageTag
+                sourceLanguageTag: record.processingSourceLanguageTag, savedSummaryLanguageTag: record.summaryLanguageTag
               ) == languages.summaryLanguageTag else {
             reporter?.reset()
             throw Failure.superseded

@@ -28,6 +28,11 @@ final class EmailMessage {
     var htmlBody: String? = nil   // 원본 HTML 본문 (WKWebView 렌더링용) — 온디바이스 전용
     var receivedAt: Date = Date.distantPast
     var isRead: Bool = false
+    /// Local attention state, independent of the provider's read/unread flags.
+    /// Legacy cached rows default to viewed; only a genuine mailbox upsert insert opts in.
+    var hasBeenViewedInApp: Bool = true
+
+    var isNewlyImportedUnseen: Bool { isInInbox && !hasBeenViewedInApp }
     var providerRawValue: String = MailProvider.gmail.rawValue
     var rawMessageID: String = ""
     /// Provider-native immutable message identity: Gmail X-GM-MSGID or Outlook RFC Message-ID.

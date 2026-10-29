@@ -63,7 +63,7 @@ final class RealDeviceDiarizationAcceptanceTests: XCTestCase {
     func testA_InstallSpeakerModel() throws {
         launch(tab: 0)
         openSettings()
-        let row = app.buttons["settings.betaRow"]
+        let row = app.buttons["settings.meetingRow"]
         scrollTo(row)
         row.tap()
 
@@ -76,9 +76,9 @@ final class RealDeviceDiarizationAcceptanceTests: XCTestCase {
         XCTAssertEqual(toggle.value as? String, "1")
 
         // If the model is already installed on the device, preserve it.
-        let installed = app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "화자 모델 설치됨")).firstMatch
+        let installed = app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "전체 화자 모델 팩 설치됨")).firstMatch
         if installed.exists {
-            shot("beta-installed")
+            shot("meeting-speaker-model-installed")
             XCTAssertTrue(installed.exists)
             return
         }

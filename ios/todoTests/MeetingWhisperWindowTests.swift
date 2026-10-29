@@ -301,18 +301,14 @@ struct MeetingWhisperWindowTests {
 
     @Test("Automatic decode uses no locale or text hints and does not skip a subsecond stop")
     func automaticOptions() throws {
-        let live = MeetingLiveLanguageDetection.decodingOptions()
-        let offline = try MeetingOfflineTranscriptionService.decodingOptions(
+        let options = try MeetingOfflineTranscriptionService.decodingOptions(
             languageCode: nil, tokenizer: nil, isMultilingual: true, logitsSize: 51_866)
-        for options in [live, offline] {
-            #expect(options.language == nil)
-            #expect(options.detectLanguage)
-            #expect(options.usePrefillPrompt)
-            #expect(options.promptTokens == nil && options.prefixTokens == nil)
-            #expect(options.windowClipTime == 0)
-            #expect(options.task == .transcribe)
-        }
-        #expect(live.temperatureFallbackCount == 0)
+        #expect(options.language == nil)
+        #expect(options.detectLanguage)
+        #expect(options.usePrefillPrompt)
+        #expect(options.promptTokens == nil && options.prefixTokens == nil)
+        #expect(options.windowClipTime == 0)
+        #expect(options.task == .transcribe)
     }
 
     private func makeTask() -> Adapter {

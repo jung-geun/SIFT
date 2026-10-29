@@ -64,9 +64,9 @@ struct MeetingRefinementBetaTests {
         }
     }
 
-    @Test("AFM failure preserves Bengali/Arabic source language for the enabled local provider", arguments: ["bn-BD", "ar-SA"])
-    func localProviderRunsAfterAFMFailure(sourceLanguageTag: String) async throws {
-        try await AIProviderTestIsolation.shared.withLock {
+    @Test("Apple failure never invokes an installed fallback model", arguments: ["bn-BD", "ar-SA"])
+    func appleFailureDoesNotLoadLocalModel(sourceLanguageTag: String) async {
+        await AIProviderTestIsolation.shared.withLock {
             resetBeta()
             defer { resetBeta() }
             let sourceText = sourceLanguageTag == "bn-BD" ? "বাংলা এবং العربية SIFT" : "العربية এবং বাংলা SIFT"
@@ -91,17 +91,18 @@ struct MeetingRefinementBetaTests {
                     failedBatchCount: 0
                 )
             }
-            let outcome = try await MeetingRefinementEngine(afmProvider: afm, onDeviceProvider: local).refine(
-                meetingID: "123e4567-e89b-12d3-a456-426614174000",
-                result: result(text: sourceText),
-                vocabulary: .empty,
-                sourceLanguageTag: sourceLanguageTag,
-                language: .korean,
-                allowModelLoad: false
-            )
-            #expect(await calls.snapshot == ["afm:\(sourceLanguageTag)", "onDevice:\(sourceLanguageTag)"])
-            #expect(outcome.executionPath == .beta(.onDevice))
-            #expect(outcome.result.segments[0].text == sourceText + ".")
+            let policy = BetaFeaturePolicy(accessReader: {
+                BetaProviderAccess(foundationModelsEnabled: true, onDeviceEnabled: true,
+                    openAIEnabled: false, layaEnabled: false, meetingVoiceProcessingEnabled: false)
+            })
+            await #expect(throws: IntelligenceRoutingError.self) {
+                _ = try await MeetingRefinementEngine(afmProvider: afm, onDeviceProvider: local, policy: policy).refine(
+                    meetingID: "123e4567-e89b-12d3-a456-426614174000",
+                    result: result(text: sourceText), vocabulary: .empty,
+                    sourceLanguageTag: sourceLanguageTag, language: .korean, allowModelLoad: false
+                )
+            }
+            #expect(await calls.snapshot == ["afm:\(sourceLanguageTag)"])
         }
     }
 
@@ -122,7 +123,11 @@ struct MeetingRefinementBetaTests {
                 )
             }
             await #expect(throws: CancellationError.self) {
-                _ = try await MeetingRefinementEngine(afmProvider: afm, onDeviceProvider: local).refine(
+                _ = try await MeetingRefinementEngine(afmProvider: afm, onDeviceProvider: local,
+                    policy: BetaFeaturePolicy(accessReader: {
+                        BetaProviderAccess(foundationModelsEnabled: true, onDeviceEnabled: false,
+                            openAIEnabled: false, layaEnabled: false, meetingVoiceProcessingEnabled: false)
+                    })).refine(
                     meetingID: "123e4567-e89b-12d3-a456-426614174000",
                     result: result(),
                     vocabulary: .empty,

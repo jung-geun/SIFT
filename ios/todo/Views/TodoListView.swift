@@ -298,7 +298,7 @@ struct TodoListView: View {
         showActiveColumn && showOverdueColumn && showReviewColumn && showCompletedColumn
     }
 
-    /// Global search is surfaced from this tab's native pull-down search drawer.
+    /// Global search stays visible above the independently refreshable list.
     let globalSearchAppContainer: ModelContainer?
     let globalSearchEmailContainer: ModelContainer?
     let globalSearchMeetingContainer: ModelContainer?
@@ -307,6 +307,7 @@ struct TodoListView: View {
     let isAdPlacementEligible: Bool
 
     @State private var showAddTodo = false
+    @State private var addTodoDraft = AddTodoDraft()
     @State private var filter: TodoFilter = .active
     @State private var isPrioritizing = false
     @State private var showPrioritizingIndicator = false
@@ -458,12 +459,12 @@ struct TodoListView: View {
             }
                 .searchable(
                     text: $globalSearchText,
-                    placement: .navigationBarDrawer(displayMode: .automatic),
+                    placement: .navigationBarDrawer(displayMode: .always),
                     prompt: Text(AppLanguage.localized(
                         "search.prompt",
                         defaultValue: "할 일, 메일, 회의 검색",
                         language: .current,
-                        comment: "Global pull-down search prompt."
+                        comment: "Global search prompt."
                     ))
                 )
                 .navigationDestination(for: Todo.self) { todo in
@@ -483,7 +484,7 @@ struct TodoListView: View {
                         )
                     }
                 }
-                .navigationBarTitleDisplayMode(horizontalSizeClass == .regular ? .inline : .large)
+                .toolbarTitleDisplayMode(horizontalSizeClass == .regular ? .inline : .inlineLarge)
                 .navigationTitle("할 일")
                 .toolbar { toolbarContent }
                 .disableNavigationBarMinimization()
@@ -551,7 +552,7 @@ struct TodoListView: View {
         .outsideDismissSheet(isPresented: $showAddTodo, onDismiss: {
             tutorial?.handleAddTodoDismissed()
         }) {
-            AddTodoView()
+            AddTodoView(draft: addTodoDraft)
         }
         #endif
         .onReceive(NotificationCenter.default.publisher(for: .tutorialRunPrioritizeRequested)) { _ in
@@ -657,7 +658,8 @@ struct TodoListView: View {
                 onPromote: { promoteTodo($0) },
                 onMoveTodoToColumn: { moveTodo($0, toColumn: $1) },
                 onAddTodo: { openAddTodoIfAllowed() },
-                canOpenAddTodo: canOpenAddTodoDuringTutorial
+                canOpenAddTodo: canOpenAddTodoDuringTutorial,
+                blankAreaCreationEnabled: globalSearchText.isEmpty
             )
         }
     }
@@ -747,14 +749,12 @@ struct TodoListView: View {
     }
 
     private var todoList: some View {
-        todoRows
-            .safeAreaInset(edge: .top, spacing: 0) {
-                VStack(spacing: 0) {
-                    filterBar
-                    taskBanner
-                }
-                .background(AppTheme.canvas, ignoresSafeAreaEdges: [])
-            }
+        VStack(spacing: 0) {
+            filterBar
+            taskBanner
+            todoRows
+        }
+        .background(AppTheme.canvas)
     }
 
     @ViewBuilder
@@ -792,10 +792,14 @@ struct TodoListView: View {
                     .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                         deleteButton(todo)
                     }
+                    .todoBlankAreaExcluded()
                 }
             }
         }
         .appListStyle()
+        .onTodoBlankAreaDoubleTap(enabled: canOpenAddTodoDuringTutorial && globalSearchText.isEmpty) {
+            openAddTodoIfAllowed()
+        }
         .refreshable {
             await CalendarService.shared.syncCalendarWithTodos(context: modelContext)
 #if DEBUG
@@ -820,14 +824,14 @@ struct TodoListView: View {
         VStack(spacing: 16) {
             Image(systemName: emptyIcon)
                 .font(.largeTitle.weight(.light))
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(AppTheme.accent)
                 .accessibilityHidden(true)
             Text(emptyTitle)
                 .font(.title3.weight(.semibold))
             if !emptyDescription.isEmpty {
                 Text(emptyDescription)
                     .font(.body)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(AppTheme.secondaryText)
                     .multilineTextAlignment(.center)
             }
             if filter != .completed {
@@ -845,6 +849,7 @@ struct TodoListView: View {
                 .buttonBorderShape(.roundedRectangle(radius: AppTheme.controlRadius))
                 .padding(.top, 8)
                 .disabled(!canOpenAddTodoDuringTutorial)
+                .todoBlankAreaExcluded()
             }
         }
         .frame(maxWidth: 420)
@@ -877,8 +882,6 @@ struct TodoListView: View {
     private var emptyDescription: String {
         let (key, fallback): (String, String) = switch filter {
         case .active:    ("todo.empty.description.active", "새 할 일을 적고 필요하면 마감일을 설정하세요.")
-        case .overdue:   ("todo.empty.description.overdue", "모든 항목이 기한 내에 있습니다.")
-        case .completed: ("todo.empty.description.completed", "완료한 항목이 여기에 표시됩니다.")
         case .review:    ("todo.empty.description.review", "캘린더에서 가져온 일정이 마감일 순으로 표시됩니다. 스와이프해 진행중으로 추가하면 캘린더에 등록됩니다.")
         default:         ("todo.empty.description.none", "")
         }
@@ -1139,7 +1142,7 @@ struct TodoListView: View {
             .outsideDismissSheet(isPresented: $showAddTodo, onDismiss: {
                 tutorial?.handleAddTodoDismissed()
             }) {
-                AddTodoView()
+                AddTodoView(draft: addTodoDraft)
                     // iPad popovers report compact traits; size the editor for the presenting window.
                     .environment(\.horizontalSizeClass, horizontalSizeClass)
             }
@@ -1248,8 +1251,9 @@ struct TodoListView: View {
     // MARK: - Actions
 
     private func openAddTodoIfAllowed() {
-        guard canOpenAddTodoDuringTutorial else { return }
+        guard canOpenAddTodoDuringTutorial, !showAddTodo else { return }
         tutorial?.handleAddTodoOpened()
+        addTodoDraft = AddTodoDraft()
         showAddTodo = true
     }
 

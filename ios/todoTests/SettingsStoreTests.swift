@@ -28,16 +28,56 @@ struct SettingsStoreTests {
         #expect(analysis?.productiveHour == 10)
     }
 
-    @Test("obsolete local provider flags cannot disable platform or installed-model routing", arguments: [false, true])
-    func obsoleteLocalOptOutCannotDisableImplicitProviders(restoredFromFullStorage: Bool) async throws {
-        try await AIProviderTestIsolation.shared.withLock {
+
+    @Test("Nemotron defaults on without changing a saved opt-out; Whisper stays optional")
+    func meetingModelChoicesPreserveOptOut() async {
+        await AIProviderTestIsolation.shared.withLock {
             let defaults = UserDefaults.standard
-            let keys = [
-                "pieroot.todo.beta.foundationModelsEnabled",
-                "pieroot.todo.beta.onDeviceModelEnabled",
-                SettingsStore.betaOpenAIEnabledKey,
-                SettingsStore.betaLayaEnabledKey
-            ]
+            let keys = [SettingsStore.betaMeetingDiarizationEnabledKey,
+                        SettingsStore.betaMeetingAdvancedTranscriptionEnabledKey]
+            let originals = keys.map { defaults.object(forKey: $0) }
+            defer {
+                for (key, value) in zip(keys, originals) {
+                    if let value { defaults.set(value, forKey: key) }
+                    else { defaults.removeObject(forKey: key) }
+                }
+            }
+            keys.forEach(defaults.removeObject(forKey:))
+            let settings = SettingsStore.shared
+            #expect(settings.effectiveMeetingDiarizationEnabled)
+            #expect(!settings.meetingAdvancedTranscriptionEnabled)
+            settings.meetingDiarizationEnabled = false
+            settings.meetingAdvancedTranscriptionEnabled = true
+            #expect(!settings.effectiveMeetingDiarizationEnabled)
+            #expect(settings.meetingAdvancedTranscriptionEnabled)
+        }
+    }
+
+    @Test("Installed local models do not authorize inference without Beta opt-in")
+    func localFallbackRequiresChoice() async {
+        await AIProviderTestIsolation.shared.withLock {
+            let defaults = UserDefaults.standard
+            let key = SettingsStore.localModelFallbackEnabledKey
+            let original = defaults.object(forKey: key)
+            defer {
+                if let original { defaults.set(original, forKey: key) }
+                else { defaults.removeObject(forKey: key) }
+            }
+            defaults.removeObject(forKey: key)
+            #expect(!SettingsStore.betaProviderAccess().onDeviceEnabled)
+            SettingsStore.shared.localModelFallbackEnabled = true
+            #expect(SettingsStore.betaProviderAccess().onDeviceEnabled
+                == !FoundationModelsAvailability.isDeviceEligible)
+            SettingsStore.shared.localModelFallbackEnabled = false
+            #expect(!BetaFeaturePolicy().authorizes(.onDevice, for: .modelManagement))
+        }
+    }
+
+    @Test("Disabling local fallback also blocks a previously enabled Laya model")
+    func localOptOutDisablesLaya() async {
+        await AIProviderTestIsolation.shared.withLock {
+            let defaults = UserDefaults.standard
+            let keys = [SettingsStore.localModelFallbackEnabledKey, SettingsStore.betaLayaEnabledKey]
             let originals = keys.map { defaults.object(forKey: $0) }
             defer {
                 for (key, original) in zip(keys, originals) {
@@ -45,39 +85,12 @@ struct SettingsStoreTests {
                     else { defaults.removeObject(forKey: key) }
                 }
             }
-            keys.forEach { defaults.set(false, forKey: $0) }
-            if restoredFromFullStorage {
-                let payload = try JSONEncoder().encode(CloudPreferenceValue.boolean(false))
-                for key in keys.prefix(2) {
-                    defaults.removeObject(forKey: key)
-                    try CloudPreferenceStore.apply(
-                        key: CloudPreferenceStore.prefix + key,
-                        payload: payload,
-                        expectedDigest: nil,
-                        defaults: defaults
-                    )
-                }
-            }
-
-            let access = SettingsStore.betaProviderAccess()
-            let readyLocal = BetaProviderReadiness(
-                foundationModelsAvailable: true, onDeviceModelUsable: true,
-                openAIAccountConnected: true, openAIPlanPermitted: true, layaModelUsable: false
-            )
-            #expect(readyLocal.selectableProviders(access: access) == [.foundationModels, .onDevice])
-            #expect(readyLocal.normalizedSelection(.onDevice, access: access) == .onDevice)
-            #expect(readyLocal.normalizedSelection(.openAI, access: access) == .foundationModels)
-            let unavailable = BetaProviderReadiness(
-                foundationModelsAvailable: false, onDeviceModelUsable: false,
-                openAIAccountConnected: true, openAIPlanPermitted: true, layaModelUsable: false
-            )
-            #expect(unavailable.selectableProviders(access: access).isEmpty)
-
-            let policy = BetaFeaturePolicy(selectionReader: { .foundationModels })
-            #expect(policy.routingDecision(for: .emailAnalysis) == .providers([.foundationModels]))
-            #expect(policy.routingDecision(for: .transcriptRefinement) == .providers([.foundationModels, .onDevice]))
-            #expect(policy.authorizes(.onDevice, for: .modelManagement))
-            #expect(!policy.authorizes(.openAI, for: .standardAnalysis))
+            defaults.set(true, forKey: SettingsStore.betaLayaEnabledKey)
+            defaults.set(true, forKey: SettingsStore.localModelFallbackEnabledKey)
+            #expect(SettingsStore.betaProviderAccess().layaEnabled == !FoundationModelsAvailability.isDeviceEligible)
+            SettingsStore.shared.localModelFallbackEnabled = false
+            #expect(!BetaFeaturePolicy().authorizes(.laya, for: .layaModelManagement))
+            #expect(!SettingsStore.betaProviderAccess().onDeviceEnabled)
         }
     }
 

@@ -69,7 +69,8 @@ final class SettingsIntegrationSmokeUITests: SIFTUITestCase {
     func testHealthRequiresSeparateTaskCreationConsent() throws {
         launch()
         openSettings()
-        tap(app.buttons["settings.healthRow"], message: "건강 기록 설정을 열 수 없습니다.")
+        tap(app.buttons["settings.routinesRow"], message: "루틴 설정을 열 수 없습니다.")
+        tap(app.buttons["routines.healthRow"], message: "건강 기록 설정을 열 수 없습니다.")
         require(app.buttons["health.connect.workout"], message: "운동 기록의 독립 연결 동작이 없습니다.")
         require(app.buttons["health.connect.medication"], message: "복약 기록의 독립 연결 동작이 없습니다.")
         let automatic = app.switches["health.autoCreate"]
@@ -88,7 +89,8 @@ final class SettingsIntegrationSmokeUITests: SIFTUITestCase {
     func testRealHealthKitPermissionAndEmptyHistorySurface() throws {
         launch()
         openSettings()
-        tap(app.buttons["settings.healthRow"], message: "건강 기록 설정을 열 수 없습니다.")
+        tap(app.buttons["settings.routinesRow"], message: "루틴 설정을 열 수 없습니다.")
+        tap(app.buttons["routines.healthRow"], message: "건강 기록 설정을 열 수 없습니다.")
         let connect = app.buttons["health.connect.workout"]
         requireHittable(connect, message: "운동 기록 연결을 열 수 없습니다.")
         XCTAssertTrue(connect.isEnabled, "시뮬레이터에서 실제 HealthKit 읽기 요청을 사용할 수 없습니다.")

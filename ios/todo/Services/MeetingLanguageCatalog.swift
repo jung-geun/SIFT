@@ -58,7 +58,7 @@ nonisolated enum MeetingLanguageCatalog {
     static func appleLanguages(
         displayLocale: Locale = .current,
         localeProvider: MeetingTranscriptionLocaleProvider = DefaultMeetingTranscriptionSessionFactory.liveSupportedLocales,
-        capabilityProbe: MeetingTranscriptionCapabilityProbe = DefaultMeetingTranscriptionSessionFactory.liveCapabilityProbe
+        capabilityProbe: MeetingTranscriptionCapabilityProbe = DefaultMeetingTranscriptionSessionFactory.liveLanguageCapabilityProbe
     ) async -> [Language] {
         var tags = Set<String>()
         for backend in [MeetingTranscriptionBackend.speechTranscriber, .dictationTranscriber] {

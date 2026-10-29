@@ -96,7 +96,7 @@ struct FMMeetingLanguageAdapterTests {
     func supportedSummaryReachesRuntime() async throws {
         try await withFoundationModelsSelection {
             let runtime = CapturingMeetingLanguageRuntime()
-            let service = FoundationModelsService(runtime: runtime, policy: BetaFeaturePolicy(selectionReader: { .foundationModels }))
+            let service = FoundationModelsService(runtime: runtime, policy: AIProviderTestIsolation.foundationPolicy)
             var checkedLanguages: [String] = []
             let result = try await service.analyzeMeeting(
                 meetingID: "meeting-language-test",
@@ -135,7 +135,7 @@ struct FMMeetingLanguageAdapterTests {
     func unsupportedSummaryStopsBeforeRuntime(unsupported: String) async throws {
         try await withFoundationModelsSelection {
             let runtime = CapturingMeetingLanguageRuntime()
-            let service = FoundationModelsService(runtime: runtime, policy: BetaFeaturePolicy(selectionReader: { .foundationModels }))
+            let service = FoundationModelsService(runtime: runtime, policy: AIProviderTestIsolation.foundationPolicy)
             do {
                 _ = try await service.analyzeMeeting(
                     meetingID: "unsupported-language-test",
@@ -158,7 +158,7 @@ struct FMMeetingLanguageAdapterTests {
     func supportedCorrectionReachesRuntime() async throws {
         try await withFoundationModelsSelection {
             let runtime = CapturingMeetingLanguageRuntime()
-            let result = try await FoundationModelsService(runtime: runtime, policy: BetaFeaturePolicy(selectionReader: { .foundationModels })).correctTranscript(
+            let result = try await FoundationModelsService(runtime: runtime, policy: AIProviderTestIsolation.foundationPolicy).correctTranscript(
                 segments: [segment],
                 sourceLanguageTag: "bn-BD",
                 language: .german,
@@ -180,7 +180,7 @@ struct FMMeetingLanguageAdapterTests {
         try await withFoundationModelsSelection {
             let runtime = CapturingMeetingLanguageRuntime()
             do {
-                _ = try await FoundationModelsService(runtime: runtime, policy: BetaFeaturePolicy(selectionReader: { .foundationModels })).correctTranscript(
+                _ = try await FoundationModelsService(runtime: runtime, policy: AIProviderTestIsolation.foundationPolicy).correctTranscript(
                     segments: [segment],
                     sourceLanguageTag: "bn-BD",
                     language: .english,

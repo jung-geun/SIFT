@@ -31,6 +31,7 @@ enum CloudModelCodec {
         let decode: (Model, Data, JSONDecoder) throws -> Void
         let copy: (Model, Model) -> Void
         let decodeMissing: ((Model) -> Void)?
+        let preservesLocalValueOnRestore: Bool
 
         init<Value: Codable>(_ name: String, _ path: ReferenceWritableKeyPath<Model, Value>, defaultValue: Value? = nil) {
             self.name = name
@@ -40,19 +41,22 @@ enum CloudModelCodec {
             }
             copy = { source, destination in destination[keyPath: path] = source[keyPath: path] }
             decodeMissing = defaultValue.map { value in { model in model[keyPath: path] = value } }
+            preservesLocalValueOnRestore = false
         }
 
-        /// Register the schema property without transferring device identifiers.
+        /// Register a schema property while transferring only a neutral value.
         /// Local store migration still copies the observed value losslessly.
-        init(deviceLocal name: String, _ path: ReferenceWritableKeyPath<Model, String>) {
+        init<Value: Codable>(deviceLocal name: String, _ path: ReferenceWritableKeyPath<Model, Value>,
+                             defaultValue: Value, preservesLocalValueOnRestore: Bool = false) {
             self.name = name
-            encode = { _, encoder in try encoder.encode("") }
+            self.preservesLocalValueOnRestore = preservesLocalValueOnRestore
+            encode = { _, encoder in try encoder.encode(defaultValue) }
             decode = { model, data, decoder in
-                _ = try decoder.decode(String.self, from: data)
-                model[keyPath: path] = ""
+                _ = try decoder.decode(Value.self, from: data)
+                model[keyPath: path] = defaultValue
             }
             copy = { source, destination in destination[keyPath: path] = source[keyPath: path] }
-            decodeMissing = { model in model[keyPath: path] = "" }
+            decodeMissing = { model in model[keyPath: path] = defaultValue }
         }
     }
 
@@ -100,7 +104,9 @@ enum CloudModelCodec {
         func envelope(_ model: Model, encoder: JSONEncoder) throws -> Envelope {
             var values: [String: Data] = [:]
             values.reserveCapacity(fields.count)
-            for field in fields { values[field.name] = try field.encode(model, encoder) }
+            for field in fields where !field.preservesLocalValueOnRestore {
+                values[field.name] = try field.encode(model, encoder)
+            }
             return Envelope(version: 1, entity: name, identity: try identity(model), fields: values)
         }
 
@@ -172,7 +178,7 @@ enum CloudModelCodec {
                     }
                     guard matches.count <= 1 else { throw CodecError.duplicateIdentity(name + "/" + identity) }
                     if let existing = matches.first {
-                        for field in fields { field.copy(decoded, existing) }
+                        for field in fields where !field.preservesLocalValueOnRestore { field.copy(decoded, existing) }
                     } else {
                         context.insert(decoded)
                     }
@@ -424,7 +430,7 @@ enum CloudModelCodec {
             .init("sourceSenderEmail", \.sourceSenderEmail), .init("sourceAccountNamespace", \.sourceAccountNamespace),
             .init("triageStatus", \.triageStatus), .init("tags", \.tags),
             .init("calendarEventID", \.calendarEventID), .init("calendarEventExternalID", \.calendarEventExternalID),
-            .init(deviceLocal: "calendarSourceID", \.calendarSourceID),
+            .init(deviceLocal: "calendarSourceID", \.calendarSourceID, defaultValue: ""),
             .init("calendarEventOrigin", \.calendarEventOrigin), .init("calendarSyncedTitle", \.calendarSyncedTitle),
             .init("memoryNotes", \.memoryNotes), .init("aiRecommendedTime", \.aiRecommendedTime),
             .init("aiNeedsNotification", \.aiNeedsNotification), .init("aiPersonaFit", \.aiPersonaFit),
@@ -485,6 +491,8 @@ enum CloudModelCodec {
             .init("id", \.id), .init("threadID", \.threadID), .init("subject", \.subject), .init("from", \.from),
             .init("snippet", \.snippet), .init("body", \.body), .init("htmlBody", \.htmlBody),
             .init("receivedAt", \.receivedAt), .init("isRead", \.isRead), .init("providerRawValue", \.providerRawValue),
+            .init(deviceLocal: "hasBeenViewedInApp", \.hasBeenViewedInApp, defaultValue: true,
+                  preservesLocalValueOnRestore: true),
             .init("rawMessageID", \.rawMessageID), .init("providerGlobalMessageID", \.providerGlobalMessageID),
             .init("labelIDs", \.labelIDs), .init("isInInbox", \.isInInbox),
             .init("outlookInferenceClassificationRawValue", \.outlookInferenceClassificationRawValue),

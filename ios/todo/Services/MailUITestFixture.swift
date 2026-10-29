@@ -13,6 +13,10 @@ enum MailUITestFixture {
     /// Exact launch argument that activates the fixture. Absent by default in every
     /// other launch, including production and every other UI test.
     static let launchArgument = "-ui-test-mail-fixture"
+    /// Optional attention/summary scenario; requires the base fixture argument too.
+    static let attentionLaunchArgument = "-ui-test-mail-attention-fixture"
+    /// Keep synthetic rows on relaunch to exercise durable app-viewed state.
+    static let preserveLaunchArgument = "-ui-test-mail-fixture-preserve"
 
     /// Synthetic Gmail account the seeded rows are scoped to. Contains "@" and no
     /// whitespace so `IMAPCredentialStore.canonicalAccount` accepts it and
@@ -55,11 +59,15 @@ enum MailUITestFixture {
                 predicate: #Predicate { $0.sourceAccountNamespace == namespace }
             )
         )) ?? []
+        if ProcessInfo.processInfo.arguments.contains(preserveLaunchArgument), !existing.isEmpty {
+            return
+        }
         for row in existing {
             context.delete(row)
         }
 
         let now = Date()
+        let showsAttentionScenario = ProcessInfo.processInfo.arguments.contains(attentionLaunchArgument)
         for index in 1...seededRowCount {
             let subject = index == 1 ? firstRowSubject : "\(subjectPrefix) — Row \(index)"
             let email = EmailMessage(
@@ -70,13 +78,25 @@ enum MailUITestFixture {
                 snippet: "Deterministic UI-test fixture row \(index). Never live mail.",
                 body: "Deterministic UI-test fixture row \(index). Never live mail.",
                 receivedAt: now.addingTimeInterval(TimeInterval(-index * 60)),
-                isRead: true,
+                isRead: !showsAttentionScenario || index != 2,
                 provider: .gmail,
                 rawMessageID: "ui-test-fixture-mail-\(index)",
-                labelIDs: ["INBOX"],
+                labelIDs: showsAttentionScenario && index == 2 ? ["INBOX", "UNREAD"] : ["INBOX"],
                 isInInbox: true,
                 sourceAccountNamespace: namespace
             )
+            if showsAttentionScenario {
+                // Row 1: provider-read but newly imported/unopened in SIFT.
+                // Row 2: provider-unread but already viewed in SIFT. Row 3: legacy cache.
+                email.hasBeenViewedInApp = index != 1
+                email.analysisState = .analyzed
+                email.analysisSummary = "Synthetic on-device summary for fixture row \(index)."
+                email.analyzedBodyFingerprint = EmailAnalysisContract.fingerprint(
+                    subject: email.subject, body: email.body
+                )
+                email.analysisVersion = EmailAnalysisContract.summaryContractVersion
+                email.analyzedAt = now
+            }
             if index == 1 {
                 email.analysisTodoCandidate = true
                 email.analysisTodoCandidateFingerprint = EmailAnalysisContract.fingerprint(

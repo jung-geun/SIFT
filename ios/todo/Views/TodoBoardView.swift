@@ -100,8 +100,13 @@ struct TodoBoardCardView: View {
                     if hasMetadata {
                         VStack(alignment: .leading, spacing: 6) {
                             if let label = todo.dueDateLabel {
-                                Label(label, systemImage: "clock")
-                                    .foregroundStyle(todo.isOverdue ? AppTheme.destructive : .secondary)
+                                Label {
+                                    Text(label).foregroundStyle(todo.isOverdue
+                                        ? (colorScheme == .dark ? Color.primary : AppTheme.destructive) : AppTheme.secondaryText)
+                                } icon: {
+                                    Image(systemName: "clock")
+                                        .foregroundStyle(todo.isOverdue ? AppTheme.destructive : AppTheme.secondaryText)
+                                }
                             }
 
                             sourceMetadata
@@ -117,7 +122,7 @@ struct TodoBoardCardView: View {
                             }
                         }
                         .font(.subheadline)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(AppTheme.secondaryText)
                         .multilineTextAlignment(.leading)
                     }
                 }
@@ -133,7 +138,7 @@ struct TodoBoardCardView: View {
             } label: {
                 Image(systemName: "ellipsis")
                     .font(.body)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(AppTheme.secondaryText)
                     .frame(minWidth: 44, minHeight: 44)
                     .contentShape(Rectangle())
             }
@@ -144,10 +149,16 @@ struct TodoBoardCardView: View {
         }
         .frame(minHeight: 52)
         .background(
-            isHovered ? AppTheme.insetSurface : AppTheme.surface,
+            isHovered ? AppTheme.insetSurface : AppTheme.elevatedSurface,
             in: RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous)
         )
         .contentShape(RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous)
+                .strokeBorder(AppTheme.workspaceStroke, lineWidth: 0.5)
+                .allowsHitTesting(false)
+        }
+        .todoBlankAreaExcluded()
     }
 
     private var hasMetadata: Bool {
@@ -231,6 +242,7 @@ struct TodoBoardView: View {
     let onMoveTodoToColumn: (UUID, BoardColumnType) -> Void
     let onAddTodo: () -> Void
     let canOpenAddTodo: Bool
+    let blankAreaCreationEnabled: Bool
 
     @State private var isDropTargeted: [BoardColumnType: Bool] = [:]
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -321,6 +333,7 @@ struct TodoBoardView: View {
                             .padding(.horizontal, AppTheme.Spacing.item)
                     }
                     .buttonStyle(.bordered)
+                    .todoBlankAreaExcluded()
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -340,6 +353,7 @@ struct TodoBoardView: View {
             }
         }
         .background(AppTheme.canvas)
+        .onTodoBlankAreaDoubleTap(enabled: canOpenAddTodo && blankAreaCreationEnabled, perform: onAddTodo)
     }
 
     private func boardColumn(_ col: BoardColumnType) -> some View {
@@ -348,12 +362,18 @@ struct TodoBoardView: View {
         return VStack(alignment: .leading, spacing: AppTheme.Spacing.compact) {
             HStack(spacing: AppTheme.Spacing.compact) {
                 HStack(spacing: AppTheme.Spacing.compact) {
+                    Image(systemName: col.iconName)
+                        .foregroundStyle(col.themeColor)
+                        .accessibilityHidden(true)
                     Text(col.title)
                         .font(.headline)
                         .foregroundStyle(.primary)
                     Text("\(items.count)")
-                        .font(.subheadline.monospacedDigit())
-                        .foregroundStyle(.secondary)
+                        .font(.subheadline.monospacedDigit().weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(col.themeColor.opacity(0.08), in: Capsule())
                 }
                 .accessibilityElement(children: .combine)
 
@@ -364,7 +384,7 @@ struct TodoBoardView: View {
                 } label: {
                     Image(systemName: "eye.slash")
                         .font(.body)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(AppTheme.secondaryText)
                         .frame(minWidth: 44, minHeight: 44)
                         .contentShape(Rectangle())
                 }
@@ -376,15 +396,17 @@ struct TodoBoardView: View {
                     onAddTodo()
                 } label: {
                     Image(systemName: "plus")
-                        .font(.body)
-                        .foregroundStyle(.secondary)
+                        .font(.body.weight(.semibold))
+                        .foregroundStyle(AppTheme.accent)
                         .frame(minWidth: 44, minHeight: 44)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .disabled(!canOpenAddTodo)
                 .accessibilityLabel(AppLanguage.localized("todo.add", defaultValue: "새 할 일", language: .current, comment: "Add task"))
+                .help(AppLanguage.localized("todo.add", defaultValue: "새 할 일", language: .current, comment: "Add task"))
             }
+            .todoBlankAreaExcluded()
 
             ScrollView(.vertical, showsIndicators: false) {
                 LazyVStack(spacing: AppTheme.Spacing.compact) {
@@ -392,10 +414,10 @@ struct TodoBoardView: View {
                         VStack(spacing: AppTheme.Spacing.item) {
                             Image(systemName: col.iconName)
                                 .font(.title2)
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(col.themeColor)
                             Text(AppLanguage.localized("board.column.empty", defaultValue: "항목 없음", language: .current, comment: "Empty column"))
                                 .font(.subheadline)
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(AppTheme.secondaryText)
                         }
                         .frame(maxWidth: .infinity, minHeight: 100)
                         .padding(AppTheme.Spacing.item)
@@ -418,22 +440,23 @@ struct TodoBoardView: View {
                             Text(AppLanguage.localized("todo.add", defaultValue: "새 할 일", language: .current, comment: "Add task"))
                         }
                         .font(.subheadline)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(AppTheme.accent)
                         .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
                         .padding(.horizontal, 16)
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
+                    .todoBlankAreaExcluded()
                     .disabled(!canOpenAddTodo)
                 }
                 .padding(.bottom, AppTheme.Spacing.item)
             }
         }
         .padding(AppTheme.Spacing.item)
-        .background(AppTheme.canvas, in: RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous))
+        .background(AppTheme.workspaceWell, in: RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous)
-                .strokeBorder(isDropTargeted[col] == true ? col.themeColor : Color.clear, lineWidth: 2)
+                .strokeBorder(isDropTargeted[col] == true ? col.themeColor : AppTheme.workspaceStroke, lineWidth: isDropTargeted[col] == true ? 2 : 0.5)
                 .allowsHitTesting(false)
         }
         .dropDestination(for: String.self) { droppedIDs, location in

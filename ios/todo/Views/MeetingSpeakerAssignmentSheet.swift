@@ -9,12 +9,14 @@ struct MeetingSpeakerDisplay: Equatable {
     var statusText: String?
     var attribution: MeetingTranscriptAttribution?
     var segments: [MeetingSegment] = []
+    var continuity: [MeetingConversationTimeline.Row.ID: MeetingSpeakerContinuity.Presentation] = [:]
 
     init() {}
 
     init(record: MeetingRecord) {
         let result = record.result
         segments = result?.segments ?? []
+        continuity = MeetingConversationTimeline.individual(record).speakerPresentation
         attribution = MeetingTranscriptAttribution(meetingID: record.meetingID, result: result ?? MeetingResult(),
             profiles: record.diarization?.profiles ?? [])
         guard let payload = record.diarization else {
@@ -70,8 +72,8 @@ struct MeetingSpeakerDisplay: Equatable {
             statusText = AppLanguage.localized(
                 "meeting.diarization.modelUnavailableState",
                 defaultValue: english
-                    ? "The speaker model was not installed. Install it in Settings → Beta features, then detect speakers again."
-                    : "화자 모델이 없어 분석하지 못했습니다. 설정 → 베타 기능에서 설치한 뒤 다시 분석하세요.",
+                    ? "Install the speaker model in Settings → Meeting, then detect speakers again."
+                    : "설정 → 회의에서 화자 모델을 설치한 뒤 화자를 다시 분석하세요.",
                 language: .current, comment: "Saved-audio speaker analysis skipped without an installed model."
             )
         case .notProcessed, .runningLive:

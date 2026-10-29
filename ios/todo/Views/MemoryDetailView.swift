@@ -5,6 +5,9 @@ import SwiftData
 struct MemoryDetailView: View {
     @Environment(\.modelContext) private var modelContext
     @ObservedObject private var regionalAvailability = OpenAIRegionalAvailability.shared
+    @ObservedObject private var settings = SettingsStore.shared
+    @ObservedObject private var connection = OpenAIConnection.shared
+    @AppStorage(OpenAIPrivacy.consentKey(for: .routines)) private var allowsOpenAIRoutines = false
     @Query private var todos: [Todo]
     @Query private var auditEvents: [TaskAuditEvent]
     @Query private var behaviorEvents: [TaskBehaviorEvent]
@@ -16,11 +19,19 @@ struct MemoryDetailView: View {
     @State private var showError = false
     @State private var analysisTask: Task<Void, Never>?
     @State private var showAdvancedRequest = false
+    @State private var activeAdvancedSession: UUID?
+    @State private var pendingAdvancedSession: UUID?
     
-    private var evidenceRecordCount: Int {
-        todos.filter { $0.triage == .todo }.count
-            + auditEvents.filter { $0.triageType == TodoTriage.todo.rawValue }.count
-            + behaviorEvents.filter { $0.triageType == TodoTriage.todo.rawValue }.count
+    private var canRequestAdvanced: Bool {
+        regionalAvailability.isAvailable
+            && SettingsStore.betaProviderAccess().openAIEnabled
+            && connection.activeProfile != nil
+    }
+
+    private var canUsePendingResult: Bool {
+        guard pendingAdvancedSession != nil || pendingMemoryResult?.processorDescription.hasPrefix("OpenAI") == true else { return true }
+        return canRequestAdvanced && allowsOpenAIRoutines
+            && pendingAdvancedSession == connection.sessionGeneration
     }
     
     var body: some View {
@@ -33,7 +44,7 @@ struct MemoryDetailView: View {
                 }
                 
                 if let result = pendingMemoryResult,
-                   regionalAvailability.isAvailable || !result.processorDescription.hasPrefix("OpenAI") {
+                   canUsePendingResult {
                     memoryAnalysisResultCard(result)
                 }
                 
@@ -56,10 +67,10 @@ struct MemoryDetailView: View {
                 }
                 .buttonStyle(.borderless)
                 .disabled(isAnalyzing)
-                if regionalAvailability.isAvailable {
+                if canRequestAdvanced {
                     Button(AppLanguage.localized(
                         "memory.analysis.advancedRequest",
-                        defaultValue: "gpt-6.1-sol로 다시 요청",
+                        defaultValue: "Analyze with gpt-6.1-sol",
                         language: .current,
                         comment: "Button to explicitly re-request behavior analysis using gpt-6.1-sol. Keep the model name unchanged."
                     )) { showAdvancedRequest = true }
@@ -75,20 +86,16 @@ struct MemoryDetailView: View {
                     ), role: .cancel) { analysisTask?.cancel() }
                 }
             } footer: {
-                if regionalAvailability.isAvailable {
-                    Text(AppLanguage.localized(
-                        "memory.analysis.footer.providers",
-                        defaultValue: "최근 90일의 TODO 상태와 변경 이벤트로 결정론적 지표를 계산합니다. 활성화·동의한 OpenAI는 gpt-6-luna로 서술하고, gpt-6.1-sol은 직접 재요청할 때만 사용합니다. 완료 시각은 실제 활동 수행의 증거가 아닙니다. 적용해야 저장되며, 활동별 루틴 후보와 할 일 추천은 루틴 화면에서 별도로 검토합니다.",
-                        language: .current,
-                        comment: "Behavior metrics, remote prose, and routine-review boundaries."
-                    ))
-                } else {
-                    Text(verbatim: AppLanguage.current == .korean
-                         ? "최근 90일의 할 일 상태와 변경 이벤트로 결정론적 지표를 기기 내에서 계산합니다. 완료 시각은 실제 활동 수행의 증거가 아닙니다. 적용해야 저장되며, 루틴 후보와 할 일 추천은 루틴 화면에서 별도로 검토합니다."
-                         : "Task states and change events from the last 90 days are used to compute deterministic metrics on device. Completion timestamps are not proof of actual activity. Results are saved only when applied; review routine candidates and task suggestions separately in Routines.")
-                }
+                Text(AppLanguage.localized(
+                    "memory.analysis.footer.local",
+                    defaultValue: "Uses local task records from the last 90 days. Completion times do not prove an activity happened. Apply to save; review routine suggestions in Routines.",
+                    language: .current,
+                    comment: "Local behavior evidence, activity-evidence limit, manual application, and separate routine review."
+                ))
             }
-            OpenAIConsentSection(scope: .routines)
+            if canRequestAdvanced {
+                OpenAIConsentSection(scope: .routines)
+            }
 
             Section {
                 if analyses.isEmpty {
@@ -108,14 +115,14 @@ struct MemoryDetailView: View {
         .navigationTitle("행동 패턴 분석")
         .navigationBarTitleDisplayMode(.inline)
         .onDisappear { analysisTask?.cancel() }
-        .onChange(of: regionalAvailability.isAvailable) { _, available in
-            guard !available else { return }
-            showAdvancedRequest = false
-            if pendingMemoryResult?.processorDescription.hasPrefix("OpenAI") == true {
-                pendingMemoryResult = nil
-            }
-            showError = false
-            errorMessage = nil
+        .onChange(of: canRequestAdvanced) { _, available in
+            if !available { invalidateAdvancedRequest() }
+        }
+        .onChange(of: connection.sessionGeneration) { _, _ in
+            invalidateAdvancedRequest()
+        }
+        .onChange(of: allowsOpenAIRoutines) { _, allowed in
+            if !allowed { invalidateAdvancedRequest() }
         }
         .confirmationDialog(AppLanguage.localized(
             "memory.analysis.advancedConfirmation",
@@ -262,16 +269,35 @@ struct MemoryDetailView: View {
         .padding(.vertical, AppTheme.Spacing.compact)
     }
 
-    private func startAnalysis(tier: OpenAIAnalysisTier = .basic) {
-        guard !isAnalyzing, tier != .advanced || regionalAvailability.isAvailable else { return }
-        analysisTask?.cancel()
-        analysisTask = Task { await analyzeMemory(tier: tier) }
+    private func invalidateAdvancedRequest() {
+        showAdvancedRequest = false
+        if activeAdvancedSession != nil {
+            analysisTask?.cancel()
+        }
+        if pendingAdvancedSession != nil || pendingMemoryResult?.processorDescription.hasPrefix("OpenAI") == true {
+            pendingMemoryResult = nil
+            pendingAdvancedSession = nil
+        }
+        showError = false
+        errorMessage = nil
     }
 
-    private func analyzeMemory(tier: OpenAIAnalysisTier = .basic) async {
-        guard !isAnalyzing, tier != .advanced || regionalAvailability.isAvailable else { return }
+    private func startAnalysis(tier: OpenAIAnalysisTier = .basic) {
+        guard !isAnalyzing, tier != .advanced || canRequestAdvanced else { return }
+        analysisTask?.cancel()
+        let session = tier == .advanced ? connection.sessionGeneration : nil
+        activeAdvancedSession = session
+        analysisTask = Task { await analyzeMemory(tier: tier, session: session) }
+    }
+
+    private func analyzeMemory(tier: OpenAIAnalysisTier = .basic, session: UUID? = nil) async {
+        guard !Task.isCancelled, !isAnalyzing,
+              tier != .advanced || (canRequestAdvanced && session == connection.sessionGeneration) else { return }
         isAnalyzing = true
-        defer { isAnalyzing = false }
+        defer {
+            isAnalyzing = false
+            activeAdvancedSession = nil
+        }
 
         do {
             let result = try await MemoryService.shared.analyzeForegroundPreview(
@@ -281,14 +307,19 @@ struct MemoryDetailView: View {
                 tier: tier
             )
             try Task.checkCancellation()
+            guard tier != .advanced || (canRequestAdvanced && allowsOpenAIRoutines
+                && session == connection.sessionGeneration) else { return }
             guard regionalAvailability.isAvailable || !result.processorDescription.hasPrefix("OpenAI") else { return }
             if !result.summary.isEmpty || !result.insights.isEmpty {
+                pendingAdvancedSession = session
                 pendingMemoryResult = result
             }
         } catch is CancellationError {
             return
         } catch {
             guard !Task.isCancelled else { return }
+            if tier == .advanced,
+               !canRequestAdvanced || session != connection.sessionGeneration { return }
             if !regionalAvailability.isAvailable,
                error is OpenAIRequestError || error is OpenAIConnectionError { return }
             errorMessage = error.localizedDescription
@@ -298,7 +329,7 @@ struct MemoryDetailView: View {
     
     private func applyMemoryAnalysis() async {
         guard let result = pendingMemoryResult,
-              regionalAvailability.isAvailable || !result.processorDescription.hasPrefix("OpenAI") else { return }
+              canUsePendingResult else { return }
         do {
             try await MemoryService.shared.applyAnalysisResult(result)
             pendingMemoryResult = nil

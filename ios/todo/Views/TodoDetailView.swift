@@ -74,8 +74,21 @@ struct TodoDetailView: View {
             calendarSection
             tagSection
             metaSection
+            #if targetEnvironment(macCatalyst)
+            Section {
+                HStack(spacing: AppTheme.Spacing.item) {
+                    completionButton
+                    deleteButton
+                        .tint(.red)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.regular)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            #else
             completionSection
             deleteSection
+            #endif
         }
         .appFormStyle()
         .font(.body)
@@ -89,8 +102,17 @@ struct TodoDetailView: View {
         .navigationBarBackButtonHidden(true)
         .interactiveDismissDisabled(hasPendingChanges)
         .toolbar {
+            #if targetEnvironment(macCatalyst)
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                cancelButton
+                    .keyboardShortcut(.cancelAction)
+                saveButton
+                    .keyboardShortcut(.defaultAction)
+            }
+            #else
             ToolbarItem(placement: .cancellationAction) { cancelButton }
             ToolbarItem(placement: .confirmationAction) { saveButton }
+            #endif
         }
         .onAppear {
             if !didLoadDraft {
@@ -242,7 +264,11 @@ struct TodoDetailView: View {
                     ),
                     displayedComponents: [.date, .hourAndMinute]
                 )
+                #if targetEnvironment(macCatalyst)
+                .datePickerStyle(.compact)
+                #else
                 .datePickerStyle(.graphical)
+                #endif
 
                 if !todo.isCompleted, draft.dueDate.map({ $0 < Date() }) ?? false {
                     Label("기한이 초과되었습니다", systemImage: "exclamationmark.triangle.fill")
@@ -470,43 +496,61 @@ struct TodoDetailView: View {
         }
     }
 
+    #if !targetEnvironment(macCatalyst)
     private var completionSection: some View {
         Section {
-            Button { toggleCompletionAndDismiss() } label: {
-                Label(
-                    AppLanguage.localized(
-                        todo.isCompleted ? "action.undo" : "todo.detail.completeAction",
-                        defaultValue: todo.isCompleted ? "되돌리기" : "완료 처리",
-                        language: .current,
-                        comment: "Complete or undo to-do action."
-                    ),
-                    systemImage: todo.isCompleted ? "arrow.uturn.left" : "checkmark.circle.fill"
-                )
-                .font(.headline)
-                .frame(maxWidth: .infinity, minHeight: 44)
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .buttonBorderShape(.roundedRectangle(radius: AppTheme.controlRadius))
-            .disabled(draft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            .accessibilityIdentifier("todo.detail.completeButton")
+            completionButton
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .buttonBorderShape(.roundedRectangle(radius: AppTheme.controlRadius))
         }
     }
 
     private var deleteSection: some View {
         Section {
-            Button(role: .destructive) { showDeleteConfirm = true } label: {
-                Label(
-                    AppLanguage.localized("action.delete", defaultValue: "삭제", language: .current, comment: "Delete to-do action."),
-                    systemImage: "trash"
-                )
-                .frame(maxWidth: .infinity, minHeight: 44)
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.large)
-            .buttonBorderShape(.roundedRectangle(radius: AppTheme.controlRadius))
-            .accessibilityIdentifier("todo.detail.deleteButton")
+            deleteButton
+                .buttonStyle(.bordered)
+                .controlSize(.large)
+                .buttonBorderShape(.roundedRectangle(radius: AppTheme.controlRadius))
         }
+    }
+    #endif
+
+    private var completionButton: some View {
+        Button { toggleCompletionAndDismiss() } label: {
+            Label(
+                AppLanguage.localized(
+                    todo.isCompleted ? "action.undo" : "todo.detail.completeAction",
+                    defaultValue: todo.isCompleted ? "되돌리기" : "완료 처리",
+                    language: .current,
+                    comment: "Complete or undo to-do action."
+                ),
+                systemImage: todo.isCompleted ? "arrow.uturn.left" : "checkmark.circle.fill"
+            )
+            #if targetEnvironment(macCatalyst)
+            .fixedSize()
+            #else
+            .font(.headline)
+            .frame(maxWidth: .infinity, minHeight: 44)
+            #endif
+        }
+        .disabled(draft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        .accessibilityIdentifier("todo.detail.completeButton")
+    }
+
+    private var deleteButton: some View {
+        Button(role: .destructive) { showDeleteConfirm = true } label: {
+            Label(
+                AppLanguage.localized("action.delete", defaultValue: "삭제", language: .current, comment: "Delete to-do action."),
+                systemImage: "trash"
+            )
+            #if targetEnvironment(macCatalyst)
+            .fixedSize()
+            #else
+            .frame(maxWidth: .infinity, minHeight: 44)
+            #endif
+        }
+        .accessibilityIdentifier("todo.detail.deleteButton")
     }
 
     // MARK: - Helpers

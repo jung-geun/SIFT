@@ -366,20 +366,22 @@ private struct PrivacyPolicyContent: View {
             LegalLocalizedBullets(items: [
                 ("legal.privacy.calendar.remoteBoundary", "처리 위치: 기기 내 EventKit. OpenAI로 보내는 별도 캘린더 이벤트 컨텍스트는 제목을 Busy로 가리고 시작·종료 시각만 포함합니다. 다만 외부 캘린더에서 가져와 진행중으로 확정한 할 일은 일반 할 일 공유 동의 범위에 포함되어 제목·메모가 전송될 수 있습니다."),
                 ("calendar.settings.autoRegisterFooter", "선택한 출처의 마감이 있는 진행 중 할 일만 자동으로 등록합니다. 검토 대기·캘린더 출처 할 일과 건강 루틴은 제외됩니다. 긴급·최우선 할 일도 이 동의가 필요합니다. 캘린더 접근 권한과 쓰기 가능한 등록 대상이 필요하며, 자동 등록을 꺼도 기존 일정은 삭제되지 않습니다."),
-                ("calendar.settings.completionFooter", "'일정 유지'는 일정을 그대로 둡니다. 기본값인 '알람만 끄기'는 일정은 남기고 알람만 끕니다. '이벤트 삭제'는 일정을 삭제합니다. 이 처리는 SIFT가 해당 할 일을 위해 만든 일정에만 적용되며, 외부 캘린더의 원본 일정에는 적용되지 않습니다."),
+                ("legal.privacy.calendar.completionActions", "'일정 유지'는 일정을 그대로 둡니다. 기본값인 '알람만 끄기'는 일정은 남기고 알람만 끕니다. '이벤트 삭제'는 일정을 삭제합니다. 이 처리는 SIFT가 해당 할 일을 위해 만든 일정에만 적용되며, 외부 캘린더의 원본 일정에는 적용되지 않습니다."),
                 ("calendar.destination.footer", "일정을 내보내기 전에 쓰기 가능한 캘린더를 선택하세요. 이 선택은 이 기기에만 저장됩니다. 캘린더는 자동으로 선택되지 않으며 시스템 기본값도 명시적으로 선택해야 합니다. 위 항목을 열어 캘린더를 선택하거나 사용할 수 없는 대상을 바꾸세요."),
             ])
 
             LegalSubTitle(text: "1-5. 할 일 우선순위 정렬 AI")
+            LegalLocalizedBullets(items: [
+                ("legal.privacy.ai.default", "기본값은 Apple Intelligence입니다. 지원하지 않는 기기에서는 베타 기능에서 로컬 언어 모델을 직접 다운로드하고 사용을 허용할 수 있습니다. 사용 가능한 모델이 없으면 규칙 기반으로 처리합니다."),
+            ])
             LegalBullets([
-                "기본값: 온디바이스 AI (Apple Foundation Models 또는 MLX 모델)",
                 "OpenAI 제공자 활성화·ChatGPT 계정의 구독 사용 권한·데이터별 전송 동의가 있어야 외부 분석을 실행합니다. 할 일·메일·루틴·페르소나 동의는 기기별로 분리합니다.",
                 "기초 요청은 gpt-6-luna, 메일 중요 내용·루틴·페르소나의 직접 고급 재요청은 gpt-6.1-sol입니다. 계정에 모델이 없으면 다른 모델로 몰래 대체하지 않습니다.",
                 "자동 할 일 정렬에서 메일·회의 출처 내용은 항상 기기 내 규칙으로 처리합니다. 회의 음성·전사·화자 정보는 OpenAI로 보내지 않습니다.",
                 "OpenAI 요청은 공개 Responses API에서 store:false·stream:true로 실행하며 완료된 응답만 사용합니다. 이는 제공자의 모든 서버 보관이 0일이라는 보장이 아니며 OpenAI 데이터 정책이 적용됩니다.",
             ])
             LegalLocalizedBullets(items: [
-                ("openai.connection.testExplanation", "짧고 고정된 테스트 메시지만 전송하며, 저장된 앱 데이터는 보내지 않습니다. 할 일·메일·루틴·페르소나 전송 동의 없이 테스트할 수 있습니다. 구독 사용 한도를 일부 사용할 수 있습니다."),
+                ("openai.connection.testExplanation", "테스트는 저장된 앱 데이터 대신 고정 메시지만 전송하며 구독 한도를 사용합니다. 제공자 활성화나 데이터별 전송 동의 없이 실행할 수 있습니다."),
             ])
 
             Text(legalCopy(

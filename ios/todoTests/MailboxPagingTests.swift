@@ -31,12 +31,14 @@ struct MailboxPagingTests {
         classification: String = "",
         categories: [String] = [],
         folderID: String = "",
-        globalID: String = ""
+        globalID: String = "",
+        namespace: String = ""
     ) -> MailboxMessageMetadata {
         MailboxMessageMetadata(
             provider: provider,
             providerMessageID: id,
             providerGlobalMessageID: globalID,
+            sourceAccountNamespace: namespace,
             threadID: "thread-\(id)",
             subject: "subject-\(id)",
             from: "sender-\(id)@example.com",
@@ -49,6 +51,177 @@ struct MailboxPagingTests {
             providerCategoryNames: categories,
             providerFolderID: folderID
         )
+    }
+
+    @Test("Only genuine inserts become app-unseen, independently of provider unread")
+    func testInsertedKeysAndLocalAttentionState() throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let cached = EmailMessage(id: "cached", isRead: false, labelIDs: ["INBOX", "UNREAD"], isInInbox: true)
+        context.insert(cached)
+        try context.save()
+        let store = MailboxLocalStore(defaults: try makeDefaults(), saveContext: { try $0.save() })
+        let page = MailboxPage(messages: [
+            metadata(provider: .gmail, id: "cached"),
+            metadata(provider: .gmail, id: "new", isRead: true),
+            metadata(provider: .gmail, id: "new", isRead: true)
+        ], nextCursor: nil)
+
+        let inserted = try store.upsert(page, into: context)
+        let rows = try context.fetch(FetchDescriptor<EmailMessage>())
+        let newEmail = try #require(rows.first { $0.providerMessageID == "new" })
+        #expect(inserted == Set([EmailMessageKey(newEmail)]))
+        #expect(cached.hasBeenViewedInApp)
+        #expect(!cached.isNewlyImportedUnseen)
+        #expect(newEmail.isRead)
+        #expect(newEmail.isNewlyImportedUnseen)
+        #expect(try store.upsert(page, into: context).isEmpty)
+        #expect(newEmail.isNewlyImportedUnseen)
+
+        try store.markViewedInApp(newEmail, in: context)
+        #expect(!newEmail.isNewlyImportedUnseen)
+        #expect(try store.upsert(page, into: context).isEmpty)
+        #expect(newEmail.hasBeenViewedInApp)
+        let reloaded = try ModelContext(container).fetch(FetchDescriptor<EmailMessage>())
+        #expect(reloaded.first { $0.providerMessageID == "new" }?.hasBeenViewedInApp == true)
+    }
+
+    @Test("Local app viewing never changes provider flags or queues remote mutations")
+    func testMarkViewedDoesNotMutateProviderReadState() throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let defaults = try makeDefaults()
+        let email = EmailMessage(id: "unread", isRead: false, labelIDs: ["INBOX", "UNREAD"], isInInbox: true)
+        email.hasBeenViewedInApp = false
+        context.insert(email)
+        try context.save()
+        let store = MailboxLocalStore(defaults: defaults, saveContext: { try $0.save() })
+        try store.markViewedInApp(email, in: context)
+
+        #expect(email.hasBeenViewedInApp)
+        #expect(!email.isRead)
+        #expect(email.labelIDs == ["INBOX", "UNREAD"])
+        #expect(MailboxMutationStore(defaults: defaults, queue: .acknowledged).mutations.isEmpty)
+        #expect(MailboxMutationStore(defaults: defaults, queue: .deferred).mutations.isEmpty)
+    }
+
+    @Test("Duplicate collapse retains viewed state and removed rows never show attention")
+    func testDuplicateAndRemovalAttentionState() throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let unseen = EmailMessage(id: "duplicate", body: "rich body", isInInbox: true)
+        unseen.hasBeenViewedInApp = false
+        let viewed = EmailMessage(id: "duplicate", isInInbox: true)
+        context.insert(unseen)
+        context.insert(viewed)
+        try context.save()
+        let store = MailboxLocalStore(defaults: try makeDefaults(), saveContext: { try $0.save() })
+        let inserted = try store.upsert(MailboxPage(messages: [
+            metadata(provider: .gmail, id: "duplicate"),
+            metadata(provider: .gmail, id: "removed")
+        ], nextCursor: nil), into: context)
+        let rows = try context.fetch(FetchDescriptor<EmailMessage>())
+        let survivor = try #require(rows.first { $0.providerMessageID == "duplicate" })
+        let removed = try #require(rows.first { $0.providerMessageID == "removed" })
+        #expect(survivor.hasBeenViewedInApp)
+        #expect(inserted == Set([EmailMessageKey(removed)]))
+        #expect(removed.isNewlyImportedUnseen)
+        try store.upsert(MailboxPage(messages: [], nextCursor: nil, removedMessageKeys: [EmailMessageKey(removed)]), into: context)
+        #expect(!removed.isNewlyImportedUnseen)
+    }
+
+    @Test("Content updates preserve local attention and equal provider IDs in another account are new")
+    func testContentUpdateAndCrossAccountAttentionState() throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let store = MailboxLocalStore(defaults: try makeDefaults(), saveContext: { try $0.save() })
+        let firstMetadata = metadata(provider: .gmail, id: "same-id", namespace: "first@example.com")
+        let firstKeys = try store.upsert(MailboxPage(messages: [firstMetadata], nextCursor: nil), into: context)
+        let first = try #require(context.fetch(FetchDescriptor<EmailMessage>()).first { $0.providerMessageID == "same-id" })
+        #expect(firstKeys == Set([EmailMessageKey(first)]))
+        #expect(first.isNewlyImportedUnseen)
+
+        try store.updateContent(MailboxMessageContent(metadata: firstMetadata, body: "First full body", htmlBody: ""), for: first, in: context)
+        #expect(first.isNewlyImportedUnseen)
+        try store.markViewedInApp(first, in: context)
+        try store.updateContent(MailboxMessageContent(metadata: firstMetadata, body: "Updated body", htmlBody: ""), for: first, in: context)
+        #expect(!first.isNewlyImportedUnseen)
+        #expect(try store.upsert(MailboxPage(messages: [firstMetadata], nextCursor: nil), into: context).isEmpty)
+
+        let secondMetadata = metadata(provider: .gmail, id: "same-id", namespace: "second@example.com")
+        let secondKeys = try store.upsert(MailboxPage(messages: [secondMetadata], nextCursor: nil), into: context)
+        let rows = try context.fetch(FetchDescriptor<EmailMessage>())
+        let second = try #require(rows.first { $0.sourceAccountNamespace == "second@example.com" })
+        #expect(rows.count == 2)
+        #expect(secondKeys == Set([EmailMessageKey(second)]))
+        #expect(second.isNewlyImportedUnseen)
+        #expect(first.hasBeenViewedInApp)
+        let laterKeys = try store.upsert(MailboxPage(messages: [
+            metadata(provider: .gmail, id: "later", namespace: "second@example.com")
+        ], nextCursor: nil), into: context)
+        let later = try #require(context.fetch(FetchDescriptor<EmailMessage>()).first { $0.providerMessageID == "later" })
+        #expect(laterKeys == Set([EmailMessageKey(later)]))
+        #expect(later.isNewlyImportedUnseen)
+    }
+
+    @Test("Gmail UIDVALIDITY re-keys preserve app-viewed state by immutable identity within the account")
+    func testGmailRekeyRetainsViewedState() throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let viewed = EmailMessage(id: "gmail-imap:global", provider: .gmail, rawMessageID: "old-uid", providerGlobalMessageID: "global", isInInbox: true, sourceAccountNamespace: "first@example.com")
+        context.insert(viewed)
+        try context.save()
+        let store = MailboxLocalStore(defaults: try makeDefaults(), saveContext: { try $0.save() })
+        let keys = try store.upsert(MailboxPage(messages: [
+            metadata(provider: .gmail, id: "new-uid", globalID: "global", namespace: "first@example.com"),
+            metadata(provider: .gmail, id: "new-arrival", globalID: "new-global", namespace: "first@example.com"),
+            metadata(provider: .gmail, id: "new-uid", globalID: "global", namespace: "second@example.com")
+        ], nextCursor: nil, requiresInboxReconcile: true), into: context, resetNamespace: "first@example.com")
+        let rows = try context.fetch(FetchDescriptor<EmailMessage>())
+        let rekeyed = try #require(rows.first { $0.providerMessageID == "new-uid" && $0.sourceAccountNamespace == "first@example.com" })
+        #expect(keys.contains(EmailMessageKey(rekeyed)))
+        #expect(rekeyed.hasBeenViewedInApp)
+        #expect(!rekeyed.isNewlyImportedUnseen)
+        #expect(!viewed.isInInbox)
+        #expect(rows.first { $0.providerMessageID == "new-arrival" }?.isNewlyImportedUnseen == true)
+        #expect(rows.first { $0.providerMessageID == "new-uid" && $0.sourceAccountNamespace == "second@example.com" }?.isNewlyImportedUnseen == true)
+    }
+
+    @Test("Genuine first-import and older-page inserts are app-unseen without flagging existing cache")
+    func testInitialAndHistoricalPageInsertsAreUnseen() throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let store = MailboxLocalStore(defaults: try makeDefaults(), saveContext: { try $0.save() })
+        let initialKeys = try store.upsert(MailboxPage(messages: [
+            metadata(provider: .gmail, id: "baseline-1"),
+            metadata(provider: .gmail, id: "baseline-2")
+        ], nextCursor: "older"), into: context)
+        #expect(initialKeys.count == 2)
+        #expect(try context.fetch(FetchDescriptor<EmailMessage>()).allSatisfy { $0.isNewlyImportedUnseen })
+
+        let olderKeys = try store.upsert(MailboxPage(messages: [
+            metadata(provider: .gmail, id: "older")
+        ], nextCursor: nil), into: context)
+        let older = try #require(context.fetch(FetchDescriptor<EmailMessage>()).first { $0.providerMessageID == "older" })
+        #expect(olderKeys == Set([EmailMessageKey(older)]))
+        #expect(older.isNewlyImportedUnseen)
+
+        try store.upsert(MailboxPage(messages: [metadata(provider: .gmail, id: "arrived")], nextCursor: nil), into: context)
+        let arrived = try #require(context.fetch(FetchDescriptor<EmailMessage>()).first { $0.providerMessageID == "arrived" })
+        #expect(arrived.isNewlyImportedUnseen)
+    }
+
+    @Test("App-viewed persistence failures retain the unseen state")
+    func testMarkViewedFailurePreservesUnseenState() throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let email = EmailMessage(id: "save-failure", isInInbox: true)
+        email.hasBeenViewedInApp = false
+        context.insert(email)
+        try context.save()
+        let store = MailboxLocalStore(defaults: try makeDefaults(), saveContext: { _ in throw CocoaError(.fileWriteUnknown) })
+        #expect(throws: CocoaError.self) { try store.markViewedInApp(email, in: context) }
+        #expect(email.isNewlyImportedUnseen)
     }
 
     @Test("duplicate upsert는 analyzed body survivor와 analysis를 보존한다")

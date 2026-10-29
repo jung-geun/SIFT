@@ -512,7 +512,15 @@ struct MailTabView: View {
     }
 
     private var cachedProviderAccess: MailboxCachedProviderAccess {
-        MailboxCachedProviderAccess.current()
+        #if DEBUG
+        if MailUITestFixture.isEnabled {
+            return MailboxCachedProviderAccess(
+                activeGmailNamespace: IMAPCredentialStore.canonicalAccount(MailUITestFixture.gmailAccount) ?? MailUITestFixture.gmailAccount,
+                activeOutlookNamespace: ""
+            )
+        }
+        #endif
+        return MailboxCachedProviderAccess.current()
     }
 
     private var validCachedInboxEmails: [EmailMessage] {
@@ -683,12 +691,12 @@ struct MailTabView: View {
                             title: AppLanguage.localized("mail.refresh.accessibilityLabel", defaultValue: "메일 새로고침", language: .current, comment: "Mail refresh button."),
                             systemImage: "arrow.clockwise", accessibilityIdentifier: "mail.refreshButton"
                         ) {
-                            Task { await refreshSelectedMailbox(showSuccess: true) }
+                            Task { await refreshSelectedMailbox() }
                         }
                         .disabled(selectedProvider == nil || startupPresentation.showsAuthenticationCheckingStatus)
                         #else
                         Button {
-                            Task { await refreshSelectedMailbox(showSuccess: true) }
+                            Task { await refreshSelectedMailbox() }
                         } label: {
                             Image(systemName: "arrow.clockwise")
                         }
@@ -718,7 +726,7 @@ struct MailTabView: View {
             }
             .refreshable {
                 if !startupPresentation.showsAuthenticationCheckingStatus {
-                    await refreshSelectedMailbox(showSuccess: true)
+                    await refreshSelectedMailbox()
                 }
             }
             .sheet(item: $selectedEmail) { selection in
@@ -739,7 +747,7 @@ struct MailTabView: View {
                     if let provider = selectedProvider {
                         await validateAndUpdateAuthState(for: provider)
                         guard selectedProvider == provider else { return }
-                        await refreshSelectedMailbox(showSuccess: false)
+                        await refreshSelectedMailbox()
                     }
                 }
             }) {
@@ -753,6 +761,14 @@ struct MailTabView: View {
                 if let errorMessage { Text(errorMessage) }
             }
             .task {
+                #if DEBUG
+                if MailUITestFixture.isEnabled {
+                    // The credential-free fixture must establish its synthetic provider
+                    // before selection reconciliation; no real credential validation runs.
+                    await validateAndUpdateAuthState(for: .gmail)
+                    return
+                }
+                #endif
                 storedCredentialProviders = MailboxCachedProviderAccess.current().storedCredentialProviders
                 authenticationState = .resolved
                 reconcileSelectedProviderForCurrentState()
@@ -760,7 +776,7 @@ struct MailTabView: View {
                 if let provider = selectedProvider {
                     await validateAndUpdateAuthState(for: provider)
                     guard selectedProvider == provider else { return }
-                    await refreshSelectedMailbox(showSuccess: false)
+                    await refreshSelectedMailbox()
                 }
             }
         }
@@ -823,7 +839,7 @@ struct MailTabView: View {
                         .foregroundStyle(.secondary)
                     Spacer()
                     Button(AppLanguage.localized("mail.refresh", defaultValue: "새로고침", language: .current, comment: "Mail refresh button.")) {
-                        Task { await refreshSelectedMailbox(showSuccess: false) }
+                        Task { await refreshSelectedMailbox() }
                     }
                     .disabled(startupPresentation.showsAuthenticationCheckingStatus)
                     .accessibilityLabel(AppLanguage.localized("mail.refresh.accessibilityLabel", defaultValue: "메일 새로고침", language: .current, comment: "Mail refresh button."))
@@ -938,7 +954,7 @@ struct MailTabView: View {
             Task {
                 await validateAndUpdateAuthState(for: provider)
                 guard selectedProvider == provider else { return }
-                await refreshSelectedMailbox(showSuccess: false)
+                await refreshSelectedMailbox()
             }
         }
     }
@@ -1231,7 +1247,7 @@ struct MailTabView: View {
 
 
     @MainActor
-    private func refreshSelectedMailbox(showSuccess: Bool) async {
+    private func refreshSelectedMailbox() async {
         #if DEBUG
         if MailUITestFixture.isEnabled {
             return
@@ -1252,15 +1268,6 @@ struct MailTabView: View {
         async let indexLoad: Void = reconcileInbox(for: provider)
         _ = await (pageLoad, indexLoad)
 
-        let state = viewState.pagingState(for: provider)
-        if showSuccess,
-           state.pageErrorMessage == nil,
-           state.indexWarningMessage == nil {
-            alertTitle = AppLanguage.localized("mail.sync.success", defaultValue: "%@ Inbox sync complete", language: .current, comment: "Mailbox sync success title.")
-            alertTitle = String(format: alertTitle, locale: AppLanguage.current.locale, providerDisplayName(provider))
-            errorMessage = mailboxHeaderText(for: provider)
-            showError = true
-        }
     }
 
     @MainActor
@@ -1342,7 +1349,7 @@ struct MailTabView: View {
         try? await Task.sleep(for: .milliseconds(500))
         analysisProgress = nil
         if mailAnalysisSyncGate.finishAnalysis() {
-            await refreshSelectedMailbox(showSuccess: false)
+            await refreshSelectedMailbox()
         }
     }
 
@@ -1510,8 +1517,8 @@ struct MailTabView: View {
         #if DEBUG
         if MailUITestFixture.isEnabled {
             isGmailAuthenticated = true
-            isOutlookAuthenticated = true
-            storedCredentialProviders = [.gmail, .outlook]
+            isOutlookAuthenticated = false
+            storedCredentialProviders = [.gmail]
             authenticationState = .resolved
             reconcileSelectedProviderForCurrentState()
             return
@@ -1558,7 +1565,7 @@ struct MailTabView: View {
               previous != selectedProvider
                 || !viewState.pagingState(for: selectedProvider).hasLoadedInitialPage
         else { return }
-        Task { await refreshSelectedMailbox(showSuccess: false) }
+        Task { await refreshSelectedMailbox() }
     }
 }
 
@@ -1614,12 +1621,41 @@ private struct MailCategoryGuideView: View {
 
 // MARK: - MailMessageRow
 
+/// Owns its animation locally so a blinking dot never invalidates the mailbox list.
+private struct NewlyImportedMailDot: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isDimmed = false
+
+    var body: some View {
+        Circle()
+            .fill(Color.blue)
+            .frame(width: 6, height: 6)
+            .opacity(reduceMotion ? 1 : (isDimmed ? 0.35 : 1))
+            .animation(
+                reduceMotion ? nil : .easeInOut(duration: 1.3).repeatForever(autoreverses: true),
+                value: isDimmed
+            )
+            .onAppear { isDimmed = !reduceMotion }
+            .onChange(of: reduceMotion) { _, reduced in isDimmed = !reduced }
+            .accessibilityLabel(AppLanguage.localized(
+                "mail.newInApp",
+                defaultValue: "New in SIFT · not opened yet",
+                language: .current,
+                comment: "Local newly imported email indicator, independent of provider unread status."
+            ))
+    }
+}
+
 struct MailMessageRow: View {
     let email: EmailMessage
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppTheme.Spacing.compact) {
             HStack {
+                if email.isNewlyImportedUnseen {
+                    NewlyImportedMailDot()
+                        .accessibilityIdentifier("mail.row.new.\(email.localListID)")
+                }
                 Text(senderName)
                     .font(.subheadline)
                     .fontWeight(email.isRead ? .regular : .semibold)

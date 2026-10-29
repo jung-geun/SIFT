@@ -21,14 +21,7 @@ struct CalendarDetailView: View {
                     get: { CalendarAutoPolicy.isAuto },
                     set: { CalendarAutoPolicy.setValue(auto: $0) }
                 )) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(copy("calendar.settings.autoRegister", fallback: "Automatically Export Deadlines"))
-                        Text(CalendarAutoPolicy.isAuto
-                             ? copy("calendar.settings.autoRegister.enabled", fallback: "Automatic export is on")
-                             : copy("calendar.settings.autoRegister.disabled", fallback: "Automatic export is off"))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
+                    Text(copy("calendar.settings.autoRegister", fallback: "Automatically Export Deadlines"))
                 }
                 .accessibilityIdentifier("calendar.autoRegister.toggle")
 
@@ -61,7 +54,7 @@ struct CalendarDetailView: View {
                 .pickerStyle(.menu)
                 .accessibilityIdentifier("calendar.completionAction.picker")
             } footer: {
-                Text(copy("calendar.settings.completionFooter", fallback: "Keep Event leaves the event unchanged. Silence Alerts keeps the event and removes its alerts (the default). Remove Event deletes it. These actions apply only to events SIFT created for that to-do, not original events from an external calendar."))
+                Text(copy("calendar.settings.completionFooter", fallback: "These actions affect only events SIFT created for the to-do, not original external events."))
             }
 
             destinationCalendarSection
@@ -100,8 +93,6 @@ struct CalendarDetailView: View {
                 }
             }
             .accessibilityIdentifier("calendar.taskAnalysis.row")
-        } header: {
-            Text(copy("calendar.taskAnalysis.title", fallback: "Task Analysis Calendars"))
         } footer: {
             VStack(alignment: .leading, spacing: 8) {
                 Text(copy("calendar.taskAnalysis.consent", fallback: "Only calendars you explicitly select are used for automatic calendar-to-task import and analysis. Select none to turn both off. This selection is saved only on this device and does not change calendar display or the export destination. Read-only and subscribed calendars can also be selected."))
@@ -149,8 +140,6 @@ struct CalendarDetailView: View {
                     .foregroundStyle(.orange)
                     .accessibilityIdentifier("calendar.destination.error")
             }
-        } header: {
-            Text(copy("calendar.destination.header", fallback: "Destination Calendar"))
         } footer: {
             Text(copy("calendar.destination.footer", fallback: "Choose a writable calendar before exporting events. This choice is saved only on this device. No calendar is chosen automatically; System Default must also be selected explicitly. Open the row above to choose or replace an unavailable calendar."))
         }

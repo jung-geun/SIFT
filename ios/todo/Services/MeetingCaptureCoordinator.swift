@@ -45,6 +45,7 @@ struct MeetingLiveTranscriptRow: Identifiable, Equatable {
     let endMs: Int64
     let text: String
     let speakerIDs: [String]
+    var evidenceSpeakerIDs: [String] = []
 }
 
 /// Derives display-only labels from the covered prefix without rewriting raw
@@ -102,7 +103,8 @@ struct MeetingLiveTranscriptRowBuilder {
             let ids = MeetingSpeakerAlignment.assignLiveSegment(
                 startMs: entry.startMs, endMs: entry.endMs, intervals: intervals, coveredThroughSample: coverage
             )
-            return [MeetingLiveTranscriptRow(id: entry.id, startMs: entry.startMs, endMs: entry.endMs, text: entry.text, speakerIDs: ids)]
+            return [MeetingLiveTranscriptRow(id: entry.id, startMs: entry.startMs, endMs: entry.endMs,
+                text: entry.text, speakerIDs: ids, evidenceSpeakerIDs: Array(Set(intervals.map(\.speakerID))).sorted())]
         }
         // Strict word alignment waits for the entire word, never a tiny fragment.
         let labels = MeetingSpeakerAlignment.assign(runs: runs, intervals: intervals, coveredThroughSample: coverage)
@@ -118,7 +120,11 @@ struct MeetingLiveTranscriptRowBuilder {
             guard !text.isEmpty || turns.count == 1 else { return nil }
             return MeetingLiveTranscriptRow(
                 id: index == 0 ? entry.id : "\(entry.id)#\(index)",
-                startMs: turn.startMs, endMs: turn.endMs, text: text, speakerIDs: turn.speakerIDs
+                startMs: turn.startMs, endMs: turn.endMs, text: text, speakerIDs: turn.speakerIDs,
+                evidenceSpeakerIDs: Array(Set(intervals.filter {
+                    $0.startSample < turn.endMs * MeetingSpeakerAlignment.samplesPerMillisecond
+                        && $0.endSample > turn.startMs * MeetingSpeakerAlignment.samplesPerMillisecond
+                }.map(\.speakerID))).sorted()
             )
         }
     }
@@ -291,6 +297,7 @@ final class MeetingCaptureCoordinator: ObservableObject {
     @Published private(set) var finalizationDetail = ""
     @Published private(set) var liveTracks: [MeetingLiveCaptureTrack] = []
     @Published private(set) var appAudioSources: [MeetingAppAudioSourceSnapshot] = []
+    @Published private(set) var recordingActivity: MeetingRecordingActivitySnapshot?
     enum LiveSpeakerPhase: Equatable {
         case inactive, preparing, waitingForInference, analyzing, stopped
     }
@@ -371,6 +378,12 @@ final class MeetingCaptureCoordinator: ObservableObject {
     private var tracks: [String: MeetingCaptureTrackSession] = [:]
     private var trackOrder: [String] = []
     private var activeSourceTracks: [MeetingAudioSourceRouter.Source: String] = [:]
+    private let recordingActivityOwnerID = UUID()
+    private var recordingMeterTask: Task<Void, Never>?
+    private var recordingMeterGeneration = UUID()
+    private var recordingMeterActive = false
+    private var recordingMeterHistories: [String: MeetingRecordingMeterHistory] = [:]
+    private var recordingMeterColors: [String: Int] = [:]
     private var sourceRetirements: [MeetingAudioSourceRouter.Source: Task<Void, Never>] = [:]
     private var trackFinalizations: [String: Task<Void, Never>] = [:]
     private var thermalObserver: NSObjectProtocol?
@@ -389,6 +402,12 @@ final class MeetingCaptureCoordinator: ObservableObject {
     init(transcriptionSessionFactory: (any MeetingTranscriptionSessionFactory)? = nil) {
         self.transcriptionSessionFactory = transcriptionSessionFactory ?? DefaultMeetingTranscriptionSessionFactory()
         Self.syncParticipants.add(self)
+    }
+
+    deinit {
+        recordingMeterTask?.cancel()
+        let ownerID = recordingActivityOwnerID
+        Task { @MainActor in MeetingRecordingActivityCenter.shared.update(nil, ownerID: ownerID) }
     }
 
     func setVocabularySnapshotProvider(_ provider: @escaping @Sendable () async -> UserVocabularySnapshot) {
@@ -435,9 +454,10 @@ final class MeetingCaptureCoordinator: ObservableObject {
         #endif
         do {
             if automaticLanguageDetection {
-                // Validate pinned local bytes before accepting any audio. This
-                // lease never downloads, and hashing runs on the model actor.
-                try await MeetingWhisperModelStore.shared.withVerifiedModel { _, _ in () }
+                guard SettingsStore.shared.meetingAdvancedTranscriptionEnabled,
+                      await MeetingWhisperModelStore.shared.isInstalled() else {
+                    throw CaptureError.automaticTranscriptionUnavailable
+                }
             }
             // No writer, analyzer, microphone permission, or retained audio exists
             // until the system picker has consented and the app stream has started.
@@ -458,6 +478,7 @@ final class MeetingCaptureCoordinator: ObservableObject {
                                     appAudioEnabled: appAudioEnabled,
                                     generation: generation, appSink: appSink)
         } catch {
+            clearRecordingActivity()
             if terminalIntent != nil {
                 // Stop/cancel already owns cleanup. Startup unwinding must not
                 // discard a prefix being journaled by the winning stop request.
@@ -490,9 +511,9 @@ final class MeetingCaptureCoordinator: ObservableObject {
         voiceProcessingRequested = SettingsStore.shared.effectiveMeetingVoiceProcessingEnabled
         recordingDiarizationEnabled = SettingsStore.shared.effectiveMeetingDiarizationEnabled
         activeMeetingID = meetingID
-        activeLanguageTag = languageTag
+        activeLanguageTag = automaticLanguageDetection ? "" : languageTag
         activeSummaryLanguageTag = summaryLanguageTag
-        recordingDefersTranscription = deferTranscription
+        recordingDefersTranscription = deferTranscription || automaticLanguageDetection
         recordingAutomaticLanguageDetection = automaticLanguageDetection
         activeTimezoneIdentifier = TimeZone.current.identifier
         let microphoneSetup = microphoneEnabled && !usesSystemPickerMicrophone && appSink.microphoneConsent.isPermitted
@@ -551,6 +572,7 @@ final class MeetingCaptureCoordinator: ObservableObject {
             if let offset = pipeline.sessionStartSample(for: source) { tracks[id]?.setStartSample(offset) }
             if let track = tracks[id] { try journalActive(track) }
         }
+        startRecordingMeterCadence()
         appSink.attach(pipeline)
         if approved, let microphoneSetup {
             let microphoneRequest = microphoneChangeGeneration
@@ -599,6 +621,8 @@ final class MeetingCaptureCoordinator: ObservableObject {
             throw CancellationError()
         }
         activeSourceTracks[source] = track.meetingID
+        let usedColors = Set(activeSourceTracks.values.compactMap { recordingMeterColors[$0] })
+        recordingMeterColors[track.meetingID] = (0..<5).first { !usedColors.contains($0) } ?? 0
         trackSink.attach(track.input, source: source)
         publishTracks()
         return track
@@ -619,9 +643,74 @@ final class MeetingCaptureCoordinator: ObservableObject {
         liveTracks = trackOrder.compactMap { tracks[$0]?.snapshot }
         recordedAudioSamples = liveTracks.reduce(Int64(0)) { $0 + $1.recordedAudioSamples }
         recordedAudioPartCount = liveTracks.reduce(0) { $0 + $1.recordedAudioPartCount }
-        let end = liveTracks.map { $0.sessionStartSample + $0.recordedAudioSamples }.max() ?? 0
-        elapsedMediaMs = end * 1_000 / MeetingMediaTimeline.sampleRate
+        if status != .recording && status != .paused {
+            let end = liveTracks.map { $0.sessionStartSample + $0.recordedAudioSamples }.max() ?? 0
+            elapsedMediaMs = end * 1_000 / MeetingMediaTimeline.sampleRate
+        }
         publishSourceDeliveryDiagnostics()
+    }
+
+    private func startRecordingMeterCadence() {
+        guard terminalIntent == nil, status == .recording, canonicalPipeline != nil else { return }
+        recordingMeterActive = true
+        recordingMeterTask?.cancel()
+        let token = UUID()
+        recordingMeterGeneration = token
+        let generation = captureGeneration
+        publishRecordingActivity()
+        recordingMeterTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .milliseconds(100)) }
+                catch { return }
+                guard !Task.isCancelled, let self,
+                      self.recordingMeterGeneration == token, self.captureGeneration == generation,
+                      self.terminalIntent == nil, self.status == .recording else { return }
+                self.publishRecordingActivity()
+            }
+        }
+    }
+
+    private func publishRecordingActivity() {
+        guard recordingMeterActive, terminalIntent == nil, status == .recording || status == .paused,
+              let router = canonicalPipeline else { return }
+        let meter = router.meterSnapshot()
+        // Divide first: the router uses a wide sample clock; never multiply it
+        // before narrowing to the display's integer millisecond scale.
+        elapsedMediaMs = meter.elapsedSamples / (MeetingMediaTimeline.sampleRate / 1_000)
+        let paused = status == .paused
+        var sources: [MeetingRecordingSourceState] = []
+        sources.reserveCapacity(activeSourceTracks.count)
+        for (source, id) in activeSourceTracks {
+            guard let track = tracks[id], let colorIndex = recordingMeterColors[id] else { continue }
+            var history = recordingMeterHistories.removeValue(forKey: id) ?? MeetingRecordingMeterHistory()
+            if paused { history.clear() }
+            else { history.append(rms: meter.levels[source] ?? 0) }
+            let kind: MeetingRecordingSourceState.Kind
+            switch track.sourceKind {
+            case .microphone: kind = .microphone
+            case .screen: kind = .screen
+            case .application, .legacyMixed: kind = .application
+            }
+            sources.append(MeetingRecordingSourceState(id: id, kind: kind, colorIndex: colorIndex, levels: history.levels))
+            recordingMeterHistories[id] = history
+        }
+        sources.sort { $0.colorIndex < $1.colorIndex }
+        let snapshot = MeetingRecordingActivitySnapshot(sessionID: captureDiagnosticID,
+            phase: paused ? .paused : .recording, elapsedMilliseconds: elapsedMediaMs,
+            updatedAt: Date(), sources: sources)
+        recordingActivity = snapshot
+        MeetingRecordingActivityCenter.shared.update(snapshot, ownerID: recordingActivityOwnerID)
+        publishSourceDeliveryDiagnostics()
+    }
+
+    private func clearRecordingActivity() {
+        recordingMeterActive = false
+        recordingMeterGeneration = UUID()
+        recordingMeterTask?.cancel()
+        recordingMeterTask = nil
+        recordingMeterHistories.removeAll()
+        recordingActivity = nil
+        MeetingRecordingActivityCenter.shared.update(nil, ownerID: recordingActivityOwnerID)
     }
 
     private func publishAppSources() {
@@ -638,6 +727,10 @@ final class MeetingCaptureCoordinator: ObservableObject {
     }
 
     func transcriptionFailure(for meetingID: String) -> Error? { tracks[meetingID]?.transcriptionError }
+
+    func transcriptionFinalizationFailure(for meetingID: String) -> Error? {
+        tracks[meetingID]?.transcriptionFinalizationError
+    }
 
     func liveTimeline(for meetingID: String) -> MeetingLiveSpeakerTimeline? { tracks[meetingID]?.timeline }
 
@@ -1219,6 +1312,10 @@ final class MeetingCaptureCoordinator: ObservableObject {
         engine.pause()
         #endif
         status = .paused
+        recordingMeterGeneration = UUID()
+        recordingMeterTask?.cancel()
+        recordingMeterTask = nil
+        publishRecordingActivity()
     }
 
     func resume() throws {
@@ -1231,6 +1328,7 @@ final class MeetingCaptureCoordinator: ObservableObject {
         #endif
         canonicalPipeline?.resume(hostTime: Self.hostTime)
         status = .recording
+        startRecordingMeterCadence()
     }
 
     /// Fast phase: close and journal the valid audio prefix before slow
@@ -1241,6 +1339,7 @@ final class MeetingCaptureCoordinator: ObservableObject {
         }
         if terminalIntent == nil {
             terminalIntent = .stop
+            clearRecordingActivity()
             canonicalPipeline?.pause(hostTime: Self.hostTime)
             status = .stopping
             finalizationDetail = AppLanguage.localized(
@@ -1281,6 +1380,7 @@ final class MeetingCaptureCoordinator: ObservableObject {
             return
         }
         terminalIntent = .cancel
+        clearRecordingActivity()
         canonicalPipeline?.pause(hostTime: Self.hostTime)
         await terminationGate.run { [weak self] in await self?.performTerminalOperation() }
         status = .cancelled
@@ -1321,6 +1421,9 @@ final class MeetingCaptureCoordinator: ObservableObject {
         let closeTime = Self.hostTime
         if revoke { router.setEnabled(false, source: source, hostTime: closeTime) }
         else { router.close(source: source, hostTime: closeTime) }
+        recordingMeterHistories[id] = nil
+        recordingMeterColors[id] = nil
+        publishRecordingActivity()
         let task = Task { @MainActor [weak self] in
             guard let self else { return }
             var metadata: MeetingCaptureSourceMetadata?
@@ -1367,6 +1470,7 @@ final class MeetingCaptureCoordinator: ObservableObject {
 
     private func performTerminalOperation() async {
         guard let terminalIntent else { return }
+        clearRecordingActivity()
         captureGeneration = UUID()
         let stopTime = Self.hostTime
         // Freeze group admission before any async hardware stop. Accepted valid
@@ -1429,6 +1533,8 @@ final class MeetingCaptureCoordinator: ObservableObject {
     }
 
     private func resetCaptureReferences() {
+        clearRecordingActivity()
+        recordingMeterColors.removeAll()
         appAudioInputSink?.revokeMicrophone()
         appAudioInputSink?.attach(nil)
         appAudioInputSink = nil
@@ -1548,6 +1654,9 @@ final class MeetingCaptureCoordinator: ObservableObject {
         if let captureError = error as? CaptureError {
             return captureError.errorDescription(language: .current)
         }
+        if let transcriptionError = error as? MeetingTranscriptionError {
+            return transcriptionError.errorDescription(language: .current)
+        }
         return AppLanguage.localized(
             "error.meeting.capture.operation",
             defaultValue: AppLanguage.current == .english
@@ -1578,6 +1687,7 @@ final class MeetingCaptureCoordinator: ObservableObject {
 
     enum CaptureError: LocalizedError {
         case microphoneDenied, unsupportedLanguage, invalidState, transcriptFinalizationTimeout, invalidAudioFormat, noAudioSource
+        case automaticTranscriptionUnavailable
 
         var errorDescription: String? {
             errorDescription(language: .current)
@@ -1585,6 +1695,15 @@ final class MeetingCaptureCoordinator: ObservableObject {
 
         func errorDescription(language: AppLanguage) -> String {
             switch self {
+            case .automaticTranscriptionUnavailable:
+                return AppLanguage.localized(
+                    "meeting.languages.automaticRequiresWhisper",
+                    defaultValue: language == .english
+                        ? "Enable Whisper and install its model in Settings → Meeting for automatic language detection after Stop. No live transcription or automatic download."
+                        : "녹음 종료 후 언어를 자동 감지하려면 설정 → 회의에서 Whisper를 켜고 모델을 설치하세요. 실시간 전사와 자동 다운로드는 하지 않습니다.",
+                    language: language,
+                    comment: "Automatic meeting language selection requires explicitly enabled saved-audio Whisper."
+                )
             case .noAudioSource:
                 return AppLanguage.localized(
                     "error.meeting.capture.noAudioSource",
@@ -1637,5 +1756,37 @@ final class MeetingCaptureCoordinator: ObservableObject {
                 )
             }
         }
+    }
+}
+
+/// Display-only quantization of measured RMS; retains no audio samples.
+nonisolated struct MeetingRecordingMeterHistory {
+    private var bins = [UInt8](repeating: 0, count: 32)
+    private var count = 0
+    private var next = 0
+
+    var levels: [UInt8] {
+        var result: [UInt8] = []
+        result.reserveCapacity(count)
+        let start = count == bins.count ? next : 0
+        for offset in 0..<count { result.append(bins[(start + offset) % bins.count]) }
+        return result
+    }
+
+    mutating func append(rms: Double) {
+        // A -60 dBFS floor gives quiet speech useful resolution, while actual
+        // silence (and invalid measurements) remains exactly flat.
+        let level: UInt8
+        if rms.isFinite, rms > 0 {
+            let normalized = min(1, max(0, (20 * log10(rms) + 60) / 60))
+            level = UInt8((normalized * 255).rounded())
+        } else { level = 0 }
+        bins[next] = level
+        next = (next + 1) % bins.count
+        count = min(count + 1, bins.count)
+    }
+
+    mutating func clear() {
+        for index in bins.indices { bins[index] = 0 }
     }
 }

@@ -28,6 +28,24 @@ struct TranscriptCorrectionBatchResult: Sendable {
 }
 
 enum FoundationModelsAvailability {
+    /// Disabled Intelligence or pending assets do not make supported hardware
+    /// eligible for a different model. Simulator has no system model runtime.
+    nonisolated static var isDeviceEligible: Bool {
+        #if targetEnvironment(simulator)
+        return false
+        #else
+        #if canImport(FoundationModels)
+        if #available(iOS 26.0, *) {
+            if case .unavailable(.deviceNotEligible) = SystemLanguageModel.default.availability {
+                return false
+            }
+            return true
+        }
+        #endif
+        return false
+        #endif
+    }
+
     static var isAvailable: Bool {
         #if targetEnvironment(simulator)
         return false
@@ -573,7 +591,7 @@ struct FoundationModelsService {
         behaviorProfile: BehaviorProfile,
         language: AppLanguage = .current
     ) async throws -> PersonaNarrative {
-        guard policy.authorizes(.foundationModels, for: .standardAnalysis) else {
+        guard policy.authorizes(.foundationModels, for: .personalNarrative) else {
             throw IntelligenceRoutingError.backendUnavailable(
                 provider: .foundationModels,
                 reason: RuleFallbackReason.providerDisabled.rawValue
@@ -626,7 +644,7 @@ struct FoundationModelsService {
         baseline: MemoryAnalysisResult,
         language: AppLanguage = .current
     ) async throws -> BehaviorNarrative {
-        guard policy.authorizes(.foundationModels, for: .standardAnalysis) else {
+        guard policy.authorizes(.foundationModels, for: .personalNarrative) else {
             throw IntelligenceRoutingError.backendUnavailable(
                 provider: .foundationModels,
                 reason: RuleFallbackReason.providerDisabled.rawValue

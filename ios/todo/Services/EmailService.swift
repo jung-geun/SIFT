@@ -47,6 +47,7 @@ struct EmailCacheSyncResult: Sendable {
     let upsertedMessageCount: Int
     let prunedMessageCount: Int
     let prunedTodoCount: Int
+    let insertedMessageIDs: Set<String>
 }
 
 private struct RecentMessageSyncSnapshot: Sendable {
@@ -399,9 +400,10 @@ final class EmailService: NSObject, MailboxPagingProvider {
         let snapshot = try await fetchRecentMessageSyncSnapshot()
         let existing = ((try? emailContext.fetch(FetchDescriptor<EmailMessage>())) ?? [])
             .filter { $0.provider == .gmail }
-        let existingByID = Dictionary(uniqueKeysWithValues: existing.map { ($0.id, $0) })
+        var existingByID = Dictionary(uniqueKeysWithValues: existing.map { ($0.id, $0) })
 
         var upsertedMessageCount = 0
+        var insertedMessageIDs = Set<String>()
         for msg in snapshot.messages {
             let serverIsRead = !msg.labelIds.contains("UNREAD")
             if let email = existingByID[msg.id] {
@@ -455,7 +457,10 @@ final class EmailService: NSObject, MailboxPagingProvider {
                     isInInbox: true
                 )
                 email.isRead = serverIsRead
+                email.hasBeenViewedInApp = false
                 emailContext.insert(email)
+                existingByID[msg.id] = email
+                insertedMessageIDs.insert(msg.id)
                 upsertedMessageCount += 1
             }
         }
@@ -489,7 +494,8 @@ final class EmailService: NSObject, MailboxPagingProvider {
         return EmailCacheSyncResult(
             upsertedMessageCount: upsertedMessageCount,
             prunedMessageCount: staleEmails.count,
-            prunedTodoCount: prunedTodoCount
+            prunedTodoCount: prunedTodoCount,
+            insertedMessageIDs: insertedMessageIDs
         )
     }
 

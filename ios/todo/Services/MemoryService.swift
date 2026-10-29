@@ -34,19 +34,24 @@ struct BehaviorNarrationService {
     typealias AvailabilityProvider = () -> Bool
 
     private let narrativeProvider: NarrativeProvider
+    private let localNarrativeProvider: NarrativeProvider
     private let routingDecisionProvider: RoutingDecisionProvider
     private let availabilityProvider: AvailabilityProvider
 
     init(
         narrativeProvider: @escaping NarrativeProvider = Self.liveNarrative,
         routingDecisionProvider: @escaping RoutingDecisionProvider = {
-            BetaFeaturePolicy().routingDecision(for: .standardAnalysis)
+            BetaFeaturePolicy().routingDecision(for: .personalNarrative)
         },
         availabilityProvider: @escaping AvailabilityProvider = {
             FoundationModelsAvailability.isAvailable
+        },
+        localNarrativeProvider: @escaping NarrativeProvider = { baseline, language in
+            try await LocalNarrativeService.behavior(baseline: baseline, language: language)
         }
     ) {
         self.narrativeProvider = narrativeProvider
+        self.localNarrativeProvider = localNarrativeProvider
         self.routingDecisionProvider = routingDecisionProvider
         self.availabilityProvider = availabilityProvider
     }
@@ -56,17 +61,19 @@ struct BehaviorNarrationService {
         language: AppLanguage,
         tier: OpenAIAnalysisTier = .basic
     ) async throws -> MemoryAnalysisResult {
-        if tier == .advanced || routingDecisionProvider() == .providers([.openAI]) {
-            if tier == .basic, !OpenAIPrivacy.allows(.routines) { return baseline }
+        if tier == .advanced {
             let narrative = try await OpenAIAnalysisService().behavior(baseline, tier: tier, language: language)
             return enriched(baseline, narrative: narrative, processor: "OpenAI · \(tier.modelID) · deterministic metrics")
         }
-        guard routingDecisionProvider() == .providers([.foundationModels]), availabilityProvider() else {
+        let route = routingDecisionProvider()
+        let usesLocalModel = route == .providers([.onDevice])
+        guard usesLocalModel || (route == .providers([.foundationModels]) && availabilityProvider()) else {
             return baseline
         }
         do {
-            let narrative = try await narrativeProvider(baseline, language)
-            return enriched(baseline, narrative: narrative, processor: "Apple Foundation Models · deterministic metrics")
+            let narrative = try await (usesLocalModel ? localNarrativeProvider : narrativeProvider)(baseline, language)
+            return enriched(baseline, narrative: narrative,
+                processor: usesLocalModel ? "On-device model · deterministic metrics" : "Apple Intelligence · deterministic metrics")
         } catch is CancellationError {
             throw CancellationError()
         } catch {

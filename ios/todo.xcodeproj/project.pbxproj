@@ -14,6 +14,19 @@
 		AEDC6C8B2FE3E978006E59B5 /* MLXLLM in Frameworks */ = {isa = PBXBuildFile; productRef = AEDC6C8A2FE3E978006E59B5 /* MLXLLM */; };
 		AEDC6C8D2FE3E978006E59B5 /* MLXLMCommon in Frameworks */ = {isa = PBXBuildFile; productRef = AEDC6C8C2FE3E978006E59B5 /* MLXLMCommon */; };
 		AFC91B100000000000000001 /* WhisperKit in Frameworks */ = {isa = PBXBuildFile; productRef = AFC91B100000000000000002 /* WhisperKit */; };
+		B70000000000000000000003 /* RecordingActivityExtension.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = B70000000000000000000001 /* RecordingActivityExtension.appex */; platformFilter = ios; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		B70000000000000000000016 /* MeetingRecordingActivitySnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = B70000000000000000000012 /* MeetingRecordingActivitySnapshot.swift */; };
+		B70000000000000000000017 /* MeetingRecordingAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = B70000000000000000000013 /* MeetingRecordingAttributes.swift */; };
+		B70000000000000000000018 /* MeetingRecordingWaveform.swift in Sources */ = {isa = PBXBuildFile; fileRef = B70000000000000000000014 /* MeetingRecordingWaveform.swift */; };
+		B70000000000000000000019 /* RecordingActivity.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = B70000000000000000000015 /* RecordingActivity.xcstrings */; };
+		B7000000000000000000001A /* MeetingRecordingActivitySnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = B70000000000000000000012 /* MeetingRecordingActivitySnapshot.swift */; };
+		B7000000000000000000001B /* MeetingRecordingAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = B70000000000000000000013 /* MeetingRecordingAttributes.swift */; };
+		B7000000000000000000001C /* MeetingRecordingWaveform.swift in Sources */ = {isa = PBXBuildFile; fileRef = B70000000000000000000014 /* MeetingRecordingWaveform.swift */; };
+		B7000000000000000000001D /* RecordingActivity.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = B70000000000000000000015 /* RecordingActivity.xcstrings */; };
+		C80000000000000000000001 /* MeetingRecordingStatusItemBridging.swift in Sources */ = {isa = PBXBuildFile; fileRef = C80000000000000000000011 /* MeetingRecordingStatusItemBridging.swift */; };
+		C80000000000000000000002 /* MeetingRecordingStatusItemBridging.swift in Sources */ = {isa = PBXBuildFile; fileRef = C80000000000000000000011 /* MeetingRecordingStatusItemBridging.swift */; };
+		C80000000000000000000003 /* MeetingRecordingStatusItemPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = C80000000000000000000012 /* MeetingRecordingStatusItemPlugin.swift */; };
+		C80000000000000000000004 /* RecordingStatusMacSupport.bundle in Embed Mac Recording Status */ = {isa = PBXBuildFile; fileRef = C80000000000000000000010 /* RecordingStatusMacSupport.bundle */; platformFilter = maccatalyst; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -31,12 +44,60 @@
 			remoteGlobalIDString = AE58F1A12FDEFA3B00690FA6;
 			remoteInfo = todo;
 		};
+		B70000000000000000000006 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE58F19A2FDEFA3B00690FA6 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = B70000000000000000000002;
+			remoteInfo = RecordingActivityExtension;
+		};
+		C80000000000000000000005 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE58F19A2FDEFA3B00690FA6 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = C80000000000000000000020;
+			remoteInfo = RecordingStatusMacSupport;
+		};
 /* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		B70000000000000000000004 /* Embed App Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				B70000000000000000000003 /* RecordingActivityExtension.appex in Embed App Extensions */,
+			);
+			name = "Embed App Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C80000000000000000000006 /* Embed Mac Recording Status */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				C80000000000000000000004 /* RecordingStatusMacSupport.bundle in Embed Mac Recording Status */,
+			);
+			name = "Embed Mac Recording Status";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		AE58F1A22FDEFA3B00690FA6 /* todo.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = todo.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		AE58F1B32FDEFA3C00690FA6 /* todoTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = todoTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		AE58F1BD2FDEFA3C00690FA6 /* todoUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = todoUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		B70000000000000000000001 /* RecordingActivityExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = RecordingActivityExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		B70000000000000000000012 /* MeetingRecordingActivitySnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeetingRecordingActivitySnapshot.swift; sourceTree = "<group>"; };
+		B70000000000000000000013 /* MeetingRecordingAttributes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeetingRecordingAttributes.swift; sourceTree = "<group>"; };
+		B70000000000000000000014 /* MeetingRecordingWaveform.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeetingRecordingWaveform.swift; sourceTree = "<group>"; };
+		B70000000000000000000015 /* RecordingActivity.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = RecordingActivity.xcstrings; sourceTree = "<group>"; };
+		C80000000000000000000010 /* RecordingStatusMacSupport.bundle */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = RecordingStatusMacSupport.bundle; sourceTree = BUILT_PRODUCTS_DIR; };
+		C80000000000000000000011 /* MeetingRecordingStatusItemBridging.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeetingRecordingStatusItemBridging.swift; sourceTree = "<group>"; };
+		C80000000000000000000012 /* MeetingRecordingStatusItemPlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeetingRecordingStatusItemPlugin.swift; sourceTree = "<group>"; };
+		C80000000000000000000013 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -50,6 +111,13 @@
 				InfoQA.plist,
 			);
 			target = AE58F1A12FDEFA3B00690FA6 /* todo */;
+		};
+		B70000000000000000000009 /* Exceptions for "RecordingActivityExtension" folder in "RecordingActivityExtension" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = B70000000000000000000002 /* RecordingActivityExtension */;
 		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
@@ -70,6 +138,14 @@
 		AE58F1C02FDEFA3C00690FA6 /* todoUITests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = todoUITests;
+			sourceTree = "<group>";
+		};
+		B70000000000000000000008 /* RecordingActivityExtension */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				B70000000000000000000009 /* Exceptions for "RecordingActivityExtension" folder in "RecordingActivityExtension" target */,
+			);
+			path = RecordingActivityExtension;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -103,6 +179,20 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		B7000000000000000000000B /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C80000000000000000000022 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -110,6 +200,10 @@
 			isa = PBXGroup;
 			children = (
 				AE58F1A42FDEFA3B00690FA6 /* todo */,
+				B70000000000000000000007 /* MeetingActivityShared */,
+				B70000000000000000000008 /* RecordingActivityExtension */,
+				C80000000000000000000014 /* RecordingStatusShared */,
+				C80000000000000000000015 /* RecordingStatusMacSupport */,
 				AE58F1B62FDEFA3C00690FA6 /* todoTests */,
 				AE58F1C02FDEFA3C00690FA6 /* todoUITests */,
 				AE58F1A32FDEFA3B00690FA6 /* Products */,
@@ -120,10 +214,40 @@
 			isa = PBXGroup;
 			children = (
 				AE58F1A22FDEFA3B00690FA6 /* todo.app */,
+				B70000000000000000000001 /* RecordingActivityExtension.appex */,
+				C80000000000000000000010 /* RecordingStatusMacSupport.bundle */,
 				AE58F1B32FDEFA3C00690FA6 /* todoTests.xctest */,
 				AE58F1BD2FDEFA3C00690FA6 /* todoUITests.xctest */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		B70000000000000000000007 /* MeetingActivityShared */ = {
+			isa = PBXGroup;
+			children = (
+				B70000000000000000000012 /* MeetingRecordingActivitySnapshot.swift */,
+				B70000000000000000000013 /* MeetingRecordingAttributes.swift */,
+				B70000000000000000000014 /* MeetingRecordingWaveform.swift */,
+				B70000000000000000000015 /* RecordingActivity.xcstrings */,
+			);
+			path = MeetingActivityShared;
+			sourceTree = "<group>";
+		};
+		C80000000000000000000014 /* RecordingStatusShared */ = {
+			isa = PBXGroup;
+			children = (
+				C80000000000000000000011 /* MeetingRecordingStatusItemBridging.swift */,
+			);
+			path = RecordingStatusShared;
+			sourceTree = "<group>";
+		};
+		C80000000000000000000015 /* RecordingStatusMacSupport */ = {
+			isa = PBXGroup;
+			children = (
+				C80000000000000000000012 /* MeetingRecordingStatusItemPlugin.swift */,
+				C80000000000000000000013 /* Info.plist */,
+			);
+			path = RecordingStatusMacSupport;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -136,10 +260,14 @@
 				AE58F19E2FDEFA3B00690FA6 /* Sources */,
 				AE58F19F2FDEFA3B00690FA6 /* Frameworks */,
 				AE58F1A02FDEFA3B00690FA6 /* Resources */,
+				B70000000000000000000004 /* Embed App Extensions */,
+				C80000000000000000000006 /* Embed Mac Recording Status */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				B70000000000000000000005 /* PBXTargetDependency */,
+				C80000000000000000000007 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				AE58F1A42FDEFA3B00690FA6 /* todo */,
@@ -204,6 +332,44 @@
 			productReference = AE58F1BD2FDEFA3C00690FA6 /* todoUITests.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
 		};
+		B70000000000000000000002 /* RecordingActivityExtension */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = B7000000000000000000000D /* Build configuration list for PBXNativeTarget "RecordingActivityExtension" */;
+			buildPhases = (
+				B7000000000000000000000A /* Sources */,
+				B7000000000000000000000B /* Frameworks */,
+				B7000000000000000000000C /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				B70000000000000000000008 /* RecordingActivityExtension */,
+			);
+			name = RecordingActivityExtension;
+			packageProductDependencies = (
+			);
+			productName = RecordingActivityExtension;
+			productReference = B70000000000000000000001 /* RecordingActivityExtension.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+		C80000000000000000000020 /* RecordingStatusMacSupport */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = C80000000000000000000030 /* Build configuration list for PBXNativeTarget "RecordingStatusMacSupport" */;
+			buildPhases = (
+				C80000000000000000000021 /* Sources */,
+				C80000000000000000000022 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = RecordingStatusMacSupport;
+			productName = RecordingStatusMacSupport;
+			productReference = C80000000000000000000010 /* RecordingStatusMacSupport.bundle */;
+			productType = "com.apple.product-type.bundle";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -235,6 +401,12 @@
 					AE58F1BC2FDEFA3C00690FA6 = {
 						CreatedOnToolsVersion = 26.5;
 						TestTargetID = AE58F1A12FDEFA3B00690FA6;
+					};
+					B70000000000000000000002 = {
+						CreatedOnToolsVersion = 27.1;
+					};
+					C80000000000000000000020 = {
+						CreatedOnToolsVersion = 27.1;
 					};
 				};
 			};
@@ -270,6 +442,8 @@
 			projectRoot = "";
 			targets = (
 				AE58F1A12FDEFA3B00690FA6 /* todo */,
+				B70000000000000000000002 /* RecordingActivityExtension */,
+				C80000000000000000000020 /* RecordingStatusMacSupport */,
 				AE58F1B22FDEFA3C00690FA6 /* todoTests */,
 				AE58F1BC2FDEFA3C00690FA6 /* todoUITests */,
 			);
@@ -281,6 +455,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B70000000000000000000019 /* RecordingActivity.xcstrings in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -298,6 +473,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		B7000000000000000000000C /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B7000000000000000000001D /* RecordingActivity.xcstrings in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
@@ -305,6 +488,10 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B70000000000000000000016 /* MeetingRecordingActivitySnapshot.swift in Sources */,
+				B70000000000000000000017 /* MeetingRecordingAttributes.swift in Sources */,
+				B70000000000000000000018 /* MeetingRecordingWaveform.swift in Sources */,
+				C80000000000000000000001 /* MeetingRecordingStatusItemBridging.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -322,6 +509,25 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		B7000000000000000000000A /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B7000000000000000000001A /* MeetingRecordingActivitySnapshot.swift in Sources */,
+				B7000000000000000000001B /* MeetingRecordingAttributes.swift in Sources */,
+				B7000000000000000000001C /* MeetingRecordingWaveform.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C80000000000000000000021 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C80000000000000000000002 /* MeetingRecordingStatusItemBridging.swift in Sources */,
+				C80000000000000000000003 /* MeetingRecordingStatusItemPlugin.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -335,6 +541,18 @@
 			target = AE58F1A12FDEFA3B00690FA6 /* todo */;
 			targetProxy = AE58F1BE2FDEFA3C00690FA6 /* PBXContainerItemProxy */;
 		};
+		B70000000000000000000005 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			platformFilter = ios;
+			target = B70000000000000000000002 /* RecordingActivityExtension */;
+			targetProxy = B70000000000000000000006 /* PBXContainerItemProxy */;
+		};
+		C80000000000000000000007 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			platformFilter = maccatalyst;
+			target = C80000000000000000000020 /* RecordingStatusMacSupport */;
+			targetProxy = C80000000000000000000005 /* PBXContainerItemProxy */;
+		};
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
@@ -347,7 +565,7 @@
 				CODE_SIGN_ENTITLEMENTS = todo/todo.entitlements;
 				"CODE_SIGN_ENTITLEMENTS[sdk=macosx*]" = "todo/todo-macCatalyst.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 10;
+				CURRENT_PROJECT_VERSION = 11;
 				DEVELOPMENT_TEAM = VQXGRP23X5;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -368,7 +586,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0.11;
+				MARKETING_VERSION = 1.0.12;
 				"OTHER_LDFLAGS[sdk=iphone*]" = (
 					"$(inherited)",
 					"-ObjC",
@@ -397,7 +615,7 @@
 				CODE_SIGN_ENTITLEMENTS = todo/todo.entitlements;
 				"CODE_SIGN_ENTITLEMENTS[sdk=macosx*]" = "todo/todo-macCatalyst.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 10;
+				CURRENT_PROJECT_VERSION = 11;
 				DEVELOPMENT_TEAM = VQXGRP23X5;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -418,7 +636,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0.11;
+				MARKETING_VERSION = 1.0.12;
 				"OTHER_LDFLAGS[sdk=iphone*]" = (
 					"$(inherited)",
 					"-ObjC",
@@ -665,7 +883,7 @@
 				CODE_SIGN_ENTITLEMENTS = todo/todo.entitlements;
 				"CODE_SIGN_ENTITLEMENTS[sdk=macosx*]" = "todo/todo-macCatalyst.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 10;
+				CURRENT_PROJECT_VERSION = 11;
 				DEVELOPMENT_TEAM = VQXGRP23X5;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -686,7 +904,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0.11;
+				MARKETING_VERSION = 1.0.12;
 				"OTHER_LDFLAGS[sdk=iphone*]" = (
 					"$(inherited)",
 					"-ObjC",
@@ -716,7 +934,7 @@
 				CODE_SIGN_ENTITLEMENTS = todo/todo.entitlements;
 				"CODE_SIGN_ENTITLEMENTS[sdk=macosx*]" = "todo/todo-macCatalyst.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 10;
+				CURRENT_PROJECT_VERSION = 11;
 				DEVELOPMENT_TEAM = VQXGRP23X5;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -737,7 +955,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0.11;
+				MARKETING_VERSION = 1.0.12;
 				"OTHER_LDFLAGS[sdk=iphone*]" = (
 					"$(inherited)",
 					"-ObjC",
@@ -969,6 +1187,234 @@
 			};
 			name = Release;
 		};
+		B7000000000000000000000E /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 11;
+				DEVELOPMENT_TEAM = VQXGRP23X5;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = RecordingActivityExtension/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0.12;
+				PRODUCT_BUNDLE_IDENTIFIER = "pieroot.sift-todo.recording-activity";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		B7000000000000000000000F /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 11;
+				DEVELOPMENT_TEAM = VQXGRP23X5;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = RecordingActivityExtension/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0.12;
+				PRODUCT_BUNDLE_IDENTIFIER = "pieroot.sift-todo.recording-activity";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		B70000000000000000000010 /* Debug-QA */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 11;
+				DEVELOPMENT_TEAM = VQXGRP23X5;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = RecordingActivityExtension/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0.12;
+				PRODUCT_BUNDLE_IDENTIFIER = "pieroot.sift-todo.qa.recording-activity";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "SIFT_QA $(inherited)";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = "Debug-QA";
+		};
+		B70000000000000000000011 /* Release-QA */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 11;
+				DEVELOPMENT_TEAM = VQXGRP23X5;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = RecordingActivityExtension/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0.12;
+				PRODUCT_BUNDLE_IDENTIFIER = "pieroot.sift-todo.qa.recording-activity";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "SIFT_QA $(inherited)";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = "Release-QA";
+		};
+		C80000000000000000000031 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 11;
+				DEVELOPMENT_TEAM = VQXGRP23X5;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = RecordingStatusMacSupport/Info.plist;
+				MACH_O_TYPE = mh_bundle;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "pieroot.sift-todo.recording-status";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SDK_VARIANT = macos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = macosx;
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		C80000000000000000000032 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 11;
+				DEVELOPMENT_TEAM = VQXGRP23X5;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = RecordingStatusMacSupport/Info.plist;
+				MACH_O_TYPE = mh_bundle;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "pieroot.sift-todo.recording-status";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SDK_VARIANT = macos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = macosx;
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		C80000000000000000000033 /* Debug-QA */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 11;
+				DEVELOPMENT_TEAM = VQXGRP23X5;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = RecordingStatusMacSupport/Info.plist;
+				MACH_O_TYPE = mh_bundle;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "pieroot.sift-todo.qa.recording-status";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SDK_VARIANT = macos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = macosx;
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG SIFT_QA $(inherited)";
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = "Debug-QA";
+		};
+		C80000000000000000000034 /* Release-QA */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 11;
+				DEVELOPMENT_TEAM = VQXGRP23X5;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = RecordingStatusMacSupport/Info.plist;
+				MACH_O_TYPE = mh_bundle;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "pieroot.sift-todo.qa.recording-status";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SDK_VARIANT = macos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = macosx;
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+			};
+			name = "Release-QA";
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -1012,6 +1458,28 @@
 				AE58F1D02FDEFA3C00690FA6 /* Release */,
 				A5F700070000000000000000 /* Debug-QA */,
 				A5F700080000000000000000 /* Release-QA */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		B7000000000000000000000D /* Build configuration list for PBXNativeTarget "RecordingActivityExtension" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				B7000000000000000000000E /* Debug */,
+				B7000000000000000000000F /* Release */,
+				B70000000000000000000010 /* Debug-QA */,
+				B70000000000000000000011 /* Release-QA */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		C80000000000000000000030 /* Build configuration list for PBXNativeTarget "RecordingStatusMacSupport" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C80000000000000000000031 /* Debug */,
+				C80000000000000000000032 /* Release */,
+				C80000000000000000000033 /* Debug-QA */,
+				C80000000000000000000034 /* Release-QA */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

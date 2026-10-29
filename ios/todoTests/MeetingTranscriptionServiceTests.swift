@@ -5,6 +5,73 @@ import Testing
 
 @Suite("Meeting transcription backend selection")
 struct MeetingTranscriptionServiceTests {
+    @Test("installed assets without a compatible format cannot select a backend") @MainActor
+    func installedWithoutFormatSelectsRunnableBackend() async throws {
+        let format = try #require(AVAudioFormat(commonFormat: .pcmFormatInt16,
+            sampleRate: 16_000, channels: 1, interleaved: true))
+        let factory = DefaultMeetingTranscriptionSessionFactory(
+            foundationModelsAvailable: { false },
+            capabilityProbe: { backend, locale in
+                DefaultMeetingTranscriptionSessionFactory.assetCapability(status: .installed,
+                    audioFormat: backend == .dictationTranscriber ? nil : format,
+                    localeIdentifier: locale.identifier, checkingInputFormat: true)
+            },
+            sessionBuilder: { backend, _, _, _ in FakeMeetingTranscriptionSession(backend: backend) },
+            forcedBackend: nil
+        )
+        let session = try await factory.make(languageTag: "en-US", purpose: .live)
+        #expect(session.backend == .speechTranscriber)
+    }
+
+    @Test("no runnable Apple format is unavailable rather than a late setup failure") @MainActor
+    func noAvailableFormatsCannotBuild() async {
+        let probe: MeetingTranscriptionCapabilityProbe = { _, locale in
+            DefaultMeetingTranscriptionSessionFactory.assetCapability(status: .installed,
+                audioFormat: nil, localeIdentifier: locale.identifier, checkingInputFormat: true)
+        }
+        let factory = DefaultMeetingTranscriptionSessionFactory(
+            foundationModelsAvailable: { false }, capabilityProbe: probe,
+            sessionBuilder: { _, _, _, _ in
+                Issue.record("An unavailable format must not start an analyzer")
+                throw MeetingTranscriptionError.setupFailed
+            }, forcedBackend: nil
+        )
+        #expect(await MeetingTranscriptionLanguages.supportsApple("en-US", capabilityProbe: probe) == false)
+        do {
+            _ = try await factory.make(languageTag: "en-US", purpose: .live)
+            Issue.record("A device without usable Apple input must use explicit local transcription")
+        } catch {
+            #expect(error as? MeetingTranscriptionError == .backendUnavailable)
+        }
+    }
+
+    @Test("downloadable Apple assets retain normal installation rather than switching engines") @MainActor
+    func downloadableLanguageReadiness() {
+        for status in [AssetInventory.Status.supported, .downloading] {
+            #expect(DefaultMeetingTranscriptionSessionFactory.assetCapability(status: status,
+                audioFormat: nil, localeIdentifier: "ko-KR", checkingInputFormat: true)
+                == .supported(resolvedLocaleIdentifier: "ko-KR"))
+        }
+        #expect(DefaultMeetingTranscriptionSessionFactory.assetCapability(status: .unsupported,
+            audioFormat: nil, localeIdentifier: "ko-KR", checkingInputFormat: true) == .unsupportedAsset)
+    }
+
+    @Test("missing live formats do not remove supported recording languages or require Whisper") @MainActor
+    func languageEligibilitySurvivesMissingLiveFormat() async {
+        let languageProbe: MeetingTranscriptionCapabilityProbe = { _, locale in
+            DefaultMeetingTranscriptionSessionFactory.assetCapability(status: .installed,
+                audioFormat: nil, localeIdentifier: locale.identifier, checkingInputFormat: false)
+        }
+        let languages = await MeetingLanguageCatalog.appleLanguages(
+            localeProvider: { _ in [Locale(identifier: "en-US")] }, capabilityProbe: languageProbe)
+        #expect(languages.map(\.languageTag) == ["en-US"])
+        #expect(await MeetingTranscriptionLanguages.supportsApple("en-US", capabilityProbe: languageProbe))
+        #expect(MeetingTranscriptionLanguages.options(apple: [MeetingLanguageOption(id: "en-US")],
+            whisperAvailable: false).map(\.id) == ["en-US"])
+        #expect(DefaultMeetingTranscriptionSessionFactory.assetCapability(status: .installed,
+            audioFormat: nil, localeIdentifier: "en-US", checkingInputFormat: true) == .unavailable)
+    }
+
     @Test("AFM-unavailable devices select Dictation before Speech") @MainActor
     func selectsDictationWhenAFMUnavailable() async throws {
         let recorder = SelectionRecorder()

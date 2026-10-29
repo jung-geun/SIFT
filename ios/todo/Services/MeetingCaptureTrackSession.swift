@@ -16,8 +16,6 @@ struct MeetingLiveCaptureTrack: Identifiable, Equatable {
     let liveSpeakerPhase: MeetingCaptureCoordinator.LiveSpeakerPhase
     let liveTranscriptionWarning: String?
     let liveDiarizationWarning: String?
-    var isDetectingLanguage: Bool = false
-    var detectedLanguageTag: String? = nil
     var id: String { meetingID }
 
     var conversationSourceLabel: String {
@@ -33,7 +31,6 @@ nonisolated final class MeetingCaptureTrackInput: @unchecked Sendable {
     let writer: MeetingFLACPartWriter
     private let lock = NSLock()
     private var transcription: MeetingTranscriptionInputPipeline?
-    private var automaticTranscription: MeetingAutomaticLanguageSession?
     private var speakers: MeetingDiarizationInputPipeline?
     private var accepting = true
     private var lastPublished: Int64 = 0
@@ -49,15 +46,11 @@ nonisolated final class MeetingCaptureTrackInput: @unchecked Sendable {
         lock.withLock { self.transcription = transcription }
     }
 
-    func attach(automaticTranscription: MeetingAutomaticLanguageSession?) {
-        lock.withLock { self.automaticTranscription = automaticTranscription }
-    }
-
     func attach(speakers: MeetingDiarizationInputPipeline?) {
         lock.withLock { self.speakers = speakers }
     }
 
-    func close() { lock.withLock { accepting = false; transcription = nil; automaticTranscription = nil; speakers = nil } }
+    func close() { lock.withLock { accepting = false; transcription = nil; speakers = nil } }
     var recordedFailure: Error? { lock.withLock { failure } }
 
     func recordFailure(_ error: Error) { lock.withLock { failure = failure ?? error } }
@@ -68,7 +61,6 @@ nonisolated final class MeetingCaptureTrackInput: @unchecked Sendable {
             let start = writer.totalSamples
             try writer.append(buffer)
             transcription?.enqueue(buffer)
-            automaticTranscription?.enqueue(buffer)
             speakers?.enqueue(buffer, startSample: start)
             if writer.totalSamples >= lastPublished + 4_000 {
                 lastPublished = writer.totalSamples
@@ -90,6 +82,7 @@ final class MeetingCaptureTrackSession {
     private(set) var input: MeetingCaptureTrackInput!
     private(set) var timeline: MeetingLiveSpeakerTimeline?
     private(set) var transcriptionError: Error?
+    private(set) var transcriptionFinalizationError: Error?
     private(set) var audioError: Error?
     private(set) var artifact: MeetingCaptureTrackArtifact?
     private(set) var finalized = false
@@ -105,9 +98,6 @@ final class MeetingCaptureTrackSession {
     private var session: (any MeetingTranscriptionSession)?
     private var continuation: AsyncStream<AnalyzerInput>.Continuation?
     private var transcriptionPipeline: MeetingTranscriptionInputPipeline?
-    private var automaticSession: MeetingAutomaticLanguageSession?
-    private var isDetectingLanguage = false
-    private var detectedLanguageTag: String?
     private var resultsTask: Task<Void, Never>?
     private var analysisTask: Task<Void, Never>?
     private var speakerPipeline: MeetingDiarizationInputPipeline?
@@ -149,8 +139,7 @@ final class MeetingCaptureTrackSession {
             sessionStartSample: sessionStartSample, recordedAudioSamples: samples,
             recordedAudioPartCount: partCount, liveTranscriptRows: rows,
             liveSpeakerOrdinals: timeline?.ordinals ?? [:], liveSpeakerPhase: phase,
-            liveTranscriptionWarning: transcriptionWarning, liveDiarizationWarning: diarizationWarning,
-            isDetectingLanguage: isDetectingLanguage, detectedLanguageTag: detectedLanguageTag
+            liveTranscriptionWarning: transcriptionWarning, liveDiarizationWarning: diarizationWarning
         )
     }
 
@@ -161,42 +150,13 @@ final class MeetingCaptureTrackSession {
     func prepare(
         factory: any MeetingTranscriptionSessionFactory, languageTag: String,
         diarizationEnabled: Bool, groupID: String, deferTranscription: Bool = false,
-        automaticLanguageDetection: Bool = false,
-        languageDetector: @escaping MeetingLiveLanguageDetector = { try await MeetingLiveLanguageDetection.detect(samples: $0) }
+        automaticLanguageDetection: Bool = false
     ) async {
         let ticket = generation
-        if automaticLanguageDetection {
-            isDetectingLanguage = true
-            let automatic = MeetingAutomaticLanguageSession(factory: factory, detector: languageDetector) { [weak self] tag in
-                Task { @MainActor [weak self] in
-                    guard let self, self.generation == ticket, !self.cancelled, self.transcriptionError == nil else { return }
-                    self.detectedLanguageTag = tag
-                    self.isDetectingLanguage = false
-                    self.changed()
-                }
-            }
-            automaticSession = automatic
-            input.attach(automaticTranscription: automatic)
-            resultsTask = Task { [weak self] in
-                do {
-                    for try await result in automatic.results {
-                        try Task.checkCancellation()
-                        guard let self, self.generation == ticket, !self.cancelled,
-                              self.transcriptionError == nil else { break }
-                        self.accept(result)
-                    }
-                } catch { await self?.failTranscription(error, ticket: ticket) }
-            }
-            analysisTask = Task { [weak self] in
-                do { try await automatic.run() }
-                catch { await self?.failTranscription(error, ticket: ticket) }
-            }
-            changed()
-            await prepareSpeakers(enabled: diarizationEnabled, groupID: groupID)
-            return
-        }
-        if deferTranscription {
-            transcriptionWarning = MeetingLanguageCopy.text("meeting.languages.deferred", "This language uses Whisper after recording stops. Original audio is saved; live Apple transcription is unavailable for this selection.")
+        if deferTranscription || automaticLanguageDetection {
+            transcriptionWarning = automaticLanguageDetection
+                ? MeetingLanguageCopy.text("meeting.languages.automaticDeferred", "Automatic mode saves audio without live transcription. Whisper detects each source’s language and transcribes after Stop.")
+                : MeetingLanguageCopy.text("meeting.languages.deferred", "This language uses Whisper after recording stops. Original audio is saved; live Apple transcription is unavailable for this selection.")
             changed()
             await prepareSpeakers(enabled: diarizationEnabled, groupID: groupID)
             return
@@ -250,8 +210,8 @@ final class MeetingCaptureTrackSession {
         guard await MeetingDiarizationModelStore.shared.isInstalled() else {
             diarizationWarning = MeetingAppAudioCapture.message(
                 "meeting.diarization.notInstalled",
-                "Install the speaker model in Settings → Beta features to identify speakers. Recording continues.",
-                "화자를 식별하려면 설정 → 베타 기능에서 화자 모델을 설치하세요. 녹음은 계속됩니다.")
+                "Install the speaker model in Settings → Meeting to identify speakers. Recording continues.",
+                "화자를 식별하려면 설정 → 회의에서 화자 모델을 설치하세요. 녹음은 계속됩니다.")
             changed()
             return
         }
@@ -353,32 +313,16 @@ final class MeetingCaptureTrackSession {
     private func failTranscription(_ error: Error, ticket: UUID) async {
         guard generation == ticket, !cancelled, !(error is CancellationError), transcriptionError == nil else { return }
         transcriptionError = error
-        isDetectingLanguage = false
-        if automaticSession != nil {
-            switch error {
-            case MeetingAutomaticLanguageSession.Failure.noSpeech:
-                transcriptionWarning = MeetingLanguageCopy.text("meeting.languages.live.noSpeech", "No speech was available to detect this source’s language. Original audio is saved for automatic transcription after recording.")
-            case MeetingAutomaticLanguageSession.Failure.invalidLanguage:
-                transcriptionWarning = MeetingLanguageCopy.text("meeting.languages.live.invalidLanguage", "This source’s language could not be identified reliably. Original audio is saved; no fallback language was selected.")
-            case MeetingAutomaticLanguageSession.Failure.bufferLimit:
-                transcriptionWarning = MeetingLanguageCopy.text("meeting.languages.live.bufferLimit", "Live language preparation exceeded this source’s audio buffer. Original audio is saved for automatic transcription after recording.")
-            case is MeetingTranscriptionError:
-                transcriptionWarning = MeetingLanguageCopy.text("meeting.languages.live.appleUnavailable", "Apple live transcription could not run for this source’s detected language. Original audio is saved for automatic transcription after recording.")
-            default:
-                transcriptionWarning = MeetingLanguageCopy.text("meeting.languages.live.detectionFailed", "Automatic live transcription failed for this source. Original audio is saved; no fallback language was selected.")
-            }
-        } else {
-            transcriptionWarning = MeetingAppAudioCapture.message(
-                "meeting.capture.source.transcriptionStopped",
-                "Live transcription stopped for this source. Its original audio is still being saved.",
-                "이 소스의 실시간 전사가 중단되었습니다. 원본 음성은 계속 저장됩니다.")
-        }
+        DiagnosticRecorder.shared.record(error: error, component: "meeting.transcription",
+                                         operation: artifact == nil ? "liveSource" : "sourceFinalization")
+        transcriptionWarning = MeetingAppAudioCapture.message(
+            "meeting.capture.source.transcriptionStopped",
+            "Live transcription stopped for this source. Its original audio is still being saved.",
+            "이 소스의 실시간 전사가 중단되었습니다. 원본 음성은 계속 저장됩니다.")
         input.attach(transcription: nil)
-        input.attach(automaticTranscription: nil)
         changed()
         // Do not await our own results/analysis task from its error handler.
         await transcriptionPipeline?.cancel()
-        await automaticSession?.cancel()
         continuation?.finish()
         await session?.cancel()
         resultsTask?.cancel()
@@ -391,7 +335,6 @@ final class MeetingCaptureTrackSession {
         input.close()
         audioError = audioError ?? input.recordedFailure
         _ = try input.writer.finish()
-        automaticSession?.finishInput()
         let parent = directoryURL.deletingLastPathComponent().lastPathComponent
         var manifest = input.writer.manifest(relativeDirectory: "\(parent)/\(directoryURL.lastPathComponent)")
         if let metadata {
@@ -418,7 +361,9 @@ final class MeetingCaptureTrackSession {
 
     private func performFinalization(timeout: Duration) async {
         guard !finalized, !cancelled else { return }
-        automaticSession?.finishInput()
+        // A previously disclosed live failure still marks the saved transcript
+        // as failed, but is not a new failure of Stop or original-audio saving.
+        let hadLiveTranscriptionFailure = transcriptionError != nil
         do { try await transcriptionPipeline?.finish() }
         catch { await failTranscription(error, ticket: generation) }
         continuation?.finish()
@@ -426,13 +371,11 @@ final class MeetingCaptureTrackSession {
             let analysis = analysisTask
             let results = resultsTask
             let session = session
-            let automatic = automaticSession
             let completed = await withTaskGroup(of: Bool.self) { group in
                 group.addTask { await analysis?.value; await results?.value; return true }
                 group.addTask {
                     do { try await Task.sleep(for: timeout) } catch { return true }
                     await session?.cancel()
-                    await automatic?.cancel()
                     analysis?.cancel()
                     results?.cancel()
                     return false
@@ -450,11 +393,11 @@ final class MeetingCaptureTrackSession {
         guard !cancelled else { return }
         releaseSpeakers()
         transcriptionPipeline = nil
-        automaticSession = nil
         continuation = nil
         session = nil
         resultsTask = nil
         analysisTask = nil
+        if !hadLiveTranscriptionFailure { transcriptionFinalizationError = transcriptionError }
         finalized = true
         changed()
     }
@@ -497,8 +440,6 @@ final class MeetingCaptureTrackSession {
         cancelled = true
         generation = UUID()
         input.close()
-        isDetectingLanguage = false
-        await automaticSession?.cancel()
         await transcriptionPipeline?.cancel()
         continuation?.finish()
         await session?.cancel()
@@ -510,7 +451,6 @@ final class MeetingCaptureTrackSession {
         _ = try? input.writer.finish()
         session = nil
         transcriptionPipeline = nil
-        automaticSession = nil
         continuation = nil
         resultsTask = nil
         analysisTask = nil

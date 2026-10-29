@@ -33,8 +33,15 @@ enum MeetingSpeakerLabelFormatter {
         for speakerIDs: [String],
         profiles: [String: MeetingSpeakerProfile],
         state: MeetingSpeakerLabelState,
+        kind: MeetingSpeakerContinuity.Presentation.Kind = .speaker,
         language: AppLanguage = .current
     ) -> String {
+        if kind == .mixed {
+            return AppLanguage.localized("meeting.speaker.mixed",
+                defaultValue: language == .english
+                    ? "Several speakers · re-transcribe to separate" : "여러 화자 · 다시 전사하면 분리 가능",
+                language: language, comment: "Untimed segment containing several sequential speakers.")
+        }
         guard !speakerIDs.isEmpty, state != .unknown else {
             return AppLanguage.localized(
                 "meeting.speaker.unknown",
@@ -67,6 +74,25 @@ enum MeetingSpeakerLabelFormatter {
         ordinals.reduce(into: [:]) { result, entry in
             result[entry.key] = MeetingSpeakerProfile(id: entry.key, ordinal: entry.value, displayName: nil)
         }
+    }
+
+    static var inheritedSpeakerExplanation: String {
+        AppLanguage.localized(
+            "meeting.speaker.continuity.provisional",
+            defaultValue: AppLanguage.current == .english
+                ? "Provisional speaker based on the preceding speech; not confirmed."
+                : "앞선 발화를 바탕으로 한 임시 화자이며, 확정된 정보가 아닙니다.",
+            language: .current,
+            comment: "Accessibility provenance for display-only speaker continuity on a brief undecided fragment."
+        )
+    }
+
+    /// Each compact row remains independently understandable to VoiceOver,
+    /// even when the visual speaker heading belongs to an earlier row.
+    static func accessibilityValue(speakerLabel: String, source: String? = nil,
+                                   transcript: String? = nil, inherited: Bool = false) -> String {
+        [source ?? "", speakerLabel, transcript ?? "", inherited ? inheritedSpeakerExplanation : ""]
+            .filter { !$0.isEmpty }.joined(separator: " · ")
     }
 }
 

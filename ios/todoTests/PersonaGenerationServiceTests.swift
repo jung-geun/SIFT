@@ -35,43 +35,9 @@ struct PersonaGenerationServiceTests {
         #expect(persona.descriptionText == originalDescription)
         #expect(!draft.descriptionText.contains("private title"))
         #expect(!draft.descriptionText.contains("private notes"))
-        #expect(draft.descriptionText.contains("규칙 기반"))
     }
 
 
-    @Test("explicit local selection retains the deterministic persona draft")
-    @MainActor
-    func explicitLocalSelectionDoesNotInvokeAFM() async throws {
-        let todo = Todo(title: "private title")
-        let now = Date()
-        let analysis = MemoryService.computeAnalysis(todos: [todo], now: now, language: .english)
-        let context = BehaviorAnalysisContextBuilder.make(
-            todos: [todo],
-            auditEvents: [],
-            behaviorEvents: [],
-            now: now,
-            calendar: Calendar.current,
-            behaviorProfile: analysis.behaviorProfile,
-            personaTypes: [.officeWorker]
-        )
-        let service = PersonaGenerationService(
-            narrativeProvider: { _, _, _, _ in
-                throw CancellationError()
-            },
-            routingDecisionProvider: { .providers([.onDevice]) },
-            availabilityProvider: { true }
-        )
-
-        let draft = try await service.generate(
-            existingPersona: "",
-            todos: [todo],
-            context: context,
-            now: now,
-            language: .english
-        )
-
-        #expect(draft.descriptionText.contains("Rule-based"))
-    }
 
     @Test("health inputs leave learned persona drafts, evidence, and heuristics unchanged")
     @MainActor
@@ -151,9 +117,9 @@ struct PersonaGenerationServiceTests {
         }
     }
 
-    @Test("persona narrative providers receive only ordinary-derived drafts and behavior profiles")
+    @Test("narrative providers cannot change evidence or use health records", arguments: [PersonaAIProvider.foundationModels, .onDevice])
     @MainActor
-    func narrativeProviderBoundaryExcludesHealthEvidence() async throws {
+    func narrativeProviderBoundaryExcludesHealthEvidence(provider: PersonaAIProvider) async throws {
         let ordinary = makeTodos(count: 24, completed: true) + makeTodos(count: 6, completed: false)
         let context = makeContext(todos: ordinary)
         let expectedProfile = context.behaviorProfile
@@ -161,16 +127,18 @@ struct PersonaGenerationServiceTests {
             existingPersona: "Saved description", todos: ordinary, context: context,
             now: fixtureNow, language: .english
         )
-        let service = PersonaGenerationService(
-            narrativeProvider: { existing, draft, profile, language in
+        let narrative: PersonaGenerationService.NarrativeProvider = { existing, draft, profile, language in
                 #expect(existing == "Saved description")
                 #expect(language == .english)
                 #expect(draft == expectedDraft)
                 #expect(profile == expectedProfile)
                 return PersonaNarrative(descriptionText: "Ordinary-only narrative", evidence: ["Provider evidence"])
-            },
-            routingDecisionProvider: { .providers([.foundationModels]) },
-            availabilityProvider: { true }
+        }
+        let service = PersonaGenerationService(
+            narrativeProvider: narrative,
+            routingDecisionProvider: { .providers([provider]) },
+            availabilityProvider: { provider == .foundationModels },
+            localNarrativeProvider: narrative
         )
         let baseline = try await service.generate(
             existingPersona: "Saved description", todos: ordinary, context: context,
@@ -178,7 +146,6 @@ struct PersonaGenerationServiceTests {
         )
 
         #expect(baseline.descriptionText == "Ordinary-only narrative")
-        #expect(baseline.processorDescription == "Apple Foundation Models")
         #expect(baseline.evidence == expectedDraft.evidence)
         #expect(baseline.confidence == expectedDraft.confidence)
         for provenance in HealthProvenance.allCases {
