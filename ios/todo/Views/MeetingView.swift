@@ -73,6 +73,7 @@ struct MeetingView: View {
 
 
     var body: some View {
+        ScrollViewReader { scrollProxy in
         NavigationStack(path: $navigationPath) {
             List {
                 Section {
@@ -176,6 +177,7 @@ struct MeetingView: View {
                     .foregroundStyle(AppTheme.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
                 }
+                .id("meeting.captureControls")
                 .listRowBackground(AppTheme.surface)
 
                 if processingReporter.phase != .idle {
@@ -406,6 +408,11 @@ struct MeetingView: View {
                 guard sessionID == coordinator.recordingActivity?.sessionID else { return }
             }
             navigationPath.removeAll()
+            Task { @MainActor in
+                await Task.yield()
+                guard recordingActivity.navigationRequestID == requestID else { return }
+                scrollProxy.scrollTo("meeting.captureControls", anchor: .top)
+            }
         }
         .onAppear { meetingScreenVisible = true }
         .task {
@@ -454,6 +461,7 @@ struct MeetingView: View {
             await speakerModel.refresh()
             guard !Task.isCancelled, meetingScreenVisible else { return }
             await speakerPrewarmer.prepareIfAvailable()
+        }
         }
     }
 
