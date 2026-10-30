@@ -4,6 +4,7 @@ import SwiftData
 struct MeetingView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.userVocabulary) private var userVocabulary
+    @Environment(\.openURL) private var openURL
     @Query(filter: #Predicate<MeetingRecord> { $0.parentMeetingID == nil }, sort: \MeetingRecord.updatedAt, order: .reverse) private var meetings: [MeetingRecord]
     @StateObject private var coordinator = MeetingCaptureCoordinator()
     @ObservedObject private var languagePreferences = MeetingLanguagePreferences.shared
@@ -28,7 +29,7 @@ struct MeetingView: View {
     @State private var helpTopic: MeetingHelpTopic?
     @StateObject private var processingReporter = MeetingProcessingReporter()
     @ScaledMetric(relativeTo: .body) private var liveTranscriptViewportHeight = 220
-    @State private var showingDiagnosticReports = false
+    @State private var diagnosticErrorSnapshot: MeetingDiagnosticErrorSnapshot?
     @State private var showingAudioImport = false
     @State private var importingMeetingID: String?
     @State private var diarizingMeetingID: String?
@@ -360,22 +361,38 @@ struct MeetingView: View {
                     }
                 )
             ) {
+                #if targetEnvironment(macCatalyst)
+                if (coordinator.reportableError as? MeetingAppAudioFailure)?.authorizationDenied == true {
+                    Button(copy("meeting.appAudio.openPrivacySettings", fallback: AppLanguage.current == .korean
+                        ? "시스템 설정 열기" : "Open System Settings")) {
+                        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+                            openURL(url)
+                        }
+                    }
+                }
+                #endif
                 if coordinator.reportableError != nil {
                     Button(copy("meeting.action.reportDiagnostic", fallback: "오류 보고")) {
-                        showingDiagnosticReports = true
+                        guard let error = coordinator.reportableError else { return }
+                        diagnosticErrorSnapshot = MeetingDiagnosticErrorSnapshot(
+                            error: error,
+                            needsCollection: !DiagnosticReportService.shared.collectionEnabled
+                        )
                     }
                 }
                 Button(copy("확인", fallback: "확인"), role: .cancel) {}
             } message: {
                 Text(coordinator.failure ?? copy("meeting.error.unknown", fallback: "알 수 없는 오류"))
             }
-            .sheet(isPresented: $showingDiagnosticReports) {
-                NavigationStack {
-                    DiagnosticReportView(
-                        pendingError: DiagnosticReportService.shared.collectionEnabled ? nil : coordinator.reportableError,
-                        showsCloseButton: true
-                    )
-                }
+        }
+        .sheet(item: $diagnosticErrorSnapshot) { snapshot in
+            NavigationStack {
+                DiagnosticReportView(
+                    pendingError: snapshot.error,
+                    showsCloseButton: true,
+                    recordsPendingError: snapshot.needsCollection
+                )
+                .id(snapshot.id)
             }
         }
         .sheet(isPresented: $showingAudioImport) {

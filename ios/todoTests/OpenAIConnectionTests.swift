@@ -10,7 +10,11 @@ import Testing
     var blocked: Set<String> = []
     var quarantined: [String: Set<String>] = [:]
     var failWrites = false
-    func load() throws -> Data? { data }
+    var failLoads = false
+    func load() throws -> Data? {
+        if failLoads { throw OpenAIConnectionError.storage }
+        return data
+    }
     func save(_ data: Data) throws {
         if failWrites { throw OpenAIConnectionError.storage }
         self.data = data
@@ -201,6 +205,28 @@ import Testing
 
 @Suite("Official native ChatGPT connection")
 @MainActor struct OpenAIConnectionTests {
+    @Test("Full cloud account adapter reports credential load failure instead of prepared")
+    func fullCloudAdapterPropagatesCredentialLoadFailure() async throws {
+        let h = try AuthHarness()
+        h.store.failLoads = true
+        let connections = FullCloudConnectionSync(operations: [.openAI(h.connection)])
+        let error = await connections.reconcile()
+        #expect((error as? OpenAIConnectionError) == .storage)
+        #expect(connections.state == .failed)
+        #expect(connections.pendingFamilies == [.openAI])
+        #expect(h.store.data == nil)
+        #expect(h.transport.requests.isEmpty)
+        h.store.failLoads = false
+        let corruptSnapshot = Data("not a valid account snapshot".utf8)
+        h.store.data = corruptSnapshot
+        #expect(await connections.reconcile() is DecodingError)
+        #expect(connections.state == .failed)
+        #expect(h.store.data == corruptSnapshot)
+        h.store.data = nil
+        #expect(await connections.reconcile() == nil)
+        #expect(connections.state == .prepared)
+    }
+
     @Test("restricted storefront prevents OAuth setup, listener, browser, and all network")
     func restrictedRegionBlocksOAuthEntry() async throws {
         let h = try AuthHarness(); h.regionAllowed = false

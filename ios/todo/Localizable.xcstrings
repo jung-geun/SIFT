@@ -1,6 +1,1950 @@
 {
   "sourceLanguage" : "ko",
   "strings" : {
+    "settings.sync.full.lastDataExport": {
+      "comment": "Full iCloud app-data versus account-connection storage; device authentication purpose, progress, cancellation and explicit retry.",
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Letzter bestätigter Export von App-Daten"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Last confirmed app-data export"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Última exportación confirmada de datos de la app"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dernier export confirmé des données de l’app"
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ultima esportazione confermata dei dati dell’app"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "最後に確認されたアプリデータの書き出し"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "최근 확인된 앱 데이터 내보내기"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "最近确认的应用数据导出"
+          }
+        }
+      }
+    },
+    "settings.sync.full.dataTransport": {
+      "comment": "Full iCloud app-data versus account-connection storage; device authentication purpose, progress, cancellation and explicit retry.",
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieser Status betrifft App-Daten, nicht Kontoverbindungen. Daten erscheinen nach Abschluss der Apple-Übertragung auf anderen Geräten. Aufnahmen belegen iCloud-Speicher; Speicher- oder Netzwerkfehler gelten nicht als abgeschlossene Synchronisierung."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This status covers app data, not account connections. Data appears on other devices after Apple's transfer completes. Recordings consume iCloud storage; quota or network failures are not treated as completed sync."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Este estado se refiere a los datos de la app, no a las conexiones. Los datos aparecen en otros dispositivos cuando Apple completa la transferencia. Las grabaciones ocupan espacio en iCloud; los fallos de cuota o red no se consideran una sincronización completada."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cet état concerne les données de l’app, pas les connexions. Les données apparaissent sur les autres appareils une fois le transfert Apple terminé. Les enregistrements occupent du stockage iCloud ; les erreurs de quota ou de réseau ne sont pas considérées comme une synchronisation terminée."
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Questo stato riguarda i dati dell’app, non le connessioni. I dati appaiono sugli altri dispositivi al termine del trasferimento Apple. Le registrazioni occupano spazio iCloud; errori di quota o rete non vengono considerati una sincronizzazione completata."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "この状態はアカウント接続ではなくアプリデータの状態です。Appleによる転送が完了すると他のデバイスに反映されます。録音はiCloudの容量を使用します。容量不足やネットワークエラーを同期完了として扱いません。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 상태는 계정 연결 정보가 아닌 앱 데이터의 전송 상태입니다. Apple의 전송이 완료된 뒤 다른 기기에 적용됩니다. 녹음은 iCloud 저장공간을 사용하며 용량·네트워크 오류를 동기화 완료로 처리하지 않습니다."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此状态表示应用数据，而非账户连接。Apple 完成传输后，数据才会显示在其他设备。录音占用 iCloud 空间；配额或网络错误不会被视为同步完成。"
+          }
+        }
+      }
+    },
+    "settings.sync.full.confirm.storageMessage": {
+      "comment": "Full iCloud app-data versus account-connection storage; device authentication purpose, progress, cancellation and explicit retry.",
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "E-Mail-Inhalte, Aufnahmen und Transkripte, Routinen, Wörterbuch und Einstellungen werden unter Ihrem Apple Account gespeichert. Kontoverbindungen verwenden den iCloud-Schlüsselbund; geschützte Verbindungen erfordern eine separate Aktion und Geräteauthentifizierung. Gesundheitsdaten, Systemberechtigungen und Modelldownloads sind ausgeschlossen. Dies autorisiert keine Weitergabe an ChatGPT."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This stores email bodies, recordings and transcripts, routines, vocabulary and settings under your Apple account. Account connections use iCloud Keychain; protected connections require a separate action and device authentication. Health data, OS grants and model downloads are excluded. This does not authorize ChatGPT sharing."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Se guardan cuerpos de correo, grabaciones y transcripciones, rutinas, vocabulario y ajustes en tu cuenta de Apple. Las conexiones usan el Llavero de iCloud; las protegidas requieren una acción aparte y autenticación del dispositivo. Se excluyen datos de salud, permisos del sistema y modelos descargables. Esto no autoriza compartir con ChatGPT."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Les corps des e-mails, enregistrements et transcriptions, routines, vocabulaire et réglages sont stockés sous votre compte Apple. Les connexions utilisent le trousseau iCloud ; les connexions protégées nécessitent une action séparée et l’authentification de l’appareil. Les données de santé, autorisations système et téléchargements de modèles sont exclus. Ceci n’autorise pas le partage avec ChatGPT."
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Corpi delle email, registrazioni e trascrizioni, routine, vocabolario e impostazioni vengono salvati nel tuo account Apple. Le connessioni usano il Portachiavi iCloud; quelle protette richiedono un’azione separata e l’autenticazione del dispositivo. Dati sanitari, permessi di sistema e modelli scaricati sono esclusi. Questo non autorizza la condivisione con ChatGPT."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "メール本文、録音・文字起こし、ルーティン、学習辞書、設定をApple Accountに保存します。アカウント接続にはiCloudキーチェーンを使用します。保護された接続には別の操作とデバイス認証が必要です。健康データ、OS権限、モデルのダウンロードは対象外です。ChatGPT共有を許可するものではありません。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "같은 Apple 계정에 메일 본문·회의 녹음/전사·루틴·학습 사전·설정을 저장합니다. 계정 연결 정보는 iCloud 키체인을 사용하며, 보호된 연결 정보는 별도 작업과 기기 인증이 필요합니다. 건강정보·OS 권한·모델 다운로드는 제외하며 ChatGPT 전송 동의와 별개입니다."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "邮件正文、录音与转写、例程、词汇表和设置将存入您的 Apple 账户。账户连接使用 iCloud 钥匙串；受保护的连接需要另行操作并进行设备认证。健康数据、系统权限和模型下载不在范围内。此操作不授权向 ChatGPT 共享。"
+          }
+        }
+      }
+    },
+    "settings.sync.full.connections.title": {
+      "comment": "Full iCloud app-data versus account-connection storage; device authentication purpose, progress, cancellation and explicit retry.",
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Synchronisierung von Kontoverbindungen"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Account connection sync"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sincronización de conexiones de cuentas"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Synchronisation des connexions aux comptes"
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sincronizzazione delle connessioni agli account"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アカウント接続の同期"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "계정 연결 정보 동기화"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "账户连接同步"
+          }
+        }
+      }
+    },
+    "settings.sync.full.connections.accountWaiting": {
+      "comment": "Full iCloud app-data versus account-connection storage; device authentication purpose, progress, cancellation and explicit retry.",
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kontoverbindungen können erst nach Verifizierung des iCloud-Apple-Accounts freigegeben werden. Prüfen Sie den App-Daten-Status unten; eine Geräteauthentifizierung wurde nicht gestartet."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Account connection approval is unavailable until the iCloud Apple account is verified. Check the app-data status below; no device authentication has started."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No se pueden aprobar las conexiones hasta verificar la cuenta de Apple de iCloud. Consulta el estado de los datos de la app abajo; no se ha iniciado la autenticación del dispositivo."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "L’approbation des connexions est indisponible tant que le compte Apple iCloud n’est pas vérifié. Consultez l’état des données ci-dessous ; l’authentification de l’appareil n’a pas commencé."
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Non puoi approvare le connessioni finché l’account Apple di iCloud non è verificato. Controlla lo stato dei dati dell’app qui sotto; l’autenticazione del dispositivo non è iniziata."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "iCloudのApple Accountが確認されるまで接続を承認できません。下のアプリデータの状態を確認してください。デバイス認証は開始されていません。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "iCloud Apple 계정이 확인되기 전에는 계정 연결 정보를 승인할 수 없습니다. 아래 앱 데이터 상태를 확인해 주세요. 기기 인증은 시작하지 않았습니다."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "验证 iCloud 的 Apple 账户后才能批准账户连接。请查看下方应用数据状态；设备认证尚未开始。"
+          }
+        }
+      }
+    },
+    "settings.sync.full.connections.progress": {
+      "comment": "Full iCloud app-data versus account-connection storage; device authentication purpose, progress, cancellation and explicit retry.",
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Geprüfte Verbindungsgruppen (keine Systemabfragen)"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connection groups checked (not OS prompts)"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Grupos comprobados (no avisos del sistema)"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Groupes vérifiés (pas les demandes du système)"
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gruppi verificati (non richieste del sistema)"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "確認済みの接続グループ（OS認証の回数ではありません）"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "확인한 연결 정보 그룹 (OS 인증 횟수 아님)"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已检查的连接组（不是系统认证次数）"
+          }
+        }
+      }
+    },
+    "settings.sync.full.connections.pending": {
+      "comment": "Full iCloud app-data versus account-connection storage; device authentication purpose, progress, cancellation and explicit retry.",
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Noch nicht vorbereitet:"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Still awaiting preparation:"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Aún pendientes de preparación:"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Préparation encore en attente :"
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ancora in attesa di preparazione:"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "準備が完了していない接続："
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "아직 준비되지 않은 연결 정보:"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "仍待准备："
+          }
+        }
+      }
+    },
+    "settings.sync.full.connections.locked": {
+      "comment": "Full iCloud app-data versus account-connection storage; device authentication purpose, progress, cancellation and explicit retry.",
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Geräteauthentifizierung erforderlich:"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Device authentication required:"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Requieren autenticación del dispositivo:"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Authentification de cet appareil requise :"
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Autenticazione del dispositivo richiesta:"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "デバイス認証が必要な接続："
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "기기 인증이 필요한 연결 정보:"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "需要设备认证："
+          }
+        }
+      }
+    },
+    "settings.sync.full.connections.stop": {
+      "comment": "Full iCloud app-data versus account-connection storage; device authentication purpose, progress, cancellation and explicit retry.",
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Synchronisierung der Kontoverbindungen stoppen"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Stop account connection sync"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Detener sincronización de conexiones"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Arrêter la synchronisation des connexions"
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Interrompi sincronizzazione delle connessioni"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アカウント接続の同期を停止"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "계정 연결 정보 동기화 중지"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "停止账户连接同步"
+          }
+        }
+      }
+    },
+    "settings.sync.full.connections.authorize": {
+      "comment": "Full iCloud app-data versus account-connection storage; device authentication purpose, progress, cancellation and explicit retry.",
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Synchronisierung der Kontoverbindungen autorisieren"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Authorize account connection sync"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Autorizar sincronización de conexiones"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Autoriser la synchronisation des connexions"
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Autorizza sincronizzazione delle connessioni"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アカウント接続の同期を承認"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "계정 연결 정보 동기화 승인"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "授权账户连接同步"
+          }
+        }
+      }
+    },
+    "settings.sync.full.connections.purpose": {
+      "comment": "Full iCloud app-data versus account-connection storage; device authentication purpose, progress, cancellation and explicit retry.",
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Diese Aktion entsperrt geschützte Verbindungsgeheimnisse nur zur Vorbereitung für den iCloud-Schlüsselbund. Sie endet nach Prüfung der aufgeführten Gruppen oder beim ersten Abbruch bzw. Fehler der Authentifizierung. Brechen Sie im Systemdialog ab oder stoppen Sie hier; lokale Daten und Zugangsdaten bleiben erhalten. Die automatische Synchronisierung fordert diese Freigabe nicht erneut an. Ein erneuter Versuch ist nur über diese Taste möglich."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This action unlocks protected connection secrets only to prepare them for iCloud Keychain. It ends after the listed families are checked or at the first authentication cancellation or failure. Cancel in the system dialog or stop here; local data and existing credentials are retained. Automatic sync never requests this approval again; retry only with this button."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Esta acción desbloquea secretos de conexión protegidos solo para prepararlos para el Llavero de iCloud. Termina al comprobar los grupos indicados o ante la primera cancelación o fallo de autenticación. Puedes cancelar en el diálogo del sistema o detenerla aquí; se conservan los datos locales y las credenciales. La sincronización automática no volverá a pedir esta aprobación; reintenta solo con este botón."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cette action déverrouille les secrets protégés uniquement pour les préparer au trousseau iCloud. Elle prend fin après vérification des groupes indiqués ou dès la première annulation ou erreur d’authentification. Annulez dans la fenêtre système ou arrêtez ici ; les données locales et les identifiants sont conservés. La synchronisation automatique ne redemandera pas cet accord ; réessayez uniquement avec ce bouton."
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Questa azione sblocca i segreti protetti solo per prepararli al Portachiavi iCloud. Termina dopo la verifica dei gruppi elencati o alla prima autenticazione annullata o non riuscita. Puoi annullare nella finestra di sistema o interrompere qui; dati locali e credenziali sono conservati. La sincronizzazione automatica non richiederà nuovamente questa approvazione; riprova solo con questo pulsante."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "この操作は、保護された接続の認証情報をiCloudキーチェーン用に準備するためだけにロック解除します。表示されたグループの確認が完了するか、最初の認証キャンセルまたは認証失敗で終了します。システム画面でキャンセルするか、ここで停止しても、ローカルデータと既存の認証情報は保持されます。自動同期が再び承認を求めることはありません。再試行はこのボタンでのみ行います。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 작업은 보호된 연결 정보를 잠금 해제해 iCloud 키체인 저장을 준비합니다. 표시된 항목을 확인하면 종료되며, 인증을 취소하거나 인증에 실패하면 즉시 멈춥니다. 시스템 창에서 취소하거나 여기서 중지해도 로컬 데이터와 기존 연결 정보는 보존됩니다. 자동 동기화는 승인을 다시 요청하지 않으며 이 버튼으로만 재시도합니다."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此操作仅为将受保护的连接密钥准备好存入 iCloud 钥匙串而解锁。检查完所列连接组后即结束，或在首次取消认证或认证失败时停止。在系统对话框取消或在此停止，均会保留本地数据和现有凭据。自动同步不会再次请求此批准；只能使用此按钮重试。"
+          }
+        }
+      }
+    },
+    "settings.sync.full.connections.authentication": {
+      "comment": "Full iCloud app-data versus account-connection storage; device authentication purpose, progress, cancellation and explicit retry.",
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ihr Apple Account bestimmt den iCloud-Speicher. Touch ID, Face ID oder das Anmeldepasswort bzw. der Gerätecode entsperrt Schlüsselbundobjekte auf diesem Gerät; es handelt sich nicht um ein E-Mail-App-Passwort. Geben Sie niemals ein E-Mail-App-Passwort in einen Systemdialog ein. Die Anzahl der Abfragen hängt von geschützten Verbindungen und dem Betriebssystem ab und ist nicht festgelegt. Systemberechtigungen und biometrische Daten werden nicht hochgeladen. Diese Aktion aktiviert weder Hintergrund-E-Mail noch KI-Weitergabe."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your Apple account identifies iCloud storage. Touch ID, Face ID or this device's login password/passcode unlocks device Keychain items; it is not a mail app password. Never enter a mail app password into an OS authentication dialog. Prompt count depends on protected connections and the OS, not a fixed number. OS permissions and biometric data are not uploaded, and this action does not enable background mail or AI sharing."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tu cuenta de Apple identifica el almacenamiento de iCloud. Touch ID, Face ID o la contraseña/código de este dispositivo desbloquea su Llavero; no es una contraseña de app de correo. Nunca introduzcas una contraseña de app de correo en un diálogo del sistema. El número de avisos depende de las conexiones protegidas y del sistema; no es fijo. No se suben permisos del sistema ni datos biométricos; esta acción no activa el correo en segundo plano ni el envío a IA."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Votre compte Apple identifie le stockage iCloud. Touch ID, Face ID ou le mot de passe/code de cet appareil déverrouille son trousseau ; il ne s’agit pas d’un mot de passe d’application de messagerie. Ne saisissez jamais celui-ci dans une fenêtre d’authentification système. Le nombre de demandes dépend des connexions protégées et du système ; il n’est pas fixe. Les autorisations système et données biométriques ne sont pas téléversées. Cette action n’active ni le courrier en arrière-plan ni le partage avec l’IA."
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Il tuo account Apple identifica l’archiviazione iCloud. Touch ID, Face ID o la password/codice di questo dispositivo sblocca il Portachiavi; non è una password per app di posta. Non inserirla mai in una finestra di autenticazione del sistema. Il numero di richieste dipende dalle connessioni protette e dal sistema, non è fisso. Permessi del sistema e dati biometrici non vengono caricati; questa azione non attiva la posta in background né la condivisione con l’IA."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Apple AccountはiCloudの保存先を識別します。Touch ID、Face ID、またはこのデバイスのログインパスワード・パスコードでキーチェーン項目をロック解除します。メールのアプリパスワードではありません。OS認証画面にメールのアプリパスワードを入力しないでください。認証回数は保護された接続とOSによって異なり、固定ではありません。OS権限や生体情報はアップロードされず、バックグラウンドメールやAI共有も有効になりません。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Apple 계정은 iCloud 저장 계정을 확인합니다. Touch ID·Face ID 또는 이 기기의 로그인 암호·암호 코드는 기기 키체인의 잠금을 해제하며, 메일 앱 비밀번호와 다릅니다. OS 인증 창에 메일 앱 비밀번호를 입력하지 마세요. 인증 횟수는 보호된 연결 정보와 OS에 따라 다르며 고정되어 있지 않습니다. OS 권한과 생체정보는 업로드하지 않고, 이 작업으로 메일 백그라운드 접근이나 AI 전송을 켜지 않습니다."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Apple 账户用于确定 iCloud 存储账户。Touch ID、Face ID 或此设备的登录密码／锁屏密码用于解锁设备钥匙串项目，并非邮件应用专用密码。切勿在系统认证对话框输入邮件应用专用密码。提示次数取决于受保护的连接和系统，并非固定次数。系统权限和生物识别数据不会上传，此操作也不会开启后台邮件或向 AI 共享。"
+          }
+        }
+      }
+    },
+    "settings.sync.full.connections.notChecked": {
+      "comment": "Full iCloud app-data versus account-connection storage; device authentication purpose, progress, cancellation and explicit retry.",
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kontoverbindungen wurden noch nicht geprüft. App-Daten werden unabhängig gespeichert."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Account connections have not been checked. App-data storage is independent."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Aún no se han comprobado las conexiones. Los datos de la app se almacenan por separado."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Les connexions n’ont pas encore été vérifiées. Les données de l’app sont stockées séparément."
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Le connessioni non sono ancora state verificate. I dati dell’app sono archiviati separatamente."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アカウント接続はまだ確認されていません。アプリデータは別に保存されます。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "계정 연결 정보를 아직 확인하지 않았습니다. 앱 데이터 저장은 별도로 진행합니다."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "尚未检查账户连接。应用数据独立存储。"
+          }
+        }
+      }
+    },
+    "settings.sync.full.connections.checking": {
+      "comment": "Full iCloud app-data versus account-connection storage; device authentication purpose, progress, cancellation and explicit retry.",
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kontoverbindungen werden ohne Authentifizierungsabfragen geprüft …"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Checking account connections without authentication prompts…"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Comprobando conexiones sin solicitar autenticación…"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Vérification des connexions sans demande d’authentification…"
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Verifica delle connessioni senza richieste di autenticazione…"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "認証画面を表示せずにアカウント接続を確認中…"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "인증 창 없이 계정 연결 정보를 확인하는 중…"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在检查账户连接，不会弹出认证提示…"
+          }
+        }
+      }
+    },
+    "settings.sync.full.connections.authorizing": {
+      "comment": "Full iCloud app-data versus account-connection storage; device authentication purpose, progress, cancellation and explicit retry.",
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kontoverbindungen werden mit Ihrer Gerätefreigabe vorbereitet …"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Preparing account connections with your device approval…"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Preparando conexiones con tu aprobación en el dispositivo…"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Préparation des connexions avec votre accord sur cet appareil…"
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Preparazione delle connessioni con la tua approvazione sul dispositivo…"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "デバイスでの承認を受けてアカウント接続を準備中…"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "기기 승인을 받아 계정 연결 정보를 준비하는 중…"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在经设备批准准备账户连接…"
+          }
+        }
+      }
+    },
+    "settings.sync.full.connections.prepared": {
+      "comment": "Full iCloud app-data versus account-connection storage; device authentication purpose, progress, cancellation and explicit retry.",
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kontoverbindungen sind lokal vorbereitet. Apple steuert die Übertragung über den iCloud-Schlüsselbund."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Account connections prepared locally. iCloud Keychain delivery is controlled by Apple."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Conexiones preparadas localmente. Apple controla la transferencia por el Llavero de iCloud."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connexions préparées localement. Apple gère le transfert par le trousseau iCloud."
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connessioni preparate localmente. Apple gestisce il trasferimento tramite Portachiavi iCloud."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アカウント接続のデバイス内での準備が完了しました。iCloudキーチェーンによる転送はAppleが管理します。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "계정 연결 정보의 기기 내 준비가 완료되었습니다. iCloud 키체인 전송은 Apple이 처리합니다."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "账户连接已在本机准备完成。iCloud 钥匙串传输由 Apple 管理。"
+          }
+        }
+      }
+    },
+    "settings.sync.full.connections.awaiting": {
+      "comment": "Full iCloud app-data versus account-connection storage; device authentication purpose, progress, cancellation and explicit retry.",
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die Synchronisierung der Kontoverbindungen wartet auf Freigabe. App-Daten werden weiter gespeichert."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Account connection sync awaiting approval. App-data storage continues."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "La sincronización de conexiones espera tu aprobación. Los datos de la app se siguen almacenando."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "La synchronisation des connexions attend votre accord. Le stockage des données de l’app continue."
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "La sincronizzazione delle connessioni attende approvazione. L’archiviazione dei dati dell’app continua."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アカウント接続の同期は承認待ちです。アプリデータの保存は続行します。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "계정 연결 정보 동기화 승인 대기 중입니다. 앱 데이터 저장은 계속 진행합니다."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "账户连接同步正在等待批准。应用数据继续存储。"
+          }
+        }
+      }
+    },
+    "settings.sync.full.connections.cancelled": {
+      "comment": "Full iCloud app-data versus account-connection storage; device authentication purpose, progress, cancellation and explicit retry.",
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Synchronisierung der Kontoverbindungen gestoppt · Freigabe ausstehend. Vorhandene Zugangsdaten und lokale Daten bleiben erhalten. App-Daten werden weiter gespeichert."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Account connection sync stopped · awaiting approval. Existing credentials and local data are retained. App-data storage continues."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sincronización de conexiones detenida · pendiente de aprobación. Se conservan las credenciales y los datos locales. El almacenamiento de datos de la app continúa."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Synchronisation des connexions arrêtée · accord en attente. Les identifiants existants et les données locales sont conservés. Le stockage des données de l’app continue."
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sincronizzazione delle connessioni interrotta · in attesa di approvazione. Credenziali e dati locali conservati. L’archiviazione dei dati dell’app continua."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アカウント接続の同期を停止しました・承認待ちです。既存の認証情報とローカルデータは保持され、アプリデータの保存は続行します。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "계정 연결 정보 동기화 중지 · 승인 대기 중입니다. 기존 연결 정보와 로컬 데이터는 보존되며 앱 데이터 저장은 계속 진행합니다."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "账户连接同步已停止，正在等待批准。现有凭据和本地数据将保留，应用数据继续存储。"
+          }
+        }
+      }
+    },
+    "settings.sync.full.connections.failed": {
+      "comment": "Full iCloud app-data versus account-connection storage; device authentication purpose, progress, cancellation and explicit retry.",
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die Synchronisierung der Kontoverbindungen wurde nicht abgeschlossen. Zugangsdaten bleiben erhalten. Prüfen Sie den Schlüsselbund und versuchen Sie es erneut. App-Daten-Fehler werden separat angezeigt."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Account connection sync could not finish. Existing credentials are retained; check Keychain availability and retry. App-data errors are shown separately."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No se pudo completar la sincronización de conexiones. Se conservan las credenciales; comprueba el Llavero y reintenta. Los errores de datos de la app se muestran por separado."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "La synchronisation des connexions n’a pas abouti. Les identifiants sont conservés ; vérifiez le trousseau et réessayez. Les erreurs de données de l’app sont indiquées séparément."
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sincronizzazione delle connessioni non completata. Le credenziali sono conservate; verifica il Portachiavi e riprova. Gli errori dei dati dell’app sono mostrati separatamente."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アカウント接続の同期を完了できませんでした。既存の認証情報は保持されます。キーチェーンを確認して再試行してください。アプリデータのエラーは別に表示されます。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "계정 연결 정보 동기화를 완료하지 못했습니다. 기존 연결 정보는 보존됩니다. 키체인 상태를 확인한 뒤 다시 시도하세요. 앱 데이터 오류는 별도로 표시됩니다."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "账户连接同步未完成。现有凭据将保留，请检查钥匙串可用性后重试。应用数据错误单独显示。"
+          }
+        }
+      }
+    },
+    "settings.sync.full.connections.family.gmail": {
+      "comment": "Full iCloud app-data versus account-connection storage; device authentication purpose, progress, cancellation and explicit retry.",
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gmail IMAP"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gmail IMAP"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gmail IMAP"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gmail IMAP"
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gmail IMAP"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gmail IMAP"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gmail IMAP"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gmail IMAP"
+          }
+        }
+      }
+    },
+    "settings.sync.full.connections.family.outlook": {
+      "comment": "Full iCloud app-data versus account-connection storage; device authentication purpose, progress, cancellation and explicit retry.",
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Outlook IMAP"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Outlook IMAP"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Outlook IMAP"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Outlook IMAP"
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Outlook IMAP"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Outlook IMAP"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Outlook IMAP"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Outlook IMAP"
+          }
+        }
+      }
+    },
+    "settings.sync.full.connections.family.google": {
+      "comment": "Full iCloud app-data versus account-connection storage; device authentication purpose, progress, cancellation and explicit retry.",
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Google-Anmeldung"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Google sign-in"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Inicio de sesión de Google"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connexion Google"
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Accesso Google"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Googleログイン"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Google 로그인"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Google 登录"
+          }
+        }
+      }
+    },
+    "settings.sync.full.connections.family.mailIdentity": {
+      "comment": "Full iCloud app-data versus account-connection storage; device authentication purpose, progress, cancellation and explicit retry.",
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Identität für E-Mail-Lernfunktionen"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mail learning identity"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Identidad del aprendizaje de correo"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Identité d’apprentissage du courrier"
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Identità di apprendimento email"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "メール学習の識別キー"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "메일 학습 식별 키"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "邮件学习标识密钥"
+          }
+        }
+      }
+    },
+    "settings.sync.full.connections.family.vocabulary": {
+      "comment": "Full iCloud app-data versus account-connection storage; device authentication purpose, progress, cancellation and explicit retry.",
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wörterbuchidentität"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Vocabulary identity"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Identidad del vocabulario"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Identité du vocabulaire"
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Identità del vocabolario"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "学習辞書の識別キー"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "학습 사전 식별 키"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "词汇表标识密钥"
+          }
+        }
+      }
+    },
+    "settings.sync.full.connections.family.openAI": {
+      "comment": "Full iCloud app-data versus account-connection storage; device authentication purpose, progress, cancellation and explicit retry.",
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ChatGPT-Verbindung"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ChatGPT connection"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Conexión de ChatGPT"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connexion ChatGPT"
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connessione ChatGPT"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ChatGPT接続"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ChatGPT 연결"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ChatGPT 连接"
+          }
+        }
+      }
+    },
+    "security.keychain.syncPurpose": {
+      "comment": "Local device Keychain authentication purpose; never disclose credentials or imply cloud/data sharing authorization.",
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Entsperre gespeicherte Kontoverbindungen, um sie mit iCloud zu synchronisieren. Beim Abbrechen bleiben geschützte Verbindungen unverändert."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unlock saved account connections to sync them with iCloud. Cancel to leave protected connections unchanged."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Desbloquea las conexiones de cuenta guardadas para sincronizarlas con iCloud. Si cancelas, las conexiones protegidas no se modificarán."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Déverrouillez les connexions de compte enregistrées pour les synchroniser avec iCloud. Si vous annulez, les connexions protégées restent inchangées."
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sblocca le connessioni degli account salvate per sincronizzarle con iCloud. Se annulli, le connessioni protette rimangono invariate."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "保存済みのアカウント接続をiCloudと同期するためにロックを解除します。キャンセルすると、保護された接続は変更されません。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "저장된 계정 연결을 iCloud와 동기화하려면 잠금을 해제하세요. 취소하면 보호된 연결은 변경하지 않습니다."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "解锁已保存的账户连接以与 iCloud 同步。取消后，受保护的连接将保持不变。"
+          }
+        }
+      }
+    },
+    "security.keychain.quietPurpose": {
+      "comment": "Local device Keychain authentication purpose; never disclose credentials or imply cloud/data sharing authorization.",
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gespeicherte Kontoverbindungen prüfen, ohne eine Authentifizierung anzufordern."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Check saved account connections without requesting authentication."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Comprobar las conexiones de cuenta guardadas sin solicitar autenticación."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Vérifier les connexions de compte enregistrées sans demander d’authentification."
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Controlla le connessioni degli account salvate senza richiedere l’autenticazione."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "認証を要求せずに保存済みのアカウント接続を確認します。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "인증을 요청하지 않고 저장된 계정 연결을 확인합니다."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "检查已保存的账户连接，不请求身份验证。"
+          }
+        }
+      }
+    },
+    "security.keychain.actionPurpose": {
+      "comment": "Local device Keychain authentication purpose; never disclose credentials or imply cloud/data sharing authorization.",
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Entsperre gespeicherte Zugangsdaten für die angeforderte Aktion."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unlock saved credentials for the action you requested."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Desbloquea las credenciales guardadas para realizar la acción solicitada."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Déverrouillez les identifiants enregistrés pour effectuer l’action demandée."
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sblocca le credenziali salvate per eseguire l’azione richiesta."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "要求された操作に使用する保存済みの認証情報のロックを解除します。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "요청한 작업에 사용할 저장된 인증 정보의 잠금을 해제하세요."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "解锁已保存的凭据以执行您请求的操作。"
+          }
+        }
+      }
+    },
+    "diagnostics.currentError.title": {
+      "comment": "Section title for a current app-operation failure, distinct from previous-session recovery.",
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Aktuellen Fehler melden"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Report the current error"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Informar del error actual"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Signaler l’erreur actuelle"
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Segnala l’errore attuale"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "現在のエラーを報告"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "현재 오류 보고"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "报告当前错误"
+          }
+        }
+      }
+    },
+    "diagnostics.currentError.detail": {
+      "comment": "Explains that current-error diagnostic collection is local and does not imply transmission consent.",
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ein App-Vorgang ist fehlgeschlagen. Erlaube die Erfassung von Diagnosedaten, um Fehlerdetails auf diesem Gerät zu speichern und einen Bericht zu prüfen. Die Aktivierung der Erfassung sendet den Bericht nicht."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "An app operation failed. Allow diagnostic collection to keep error details on this device and review a report. Enabling collection does not send the report."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ha fallado una operación de la app. Permite la recopilación de diagnósticos para guardar los detalles del error en este dispositivo y revisar un informe. Activar la recopilación no envía el informe."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Une opération de l’app a échoué. Autorisez la collecte de diagnostics pour conserver les détails de l’erreur sur cet appareil et consulter un rapport. L’activation de la collecte n’envoie pas le rapport."
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Un’operazione dell’app non è riuscita. Consenti la raccolta dei dati diagnostici per conservare i dettagli dell’errore su questo dispositivo ed esaminare un rapporto. L’attivazione della raccolta non invia il rapporto."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アプリの操作に失敗しました。診断情報の収集を許可すると、エラーの詳細をこのデバイスに保存し、レポートを確認できます。収集を有効にしてもレポートは送信されません。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "앱에서 오류가 발생했습니다. 진단 로그 수집을 허용하면 오류 정보를 이 기기에 보관하고 보고서를 검토할 수 있습니다. 수집 허용만으로 보고서가 전송되지는 않습니다."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "应用操作失败。允许收集诊断信息后，可在此设备上保存错误详情并查看报告。启用收集不会发送报告。"
+          }
+        }
+      }
+    },
+    "diagnostics.preparationFailed": {
+      "comment": "Visible local report-preparation failure; confirms no transmission and retention of diagnostic logs.",
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Der Bericht konnte auf diesem Gerät nicht vorbereitet werden. Es wurde nichts gesendet und die Diagnoseprotokolle bleiben erhalten. Versuche es erneut."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The report could not be prepared on this device. Nothing was sent and diagnostic logs are kept. Try again."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No se ha podido preparar el informe en este dispositivo. No se ha enviado nada y los registros de diagnóstico se conservan. Inténtalo de nuevo."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Le rapport n’a pas pu être préparé sur cet appareil. Rien n’a été envoyé et les journaux de diagnostic sont conservés. Réessayez."
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Non è stato possibile preparare il rapporto su questo dispositivo. Non è stato inviato nulla e i registri diagnostici vengono conservati. Riprova."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "このデバイスでレポートを準備できませんでした。何も送信されておらず、診断ログは保持されています。もう一度お試しください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "기기에서 보고서를 준비하지 못했습니다. 아무것도 전송되지 않았으며 진단 로그는 유지됩니다. 다시 시도하세요."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法在此设备上准备报告。未发送任何内容，诊断日志仍保留。请重试。"
+          }
+        }
+      }
+    },
+    "feedback.diagnostics.defaultTitle": {
+      "comment": "Editable, privacy-safe default title for feedback containing an explicitly reviewed diagnostic report.",
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Diagnosebericht zu einem App-Fehler"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "App error diagnostic report"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Informe de diagnóstico de un error de la app"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Rapport de diagnostic d’une erreur de l’app"
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Rapporto diagnostico di un errore dell’app"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アプリのエラー診断レポート"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "앱 오류 진단 보고서"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "应用错误诊断报告"
+          }
+        }
+      }
+    },
+    "feedback.diagnostics.defaultMessage": {
+      "comment": "Editable, privacy-safe default message for feedback containing a reviewed diagnostic report; not transmission consent.",
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bitte untersucht den beigefügten Diagnosebericht."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Please investigate the attached diagnostic report."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Por favor, investiguen el informe de diagnóstico adjunto."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Veuillez examiner le rapport de diagnostic joint."
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Esaminate il rapporto diagnostico allegato."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "添付の診断レポートを調査してください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "첨부된 진단 보고서를 조사해 주세요."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请调查所附的诊断报告。"
+          }
+        }
+      }
+    },
+    "meeting.appAudio.error.authorizationDenied.mac": {
+      "comment": "macOS capture authorization failure; permission must remain user controlled.",
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "macOS hat die Systemaudioaufnahme nicht erlaubt. Prüfe SIFT unter Systemeinstellungen → Datenschutz & Sicherheit → Bildschirm- & Systemaudioaufnahme. Beende und öffne SIFT nach einer Berechtigungsänderung erneut und wähle die Quelle noch einmal."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "macOS did not authorize system audio capture. Check SIFT in System Settings → Privacy & Security → Screen & System Audio Recording. If you change permission, quit and reopen SIFT, then select the source again."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "macOS no ha autorizado la captura de audio del sistema. Revisa SIFT en Ajustes del Sistema → Privacidad y seguridad → Grabación de pantalla y audio del sistema. Si cambias el permiso, cierra y vuelve a abrir SIFT y selecciona la fuente de nuevo."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "macOS n’a pas autorisé la capture de l’audio du système. Vérifiez SIFT dans Réglages Système → Confidentialité et sécurité → Enregistrement de l’écran et de l’audio du système. Si vous modifiez l’autorisation, quittez et rouvrez SIFT, puis sélectionnez à nouveau la source."
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "macOS non ha autorizzato l’acquisizione dell’audio di sistema. Controlla SIFT in Impostazioni di Sistema → Privacy e sicurezza → Registrazione schermo e audio di sistema. Se modifichi il permesso, chiudi e riapri SIFT, quindi seleziona di nuovo la sorgente."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "macOSがシステムオーディオのキャプチャを許可しませんでした。システム設定 → プライバシーとセキュリティ → 画面収録とシステムオーディオ録音でSIFTの権限を確認してください。権限を変更した場合はSIFTを終了して開き直し、ソースを再選択してください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "macOS가 시스템 오디오 캡처를 허용하지 않았습니다. 시스템 설정 → 개인정보 보호 및 보안 → 화면 및 시스템 오디오 녹음에서 SIFT 권한을 확인하세요. 권한을 변경했다면 SIFT를 종료한 뒤 다시 열고 소스를 선택하세요."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "macOS 未授权捕捉系统音频。请在系统设置 → 隐私与安全性 → 屏幕与系统录音中检查 SIFT 权限。如果更改了权限，请退出并重新打开 SIFT，然后重新选择来源。"
+          }
+        }
+      }
+    },
+    "meeting.appAudio.error.authorizationDenied": {
+      "comment": "System picker authorization failure; do not imply user cancellation or automatically grant access.",
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Das System hat die Audioaufnahme nicht erlaubt. Wähle die Quelle erneut und bestätige die Freigabe in der Systemauswahl."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The system did not authorize audio capture. Select the source again and approve sharing in the system picker."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "El sistema no ha autorizado la captura de audio. Selecciona de nuevo la fuente y permite compartirla en el selector del sistema."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Le système n’a pas autorisé la capture audio. Sélectionnez à nouveau la source et autorisez le partage dans le sélecteur système."
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Il sistema non ha autorizzato l’acquisizione audio. Seleziona di nuovo la sorgente e autorizza la condivisione nel selettore di sistema."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "システムがオーディオのキャプチャを許可しませんでした。ソースを再選択し、システムの選択画面で共有を許可してください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "시스템이 오디오 캡처를 허용하지 않았습니다. 소스를 다시 선택하고 시스템 선택창에서 공유를 허용하세요."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "系统未授权音频捕捉。请重新选择来源，并在系统选择器中允许共享。"
+          }
+        }
+      }
+    },
+    "meeting.appAudio.openPrivacySettings": {
+      "comment": "Open macOS privacy settings without changing any permission.",
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Systemeinstellungen öffnen"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open System Settings"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Abrir Ajustes del Sistema"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ouvrir Réglages Système"
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Apri Impostazioni di Sistema"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "システム設定を開く"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "시스템 설정 열기"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "打开系统设置"
+          }
+        }
+      }
+    },
     "meeting.section.languages": {
       "comment": "Meeting entry section heading.",
       "localizations": {
@@ -83493,60 +85437,6 @@
         }
       }
     },
-    "settings.sync.full.confirm.message" : {
-      "comment" : "Full iCloud storage scope, consent and real transport status.",
-      "extractionState" : "manual",
-      "localizations" : {
-        "de" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Dabei werden E-Mail-Inhalte, Besprechungsaufnahmen und Transkripte, Routinen, Wortschatz, Einstellungen und Kontoverbindungen unter deinem Apple Account gespeichert. Gesundheitsdaten, Betriebssystemberechtigungen und herunterladbare Modelldateien sind ausgeschlossen. Dies erlaubt nicht, Inhalte an ChatGPT zu senden."
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "This includes email bodies, meeting recordings and transcripts, routines, vocabulary, settings and account connections under your Apple account. Health data, OS grants and downloadable model files are excluded. This does not authorize sending content to ChatGPT."
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Se guardarán los cuerpos de los correos, las grabaciones y transcripciones de reuniones, las rutinas, el vocabulario, los ajustes y las conexiones de cuentas en tu cuenta de Apple. Se excluyen los datos de salud, los permisos del sistema y los archivos de modelos descargables. Esto no autoriza el envío de contenido a ChatGPT."
-          }
-        },
-        "fr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Cela inclut le corps des e-mails, les enregistrements et transcriptions de réunions, les routines, le vocabulaire, les réglages et les connexions aux comptes, sous votre compte Apple. Les données de santé, les autorisations du système et les fichiers de modèles téléchargeables sont exclus. Cela n’autorise pas l’envoi de contenu à ChatGPT."
-          }
-        },
-        "it" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Include il corpo delle email, le registrazioni e trascrizioni delle riunioni, le routine, il vocabolario, le impostazioni e le connessioni agli account, associati al tuo account Apple. Sono esclusi i dati sanitari, le autorizzazioni del sistema e i file dei modelli scaricabili. Questo non autorizza l’invio di contenuti a ChatGPT."
-          }
-        },
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "メール本文、会議の録音・文字起こし、ルーティン、語彙、設定、アカウント接続情報を同じApple Accountに保存します。健康データ、OSの権限、ダウンロード可能なモデルファイルは対象外です。これはChatGPTへのコンテンツ送信を許可するものではありません。"
-          }
-        },
-        "ko" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "같은 Apple 계정에 메일 본문·회의 녹음/전사·루틴·학습 사전·설정·연결 정보를 저장합니다. 건강정보·OS 권한·재다운로드 가능한 모델 파일은 제외하며, ChatGPT로 내용을 전송하는 동의와는 별개입니다."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "这会将邮件正文、会议录音与转写、例程、词汇、设置和账户连接信息存储在你的 Apple 账户下。健康数据、操作系统权限和可下载的模型文件不包含在内。这并不代表授权向 ChatGPT 发送内容。"
-          }
-        }
-      }
-    },
     "settings.sync.full.confirm.title" : {
       "comment" : "Full iCloud storage scope, consent and real transport status.",
       "extractionState" : "manual",
@@ -84249,60 +86139,6 @@
         }
       }
     },
-    "settings.sync.full.lastExport" : {
-      "comment" : "Full iCloud storage scope, consent and real transport status.",
-      "extractionState" : "manual",
-      "localizations" : {
-        "de" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Letzter bestätigter iCloud-Export"
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Last confirmed iCloud export"
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Última exportación confirmada a iCloud"
-          }
-        },
-        "fr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Dernier export iCloud confirmé"
-          }
-        },
-        "it" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ultima esportazione iCloud confermata"
-          }
-        },
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "最後に確認されたiCloudへの書き出し"
-          }
-        },
-        "ko" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "최근 확인된 iCloud 내보내기"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "最近确认的 iCloud 导出"
-          }
-        }
-      }
-    },
     "settings.sync.full.offline" : {
       "comment" : "Full iCloud storage scope, consent and real transport status.",
       "extractionState" : "manual",
@@ -84731,60 +86567,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "将全部应用数据存储到 iCloud"
-          }
-        }
-      }
-    },
-    "settings.sync.full.transport" : {
-      "comment" : "Full iCloud storage scope, consent and real transport status.",
-      "extractionState" : "manual",
-      "localizations" : {
-        "de" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Daten erscheinen auf anderen Geräten, sobald Apple die Übertragung abgeschlossen hat. Aufnahmen belegen iCloud-Speicherplatz. Speicherplatz- oder Netzwerkfehler werden angezeigt und nicht als abgeschlossene Synchronisierung behandelt. Für Zugangsdaten ist außerdem der iCloud-Schlüsselbund erforderlich."
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Data appears on other devices after Apple's transfer completes. Recordings consume iCloud storage; quota or network failures are shown rather than treated as completed sync. Credentials also require iCloud Keychain."
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Los datos aparecen en otros dispositivos cuando Apple completa la transferencia. Las grabaciones ocupan espacio en iCloud; los errores de cuota o de red se muestran en lugar de indicar que la sincronización ha finalizado. Las credenciales también requieren el Llavero de iCloud."
-          }
-        },
-        "fr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Les données apparaissent sur les autres appareils une fois le transfert d’Apple terminé. Les enregistrements occupent de l’espace iCloud. Les erreurs de quota ou de réseau sont affichées et ne sont pas considérées comme une synchronisation terminée. Les identifiants nécessitent aussi le trousseau iCloud."
-          }
-        },
-        "it" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "I dati appaiono sugli altri dispositivi al termine del trasferimento da parte di Apple. Le registrazioni occupano spazio su iCloud; gli errori di spazio o di rete vengono mostrati e non considerati come una sincronizzazione completata. Le credenziali richiedono anche il Portachiavi iCloud."
-          }
-        },
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Appleによる転送が完了すると、ほかのデバイスにデータが反映されます。録音はiCloudストレージを使用します。容量やネットワークのエラーは表示され、同期完了としては扱われません。認証情報にはiCloudキーチェーンも必要です。"
-          }
-        },
-        "ko" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Apple의 전송이 완료된 뒤 다른 기기에 적용됩니다. 녹음은 iCloud 저장공간을 사용하며 용량·네트워크 오류를 동기화 완료로 처리하지 않습니다. 연결 정보 복원에는 iCloud 키체인도 필요합니다."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Apple 完成传输后，数据才会出现在其他设备上。录音会占用 iCloud 存储空间；配额或网络错误会显示出来，而不会被视为同步已完成。凭据还需要通过 iCloud 钥匙串同步。"
           }
         }
       }

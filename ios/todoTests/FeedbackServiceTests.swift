@@ -133,7 +133,7 @@ struct FeedbackServiceTests {
             let fixture = FeedbackHTTPFixture(action: .response(status, headers, data))
             defer { fixture.remove() }
             let service = FeedbackService(baseURL: fixture.baseURL, protocolClasses: [FeedbackTestURLProtocol.self])
-            await #expect(throws: FeedbackFailure.invalidResponse) { try await service.submit(submission()) }
+            await #expect(throws: FeedbackFailure.invalidResponse(status: status)) { try await service.submit(submission()) }
             #expect(fixture.exchange.requests.count == 1)
         }
     }
@@ -151,7 +151,7 @@ struct FeedbackServiceTests {
             let fixture = FeedbackHTTPFixture(action: .response(201, [:], try receiptBody(ticketID: id, receivedAt: date)))
             defer { fixture.remove() }
             let service = FeedbackService(baseURL: fixture.baseURL, protocolClasses: [FeedbackTestURLProtocol.self])
-            await #expect(throws: FeedbackFailure.invalidResponse) { try await service.submit(submission()) }
+            await #expect(throws: FeedbackFailure.invalidResponse(status: 201)) { try await service.submit(submission()) }
         }
     }
 
@@ -221,7 +221,7 @@ struct FeedbackServiceTests {
             (.response(413, [:], Data("{\"errorCode\":\"REQUEST_TOO_LARGE\"}".utf8)), .requestTooLarge),
             (.response(503, [:], Data("{\"errorCode\":\"INTAKE_UNAVAILABLE\"}".utf8)), .unavailable),
             (.response(503, [:], Data("{\"errorCode\":\"CAPACITY_REACHED\"}".utf8)), .unavailable),
-            (.failure(.networkConnectionLost), .transport)
+            (.failure(.networkConnectionLost), .transport(code: URLError.networkConnectionLost.rawValue))
         ]
         for (action, failure) in cases {
             let fixture = FeedbackHTTPFixture(action: action)
@@ -230,6 +230,40 @@ struct FeedbackServiceTests {
             await #expect(throws: failure) { try await service.submit(submission()) }
             #expect(fixture.exchange.requests.count == 1)
         }
+    }
+
+    @Test("HTTP gateway failures retain status without retaining private response content", arguments: [302, 403, 500, 502, 503])
+    func gatewayFailureHasSafeStatus(status: Int) async throws {
+        let fixture = FeedbackHTTPFixture(action: .response(
+            status, ["Content-Type": "text/html", "Location": "https://private.invalid/token=secret"],
+            Data("<html>private account and server content</html>".utf8)
+        ))
+        defer { fixture.remove() }
+        let service = FeedbackService(baseURL: fixture.baseURL, protocolClasses: [FeedbackTestURLProtocol.self])
+        do {
+            _ = try await service.submit(submission())
+            Issue.record("A gateway response must never acknowledge delivery")
+        } catch let failure as FeedbackFailure {
+            #expect(failure == .invalidResponse(status: status))
+            #expect(failure.technicalDetail == "HTTP \(status)")
+            #expect(!String(describing: failure).contains("private"))
+        }
+        #expect(fixture.exchange.requests.count == 1)
+    }
+
+    @Test("Transport failures retain the safe URL loading code", arguments: [URLError.timedOut, .cannotFindHost, .notConnectedToInternet, .secureConnectionFailed])
+    func transportFailureHasSafeCode(code: URLError.Code) async throws {
+        let fixture = FeedbackHTTPFixture(action: .failure(code))
+        defer { fixture.remove() }
+        let service = FeedbackService(baseURL: fixture.baseURL, protocolClasses: [FeedbackTestURLProtocol.self])
+        do {
+            _ = try await service.submit(submission())
+            Issue.record("A transport failure must never acknowledge delivery")
+        } catch let failure as FeedbackFailure {
+            #expect(failure == .transport(code: code.rawValue))
+            #expect(failure.technicalDetail == "NSURLErrorDomain (\(code.rawValue))")
+        }
+        #expect(fixture.exchange.requests.count == 1)
     }
 
     @Test("In-flight task cancellation stops transport and cannot return a receipt")

@@ -28,6 +28,19 @@ struct DiagnosticReportPreview: Equatable {
     }
 }
 
+enum DiagnosticReportContext {
+    case currentError
+    case previousSessionRecovery
+}
+
+/// Captures both the error and its collection state before alert dismissal.
+/// One identity owns one reporting session, including later collection consent.
+struct MeetingDiagnosticErrorSnapshot: Identifiable {
+    let id = UUID()
+    let error: Error
+    let needsCollection: Bool
+}
+
 struct DiagnosticExportRequest: Identifiable, Equatable {
     let id: UUID
     let data: Data
@@ -58,24 +71,33 @@ struct DiagnosticReportView: View {
     @StateObject private var diagnostics = DiagnosticReportService.shared
     @State private var activeExport: DiagnosticExportRequest?
     @State private var isDeliveryPresented = false
+    @State private var feedbackComposer: FeedbackComposer?
     @State private var hasDeliveredDiagnostics = false
     @State private var isPreparingReport = false
+    @State private var preparationFailed = false
     @State private var preparationTask: Task<Void, Never>?
-    @State private var pendingDiagnostic: PendingDiagnostic?
+    @State private var hasRecordedPendingDiagnostic = false
+    private let pendingDiagnostic: PendingDiagnostic?
+    private let recordsPendingError: Bool
     private let presentsPendingDiagnostic: Bool
     private let showsCloseButton: Bool
 
+    private let context: DiagnosticReportContext
     init(
         pendingError: Error? = nil,
         component: String = "meeting.capture",
         operation: String = "userReportedFailure",
-        showsCloseButton: Bool = false
+        showsCloseButton: Bool = false,
+        context: DiagnosticReportContext = .currentError,
+        recordsPendingError: Bool = true
     ) {
-        _pendingDiagnostic = State(initialValue: pendingError.map {
+        pendingDiagnostic = pendingError.map {
             PendingDiagnostic(error: $0, component: component, operation: operation)
-        })
+        }
+        self.recordsPendingError = recordsPendingError
         presentsPendingDiagnostic = pendingError != nil
         self.showsCloseButton = showsCloseButton
+        self.context = context
     }
 
     var body: some View {
@@ -83,15 +105,19 @@ struct DiagnosticReportView: View {
             if presentsPendingDiagnostic {
                 Section {
                     Text(copy(
-                        "diagnostics.recovery.detail",
-                        korean: "이전 활성 세션이 일반적인 비활성 전환을 기록하지 못했습니다. 이는 충돌을 확정하지 않습니다. 진단 로그 수집을 허용하면 이 종료 징후만 포함한 최소 보고서를 이 기기에 만들 수 있습니다. 앱은 사용자의 동의 없이 정보를 전송하지 않습니다.",
-                        english: "The previous active session did not record a normal deactivation. This does not confirm a crash. Allow diagnostic collection to create a minimal on-device report about this termination signal. The app never sends information without your consent."
+                        context == .previousSessionRecovery ? "diagnostics.recovery.detail" : "diagnostics.currentError.detail",
+                        korean: context == .previousSessionRecovery
+                            ? "이전 활성 세션이 일반적인 비활성 전환을 기록하지 못했습니다. 이는 충돌을 확정하지 않습니다. 진단 로그 수집을 허용하면 이 종료 징후만 포함한 최소 보고서를 이 기기에 만들 수 있습니다. 앱은 사용자의 동의 없이 정보를 전송하지 않습니다."
+                            : "앱에서 오류가 발생했습니다. 진단 로그 수집을 허용하면 오류 정보를 이 기기에 보관하고 보고서를 검토할 수 있습니다. 수집 허용만으로 보고서가 전송되지는 않습니다.",
+                        english: context == .previousSessionRecovery
+                            ? "The previous active session did not record a normal deactivation. This does not confirm a crash. Allow diagnostic collection to create a minimal on-device report about this termination signal. The app never sends information without your consent."
+                            : "An app operation failed. Allow diagnostic collection to keep error details on this device and review a report. Enabling collection does not send the report."
                     ))
                 } header: {
                     Text(copy(
-                        "diagnostics.recovery.title",
-                        korean: "이전 세션 복구",
-                        english: "Previous session recovery"
+                        context == .previousSessionRecovery ? "diagnostics.recovery.title" : "diagnostics.currentError.title",
+                        korean: context == .previousSessionRecovery ? "이전 세션 복구" : "현재 오류 보고",
+                        english: context == .previousSessionRecovery ? "Previous session recovery" : "Report the current error"
                     ))
                 }
             }
@@ -150,6 +176,15 @@ struct DiagnosticReportView: View {
                 }
 
                 Section {
+                    if preparationFailed {
+                        Text(copy(
+                            "diagnostics.preparationFailed",
+                            korean: "기기에서 보고서를 준비하지 못했습니다. 아무것도 전송되지 않았으며 진단 로그는 유지됩니다. 다시 시도하세요.",
+                            english: "The report could not be prepared on this device. Nothing was sent and diagnostic logs are kept. Try again."
+                        ))
+                        .foregroundStyle(.red)
+                        .accessibilityIdentifier("diagnostics.preparationFailure")
+                    }
                     Button {
                         guard preparationTask == nil else { return }
                         preparationTask = Task { await beginReport() }
@@ -208,25 +243,30 @@ struct DiagnosticReportView: View {
         .sheet(item: $activeExport, onDismiss: {
             // Covers an interactive dismissal of the local review as well.
             isDeliveryPresented = false
+            feedbackComposer = nil
             if !hasDeliveredDiagnostics { diagnostics.discardPreparedReport() }
             hasDeliveredDiagnostics = false
         }) { export in
             reportReview(export)
                 .interactiveDismissDisabled(isDeliveryPresented)
                 .sheet(isPresented: $isDeliveryPresented, onDismiss: {
-                    if let export = activeExport { finishExport(export) }
+                    // Cancelling delivery returns to local review with the same
+                    // draft, consent snapshot and submission ID available to retry.
+                    if feedbackComposer?.receipt != nil, let export = activeExport { finishExport(export) }
                 }) {
-                    NavigationStack {
-                        FeedbackView(initialKind: .bug, diagnosticData: export.data, showsCloseButton: true) { _, includedDiagnostics in
-                            guard includedDiagnostics, !hasDeliveredDiagnostics,
-                                  activeExport?.id == export.id else { return }
-                            diagnostics.acknowledgeDeliveredReport(.init(
-                                data: export.data,
-                                events: export.events,
-                                metricPayloads: export.metricPayloads,
-                                metricPayloadIDs: export.metricPayloadIDs
-                            ))
-                            hasDeliveredDiagnostics = true
+                    if let feedbackComposer {
+                        NavigationStack {
+                            FeedbackView(composer: feedbackComposer, showsCloseButton: true) { _, includedDiagnostics in
+                                guard includedDiagnostics, !hasDeliveredDiagnostics,
+                                      activeExport?.id == export.id else { return }
+                                diagnostics.acknowledgeDeliveredReport(.init(
+                                    data: export.data,
+                                    events: export.events,
+                                    metricPayloads: export.metricPayloads,
+                                    metricPayloadIDs: export.metricPayloadIDs
+                                ))
+                                hasDeliveredDiagnostics = true
+                            }
                         }
                     }
                 }
@@ -333,6 +373,7 @@ struct DiagnosticReportView: View {
             return
         }
         isPreparingReport = true
+        preparationFailed = false
         defer {
             isPreparingReport = false
             preparationTask = nil
@@ -340,6 +381,7 @@ struct DiagnosticReportView: View {
         guard let report = await diagnostics.prepareAttachment(), diagnostics.collectionEnabled,
               !Task.isCancelled else {
             diagnostics.discardPreparedReport()
+            if diagnostics.collectionEnabled, !Task.isCancelled { preparationFailed = true }
             return
         }
         let export = DiagnosticExportRequest(
@@ -350,8 +392,10 @@ struct DiagnosticReportView: View {
         )
         guard export.preview != nil else {
             diagnostics.discardPreparedReport()
+            preparationFailed = true
             return
         }
+        feedbackComposer = FeedbackComposer(initialKind: .bug, preparedDiagnostics: export.data)
         activeExport = export
     }
 
@@ -364,13 +408,14 @@ struct DiagnosticReportView: View {
 
 
     private func recordPendingDiagnosticIfConsented() {
-        guard diagnostics.collectionEnabled, let pendingDiagnostic else { return }
+        guard recordsPendingError, !hasRecordedPendingDiagnostic,
+              diagnostics.collectionEnabled, let pendingDiagnostic else { return }
         DiagnosticRecorder.shared.record(
             error: pendingDiagnostic.error,
             component: pendingDiagnostic.component,
             operation: pendingDiagnostic.operation
         )
-        self.pendingDiagnostic = nil
+        hasRecordedPendingDiagnostic = true
     }
 
 

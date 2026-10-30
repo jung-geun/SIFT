@@ -19,9 +19,19 @@ import UIKit
         showsCloseButton: Bool = false,
         onDelivered: @escaping (FeedbackReceipt, Bool) -> Void = { _, _ in }
     ) {
-        _composer = StateObject(wrappedValue: FeedbackComposer(
-            initialKind: initialKind, preparedDiagnostics: diagnosticData
-        ))
+        self.init(
+            composer: FeedbackComposer(initialKind: initialKind, preparedDiagnostics: diagnosticData),
+            showsCloseButton: showsCloseButton,
+            onDelivered: onDelivered
+        )
+    }
+
+    init(
+        composer: @autoclosure @escaping () -> FeedbackComposer,
+        showsCloseButton: Bool = false,
+        onDelivered: @escaping (FeedbackReceipt, Bool) -> Void = { _, _ in }
+    ) {
+        _composer = StateObject(wrappedValue: composer())
         self.showsCloseButton = showsCloseButton
         self.onDelivered = onDelivered
     }
@@ -219,6 +229,12 @@ import UIKit
         Section(text("failure.title", "Delivery not confirmed")) {
             Text(failureText(failure))
                 .foregroundStyle(.red)
+            if let detail = failure.technicalDetail {
+                Text(verbatim: detail)
+                    .font(.footnote.monospaced())
+                    .textSelection(.enabled)
+                    .accessibilityIdentifier("feedback.failureDetail")
+            }
             if case let .rateLimited(seconds?) = failure {
                 Text(AppLanguage.localizedCount(
                     "feedback.failure.retryAfter", count: seconds,

@@ -85,7 +85,9 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterD
     ) -> Bool {
         UNUserNotificationCenter.current().delegate = self
         #if DEBUG
-        if ProcessInfo.processInfo.arguments.contains("-ui-test-seed-diagnostic-report") {
+        if Bundle.main.bundleIdentifier == "pieroot.sift-todo.qa",
+           ProcessInfo.processInfo.arguments.contains("-ui-test-in-memory-store"),
+           ProcessInfo.processInfo.arguments.contains("-ui-test-seed-diagnostic-report") {
             DiagnosticRecorder.shared.setCollectionEnabled(true)
             DiagnosticRecorder.shared.record(
                 error: NSError(
@@ -812,7 +814,8 @@ struct todoApp: App {
                         pendingError: prompt.error,
                         component: "app.lifecycle",
                         operation: "unexpectedForegroundTermination",
-                        showsCloseButton: true
+                        showsCloseButton: true,
+                        context: .previousSessionRecovery
                     )
                 }
             }

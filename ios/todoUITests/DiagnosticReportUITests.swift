@@ -41,6 +41,26 @@ final class DiagnosticReportUITests: SIFTUITestCase {
             screenshot.lifetime = .keepAlways
             add(screenshot)
         }
+
+        step("의견 작성 취소 후 같은 진단 검토와 초안 유지") {
+            let title = app.textFields["feedback.titleField"]
+            replaceText(in: title, with: "Retained diagnostic draft")
+            tap(app.buttons["feedback.close"], message: "의견 작성 취소 버튼이 없습니다.")
+            require(app.staticTexts["diagnostics.preview.payload"], message: "취소 후 원래 진단 검토로 돌아오지 않았습니다.")
+            tap(app.buttons["diagnostics.preview.continue"], message: "같은 의견 작성을 다시 열 수 없습니다.")
+            require(deliveryScreen, message: "의견 초안이 돌아오지 않았습니다.")
+            XCTAssertEqual(deliveryScreen.value as? String, "Retained diagnostic draft")
+            requireHittable(app.buttons["feedback.reviewButton"], message: "보내기 전 검토 버튼이 보이지 않습니다.")
+            tap(app.buttons["feedback.reviewButton"], message: "보내기 전 검토 버튼이 없습니다.")
+            let consent = app.switches["feedback.consentToggle"]
+            requireHittable(consent, message: "명시적 전송 동의가 없습니다.")
+            XCTAssertEqual(consent.value as? String, "0")
+            tap(app.buttons["feedback.close"], message: "전송 전 취소 버튼이 없습니다.")
+            require(app.staticTexts["diagnostics.preview.payload"], message: "검토 취소 후 진단 보고서가 없어졌습니다.")
+            tap(app.buttons["diagnostics.preview.continue"], message: "전송 검토를 다시 열 수 없습니다.")
+            requireHittable(app.switches["feedback.consentToggle"], message: "보내기 검토 상태가 소실되었습니다.")
+            XCTAssertEqual(app.switches["feedback.consentToggle"].value as? String, "0")
+        }
     }
 
     private var deliveryScreen: XCUIElement {

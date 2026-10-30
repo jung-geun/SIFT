@@ -18,6 +18,8 @@ import OSLog
 enum KeychainStoreError: Error, Equatable {
     case security(OSStatus)
     case authorizationChanged
+    case authenticationRequired
+    case authenticationCancelled
 }
 
 enum GmailCredentialPortabilityError: Error, Equatable {
@@ -40,10 +42,203 @@ nonisolated enum DeviceOnlyCredentialAccess: Sendable, Equatable {
     case backgroundAfterFirstUnlock
 }
 
+/// Metadata cannot always distinguish an existing protected item without UI.
+/// Only an already-verified receipt may interpret authenticationRequired as
+/// unchanged availability; it never authorizes a credential read or new receipt.
+nonisolated enum DeviceOnlyCredentialPresence: Sendable, Equatable {
+    case present
+    case missing
+    case authenticationRequired
+}
+
 nonisolated enum KeychainStore {
     private static let logger = Logger(subsystem: "pieroot.todo", category: "KeychainStore")
     private static let gmailCopyLock = NSRecursiveLock()
     private static let gmailStateService = "pieroot.todo.gmail.portability-state.v1"
+
+    /// A task inherits its attempt, never an app-wide authentication switch.
+    /// The context holds OS authorization only; no credential bytes are cached.
+    private final class AuthenticationAttempt: @unchecked Sendable {
+        let context = LAContext()
+        let allowsUI: Bool
+        private let parent: AuthenticationAttempt?
+        private let lock = NSLock()
+        private let operationLock = NSRecursiveLock()
+        private var failure: KeychainStoreError?
+        private var ended = false
+        private var taskCancelled = false
+
+        init(allowsUI: Bool, parent: AuthenticationAttempt?) {
+            self.allowsUI = allowsUI
+            self.parent = parent
+            context.interactionNotAllowed = !allowsUI
+            context.localizedReason = AppLanguage.localized(
+                allowsUI ? "security.keychain.syncPurpose" : "security.keychain.quietPurpose",
+                defaultValue: allowsUI
+                    ? "Unlock saved account connections to sync them with iCloud. Cancel to leave protected connections unchanged."
+                    : "Check saved account connections without requesting authentication.",
+                language: .current)
+        }
+
+        func beginOperation() throws {
+            operationLock.lock()
+            do { try check() }
+            catch { operationLock.unlock(); throw error }
+        }
+
+        func endOperation() { operationLock.unlock() }
+
+        func check() throws {
+            try parent?.check()
+            lock.lock()
+            defer { lock.unlock() }
+            if taskCancelled { throw CancellationError() }
+            if let failure { throw failure }
+            guard !ended else { throw KeychainStoreError.authorizationChanged }
+        }
+
+        func fail(_ error: KeychainStoreError) {
+            lock.lock()
+            if failure == nil { failure = error }
+            lock.unlock()
+            context.invalidate()
+        }
+
+        func cancelTask() {
+            lock.lock()
+            taskCancelled = true
+            lock.unlock()
+            context.invalidate()
+        }
+
+        func finish() {
+            lock.lock()
+            ended = true
+            lock.unlock()
+            context.invalidate()
+        }
+    }
+
+    @TaskLocal private static var authenticationAttempt: AuthenticationAttempt?
+
+    /// Automatic sync must use this scope for reads AND mutations, including
+    /// slot migrations. An unavailable protected item is not an absent item.
+    static func withoutAuthenticationUI<T>(
+        isolation: isolated (any Actor)? = #isolation, _ operation: () async throws -> T
+    ) async throws -> T {
+        try await withAuthenticationAttempt(allowsUI: false, isolation: isolation, operation)
+    }
+
+    /// Only a dedicated, explained user action may enter this scope. One OS
+    /// context is reused across families; the OS still decides the prompt count.
+    static func withUserInitiatedCredentialSync<T>(
+        isolation: isolated (any Actor)? = #isolation, _ operation: () async throws -> T
+    ) async throws -> T {
+        try await withAuthenticationAttempt(allowsUI: true, isolation: isolation, operation)
+    }
+
+    static func checkAuthenticationAttempt() throws {
+        try authenticationAttempt?.check()
+    }
+
+    private static func withAuthenticationAttempt<T>(
+        allowsUI: Bool, isolation: isolated (any Actor)?, _ operation: () async throws -> T
+    ) async throws -> T {
+        // Each quiet family has its own failure boundary, so a protected account
+        // cannot block unrelated app data. Parent cancellation/end still wins.
+        // An interactive helper inherits the parent and can never escalate it.
+        try checkAuthenticationAttempt()
+        if let current = authenticationAttempt, allowsUI {
+            let value = try await operation()
+            try current.check()
+            return value
+        }
+        let attempt = AuthenticationAttempt(allowsUI: allowsUI, parent: authenticationAttempt)
+        defer { attempt.finish() }
+        return try await withTaskCancellationHandler {
+            try await $authenticationAttempt.withValue(attempt) {
+                if Task.isCancelled { attempt.cancelTask() }
+                try attempt.check()
+                do {
+                    let value = try await operation()
+                    try attempt.check() // Legacy optional/best-effort APIs may catch.
+                    return value
+                } catch {
+                    // Preserve a swallowed/wrapped authentication error over a
+                    // later decoding, rollback, or missing-credential error.
+                    try attempt.check()
+                    throw error
+                }
+            }
+        } onCancel: {
+            attempt.cancelTask()
+        }
+    }
+
+    private enum SecurityOperation: String { case read, update, add, delete }
+
+    /// Every Security.framework entry point goes through the same policy.
+    /// Query-only parameters never become stored ACL/accessibility attributes.
+    private static func performSecurityOperation(
+        _ operation: SecurityOperation, query: [String: Any], attributes: [String: Any] = [:],
+        noninteractiveProbe: Bool = false, result: inout AnyObject?
+    ) throws -> OSStatus {
+        try checkAuthenticationAttempt()
+        let attempt = authenticationAttempt
+        try attempt?.beginOperation()
+        defer { attempt?.endOperation() }
+        let context = noninteractiveProbe ? LAContext() : (attempt?.context ?? LAContext())
+        if noninteractiveProbe { context.interactionNotAllowed = true }
+        if attempt == nil || noninteractiveProbe {
+            context.localizedReason = AppLanguage.localized("security.keychain.actionPurpose",
+                defaultValue: "Unlock saved credentials for the action you requested.", language: .current)
+        }
+        defer { if attempt == nil || noninteractiveProbe { context.invalidate() } }
+        var authenticatedQuery = query
+        authenticatedQuery[kSecUseAuthenticationContext as String] = context
+        let status: OSStatus
+        #if DEBUG
+        if let backend = securityBackendForTesting {
+            let response = backend.perform(operation.rawValue, authenticatedQuery, attributes)
+            status = response.0
+            result = response.1
+        } else {
+            status = callSecurity(operation, query: authenticatedQuery, attributes: attributes, result: &result)
+        }
+        #else
+        status = callSecurity(operation, query: authenticatedQuery, attributes: attributes, result: &result)
+        #endif
+        if !noninteractiveProbe && status != errSecSuccess && status != errSecItemNotFound && status != errSecDuplicateItem {
+            if attempt != nil { throw securityError(status) }
+        }
+        return status
+    }
+
+    private static func securityError(_ status: OSStatus) -> KeychainStoreError {
+        guard let attempt = authenticationAttempt else { return .security(status) }
+        let error: KeychainStoreError
+        switch status {
+        case errSecUserCanceled: error = .authenticationCancelled
+        case errSecInteractionNotAllowed, errSecAuthFailed: error = .authenticationRequired
+        // A malformed/unavailable item is a family failure, not revocation of
+        // the user's authorization for other families in this explicit attempt.
+        default: return .security(status)
+        }
+        attempt.fail(error)
+        return error
+    }
+
+    private static func callSecurity(
+        _ operation: SecurityOperation, query: [String: Any], attributes: [String: Any],
+        result: inout AnyObject?
+    ) -> OSStatus {
+        switch operation {
+        case .read: return SecItemCopyMatching(query as CFDictionary, &result)
+        case .update: return SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+        case .add: return SecItemAdd(query as CFDictionary, nil)
+        case .delete: return SecItemDelete(query as CFDictionary)
+        }
+    }
 
     /// Validate the lease captured before any potentially blocking operation.
     /// A new authorization must never make an older in-flight pass valid again.
@@ -62,6 +257,23 @@ nonisolated enum KeychainStore {
     }
 
     #if DEBUG
+    /// Runs the production query builder against a task-local fake transport.
+    /// Unlike the in-memory value store this observes every Security operation.
+    private final class SecurityBackend: @unchecked Sendable {
+        let perform: (String, [String: Any], [String: Any]) -> (OSStatus, AnyObject?)
+        init(_ perform: @escaping (String, [String: Any], [String: Any]) -> (OSStatus, AnyObject?)) {
+            self.perform = perform
+        }
+    }
+    @TaskLocal private static var securityBackendForTesting: SecurityBackend?
+
+    static func withSecurityOperationForTesting<T>(
+        _ perform: @escaping (String, [String: Any], [String: Any]) -> (OSStatus, AnyObject?),
+        isolation: isolated (any Actor)? = #isolation, operation: () async throws -> T
+    ) async rethrows -> T {
+        try await $securityBackendForTesting.withValue(SecurityBackend(perform), operation: operation)
+    }
+
     nonisolated private static let testStoreLock = NSLock()
     nonisolated(unsafe) private static var testDataStore: [String: Data] = [:]
     nonisolated(unsafe) private static var testWriteFailures: [String: OSStatus] = [:]
@@ -112,6 +324,7 @@ nonisolated enum KeychainStore {
     /// UI tests opt in through SIFT_UI_TESTING. Production always uses
     /// Security.framework.
     nonisolated private static var usesTestStore: Bool {
+        if securityBackendForTesting != nil { return false }
         let environment = ProcessInfo.processInfo.environment
         return environment["XCTestConfigurationFilePath"] != nil
             || environment["SIFT_UI_TESTING"] == "1"
@@ -144,6 +357,7 @@ nonisolated enum KeychainStore {
     }
 
     static func setChecked(service: String, account: String? = nil, value: String) throws {
+        try checkAuthenticationAttempt()
         if usesFullScopeGmailCopies(service: service) {
             try saveFullScopeGmail(account: account ?? "", data: Data(value.utf8))
             return
@@ -152,7 +366,7 @@ nonisolated enum KeychainStore {
         if usesTestStore {
             testStoreLock.lock()
             defer { testStoreLock.unlock() }
-            if let status = testWriteFailures[service] { throw KeychainStoreError.security(status) }
+            if let status = testWriteFailures[service] { throw securityError(status) }
             let key = testKey(service: service, account: account)
             let data = Data(value.utf8)
             // Generic and binary APIs address the same Security.framework item.
@@ -185,13 +399,14 @@ nonisolated enum KeychainStore {
 
     /// Updating the canonical item is atomic; never delete it to replace its value.
     private static func upsert(query: [String: Any], attributes: [String: Any]) throws {
-        let status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+        var result: AnyObject?
+        let status = try performSecurityOperation(.update, query: query, attributes: attributes, result: &result)
         if status == errSecSuccess { return }
         guard status == errSecItemNotFound else { throw KeychainStoreError.security(status) }
         let item = query.merging(attributes) { _, new in new }
-        let addStatus = SecItemAdd(item as CFDictionary, nil)
+        let addStatus = try performSecurityOperation(.add, query: item, result: &result)
         if addStatus == errSecDuplicateItem {
-            let retry = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+            let retry = try performSecurityOperation(.update, query: query, attributes: attributes, result: &result)
             guard retry == errSecSuccess else { throw KeychainStoreError.security(retry) }
         } else if addStatus != errSecSuccess {
             throw KeychainStoreError.security(addStatus)
@@ -415,6 +630,7 @@ nonisolated enum KeychainStore {
     }
 
     static func getChecked(service: String, account: String? = nil) throws -> String? {
+        try checkAuthenticationAttempt()
         if usesFullScopeGmailCopies(service: service) {
             let data = try readFullScopeGmail(account: account ?? "")
             guard let data else { return nil }
@@ -427,7 +643,7 @@ nonisolated enum KeychainStore {
         if usesTestStore {
             testStoreLock.lock()
             defer { testStoreLock.unlock() }
-            if let status = testReadFailures[service] { throw KeychainStoreError.security(status) }
+            if let status = testReadFailures[service] { throw securityError(status) }
             let key = testKey(service: service, account: account)
             guard let data = testDataStore[key] ?? testSynchronizableStore[key] else { return nil }
             guard let value = String(data: data, encoding: .utf8) else {
@@ -446,7 +662,7 @@ nonisolated enum KeychainStore {
         if let account { query[kSecAttrAccount as String] = account }
         
         var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        let status = try performSecurityOperation(.read, query: query, result: &result)
         
         if status == errSecItemNotFound { return nil }
         guard status == errSecSuccess else { throw KeychainStoreError.security(status) }
@@ -463,6 +679,7 @@ nonisolated enum KeychainStore {
     }
 
     static func deleteChecked(service: String, account: String? = nil) throws {
+        try checkAuthenticationAttempt()
         guard service == "pieroot.todo.gmail" else {
             return try deleteItemsChecked(service: service, account: account)
         }
@@ -500,11 +717,12 @@ nonisolated enum KeychainStore {
     }
 
     private static func deleteItemsChecked(service: String, account: String?, synchronizable: Bool? = nil) throws {
+        try checkAuthenticationAttempt()
         #if DEBUG
         if usesTestStore {
             testStoreLock.lock()
             defer { testStoreLock.unlock() }
-            if let status = testDeleteFailures[service] { throw KeychainStoreError.security(status) }
+            if let status = testDeleteFailures[service] { throw securityError(status) }
             if let account {
                 let key = testKey(service: service, account: account)
                 if synchronizable != true {
@@ -531,7 +749,8 @@ nonisolated enum KeychainStore {
         else { query[kSecAttrSynchronizable as String] = kSecAttrSynchronizableAny }
         if let account { query[kSecAttrAccount as String] = account }
         
-        let status = SecItemDelete(query as CFDictionary)
+        var result: AnyObject?
+        let status = try performSecurityOperation(.delete, query: query, result: &result)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw KeychainStoreError.security(status)
         }
@@ -546,11 +765,12 @@ nonisolated enum KeychainStore {
         data: Data,
         access: DeviceOnlyCredentialAccess
     ) throws {
+        try checkAuthenticationAttempt()
         #if DEBUG
         if usesTestStore {
             testStoreLock.lock()
             defer { testStoreLock.unlock() }
-            if let status = testWriteFailures[service] { throw KeychainStoreError.security(status) }
+            if let status = testWriteFailures[service] { throw securityError(status) }
             testDataStore[testKey(service: service, account: account)] = data
             testDeviceAccess[testKey(service: service, account: account)] = access
             return
@@ -593,11 +813,12 @@ nonisolated enum KeychainStore {
     }
 
     nonisolated static func getDeviceOnly(service: String, account: String) throws -> Data? {
+        try checkAuthenticationAttempt()
         #if DEBUG
         if usesTestStore {
             testStoreLock.lock()
             defer { testStoreLock.unlock() }
-            if let status = testReadFailures[service] { throw KeychainStoreError.security(status) }
+            if let status = testReadFailures[service] { throw securityError(status) }
             return testDataStore[testKey(service: service, account: account)]
         }
         #endif
@@ -610,43 +831,60 @@ nonisolated enum KeychainStore {
             kSecMatchLimit as String: kSecMatchLimitOne
         ]
         var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        let status = try performSecurityOperation(.read, query: query, result: &result)
         if status == errSecItemNotFound { return nil }
         guard status == errSecSuccess else { throw KeychainStoreError.security(status) }
         guard let data = result as? Data else { throw KeychainStoreError.security(errSecDecode) }
         return data
     }
 
-    /// Checks for a device-only item without reading secret bytes or presenting
-    /// a Keychain authentication prompt.
+    /// UI-facing existence checks remain conservative; a protected metadata
+    /// result is not proof of a readable credential.
     nonisolated static func hasDeviceOnlyItem(service: String, account: String) -> Bool {
+        (try? deviceOnlyItemPresence(service: service, account: account)) == .present
+    }
+
+    /// Noninteractive, nonsecret metadata for validating a prior sync receipt.
+    /// Unexpected OS failures propagate rather than masquerading as deletion.
+    nonisolated static func deviceOnlyItemPresence(service: String, account: String) throws -> DeviceOnlyCredentialPresence {
+        try checkAuthenticationAttempt()
         #if DEBUG
         if usesTestStore {
             testStoreLock.lock()
             defer { testStoreLock.unlock() }
-            return testDataStore[testKey(service: service, account: account)] != nil
+            if let status = testReadFailures[service] {
+                if status == errSecInteractionNotAllowed { return .authenticationRequired }
+                if status == errSecItemNotFound { return .missing }
+                throw KeychainStoreError.security(status)
+            }
+            return testDataStore[testKey(service: service, account: account)] == nil ? .missing : .present
         }
         #endif
-        let context = LAContext()
-        context.interactionNotAllowed = true
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
             kSecAttrSynchronizable as String: kCFBooleanFalse!,
             kSecReturnAttributes as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-            kSecUseAuthenticationContext as String: context
+            kSecMatchLimit as String: kSecMatchLimitOne
         ]
-        return SecItemCopyMatching(query as CFDictionary, nil) == errSecSuccess
+        var result: AnyObject?
+        let status = try performSecurityOperation(.read, query: query, noninteractiveProbe: true, result: &result)
+        switch status {
+        case errSecSuccess: return .present
+        case errSecItemNotFound: return .missing
+        case errSecInteractionNotAllowed: return .authenticationRequired
+        default: throw KeychainStoreError.security(status)
+        }
     }
 
     nonisolated static func deleteDeviceOnly(service: String, account: String) throws {
+        try checkAuthenticationAttempt()
         #if DEBUG
         if usesTestStore {
             testStoreLock.lock()
             defer { testStoreLock.unlock() }
-            if let status = testDeleteFailures[service] { throw KeychainStoreError.security(status) }
+            if let status = testDeleteFailures[service] { throw securityError(status) }
             testDataStore.removeValue(forKey: testKey(service: service, account: account))
             testDeviceAccess.removeValue(forKey: testKey(service: service, account: account))
             return
@@ -658,7 +896,8 @@ nonisolated enum KeychainStore {
             kSecAttrAccount as String: account,
             kSecAttrSynchronizable as String: kCFBooleanFalse!
         ]
-        let status = SecItemDelete(query as CFDictionary)
+        var result: AnyObject?
+        let status = try performSecurityOperation(.delete, query: query, result: &result)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw KeychainStoreError.security(status)
         }
@@ -671,12 +910,13 @@ nonisolated enum KeychainStore {
     /// match, downgrade, or delete a device-local item with the same identity.
     /// Portable items deliberately carry no device-local user-presence ACL.
     nonisolated static func setSynchronizable(service: String, account: String, data: Data) throws {
+        try checkAuthenticationAttempt()
         #if DEBUG
         if usesTestStore {
             testStoreLock.lock()
             defer { testStoreLock.unlock() }
-            if let status = testWriteFailures[service] { throw KeychainStoreError.security(status) }
-            if let status = testSynchronizableWriteFailures[service] { throw KeychainStoreError.security(status) }
+            if let status = testWriteFailures[service] { throw securityError(status) }
+            if let status = testSynchronizableWriteFailures[service] { throw securityError(status) }
             testSynchronizableStore[testKey(service: service, account: account)] = data
             return
         }
@@ -688,11 +928,12 @@ nonisolated enum KeychainStore {
     }
 
     nonisolated static func getSynchronizable(service: String, account: String) throws -> Data? {
+        try checkAuthenticationAttempt()
         #if DEBUG
         if usesTestStore {
             testStoreLock.lock()
             defer { testStoreLock.unlock() }
-            if let status = testReadFailures[service] { throw KeychainStoreError.security(status) }
+            if let status = testReadFailures[service] { throw securityError(status) }
             return testSynchronizableStore[testKey(service: service, account: account)]
         }
         #endif
@@ -700,7 +941,7 @@ nonisolated enum KeychainStore {
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        let status = try performSecurityOperation(.read, query: query, result: &result)
         if status == errSecItemNotFound { return nil }
         guard status == errSecSuccess else { throw KeychainStoreError.security(status) }
         guard let data = result as? Data else { throw KeychainStoreError.security(errSecDecode) }
@@ -710,11 +951,12 @@ nonisolated enum KeychainStore {
     /// The per-account records themselves form a merge-friendly portable manifest.
     /// Enumerate attributes only; do not put a parallel secret registry in defaults.
     nonisolated static func synchronizableAccounts(service: String) throws -> [String] {
+        try checkAuthenticationAttempt()
         #if DEBUG
         if usesTestStore {
             testStoreLock.lock()
             defer { testStoreLock.unlock() }
-            if let status = testReadFailures[service] { throw KeychainStoreError.security(status) }
+            if let status = testReadFailures[service] { throw securityError(status) }
             let prefix = "\(service)\u{1F}"
             return testSynchronizableStore.keys.compactMap {
                 $0.hasPrefix(prefix) ? String($0.dropFirst(prefix.count)) : nil
@@ -725,7 +967,7 @@ nonisolated enum KeychainStore {
         query[kSecReturnAttributes as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitAll
         var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        let status = try performSecurityOperation(.read, query: query, result: &result)
         if status == errSecItemNotFound { return [] }
         guard status == errSecSuccess else { throw KeychainStoreError.security(status) }
         guard let items = result as? [[String: Any]] else {
@@ -741,16 +983,18 @@ nonisolated enum KeychainStore {
 
     /// Explicit disconnect only. Opting out of sync must never call this API.
     nonisolated static func deleteSynchronizable(service: String, account: String) throws {
+        try checkAuthenticationAttempt()
         #if DEBUG
         if usesTestStore {
             testStoreLock.lock()
             defer { testStoreLock.unlock() }
-            if let status = testDeleteFailures[service] { throw KeychainStoreError.security(status) }
+            if let status = testDeleteFailures[service] { throw securityError(status) }
             testSynchronizableStore.removeValue(forKey: testKey(service: service, account: account))
             return
         }
         #endif
-        let status = SecItemDelete(synchronizableQuery(service: service, account: account) as CFDictionary)
+        var result: AnyObject?
+        let status = try performSecurityOperation(.delete, query: synchronizableQuery(service: service, account: account), result: &result)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw KeychainStoreError.security(status)
         }

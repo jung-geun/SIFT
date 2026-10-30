@@ -58,15 +58,30 @@ struct FeedbackComposerTests {
         #expect(composer.preparedDiagnostics == diagnostics)
     }
 
+    @Test("Prepared diagnostic reports can reach local review without mandatory manual text entry")
+    func preparedDiagnosticCanBeReviewedWithoutManualEntry() async throws {
+        let service = QueuedFeedbackSubmitter(outcomes: [.success(delivered)])
+        let composer = FeedbackComposer(preparedDiagnostics: diagnostics, app: app, service: service)
+        #expect(composer.prepareReview())
+        let frozen = try #require(composer.submission)
+        #expect(frozen.diagnostics.map { Data($0.utf8) } == diagnostics)
+        #expect(!composer.consent)
+        #expect(await composer.send() == nil)
+        #expect(await service.callCount == 0)
+        composer.consent = true
+        #expect(await composer.send() == delivered)
+        #expect(await service.callCount == 1)
+    }
+
     @Test("A manual retry reuses the exact frozen payload and submission ID")
     func manualRetryReusesFrozenBytesAndID() async throws {
-        let service = QueuedFeedbackSubmitter(outcomes: [.failure(.transport), .success(delivered)])
+        let service = QueuedFeedbackSubmitter(outcomes: [.failure(.transport(code: nil)), .success(delivered)])
         let composer = composer(service: service)
         #expect(composer.prepareReview())
         let frozen = try #require(composer.submission)
         composer.consent = true
         #expect(await composer.send() == nil)
-        #expect(composer.failure == .transport)
+        #expect(composer.failure == .transport(code: nil))
         #expect(composer.receipt == nil)
         #expect(await service.callCount == 1)
         #expect(composer.prepareReview())
@@ -133,7 +148,9 @@ struct FeedbackComposerTests {
     @Test("Failures including malformed responses preserve draft and diagnostic bytes without a receipt")
     func failuresPreserveDraftWithoutReceipt() async throws {
         let failures: [FeedbackFailure] = [
-            .invalidResponse, .transport, .cancelled, .configuration, .rejected,
+            .invalidResponse(status: nil), .invalidResponse(status: 502),
+            .transport(code: nil), .transport(code: URLError.timedOut.rawValue),
+            .cancelled, .configuration, .rejected,
             .conflict, .requestTooLarge, .rateLimited(retryAfter: 60), .unavailable
         ]
         for failure in failures {
@@ -307,7 +324,7 @@ private actor QueuedFeedbackSubmitter: FeedbackSubmitting {
         submissions.append(submission)
         guard !outcomes.isEmpty else {
             Issue.record("Unexpected feedback submission: no queued outcome")
-            throw FeedbackFailure.transport
+            throw FeedbackFailure.transport(code: nil)
         }
         let outcome = outcomes.removeFirst()
         switch outcome {

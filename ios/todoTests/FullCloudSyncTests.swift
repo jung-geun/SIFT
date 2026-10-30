@@ -1,11 +1,205 @@
 import Foundation
 import SwiftData
+import LocalAuthentication
+import Security
 import Testing
 @testable import todo
 
 @Suite("Full iCloud data reconciliation", .serialized)
 @MainActor
 struct FullCloudSyncTests {
+    @Test("Cancelled device approval stops remaining connection families and all automatic retries stay quiet")
+    func credentialCancellationStopsFamilies() async throws {
+        var reads = [(String, Bool)]()
+        try await KeychainStore.withSecurityOperationForTesting({ operation, query, _ in
+            #expect(operation == "read")
+            let context = query[kSecUseAuthenticationContext as String] as? LAContext
+            let account = query[kSecAttrAccount as String] as? String ?? ""
+            reads.append((account, context?.interactionNotAllowed == true))
+            return (context?.interactionNotAllowed == true ? errSecInteractionNotAllowed : errSecUserCanceled, nil)
+        }) {
+            let connections = FullCloudConnectionSync(operations: FullCloudConnectionSync.Family.allCases.map { family in
+                .init(family: family) {
+                    // Legacy getters may swallow an error; the scope must still stop the family loop.
+                    _ = try? KeychainStore.getDeviceOnly(service: "synthetic.full-cloud", account: family.rawValue)
+                }
+            })
+            #expect(await connections.reconcile(userInitiated: true) == nil)
+            #expect(connections.state == .cancelled)
+            #expect(reads.count == 1)
+            #expect(reads.first?.1 == false)
+            #expect(connections.pendingFamilies == Set(FullCloudConnectionSync.Family.allCases))
+            #expect(connections.blockedFamilies == [.gmailIMAP])
+            for _ in 0..<34 { #expect(await connections.reconcile() == nil) }
+            #expect(reads.count == 1)
+            #expect(connections.state == .cancelled)
+
+            // The same production content engine remains usable while connections await approval.
+            let fixture = try CloudSyncFixture()
+            defer { fixture.remove() }
+            let peer = try fixture.peer("cancelled-connections")
+            peer.values["Todo/retained"] = Data("saved task".utf8)
+            try await peer.reconcile()
+            #expect(try ModelContext(fixture.cloud).fetchCount(FetchDescriptor<CloudDataRevision>()) == 1)
+            #expect(connections.state == .cancelled)
+        }
+    }
+
+    @Test("A successful bounded attempt shares its context; 34 subsequent automatic passes cannot request UI")
+    func successfulCredentialsDoNotRearmAuthentication() async throws {
+        var interactiveContexts = Set<ObjectIdentifier>()
+        var interactiveReads = 0
+        var automaticReads = 0
+        await KeychainStore.withSecurityOperationForTesting({ operation, query, _ in
+            #expect(operation == "read")
+            let context = query[kSecUseAuthenticationContext as String] as? LAContext
+            if let context, !context.interactionNotAllowed {
+                interactiveReads += 1
+                interactiveContexts.insert(ObjectIdentifier(context))
+            } else { automaticReads += 1 }
+            return (errSecSuccess, Data("synthetic-credential".utf8) as NSData)
+        }) {
+            let connections = FullCloudConnectionSync(operations: FullCloudConnectionSync.Family.allCases.map { family in
+                .init(family: family) {
+                    _ = try KeychainStore.getDeviceOnly(service: "synthetic.full-cloud", account: family.rawValue)
+                }
+            })
+            #expect(await connections.reconcile(userInitiated: true) == nil)
+            #expect(connections.state == .prepared)
+            #expect(connections.pendingFamilies.isEmpty)
+            #expect(interactiveContexts.count == 1)
+            #expect(interactiveReads == connections.familyCount)
+            for _ in 0..<34 {
+                #expect(await connections.reconcile() == nil)
+                #expect(connections.state == .prepared)
+                #expect(!connections.isAuthorizing)
+            }
+            #expect(interactiveReads == connections.familyCount)
+            #expect(automaticReads == 34 * connections.familyCount)
+        }
+    }
+
+    @Test("Blocked families remain awaiting explicit approval; ordinary sync never retries them interactively")
+    func automaticCredentialBlockRequiresExplicitRetry() async throws {
+        var contexts = [Bool]()
+        await KeychainStore.withSecurityOperationForTesting({ _, query, _ in
+            let noninteractive = (query[kSecUseAuthenticationContext as String] as? LAContext)?.interactionNotAllowed == true
+            contexts.append(noninteractive)
+            return noninteractive ? (errSecInteractionNotAllowed, nil) : (errSecSuccess, Data("synthetic".utf8) as NSData)
+        }) {
+            let connections = FullCloudConnectionSync(operations: [.init(family: .outlookIMAP) {
+                _ = try KeychainStore.getDeviceOnly(service: "synthetic.full-cloud", account: "outlook")
+            }])
+            #expect(await connections.reconcile() == nil)
+            #expect(connections.state == .awaitingApproval)
+            #expect(connections.blockedFamilies == [.outlookIMAP])
+            #expect(await connections.reconcile() == nil)
+            #expect(contexts == [true])
+            #expect(await connections.reconcile(userInitiated: true) == nil)
+            #expect(connections.state == .prepared)
+            #expect(connections.pendingFamilies.isEmpty)
+            #expect(contexts == [true, false])
+        }
+    }
+
+    @Test("Duplicate authorize taps and foreground-style passes cannot overlap an in-flight attempt")
+    func credentialAuthorizationSingleFlight() async {
+        var started = 0
+        var release: CheckedContinuation<Void, Never>?
+        let connections = FullCloudConnectionSync(operations: [.init(family: .google) {
+            started += 1
+            await withCheckedContinuation { release = $0 }
+        }])
+        connections.authorize()
+        connections.authorize()
+        while release == nil { await Task.yield() }
+        #expect(connections.isAuthorizing)
+        #expect(await connections.reconcile() == nil)
+        #expect(started == 1)
+        connections.cancelAuthorization()
+        release?.resume()
+        while connections.isAuthorizing { await Task.yield() }
+        #expect(connections.state == .cancelled)
+        #expect(await connections.reconcile() == nil)
+        #expect(started == 1)
+    }
+
+    @Test("Background cancellation cannot turn quiet connection work into a new approval requirement", arguments: [false, true])
+    func automaticCancellationDoesNotRequireApproval(previouslyBlocked: Bool) async throws {
+        var reads = [(String, Bool)]()
+        var protected = previouslyBlocked
+        var suspend = false
+        var entered: CheckedContinuation<Void, Never>?
+        var release: CheckedContinuation<Void, Never>?
+        await KeychainStore.withSecurityOperationForTesting({ _, query, _ in
+            let account = query[kSecAttrAccount as String] as? String ?? ""
+            let quiet = (query[kSecUseAuthenticationContext as String] as? LAContext)?.interactionNotAllowed == true
+            reads.append((account, quiet))
+            if account == "blocked", protected { return (errSecInteractionNotAllowed, nil) }
+            return (errSecSuccess, Data("synthetic".utf8) as NSData)
+        }) {
+            let connections = FullCloudConnectionSync(operations: [
+                .init(family: .google) {
+                    if suspend {
+                        await withCheckedContinuation { continuation in
+                            release = continuation
+                            entered?.resume()
+                            entered = nil
+                        }
+                    }
+                    _ = try KeychainStore.getDeviceOnly(service: "synthetic.lifecycle", account: "google")
+                },
+                .init(family: .outlookIMAP) {
+                    _ = try KeychainStore.getDeviceOnly(service: "synthetic.lifecycle", account: "blocked")
+                }
+            ])
+            #expect(await connections.reconcile() == nil)
+            let priorState = connections.state
+            let priorBlocked = connections.blockedFamilies
+            let priorPending = connections.pendingFamilies
+            let priorCount = connections.completedFamilyCount
+            let initialReadCount = reads.count
+            suspend = true
+            let interrupted = Task { @MainActor in
+                try await KeychainStore.withoutAuthenticationUI {
+                    await connections.reconcile()
+                }
+            }
+            await withCheckedContinuation { continuation in
+                entered = continuation
+                if release != nil { entered?.resume(); entered = nil }
+            }
+            interrupted.cancel()
+            release?.resume()
+            _ = try? await interrupted.value
+            #expect(connections.state == priorState)
+            #expect(connections.blockedFamilies == priorBlocked)
+            #expect(connections.pendingFamilies == priorPending)
+            #expect(connections.completedFamilyCount == priorCount)
+            #expect(connections.currentFamily == nil)
+            #expect(reads.count == initialReadCount)
+            suspend = false
+            protected = false
+            #expect(await connections.reconcile() == nil)
+            #expect(reads.count == initialReadCount + (previouslyBlocked ? 1 : 2))
+            let allQueriesWereQuiet = reads.allSatisfy { $0.1 }
+            #expect(allQueriesWereQuiet)
+            #expect(connections.blockedFamilies == priorBlocked)
+            #expect(connections.state == (previouslyBlocked ? .awaitingApproval : .prepared))
+        }
+    }
+
+    @Test("Non-authentication connection failures remain failures, not a completed account sync")
+    func credentialStorageFailureIsNotCompletion() async {
+        let connections = FullCloudConnectionSync(operations: [.init(family: .google) {
+            throw KeychainStoreError.security(errSecNotAvailable)
+        }])
+        let error = await connections.reconcile()
+        #expect((error as? KeychainStoreError) == .security(errSecNotAvailable))
+        #expect(connections.state == .failed)
+        #expect(connections.pendingFamilies == [.google])
+    }
+
     @Test("A second installation restores updates and deletion without stale-cache resurrection")
     func restoreUpdatesDeletionAndRejoin() async throws {
         let fixture = try CloudSyncFixture()

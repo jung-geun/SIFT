@@ -41,6 +41,7 @@ struct MeetingAudioSourceControlTests {
             }
         }
         #expect(coordinator.status == .failed)
+        #expect(coordinator.failure == MeetingAppAudioCapture.CaptureError.consentRequired.localizedDescription)
         #expect(coordinator.microphoneEnabled == false)
         #expect(coordinator.recordedAudioSamples == 0)
         #expect(coordinator.appAudioState == .disabled)

@@ -1,4 +1,6 @@
 import Foundation
+import LocalAuthentication
+import Security
 import Testing
 @testable import todo
 
@@ -424,9 +426,7 @@ struct IMAPCredentialStoreTests {
         #expect(try h.store.applyFullSyncPolicy().isEmpty)
         h.defaults.removeObject(forKey: h.store.deletionKey(email)) // Simulate a different device.
         #expect(try h.store.applyFullSyncPolicy().isEmpty)
-        let authorization = h.store.authorization()
-        let preparation = try h.store.prepareSave(for: email, authorization: authorization)
-        try h.store.publishSaved(Data("reconnected".utf8), for: email, preparation: preparation, authorization: authorization)
+        try h.save(Data("reconnected".utf8), for: email)
         #expect(try h.store.applyFullSyncPolicy().map(\.account) == [email])
         // The old revision remains revoked even after deliberate reconnection.
         h.shared[h.store.recordKey(email)] = stale
@@ -697,6 +697,91 @@ struct IMAPCredentialStoreTests {
         #expect(!h.events.contains("local write"))
     }
 
+    @Test("verified protected receipts converge without re-reading secrets on periodic sync",
+          arguments: [IMAPCredentialStore.service, OutlookIMAPCredentialStore.service])
+    func protectedReceiptSurvivesUnavailableAuthenticationMetadata(service: String) async throws {
+        let h = IMAPPortableTestHarness(service: service)
+        try h.seed(email, secret: Data("foreground secret".utf8))
+        var store = h.store
+        // Exercise the real query builder/status classification with the real
+        // IMAP receipt lifecycle, not a Boolean fixture that always says present.
+        store.localPresence = { try KeychainStore.deviceOnlyItemPresence(service: $0, account: $1) }
+        var metadataQueries = 0
+        var unavailable = false
+        try await KeychainStore.withSecurityOperationForTesting({ operation, query, _ in
+            metadataQueries += 1
+            #expect(operation == "read")
+            #expect(query[kSecReturnAttributes as String] as? Bool == true)
+            #expect(query[kSecReturnData as String] == nil)
+            let context = query[kSecUseAuthenticationContext as String] as! LAContext
+            #expect(context.interactionNotAllowed)
+            if unavailable { return (errSecNotAvailable, nil) }
+            let account = query[kSecAttrAccount as String] as! String
+            return (h.local[account] == nil ? errSecItemNotFound : errSecInteractionNotAllowed, nil)
+        }) {
+            try await KeychainStore.withUserInitiatedCredentialSync {
+                let restored = try store.applyFullSyncPolicy()
+                #expect(restored.map(\.account) == [email])
+            }
+            #expect(h.hasReceipt(email))
+            // A receipt is written from the checked read/slot commit itself,
+            // without repeating a protected metadata request after authorization.
+            #expect(metadataQueries == 0)
+            h.failure = "local read"
+            h.events.removeAll()
+            for _ in 0..<34 {
+                try await KeychainStore.withoutAuthenticationUI {
+                    let unchanged = try store.applyFullSyncPolicy()
+                    #expect(unchanged.map(\.account) == [email])
+                }
+            }
+            #expect(metadataQueries == 34)
+            #expect(!h.events.contains("local read"))
+            #expect(!h.events.contains("local write"))
+            #expect(!h.events.contains("portable write"))
+
+            // A genuine metadata failure remains an error, not a grant or deletion.
+            unavailable = true
+            do {
+                try await KeychainStore.withoutAuthenticationUI { _ = try store.applyFullSyncPolicy() }
+                Issue.record("Unavailable Keychain metadata must not report completed sync")
+            } catch {
+                #expect(error as? KeychainStoreError == .security(errSecNotAvailable))
+            }
+            #expect(h.hasReceipt(email))
+            unavailable = false
+
+            // A real missing slot is distinguishable and invalidates the fast path.
+            let active = try #require(h.slots(email).activeSlot)
+            h.local.removeValue(forKey: h.slots(email).slotAccount(active))
+            do {
+                try await KeychainStore.withoutAuthenticationUI { _ = try store.applyFullSyncPolicy() }
+                Issue.record("Missing slots must require a checked restoration")
+            } catch {
+                #expect(error is IMAPPortableTestHarness.Failure)
+            }
+            h.failure = nil
+            try await KeychainStore.withUserInitiatedCredentialSync { _ = try store.applyFullSyncPolicy() }
+            #expect(h.hasReceipt(email))
+            #expect(try h.slots(email).credential(read: store.localRead) == Data("foreground secret".utf8))
+            let restoredSlot = try #require(h.slots(email).activeSlot)
+            #expect(h.access[h.slots(email).slotAccount(restoredSlot)] == .foregroundUserPresence)
+
+            // Blocked metadata without an existing matching receipt can never
+            // establish a new receipt or hide the newly changed portable value.
+            try h.seed(email, secret: Data("changed revision".utf8))
+            h.failure = "local read"
+            let portableBefore = h.shared
+            do {
+                try await KeychainStore.withoutAuthenticationUI { _ = try store.applyFullSyncPolicy() }
+                Issue.record("A changed revision must perform its checked credential read")
+            } catch {
+                #expect(error is IMAPPortableTestHarness.Failure)
+            }
+            #expect(h.shared == portableBefore)
+        }
+    }
+
     @Test("failed local restore rolls back without mutating the portable record")
     func portableRestoreWriteFailureSafety() throws {
         let h = IMAPPortableTestHarness()
@@ -785,7 +870,7 @@ struct IMAPCredentialStoreTests {
 
     @Test("a committed save retains its preparation when its original lease expires",
           arguments: [IMAPCredentialStore.service, OutlookIMAPCredentialStore.service],
-          ["local read", "portable write", "local presence"])
+          ["local read", "portable write", "fence write"])
     func committedSaveRetainsExpiredPreparation(service: String, operation: String) throws {
         let h = IMAPPortableTestHarness(service: service)
         try h.seed(email, secret: Data("old remote".utf8))
@@ -809,7 +894,7 @@ struct IMAPCredentialStoreTests {
         #expect(!h.mutationsAfterExpiry.contains { $0.hasPrefix("portable") })
         let writes = h.events.filter { $0 == "portable write" }.count
         #expect(writes == (operation == "local read" ? 0 : operation == "portable write" ? 1 : 2))
-        if operation != "local presence" {
+        if operation != "fence write" {
             #expect(h.shared[h.store.fenceKey(email)] == encodedFence)
         }
 
@@ -823,7 +908,7 @@ struct IMAPCredentialStoreTests {
 
     @Test("pending reconciliation uses one lease and preserves retry or conflict metadata",
           arguments: [IMAPCredentialStore.service, OutlookIMAPCredentialStore.service],
-          ["portable read", "local read", "portable write", "local presence"])
+          ["portable read", "local read", "portable write", "fence write"])
     func pendingReconcileRejectsExpiredEpoch(service: String, operation: String) throws {
         for conflict in [false, true] {
             let h = IMAPPortableTestHarness(service: service)
@@ -1067,6 +1152,7 @@ nonisolated final class IMAPPortableTestHarness {
             if account == self.failureWriteAccount { throw Failure.injected }
             self.shared[account] = data
             self.afterOperation?("portable write")
+            if account.hasPrefix("deletion/") { self.afterOperation?("fence write") }
         }, remove: { _, account in
             try self.step("portable delete")
             self.shared.removeValue(forKey: account)
@@ -1085,10 +1171,10 @@ nonisolated final class IMAPPortableTestHarness {
             self.local.removeValue(forKey: account)
             self.access.removeValue(forKey: account)
             self.afterOperation?("local delete")
-        }, localHasItem: { _, account in
+        }, localPresence: { _, account in
             self.events.append("local presence")
             defer { self.afterOperation?("local presence") }
-            return self.local[account] != nil
+            return self.local[account] == nil ? .missing : .present
         })
     }
 
