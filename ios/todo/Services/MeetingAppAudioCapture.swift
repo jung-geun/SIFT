@@ -159,6 +159,75 @@ nonisolated enum MeetingAppAudioTimestamp {
     }
 }
 
+/// Carries framework identity across startup cleanup and late diagnostic consent.
+/// Framework descriptions and arbitrary userInfo can contain app/window names.
+nonisolated struct MeetingAppAudioFailure: LocalizedError, CustomNSError, Sendable {
+    enum Stage: String, Sendable {
+        case picker = "appAudioPickerStart"
+        case audioOutput = "appAudioOutputRegistration"
+        case screenOutput = "appAudioScreenOutputRegistration"
+        case microphoneOutput = "appAudioMicrophoneOutputRegistration"
+        case streamStart = "appAudioStreamStart"
+        case streamStopped = "appAudioStreamStopped"
+        case sample = "appAudioSample"
+    }
+
+    let stage: Stage
+    let cause: NSError
+
+    init(_ error: Error, stage: Stage) {
+        self.stage = stage
+        cause = Self.safeCause(error as NSError, depth: 0)
+    }
+
+    static var errorDomain: String { "todo.MeetingAppAudioFailure" }
+    var errorCode: Int { cause.code }
+    var errorUserInfo: [String: Any] {
+        [NSLocalizedDescriptionKey: errorDescription ?? "",
+         NSLocalizedFailureReasonErrorKey: stage.rawValue,
+         NSUnderlyingErrorKey: cause]
+    }
+
+    var authorizationDenied: Bool {
+        cause.domain == "com.apple.ScreenCaptureKit.SCStreamErrorDomain" && cause.code == -3801
+    }
+
+    var errorDescription: String? {
+        let detail: String
+        if authorizationDenied {
+            #if targetEnvironment(macCatalyst)
+            detail = MeetingAppAudioCapture.message("meeting.appAudio.error.authorizationDenied.mac",
+                "macOS did not authorize system audio capture. Check SIFT in System Settings → Privacy & Security → Screen & System Audio Recording. If you change permission, quit and reopen SIFT, then select the source again.",
+                "macOS가 시스템 오디오 캡처를 허용하지 않았습니다. 시스템 설정 → 개인정보 보호 및 보안 → 화면 및 시스템 오디오 녹음에서 SIFT 권한을 확인하세요. 권한을 변경했다면 SIFT를 종료한 뒤 다시 열고 소스를 선택하세요.")
+            #else
+            detail = MeetingAppAudioCapture.message("meeting.appAudio.error.authorizationDenied",
+                "The system did not authorize audio capture. Select the source again and approve sharing in the system picker.",
+                "시스템이 오디오 캡처를 허용하지 않았습니다. 소스를 다시 선택하고 시스템 선택창에서 공유를 허용하세요.")
+            #endif
+        } else {
+            switch stage {
+            case .picker:
+                detail = MeetingAppAudioCapture.message("meeting.appAudio.error.selectionFailed", "System content selection failed. Select a new source to retry.", "시스템 콘텐츠 선택에 실패했습니다. 새 소스를 선택하여 다시 시도하세요.")
+            case .streamStopped:
+                detail = MeetingAppAudioCapture.message("meeting.appAudio.error.captureStopped", "System audio capture stopped. Select a new source to continue.", "시스템 오디오 캡처가 중지되었습니다. 계속하려면 새 소스를 선택하세요.")
+            case .sample:
+                detail = MeetingAppAudioCapture.message("meeting.appAudio.error.decodeFailed", "App audio could not be decoded or synchronized. Select the source again.", "앱 오디오를 디코딩하거나 동기화할 수 없습니다. 소스를 다시 선택하세요.")
+            default:
+                detail = MeetingAppAudioCapture.message("meeting.appAudio.error.startFailed", "System audio capture could not start. Select a new source to retry.", "시스템 오디오 캡처를 시작할 수 없습니다. 새 소스를 선택하여 다시 시도하세요.")
+            }
+        }
+        return "\(detail)\n\(stage.rawValue) · \(cause.domain) (\(cause.code))"
+    }
+
+    private static func safeCause(_ error: NSError, depth: Int) -> NSError {
+        var info: [String: Any] = [:]
+        if depth < 3, let underlying = error.userInfo[NSUnderlyingErrorKey] as? NSError {
+            info[NSUnderlyingErrorKey] = safeCause(underlying, depth: depth + 1)
+        }
+        return NSError(domain: error.domain, code: error.code, userInfo: info)
+    }
+}
+
 /// Captures only audio. Every stream has a minimal screen discard output;
 /// no pixels leave that callback and no video or clip is persisted.
 @MainActor
@@ -208,6 +277,7 @@ final class MeetingAppAudioCapture {
     private var session: (any AppAudioCaptureSession)?
     private var readinessWaiter: CheckedContinuation<Void, Error>?
     private var readinessToken: UUID?
+    private(set) var lastFailure: MeetingAppAudioFailure?
     /// A capture instance is a source identity, never a reselectable track.
     let sourceID: String
     private(set) var sourceKind: MeetingAudioTrackKind = .screen
@@ -221,7 +291,11 @@ final class MeetingAppAudioCapture {
             stateChanged(state)
             switch state {
             case .waitingForAudio, .receivingAudio: settleReadiness(.success(()))
-            case .unavailable(let reason): settleReadiness(.failure(CaptureError.unavailable(reason)))
+            case .unavailable(let reason):
+                let error: Error
+                if let lastFailure { error = lastFailure }
+                else { error = CaptureError.unavailable(reason) }
+                settleReadiness(.failure(error))
             case .disabled: settleReadiness(.failure(CancellationError()))
             case .selecting: break
             }
@@ -318,6 +392,7 @@ final class MeetingAppAudioCapture {
                 self.selectedSourceDescription = change.description
                 self.sourceKind = change.sourceKind
                 self.microphoneApproved = change.microphoneApproved
+                self.lastFailure = change.error
                 self.state = change.state
             }
             session = capture
@@ -385,6 +460,7 @@ private final class ScreenCaptureSession: AppAudioCaptureSession {
         let description: String?
         var sourceKind: MeetingAudioTrackKind = .screen
         var microphoneApproved = false
+        var error: MeetingAppAudioFailure?
     }
 
     private let receive: MeetingAppAudioCapture.Receive
@@ -456,9 +532,10 @@ private final class ScreenCaptureSession: AppAudioCaptureSession {
                 Task { @MainActor in await self?.fail(nil, ticket: ticket) }
             },
             failed: { [weak self, delivery] error in
-                Self.recordSystemFailure(error, operation: "appAudioPickerStart")
+                let failure = MeetingAppAudioFailure(error, stage: .picker)
+                DiagnosticRecorder.shared.record(error: failure, component: "meeting.capture", operation: failure.stage.rawValue)
                 let ticket = delivery.replace()
-                Task { @MainActor in await self?.fail(MeetingAppAudioCapture.message("meeting.appAudio.error.selectionFailed", "System content selection failed. Select a new source to retry.", "시스템 콘텐츠 선택에 실패했습니다. 새 소스를 선택하여 다시 시도하세요."), ticket: ticket) }
+                Task { @MainActor in await self?.fail(failure.errorDescription, ticket: ticket, error: failure) }
             }
         )
         self.observer = observer
@@ -468,8 +545,7 @@ private final class ScreenCaptureSession: AppAudioCaptureSession {
     }
 
     private nonisolated static func recordSystemFailure(_ error: Error, operation: String) {
-        // Framework userInfo/descriptions can contain private app/window names.
-        DiagnosticRecorder.shared.record(error: NSError(domain: "MeetingAppAudioCapture", code: (error as NSError).code),
+        DiagnosticRecorder.shared.record(error: MeetingAppAudioFailure(error, stage: .streamStopped).cause,
                                          component: "meeting.capture", operation: operation)
     }
 
@@ -505,8 +581,9 @@ private final class ScreenCaptureSession: AppAudioCaptureSession {
         }
         let sink = AppAudioOutput(source: .appAudio, receive: receive) { [weak self] failure in
             Task { @MainActor [weak self] in
-                DiagnosticRecorder.shared.record(error: failure, component: "meeting.capture", operation: "appAudioSample")
-                await self?.fail(MeetingAppAudioCapture.message("meeting.appAudio.error.decodeFailed", "App audio could not be decoded or synchronized. Select the source again.", "앱 오디오를 디코딩하거나 동기화할 수 없습니다. 소스를 다시 선택하세요."), ticket: ticket)
+                let error = MeetingAppAudioFailure(failure, stage: .sample)
+                DiagnosticRecorder.shared.record(error: error, component: "meeting.capture", operation: error.stage.rawValue)
+                await self?.fail(error.errorDescription, ticket: ticket, error: error)
             }
         } firstAudio: { [weak self] output, laneTicket in
             guard let owner = self else { return }
@@ -525,10 +602,11 @@ private final class ScreenCaptureSession: AppAudioCaptureSession {
             }
         }, firstAudio: { _, _ in }) : nil
         let delegate = AppAudioStreamDelegate(revoke: { [delivery] in _ = delivery.replace(); sink.revoke(); micSink?.revoke() }) { [weak self] error in
-            Self.recordSystemFailure(error, operation: "appAudioStreamStopped")
+            let failure = MeetingAppAudioFailure(error, stage: .streamStopped)
+            DiagnosticRecorder.shared.record(error: failure, component: "meeting.capture", operation: failure.stage.rawValue)
             Task { @MainActor [weak self] in
                 guard let self, self.stream != nil else { return }
-                await self.fail(MeetingAppAudioCapture.message("meeting.appAudio.error.captureStopped", "System audio capture stopped. Select a new source to continue.", "시스템 오디오 캡처가 중지되었습니다. 계속하려면 새 소스를 선택하세요."), ticket: self.delivery.currentTicket())
+                await self.fail(failure.errorDescription, ticket: self.delivery.currentTicket(), error: failure)
             }
         }
         let candidate = SCStream(filter: filter, configuration: config, delegate: delegate)
@@ -543,18 +621,20 @@ private final class ScreenCaptureSession: AppAudioCaptureSession {
         self.delegate = delegate
         output = sink
         microphoneOutput = micSink
-        var stage = "appAudioOutputRegistration"
+        var stage = MeetingAppAudioFailure.Stage.audioOutput
         do {
             try candidate.addStreamOutput(sink, type: .audio, sampleHandlerQueue: sampleQueue)
             registeredOutputs.append((sink, .audio))
             let screenSink = DiscardedScreenOutput()
+            stage = .screenOutput
             try candidate.addStreamOutput(screenSink, type: .screen, sampleHandlerQueue: screenQueue)
             registeredOutputs.append((screenSink, .screen))
             if let micSink {
+                stage = .microphoneOutput
                 try candidate.addStreamOutput(micSink, type: .microphone, sampleHandlerQueue: sampleQueue)
                 registeredOutputs.append((micSink, .microphone))
             }
-            stage = "appAudioStreamStart"
+            stage = .streamStart
             // Own only the raw SDK operation. Shutdown can await it without
             // waiting on this enclosing method, which may itself await failure cleanup.
             let startup = Task { @MainActor in try await candidate.startCapture() }
@@ -575,18 +655,19 @@ private final class ScreenCaptureSession: AppAudioCaptureSession {
                 delivery.activate(ticket)
             }
         } catch {
-            Self.recordSystemFailure(error, operation: stage)
+            let failure = MeetingAppAudioFailure(error, stage: stage)
+            DiagnosticRecorder.shared.record(error: failure, component: "meeting.capture", operation: stage.rawValue)
             sink.revoke()
             micSink?.revoke()
-            await fail(MeetingAppAudioCapture.message("meeting.appAudio.error.startFailed", "System audio capture could not start. Select a new source to retry.", "시스템 오디오 캡처를 시작할 수 없습니다. 새 소스를 선택하여 다시 시도하세요."), ticket: ticket)
+            await fail(failure.errorDescription, ticket: ticket, error: failure)
         }
     }
 
-    private func fail(_ reason: String?, ticket: Int) async {
+    private func fail(_ reason: String?, ticket: Int, error: MeetingAppAudioFailure? = nil) async {
         guard delivery.isCurrent(ticket) else { return }
         // Publish closure before suspending in stopCapture.
         _ = delivery.replace()
-        change(Change(state: reason.map(MeetingAppAudioCapture.State.unavailable) ?? .disabled, description: nil, sourceKind: sourceKind))
+        change(Change(state: reason.map(MeetingAppAudioCapture.State.unavailable) ?? .disabled, description: nil, sourceKind: sourceKind, error: error))
         await stop()
     }
 

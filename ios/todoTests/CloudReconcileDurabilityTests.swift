@@ -288,6 +288,45 @@ struct CloudReconcileDurabilityTests {
         #expect(Set(try fixture.records().map(\.revisionID)) == Set([a.revisionID, b.revisionID]))
     }
 
+    @Test("Cancellation or invalidation rolls back a staged group without deleting its prior revisions", arguments: [false, true])
+    func interruptedPublicationGroup(cancel: Bool) async throws {
+        let fixture = try DurabilityFixture()
+        defer { fixture.remove() }
+        let oldA = try fixture.remote("old a", clock: 1, key: "Todo/a")
+        let oldB = try fixture.remote("old b", clock: 1, key: "Todo/b")
+        let engine = try fixture.engine()
+        let original = ["Todo/a": Data("old a".utf8), "Todo/b": Data("old b".utf8)]
+        try await engine.reconcile(digests: original.mapValues(CloudFileStore.digest), load: { original[$0] },
+            apply: { _, _ in Issue.record("Matching originals must not be restored") })
+        let values = ["Todo/a": Data("edited a".utf8), "Todo/b": Data("edited b".utf8), "Todo/z": Data("new task".utf8)]
+        let gate = DurabilityLoadGate()
+        var valid = true
+        let task = Task { @MainActor in
+            try await engine.reconcile(digests: values.mapValues(CloudFileStore.digest), isValid: { valid },
+                didEnqueue: { Issue.record("A revoked uncommitted group cannot report success") }, load: { key in
+                    if key == "Todo/z" { await gate.suspend() }
+                    return values[key]
+                }, apply: { _, _ in Issue.record("Local edits must not be replaced") })
+        }
+        await gate.waitUntilSuspended()
+        if cancel { task.cancel() } else { valid = false }
+        gate.resume()
+        await #expect(throws: CancellationError.self) { try await task.value }
+        #expect(!engine.didEnqueueChanges)
+        #expect(Set(try fixture.records().map(\.revisionID)) == Set([oldA.revisionID, oldB.revisionID]))
+        #expect(engine.journal.items["Todo/a"] == oldA)
+        #expect(engine.journal.items["Todo/b"] == oldB)
+        let pending = try fixture.readJournal().pendingPublications
+        #expect(Set(pending.keys) == Set(values.keys))
+        let restarted = try fixture.engine()
+        try await restarted.reconcile(digests: values.mapValues(CloudFileStore.digest), load: { values[$0] },
+            apply: { _, _ in Issue.record("Recovery must preserve local edits") })
+        let recovered = try fixture.records()
+        #expect(Dictionary(uniqueKeysWithValues: recovered.map { ($0.itemKey, $0.payload) }) == values.mapValues(Optional.some))
+        #expect(Set(recovered.map(\.revisionID)) == Set(pending.values.map(\.revisionID)))
+        #expect(try fixture.readJournal().pendingPublications.isEmpty)
+    }
+
     @Test("Compaction reports its successful save at the enqueue boundary")
     func compactionEnqueue() async throws {
         let fixture = try DurabilityFixture()

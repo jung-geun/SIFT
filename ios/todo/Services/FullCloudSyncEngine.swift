@@ -266,12 +266,39 @@ final class FullCloudSyncEngine {
         // A single bounded metadata write covers the whole pass, never assets.
         try persistJournal()
         var restored = 0
+        // Per-record saves create a history transaction/export request for every
+        // small preference or model. Bound both pending rows and payload bytes;
+        // a single large asset still commits on its own.
+        let publicationLimit = 64
+        let payloadLimit = 4 * 1_024 * 1_024
+        var publications = [(key: String, checkpoint: CloudSyncCheckpoint, revision: CloudDataRevision)]()
+        publications.reserveCapacity(publicationLimit)
+        var payloadBytes = 0
+        var publicationSaveFailed = false
+        func commitPublications() throws {
+            guard !publications.isEmpty else { return }
+            try checkCurrent(isValid)
+            do { try cloud.save() }
+            catch { publicationSaveFailed = true; throw error }
+            storeIdentifier = publications.last?.revision.persistentModelID.storeIdentifier
+            didEnqueueChanges = true
+            didEnqueue?()
+            try checkCurrent(isValid)
+            for publication in publications {
+                remember(publication.key, publication.checkpoint)
+                journal.pendingPublications.removeValue(forKey: publication.key)
+            }
+            journalDirty = true
+            publications.removeAll(keepingCapacity: true)
+            payloadBytes = 0
+        }
         do {
             for key in orderedKeys {
                 try checkCurrent(isValid)
                 guard let operation = operations[key] else { continue }
                 switch operation {
                 case .apply(let remote):
+                    try commitPublications()
                     let target = checkpoint(remote)
                     let payload = try await materialize(remote)
                     try checkCurrent(isValid)
@@ -296,6 +323,10 @@ final class FullCloudSyncEngine {
                     }
                     try checkCurrent(isValid)
                     guard digest == intended.digest else { throw CloudFileError.changingFile }
+                    let size = data?.count ?? 0
+                    if !publications.isEmpty, size > payloadLimit - payloadBytes {
+                        try commitPublications()
+                    }
                     let revision = CloudDataRevision(itemKey: key, clock: intended.logicalClock,
                         installationID: intended.installationID, payload: data, digest: intended.digest ?? "")
                     revision.revisionID = intended.revisionID
@@ -305,21 +336,18 @@ final class FullCloudSyncEngine {
                         try checkCurrent(isValid)
                         cloud.delete(old)
                     }
-                    try checkCurrent(isValid)
-                    try cloud.save()
-                    didEnqueueChanges = true
-                    didEnqueue?()
-                    try checkCurrent(isValid)
-                    remember(key, intended)
-                    journal.pendingPublications.removeValue(forKey: key)
-                    journalDirty = true
-                    storeIdentifier = revision.persistentModelID.storeIdentifier
+                    publications.append((key, intended, revision))
+                    payloadBytes += size
+                    if publications.count >= publicationLimit || payloadBytes >= payloadLimit {
+                        try commitPublications()
+                    }
                 case .inspect(let remote, let adopt):
                     _ = try await materialize(remote, needsPayload: false)
                     try checkCurrent(isValid)
                     if adopt { remember(key, checkpoint(remote)) }
                 }
             }
+            try commitPublications()
             for key in orderedKeys where !temporarilyUnavailable.contains(key) {
                 if case .publish? = operations[key] { continue }
                 guard let remote = latest[key] else { continue }
@@ -338,6 +366,13 @@ final class FullCloudSyncEngine {
             try persistJournal()
             return restored
         } catch {
+            // A changing/unreadable later source must not starve valid earlier
+            // rows forever. Cancellation or a revoked snapshot still rolls back
+            // the entire uncommitted group; never retry a failed store save.
+            if !(error is CancellationError), !Task.isCancelled, isValid(), !publicationSaveFailed {
+                do { try commitPublications() }
+                catch { cloud.rollback(); throw error }
+            }
             // The write-ahead journal intentionally remains on disk. Even if an
             // apply or save committed before throwing/cancellation, replay can
             // identify it from local fingerprints or the saved revision ID.

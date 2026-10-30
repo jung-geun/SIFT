@@ -408,8 +408,8 @@ nonisolated struct IMAPPortableCredentials {
         try KeychainStore.setDeviceOnly(service: $0, account: $1, data: $2, access: $3)
     }
     var localRemove: (String, String) throws -> Void = { try KeychainStore.deleteDeviceOnly(service: $0, account: $1) }
-    var localHasItem: (String, String) -> Bool = {
-        KeychainStore.hasDeviceOnlyItem(service: $0, account: $1)
+    var localPresence: (String, String) throws -> DeviceOnlyCredentialPresence = {
+        try KeychainStore.deviceOnlyItemPresence(service: $0, account: $1)
     }
 
     func authorization(forRevocation: Bool = false) -> Authorization {
@@ -437,10 +437,11 @@ nonisolated struct IMAPPortableCredentials {
     private func noteSynchronized(_ revision: UUID, for account: String, backgroundEnabled: Bool? = nil,
                                   fence: DeletionFence? = nil, authorization: Authorization) throws {
         let store = slots(account)
-        let slot = store.activeSlot
-        let present = slot.map { localHasItem(service, store.slotAccount($0)) } ?? false
         try authorization.check()
-        guard let slot, present else { return }
+        // Callers have just checked the local credential or committed the slot.
+        // A second metadata probe cannot demand another authentication to prove
+        // that same commit: protected metadata may be unavailable even then.
+        guard let slot = store.activeSlot else { throw IMAPCredentialError.missingCredential }
         let receipt = Receipt(revision: revision, slot: slot.rawValue,
                               backgroundEnabled: backgroundEnabled ?? defaults.bool(forKey: backgroundKey), fence: fence)
         let encoded = try JSONEncoder().encode(receipt)
@@ -448,12 +449,18 @@ nonisolated struct IMAPPortableCredentials {
         defaults.set(encoded, forKey: receiptKey(account))
     }
 
-    private func isSynchronized(_ revision: UUID, for account: String, receipt: Receipt?) -> Bool {
+    private func isSynchronized(_ revision: UUID, for account: String, receipt: Receipt?) throws -> Bool {
         guard let receipt, receipt.revision == revision,
               receipt.backgroundEnabled == defaults.bool(forKey: backgroundKey) else { return false }
         let store = slots(account)
         guard let slot = store.activeSlot, receipt.slot == slot.rawValue else { return false }
-        return localHasItem(service, store.slotAccount(slot))
+        switch try localPresence(service, store.slotAccount(slot)) {
+        case .present, .authenticationRequired:
+            // This preserves existing verified proof, never creates proof from
+            // a blocked probe or claims the secret was read in this pass.
+            return true
+        case .missing: return false
+        }
     }
 
     // Local metadata only: never copies secrets, ACLs, or this journal to iCloud.
@@ -613,7 +620,7 @@ nonisolated struct IMAPPortableCredentials {
             if let fence, fence.allowedRevision == nil || fence.allowedRevision != remote?.revision { continue }
             let store = slots(account)
             let priorReceipt = try receipt(for: account)
-            if let remote, isSynchronized(remote.revision, for: account, receipt: priorReceipt) {
+            if let remote, try isSynchronized(remote.revision, for: account, receipt: priorReceipt) {
                 try authorization.check()
                 restored.append(IMAPRestoredAccount(account: account, preferenceKey: preferenceKey))
                 continue

@@ -86,16 +86,13 @@ struct OutlookIMAPCredentialStoreTests {
     func publishesSavedCredentialOnlyWhenEnabled() throws {
         let h = IMAPPortableTestHarness(service: OutlookIMAPCredentialStore.service)
         h.enabled = false
-        let disabledAuthorization = h.store.authorization()
-        let disabled = try h.store.prepareSave(for: email, authorization: disabledAuthorization)
-        try h.store.publishSaved(Data("local only".utf8), for: email, preparation: disabled, authorization: disabledAuthorization)
+        try h.save(Data("local only".utf8), for: email)
         #expect(h.shared.isEmpty)
-        #expect(h.events.isEmpty)
+        #expect(!h.events.contains { $0.hasPrefix("portable") || $0 == "list" })
+        #expect(try h.slots(email).credential(read: h.store.localRead) == Data("local only".utf8))
         h.enabled = true
-        let authorization = h.store.authorization()
-        let preparation = try h.store.prepareSave(for: email, authorization: authorization)
         let normalized = try IMAPCredentialValidation.appPassword("abcd efgh ijkl mnop")
-        try h.store.publishSaved(Data(normalized.utf8), for: email, preparation: preparation, authorization: authorization)
+        try h.save(Data(normalized.utf8), for: email)
         #expect(try h.remote(email)?.secret == Data("abcdefghijklmnop".utf8))
     }
 

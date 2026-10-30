@@ -132,7 +132,7 @@ nonisolated struct FeedbackReceipt: Codable, Equatable, Sendable {
 
 nonisolated enum FeedbackFailure: Error, Equatable, Sendable {
     case configuration, invalidInput, invalidDiagnostics, requestTooLarge
-    case transport, cancelled, invalidResponse, conflict
+    case transport(code: Int?), cancelled, invalidResponse(status: Int?), conflict
     case rateLimited(retryAfter: Int?)
     case unavailable, rejected
 
@@ -152,6 +152,15 @@ nonisolated enum FeedbackFailure: Error, Equatable, Sendable {
         case .rejected: suffix = "rejected"
         }
         return "feedback.failure.\(suffix)"
+    }
+
+    /// Deliberately excludes response bodies, URLs, headers and error userInfo.
+    var technicalDetail: String? {
+        switch self {
+        case let .transport(code?): return "NSURLErrorDomain (\(code))"
+        case let .invalidResponse(status?): return "HTTP \(status)"
+        default: return nil
+        }
     }
 }
 
@@ -242,20 +251,20 @@ nonisolated final class FeedbackService: FeedbackSubmitting {
             if Task.isCancelled || (error as? URLError)?.code == .cancelled {
                 throw FeedbackFailure.cancelled
             }
-            throw FeedbackFailure.transport
+            throw FeedbackFailure.transport(code: (error as? URLError)?.code.rawValue)
         }
         try Self.checkCancellation()
-        guard let http = response as? HTTPURLResponse else { throw FeedbackFailure.invalidResponse }
+        guard let http = response as? HTTPURLResponse else { throw FeedbackFailure.invalidResponse(status: nil) }
         let isJSON = http.mimeType?.lowercased() == "application/json"
         if http.statusCode == 200 || http.statusCode == 201 {
             guard isJSON, data.count <= 65_536,
                   let receipt = try? JSONDecoder().decode(FeedbackReceipt.self, from: data),
-                  receipt.isValid else { throw FeedbackFailure.invalidResponse }
+                  receipt.isValid else { throw FeedbackFailure.invalidResponse(status: http.statusCode) }
             return receipt
         }
         guard isJSON, data.count <= 65_536,
               let failure = try? JSONDecoder().decode(ServerFailure.self, from: data) else {
-            throw FeedbackFailure.invalidResponse
+            throw FeedbackFailure.invalidResponse(status: http.statusCode)
         }
         switch (http.statusCode, failure.errorCode) {
         case (400, "INVALID_REQUEST"): throw FeedbackFailure.rejected
@@ -265,7 +274,7 @@ nonisolated final class FeedbackService: FeedbackSubmitting {
             let seconds = http.value(forHTTPHeaderField: "Retry-After").flatMap(Int.init).flatMap { $0 >= 0 ? $0 : nil }
             throw FeedbackFailure.rateLimited(retryAfter: seconds)
         case (503, "INTAKE_UNAVAILABLE"), (503, "CAPACITY_REACHED"): throw FeedbackFailure.unavailable
-        default: throw FeedbackFailure.invalidResponse
+        default: throw FeedbackFailure.invalidResponse(status: http.statusCode)
         }
     }
 
@@ -306,6 +315,10 @@ nonisolated final class FeedbackService: FeedbackSubmitting {
         includeDiagnostics = initialKind == .bug && preparedDiagnostics != nil
         self.app = app ?? .current()
         self.service = service
+        if initialKind == .bug, preparedDiagnostics != nil {
+            title = AppLanguage.localized("feedback.diagnostics.defaultTitle", defaultValue: "App error diagnostic report", language: .current)
+            message = AppLanguage.localized("feedback.diagnostics.defaultMessage", defaultValue: "Please investigate the attached diagnostic report.", language: .current)
+        }
     }
 
     @discardableResult func prepareReview() -> Bool {
@@ -359,7 +372,7 @@ nonisolated final class FeedbackService: FeedbackSubmitting {
                 inFlight = nil
                 attemptID = nil
                 isSending = false
-                failure = Task.isCancelled || task.isCancelled ? .cancelled : (error as? FeedbackFailure ?? .transport)
+                failure = Task.isCancelled || task.isCancelled ? .cancelled : (error as? FeedbackFailure ?? .transport(code: nil))
                 return nil
             }
         } onCancel: {

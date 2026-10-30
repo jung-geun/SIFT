@@ -778,7 +778,16 @@ final class MeetingCaptureCoordinator: ObservableObject {
                 }
                 self.publishAppSources()
                 if case .unavailable = state, self.activeSourceTracks[source] != nil, self.terminalIntent == nil {
-                    Task { @MainActor [weak self] in await self?.retireSource(source, revoke: true) }
+                    let capture = self.appSources[sourceID]?.capture ?? (isPrimary ? self.appAudioCapture : nil)
+                    if let error = capture?.lastFailure {
+                        if let id = self.activeSourceTracks[source] { self.tracks[id]?.recordAudioFailure(error) }
+                        self.logDiagnostic(error, operation: "sourceCapture")
+                        self.failure = self.userFacingFailure(for: error, operation: "sourceCapture")
+                    }
+                    Task { @MainActor [weak self] in
+                        guard let self, self.captureGeneration == generation else { return }
+                        await self.retireSource(source, revoke: true)
+                    }
                 }
             },
             microphoneFailed: { [weak self] reason in
@@ -1651,6 +1660,12 @@ final class MeetingCaptureCoordinator: ObservableObject {
     }
 
     private func userFacingFailure(for error: Error, operation _: String) -> String {
+        if let appAudioError = error as? MeetingAppAudioFailure {
+            return appAudioError.localizedDescription
+        }
+        if let appAudioError = error as? MeetingAppAudioCapture.CaptureError {
+            return appAudioError.localizedDescription
+        }
         if let captureError = error as? CaptureError {
             return captureError.errorDescription(language: .current)
         }

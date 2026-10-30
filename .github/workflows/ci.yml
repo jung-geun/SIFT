@@ -46,6 +46,7 @@ jobs:
             -project ios/todo.xcodeproj \
             -scheme todo-QA \
             -destination "platform=iOS Simulator,id=$DEVICE_ID" \
+            -parallel-testing-enabled NO \
             -only-testing:todoTests \
             -resultBundlePath "$RUNNER_TEMP/unit-tests.xcresult" \
             CODE_SIGNING_ALLOWED=NO

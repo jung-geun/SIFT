@@ -223,6 +223,46 @@ struct MeetingAppAudioCaptureTests {
         await capture.stop()
     }
 
+    @Test("Framework stage and cause survive late consent without private framework content")
+    func frameworkFailureSurvivesLateConsent() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let defaultsName = "MeetingCaptureFailureTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: defaultsName))
+        defer {
+            defaults.removePersistentDomain(forName: defaultsName)
+            try? FileManager.default.removeItem(at: root)
+        }
+        let privateText = "Private window title and transcript"
+        let underlying = NSError(domain: NSOSStatusErrorDomain, code: -50,
+                                 userInfo: [NSLocalizedDescriptionKey: privateText, "privateWindow": privateText])
+        let systemError = NSError(domain: "com.apple.ScreenCaptureKit.SCStreamErrorDomain", code: -3801,
+                                  userInfo: [NSLocalizedDescriptionKey: privateText, NSUnderlyingErrorKey: underlying])
+        let failure = MeetingAppAudioFailure(systemError, stage: .streamStart)
+        #expect(failure.authorizationDenied)
+        let recorder = DiagnosticRecorder(store: DiagnosticReportStore(fileURL: root.appendingPathComponent("report.json")), defaults: defaults)
+        recorder.record(error: failure, component: "meeting.capture", operation: failure.stage.rawValue)
+        #expect(recorder.snapshot().events.isEmpty)
+        recorder.setCollectionEnabled(true)
+        // The retained in-memory failure is enough even when collection was off at capture time.
+        recorder.record(error: failure, component: "meeting.capture", operation: failure.stage.rawValue)
+        let event = try #require(recorder.snapshot().events.first)
+        #expect(event.error?.failureReason == "appAudioStreamStart")
+        #expect(event.error?.code == -3801)
+        #expect(event.underlyingErrors.map(\.domain) == [systemError.domain, NSOSStatusErrorDomain])
+        #expect(event.underlyingErrors.map(\.code) == [-3801, -50])
+        let bytes = try JSONEncoder().encode(event)
+        #expect(!String(decoding: bytes, as: UTF8.self).contains(privateText))
+        #expect(!String(decoding: bytes, as: UTF8.self).contains("privateWindow"))
+    }
+
+    @Test("Only the framework authorization denial offers permission recovery", arguments: [-3801, -3802, -3803, -3818])
+    func authorizationRecoveryRequiresMatchingDomainAndCode(code: Int) {
+        let system = MeetingAppAudioFailure(NSError(domain: "com.apple.ScreenCaptureKit.SCStreamErrorDomain", code: code), stage: .streamStart)
+        let other = MeetingAppAudioFailure(NSError(domain: NSOSStatusErrorDomain, code: code), stage: .audioOutput)
+        #expect(system.authorizationDenied == (code == -3801))
+        #expect(!other.authorizationDenied)
+    }
+
     @Test("A muted lane survives delayed activation but revocation never reopens")
     func mutedAndRevokedDelivery() {
         var delivery = MeetingAppAudioDeliveryState()

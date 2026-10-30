@@ -1,10 +1,304 @@
 import Foundation
+import LocalAuthentication
 import Security
 import Testing
 @testable import todo
 
 @Suite("Explicit portable Keychain copies", .serialized)
 struct KeychainCredentialPortabilityTests {
+    @Test("automatic scopes deny UI for generic, portable, local and migration queries")
+    func automaticPolicyCoversEverySecurityOperation() async throws {
+        let service = "test.auth.policy.\(UUID().uuidString)"
+        var operations: [String] = []
+        var protectedACLWrites = 0
+        try await KeychainStore.withSecurityOperationForTesting({ operation, query, attributes in
+            operations.append(operation)
+            let context = query[kSecUseAuthenticationContext as String] as? LAContext
+            #expect(context?.interactionNotAllowed == true)
+            if attributes[kSecAttrAccessControl as String] != nil || query[kSecAttrAccessControl as String] != nil {
+                protectedACLWrites += 1
+                // Authentication policy is query-only: never replace a protected
+                // slot with an unprotected accessibility attribute to avoid UI.
+                #expect(attributes[kSecAttrAccessible as String] == nil)
+                #expect(query[kSecAttrAccessible as String] == nil)
+            }
+            if operation == "update" { return (errSecItemNotFound, nil) }
+            if operation == "read" {
+                if query[kSecReturnAttributes as String] as? Bool == true {
+                    return (errSecSuccess, [[kSecAttrAccount as String: "portable"]] as NSArray)
+                }
+                return (errSecSuccess, Data("fixture".utf8) as NSData)
+            }
+            return (errSecSuccess, nil)
+        }) {
+            try await KeychainStore.withoutAuthenticationUI {
+                try KeychainStore.setChecked(service: service, account: "generic", value: "fixture")
+                _ = try KeychainStore.getChecked(service: service, account: "generic")
+                try KeychainStore.deleteChecked(service: service, account: "generic")
+                try KeychainStore.setDeviceOnly(service: service, account: "local", data: Data([1]), access: .foregroundUserPresence)
+                _ = try KeychainStore.getDeviceOnly(service: service, account: "local")
+                #expect(KeychainStore.hasDeviceOnlyItem(service: service, account: "local"))
+                try KeychainStore.deleteDeviceOnly(service: service, account: "local")
+                try KeychainStore.setSynchronizable(service: service, account: "portable", data: Data([2]))
+                _ = try KeychainStore.getSynchronizable(service: service, account: "portable")
+                #expect(try KeychainStore.synchronizableAccounts(service: service) == ["portable"])
+                try KeychainStore.deleteSynchronizable(service: service, account: "portable")
+            }
+        }
+        #expect(Set(operations) == ["read", "update", "add", "delete"])
+        #expect(protectedACLWrites == 2) // Same user-presence ACL on update + add.
+    }
+
+    @Test("successful explicit reads share one context and later periodic passes never allow UI")
+    func successfulAttemptDoesNotAuthorizePeriodicPrompts() async throws {
+        var contexts: [LAContext] = []
+        var quietQueries = 0
+        try await KeychainStore.withSecurityOperationForTesting({ _, query, _ in
+            let context = query[kSecUseAuthenticationContext as String] as! LAContext
+            if context.interactionNotAllowed { quietQueries += 1 }
+            else { contexts.append(context) }
+            return (errSecSuccess, Data([1]) as NSData)
+        }) {
+            try await KeychainStore.withUserInitiatedCredentialSync {
+                for index in 0..<34 {
+                    _ = try KeychainStore.getDeviceOnly(service: "test.auth.explicit", account: "slot-\(index)")
+                }
+            }
+            for _ in 0..<34 {
+                try await KeychainStore.withoutAuthenticationUI {
+                    _ = try KeychainStore.getDeviceOnly(service: "test.auth.periodic", account: "slot")
+                }
+            }
+        }
+        #expect(contexts.count == 34)
+        #expect(Set(contexts.map(ObjectIdentifier.init)).count == 1)
+        #expect(quietQueries == 34)
+    }
+
+    @Test("canceling explicit authentication stops every later Security operation even when caught")
+    func cancellationStopsReentryAcrossFamilies() async {
+        var queries = 0
+        do {
+            try await KeychainStore.withSecurityOperationForTesting({ _, _, _ in
+                queries += 1
+                return (errSecUserCanceled, nil)
+            }) {
+                try await KeychainStore.withUserInitiatedCredentialSync {
+                    #expect(throws: KeychainStoreError.authenticationCancelled) {
+                        _ = try KeychainStore.getDeviceOnly(service: "test.auth.cancel", account: "first")
+                    }
+                    #expect(throws: KeychainStoreError.authenticationCancelled) {
+                        try KeychainStore.setSynchronizable(service: "test.auth.cancel", account: "next-family", data: Data([2]))
+                    }
+                    #expect(throws: KeychainStoreError.authenticationCancelled) {
+                        try KeychainStore.deleteDeviceOnly(service: "test.auth.cancel", account: "migration")
+                    }
+                }
+            }
+            Issue.record("A swallowed cancellation must still fail the authentication attempt")
+        } catch {
+            #expect(error as? KeychainStoreError == .authenticationCancelled)
+        }
+        #expect(queries == 1)
+    }
+
+    @Test("automatic authentication-required preserves the stored user-presence ACL and value")
+    func automaticFailurePreservesProtectedCredential() async throws {
+        let service = "test.auth.preserve.\(UUID().uuidString)"
+        let data = Data([1, 2, 3])
+        try KeychainStore.setDeviceOnly(service: service, account: "slot", data: data, access: .foregroundUserPresence)
+        defer {
+            KeychainStore.setReadFailureForTesting(service: service, status: nil)
+            try? KeychainStore.deleteDeviceOnly(service: service, account: "slot")
+        }
+        KeychainStore.setReadFailureForTesting(service: service, status: errSecInteractionNotAllowed)
+        do {
+            try await KeychainStore.withoutAuthenticationUI {
+                _ = try KeychainStore.getDeviceOnly(service: service, account: "slot")
+            }
+            Issue.record("Protected credentials require a separate explicit action")
+        } catch {
+            #expect(error as? KeychainStoreError == .authenticationRequired)
+        }
+        KeychainStore.setReadFailureForTesting(service: service, status: nil)
+        #expect(try KeychainStore.getDeviceOnly(service: service, account: "slot") == data)
+        #expect(KeychainStore.deviceOnlyAccessForTesting(service: service, account: "slot") == .foregroundUserPresence)
+    }
+
+    @Test("nested scopes may restrict UI but never escalate automatic access")
+    func nestedScopesCannotEscalateAuthentication() async throws {
+        var allowsUI: [Bool] = []
+        try await KeychainStore.withSecurityOperationForTesting({ _, query, _ in
+            let context = query[kSecUseAuthenticationContext as String] as! LAContext
+            allowsUI.append(!context.interactionNotAllowed)
+            return (errSecSuccess, Data([1]) as NSData)
+        }) {
+            try await KeychainStore.withUserInitiatedCredentialSync {
+                _ = try KeychainStore.getDeviceOnly(service: "test.auth.nesting", account: "explicit")
+                try await KeychainStore.withoutAuthenticationUI {
+                    _ = try KeychainStore.getDeviceOnly(service: "test.auth.nesting", account: "restricted")
+                }
+            }
+            try await KeychainStore.withoutAuthenticationUI {
+                try await KeychainStore.withUserInitiatedCredentialSync {
+                    _ = try KeychainStore.getDeviceOnly(service: "test.auth.nesting", account: "no-escalation")
+                }
+            }
+        }
+        #expect(allowsUI == [true, false, false])
+    }
+
+    @Test("a generic family error does not discard explicit authorization for later families")
+    func genericFamilyFailurePreservesExplicitContext() async throws {
+        var contexts: [LAContext] = []
+        try await KeychainStore.withSecurityOperationForTesting({ _, query, _ in
+            let context = query[kSecUseAuthenticationContext as String] as! LAContext
+            #expect(!context.interactionNotAllowed)
+            contexts.append(context)
+            if query[kSecAttrAccount as String] as? String == "malformed" {
+                return (errSecDecode, nil)
+            }
+            return (errSecSuccess, Data([1]) as NSData)
+        }) {
+            try await KeychainStore.withUserInitiatedCredentialSync {
+                #expect(throws: KeychainStoreError.security(errSecDecode)) {
+                    _ = try KeychainStore.getDeviceOnly(service: "test.auth.partial", account: "malformed")
+                }
+                let next = try KeychainStore.getDeviceOnly(service: "test.auth.partial", account: "next-family")
+                #expect(next == Data([1]))
+            }
+        }
+        #expect(contexts.count == 2)
+        #expect(Set(contexts.map(ObjectIdentifier.init)).count == 1)
+    }
+
+    @Test("an unavailable optional credential family cannot block unprotected app-data sync")
+    func optionalFamilyFailureDoesNotPoisonAppDataScope() async throws {
+        var queries = 0
+        try await KeychainStore.withSecurityOperationForTesting({ _, query, _ in
+            queries += 1
+            let context = query[kSecUseAuthenticationContext as String] as! LAContext
+            #expect(context.interactionNotAllowed)
+            if query[kSecAttrAccount as String] as? String == "protected-family" {
+                return (errSecInteractionNotAllowed, nil)
+            }
+            return (errSecSuccess, Data([1]) as NSData)
+        }) {
+            try await KeychainStore.withoutAuthenticationUI {
+                do {
+                    try await KeychainStore.withoutAuthenticationUI {
+                        _ = try KeychainStore.getDeviceOnly(service: "test.auth.app-data", account: "protected-family")
+                    }
+                    Issue.record("Expected a blocked optional family")
+                } catch {
+                    #expect(error as? KeychainStoreError == .authenticationRequired)
+                }
+                let appData = try KeychainStore.getDeviceOnly(service: "test.auth.app-data", account: "unprotected")
+                #expect(appData == Data([1]))
+            }
+        }
+        #expect(queries == 2)
+    }
+
+    @Test("a nested quiet scope cannot reset a canceled outer attempt")
+    func nestedScopeCannotResetParentCancellation() async {
+        var queries = 0
+        do {
+            try await KeychainStore.withSecurityOperationForTesting({ _, _, _ in
+                queries += 1
+                return (errSecUserCanceled, nil)
+            }) {
+                try await KeychainStore.withUserInitiatedCredentialSync {
+                    _ = try? KeychainStore.getDeviceOnly(service: "test.auth.parent-cancel", account: "first")
+                    do {
+                        try await KeychainStore.withoutAuthenticationUI {
+                            _ = try KeychainStore.getDeviceOnly(service: "test.auth.parent-cancel", account: "second")
+                        }
+                        Issue.record("A new nested scope must not reset cancellation")
+                    } catch {
+                        #expect(error as? KeychainStoreError == .authenticationCancelled)
+                    }
+                }
+            }
+            Issue.record("The outer attempt must retain cancellation")
+        } catch {
+            #expect(error as? KeychainStoreError == .authenticationCancelled)
+        }
+        #expect(queries == 1)
+    }
+
+    @Test("a child task cannot reuse an authentication attempt after its scope ends")
+    func inheritedAttemptCannotOutliveScope() async throws {
+        let gate = AuthenticationTestGate()
+        var queries = 0
+        let child = try await KeychainStore.withSecurityOperationForTesting({ _, _, _ in
+            queries += 1
+            return (errSecSuccess, Data([1]) as NSData)
+        }) {
+            try await KeychainStore.withUserInitiatedCredentialSync {
+                Task {
+                    await gate.wait()
+                    return try KeychainStore.getDeviceOnly(service: "test.auth.ended", account: "child")
+                }
+            }
+        }
+        await gate.open()
+        do {
+            _ = try await child.value
+            Issue.record("An inherited ended context must not reach Security.framework")
+        } catch {
+            #expect(error as? KeychainStoreError == .authorizationChanged)
+        }
+        #expect(queries == 0)
+    }
+
+    @Test("An inherited task-cancelled authentication attempt is not a cancelled device approval")
+    func taskCancellationRemainsDistinctForInheritedChildren() async throws {
+        let parentGate = AuthenticationTestGate()
+        let childGate = AuthenticationTestGate()
+        let readyGate = AuthenticationTestGate()
+        var queries = 0
+        var child: Task<Data?, any Error>?
+        try await KeychainStore.withSecurityOperationForTesting({ _, _, _ in
+            queries += 1
+            return (errSecSuccess, Data([1]) as NSData)
+        }) {
+            let parent = Task {
+                try await KeychainStore.withoutAuthenticationUI {
+                    child = Task {
+                        await childGate.wait()
+                        #expect(!Task.isCancelled)
+                        return try KeychainStore.getDeviceOnly(service: "test.auth.task-cancel", account: "inherited")
+                    }
+                    await readyGate.open()
+                    await parentGate.wait()
+                }
+            }
+            await readyGate.wait()
+            parent.cancel()
+            await childGate.open()
+            let inherited = try #require(child)
+            await #expect(throws: CancellationError.self) { _ = try await inherited.value }
+            #expect(queries == 0)
+            await parentGate.open()
+            await #expect(throws: CancellationError.self) { try await parent.value }
+        }
+    }
+
+    private actor AuthenticationTestGate {
+        private var isOpen = false
+        private var continuation: CheckedContinuation<Void, Never>?
+        func wait() async {
+            guard !isOpen else { return }
+            await withCheckedContinuation { continuation = $0 }
+        }
+        func open() {
+            isOpen = true
+            continuation?.resume()
+            continuation = nil
+        }
+    }
+
     @Test("portable CRUD never matches local ACL slots with the same identity")
     func independentStorageDomains() throws {
         let service = "test.portability.domains.\(UUID().uuidString)"

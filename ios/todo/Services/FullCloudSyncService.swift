@@ -5,6 +5,162 @@ import Foundation
 import SwiftData
 import UIKit
 
+/// Only the dedicated action opens a bounded interactive credential attempt.
+@MainActor
+final class FullCloudConnectionSync: ObservableObject {
+    enum Family: String, CaseIterable {
+        case gmailIMAP, outlookIMAP, google, mailIdentity, vocabulary, openAI
+    }
+    enum State: Equatable {
+        case notChecked, checking, authorizing, prepared, awaitingApproval, cancelled, failed
+    }
+    struct Operation {
+        let family: Family
+        let reconcile: @MainActor () async throws -> Void
+
+        @MainActor static func openAI(_ connection: OpenAIConnection) -> Self {
+            .init(family: .openAI) {
+                try connection.refreshCredentialsChecked()
+                try KeychainStore.checkAuthenticationAttempt()
+                if let issue = connection.synchronizationIssue { throw issue }
+            }
+        }
+    }
+
+    @Published private(set) var state: State = .notChecked
+    @Published private(set) var currentFamily: Family?
+    @Published private(set) var pendingFamilies: Set<Family>
+    @Published private(set) var blockedFamilies = Set<Family>()
+    @Published private(set) var completedFamilyCount = 0
+    private let operations: [Operation]
+    private var authorizationTask: Task<Void, Never>?
+    private var generation = 0
+    private var reconciling = false
+    var isAuthorizing: Bool { state == .authorizing }
+    var familyCount: Int { operations.count }
+
+    init(operations: [Operation]) {
+        self.operations = operations
+        pendingFamilies = Set(operations.map(\.family))
+    }
+
+    func authorize() {
+        guard authorizationTask == nil, !reconciling, !isAuthorizing else { return }
+        state = .authorizing
+        let attemptGeneration = generation
+        authorizationTask = Task.detached { @MainActor [weak self] in
+            guard let self else { return }
+            _ = await self.reconcile(userInitiated: true)
+            if attemptGeneration == self.generation { self.authorizationTask = nil }
+        }
+    }
+
+    func cancelAuthorization() { authorizationTask?.cancel() }
+
+    func reset() {
+        generation += 1
+        authorizationTask?.cancel()
+        authorizationTask = nil
+        state = .notChecked
+        currentFamily = nil
+        pendingFamilies = Set(operations.map(\.family))
+        blockedFamilies = []
+        completedFamilyCount = 0
+    }
+
+    /// Injected operations exercise this same production loop without reading user secrets.
+    func reconcile(userInitiated: Bool = false) async -> (any Error)? {
+        guard !reconciling, userInitiated || !isAuthorizing else { return nil }
+        reconciling = true
+        defer { reconciling = false }
+        let attemptGeneration = generation
+        let preserveCancellation = !userInitiated && state == .cancelled
+        let waitingForExplicitRetry = userInitiated ? Set<Family>() : blockedFamilies.union(preserveCancellation ? pendingFamilies : [])
+        let previousState = state
+        let previousCompletedCount = completedFamilyCount
+        state = userInitiated ? .authorizing : .checking
+        completedFamilyCount = 0
+        var pending = Set(operations.map(\.family))
+        var blocked = Set<Family>()
+        var firstError: (any Error)?
+        var cancelled = false
+        var activeFamily: Family?
+
+        func run(_ operation: Operation) async throws {
+            try Task.checkCancellation()
+            try KeychainStore.checkAuthenticationAttempt()
+            guard attemptGeneration == generation else { throw CancellationError() }
+            activeFamily = operation.family
+            currentFamily = operation.family
+            await Task.yield()
+            try Task.checkCancellation()
+            guard attemptGeneration == generation else { throw CancellationError() }
+            try await operation.reconcile()
+            try KeychainStore.checkAuthenticationAttempt()
+            try Task.checkCancellation()
+            pending.remove(operation.family)
+            completedFamilyCount += 1
+        }
+
+        if userInitiated {
+            do {
+                try await KeychainStore.withUserInitiatedCredentialSync {
+                    for operation in self.operations {
+                        do { try await run(operation) }
+                        catch {
+                            if Self.isAuthenticationIssue(error) || error is CancellationError { throw error }
+                            firstError = firstError ?? error
+                        }
+                    }
+                }
+            } catch {
+                if let activeFamily, Self.isAuthenticationIssue(error) { blocked.insert(activeFamily) }
+                cancelled = error is CancellationError || (error as? KeychainStoreError) == .authenticationCancelled
+                if !Self.isAuthenticationIssue(error) && !(error is CancellationError) { firstError = firstError ?? error }
+            }
+        } else {
+            for operation in operations {
+                if waitingForExplicitRetry.contains(operation.family) {
+                    if blockedFamilies.contains(operation.family) { blocked.insert(operation.family) }
+                    continue
+                }
+                do { try await KeychainStore.withoutAuthenticationUI { try await run(operation) } }
+                catch {
+                    if error is CancellationError || Task.isCancelled {
+                        // Backgrounding aborts this pass, not the user's device
+                        // approval. Preserve even blocks not yet visited here.
+                        if attemptGeneration == generation {
+                            currentFamily = nil
+                            state = previousState
+                            completedFamilyCount = previousCompletedCount
+                        }
+                        return CancellationError()
+                    }
+                    if Self.isAuthenticationIssue(error) { blocked.insert(operation.family) }
+                    else { firstError = firstError ?? error }
+                }
+            }
+        }
+        guard attemptGeneration == generation else { return firstError }
+        currentFamily = nil
+        pendingFamilies = pending
+        blockedFamilies = blocked
+        if let firstError {
+            DiagnosticRecorder.shared.record(error: firstError, component: "sync.accountConnections", operation: "reconcile")
+        }
+        if cancelled || preserveCancellation { state = .cancelled }
+        else if !blocked.isEmpty { state = .awaitingApproval }
+        else if firstError != nil { state = .failed }
+        else { state = .prepared }
+        return firstError
+    }
+
+    private static func isAuthenticationIssue(_ error: any Error) -> Bool {
+        guard let error = error as? KeychainStoreError else { return false }
+        return error == .authenticationRequired || error == .authenticationCancelled
+    }
+}
+
 @MainActor
 final class FullCloudSyncService: ObservableObject {
     static let shared = FullCloudSyncService()
@@ -43,7 +199,14 @@ final class FullCloudSyncService: ObservableObject {
     private var cachedModelDigests = [String: String]()
     private var modelChangeVersion = 0
     private var rerunForLocalSave = false
-    private var credentialPolicyApplied = false
+    lazy var connectionSync = FullCloudConnectionSync(operations: [
+        .init(family: .gmailIMAP) { Self.restoreSelection(try IMAPCredentialStore.applyFullSyncPolicy()) },
+        .init(family: .outlookIMAP) { Self.restoreSelection(try OutlookIMAPCredentialStore.applyFullSyncPolicy()) },
+        .init(family: .google) { try KeychainStore.applyFullSyncPolicyChecked() },
+        .init(family: .mailIdentity) { try MailAnalysisLedgerKeyStore.applyFullSyncPolicy() },
+        .init(family: .vocabulary) { [weak self] in try await self?.vocabularyService?.applyFullSyncPolicy() },
+        .openAI(.shared)
+    ])
     private var accountGeneration = 0
     private var synchronizing = false
     private var shadowStoreID: String?
@@ -131,7 +294,7 @@ final class FullCloudSyncService: ObservableObject {
                 self.schedule()
             }
         isRunning = true
-        worker = Task { [weak self] in
+        worker = Task.detached { @MainActor [weak self] in
             while let self, !Task.isCancelled, UserCloudSyncPolicy.isRequested {
                 do { try await self.synchronizeNow() }
                 catch { self.report(error) }
@@ -151,6 +314,7 @@ final class FullCloudSyncService: ObservableObject {
     }
 
     private func pause() {
+        connectionSync.cancelAuthorization()
         pendingRun?.cancel()
         pendingRun = nil
         worker?.cancel()
@@ -178,7 +342,7 @@ final class FullCloudSyncService: ObservableObject {
         modelDataDirty = true
         cachedModelRecords = [:]
         cachedModelDigests = [:]
-        credentialPolicyApplied = false
+        connectionSync.reset()
         hasFinishedInitialRestore = false
         transportFailures.removeAll()
         exportSequences.removeAll()
@@ -191,7 +355,6 @@ final class FullCloudSyncService: ObservableObject {
 
     func enterForeground() {
         guard UserCloudSyncPolicy.isRequested else { return }
-        credentialPolicyApplied = false
         start()
         schedule()
     }
@@ -204,7 +367,7 @@ final class FullCloudSyncService: ObservableObject {
         let identifier = UIApplication.shared.beginBackgroundTask(withName: "SIFT full data enqueue") { [weak self] in
             Task { @MainActor in self?.backgroundDrain?.cancel() }
         }
-        backgroundDrain = Task { [weak self] in
+        backgroundDrain = Task.detached { @MainActor [weak self] in
             defer {
                 if identifier != .invalid { UIApplication.shared.endBackgroundTask(identifier) }
                 self?.backgroundDrain = nil
@@ -232,6 +395,10 @@ final class FullCloudSyncService: ObservableObject {
     }
 
     func synchronizeNow() async throws {
+        try await KeychainStore.withoutAuthenticationUI { try await synchronizeWithoutAuthenticationUI() }
+    }
+
+    private func synchronizeWithoutAuthenticationUI() async throws {
         guard UserCloudSyncPolicy.isRequested, !synchronizing else { return }
         guard !Self.usesSyntheticEnvironment else { throw CancellationError() }
         synchronizing = true
@@ -247,15 +414,11 @@ final class FullCloudSyncService: ObservableObject {
             guard UserCloudSyncPolicy.isEnabled, !Task.isCancelled else { throw CancellationError() }
             // Keychain failures are visible, but must not strand unrelated tasks,
             // saved mail or recordings behind an unavailable credential item.
-            let connectionError = await reconcileConnections()
+            _ = await connectionSync.reconcile()
             guard UserCloudSyncPolicy.isEnabled, !Task.isCancelled else { throw CancellationError() }
-            OpenAIConnection.shared.refreshCredentials()
-            let openAIConnectionIssue = OpenAIConnection.shared.synchronizationIssue
             if shadowImported && legacyImported {
                 if try await reconcileContent() { hasFinishedInitialRestore = true }
             }
-            if let connectionError { throw connectionError }
-            if let openAIConnectionIssue { throw openAIConnectionIssue }
             reconciliationFailed = false
             clearResolvedError()
         } catch {
@@ -264,23 +427,15 @@ final class FullCloudSyncService: ObservableObject {
         }
     }
 
-    private func reconcileConnections() async -> (any Error)? {
-        var firstError: (any Error)?
-        func retain(_ error: any Error) { if firstError == nil { firstError = error } }
-        func restoreSelection(_ accounts: [IMAPRestoredAccount]) {
-            for restored in accounts where UserDefaults.standard.string(forKey: restored.preferenceKey) == nil {
-                UserDefaults.standard.set(restored.account, forKey: restored.preferenceKey)
-            }
+    func authorizeAccountConnectionSync() {
+        guard UserCloudSyncPolicy.isEnabled, UIApplication.shared.applicationState == .active else { return }
+        connectionSync.authorize()
+    }
+
+    private static func restoreSelection(_ accounts: [IMAPRestoredAccount]) {
+        for restored in accounts where UserDefaults.standard.string(forKey: restored.preferenceKey) == nil {
+            UserDefaults.standard.set(restored.account, forKey: restored.preferenceKey)
         }
-        do { restoreSelection(try IMAPCredentialStore.applyFullSyncPolicy()) } catch { retain(error) }
-        do { restoreSelection(try OutlookIMAPCredentialStore.applyFullSyncPolicy()) } catch { retain(error) }
-        if !credentialPolicyApplied {
-            do { try KeychainStore.applyFullSyncPolicyChecked(); credentialPolicyApplied = true }
-            catch { retain(error) }
-        }
-        do { try MailAnalysisLedgerKeyStore.applyFullSyncPolicy() } catch { retain(error) }
-        do { try await vocabularyService?.applyFullSyncPolicy() } catch { retain(error) }
-        return firstError
     }
 
     private func resolveAccount() async throws -> (CKContainer, String) {
@@ -529,7 +684,7 @@ final class FullCloudSyncService: ObservableObject {
     private func schedule() {
         guard UserCloudSyncPolicy.isRequested, isRunning, !synchronizing else { return }
         pendingRun?.cancel()
-        pendingRun = Task { [weak self] in
+        pendingRun = Task.detached { @MainActor [weak self] in
             do {
                 try await Task.sleep(for: .milliseconds(750))
                 try await self?.synchronizeNow()

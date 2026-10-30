@@ -129,6 +129,12 @@ import CryptoKit
     /// Reconcile late iCloud Keychain delivery on foreground, policy changes, and before use.
     /// This updates authentication only; provider toggles and app-data consents remain device-local.
     func refreshCredentials() {
+        do { try refreshCredentialsChecked() }
+        catch { /* Best-effort callers use the published storage status. */ }
+    }
+
+    /// Storage reconciliation must distinguish a failed load from a prepared connection.
+    func refreshCredentialsChecked() throws {
         do {
             var loaded = snapshot
             if let data = try store.load() { loaded = try JSONDecoder().decode(Snapshot.self, from: data) }
@@ -172,6 +178,7 @@ import CryptoKit
             snapshot.activeID = nil
             publish()
             statusMessage = OpenAIConnectionError.storage.errorDescription
+            throw error
         }
     }
 
