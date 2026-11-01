@@ -281,7 +281,7 @@ struct MeetingProofreadTests {
                     providerRan: true
                 )
             },
-            analyze: { _, input, _, _, _, _ in
+            analyze: { _, input, _, _, _, _, _, _ in
                 analyzedText = input.segments.first?.text ?? ""
                 var analyzed = input
                 analyzed.summary = "원문 요약"
@@ -359,7 +359,7 @@ struct MeetingProofreadTests {
                     providerRan: true
                 )
             },
-            analyze: { _, input, _, _, _, _ in
+            analyze: { _, input, _, _, _, _, _, _ in
                 var analyzed = input
                 analyzed.summary = "저장 실패 요약"
                 return MeetingAnalysisEngine.Outcome(
@@ -411,7 +411,7 @@ struct MeetingProofreadTests {
         let dependencies = MeetingPostProcessor.Dependencies(
             snapshot: { .empty },
             refine: { _, _, _, _, _, _ in .skipped(.disabled) },
-            analyze: { _, input, _, _, _, _ in
+            analyze: { _, input, _, _, _, _, _, _ in
                 MeetingAnalysisEngine.Outcome(result: input, engineLabel: "테스트", usedOnDeviceLLM: false)
             },
             save: { _ in throw ProofreadTestError.saveFailed },
@@ -463,7 +463,7 @@ struct MeetingProofreadTests {
                     #expect(input.segments == base.segments)
                     return .skipped(.unavailable)
                 },
-                analyze: { _, input, _, sourceTag, outputTag, uiLanguage in
+                analyze: { _, input, _, sourceTag, outputTag, uiLanguage, _, _ in
                     analysisSourceTag = sourceTag
                     analysisOutputTag = outputTag
                     #expect(uiLanguage == .current)
@@ -545,7 +545,7 @@ struct MeetingProofreadTests {
         let dependencies = MeetingPostProcessor.Dependencies(
             snapshot: { .empty },
             refine: { _, _, _, _, _, _ in throw CancellationError() },
-            analyze: { _, input, _, _, _, _ in
+            analyze: { _, input, _, _, _, _, _, _ in
                 analysisCalled = true
                 return MeetingAnalysisEngine.Outcome(result: input, engineLabel: "test", usedOnDeviceLLM: false)
             },
@@ -581,7 +581,7 @@ struct MeetingProofreadTests {
                 return .applied(result: corrected, changed: true, source: .appleIntelligence,
                                 correctionPairs: [], providerRan: true)
             },
-            analyze: { _, input, _, _, _, _ in
+            analyze: { _, input, _, _, _, _, _, _ in
                 analyzed = true
                 return MeetingAnalysisEngine.Outcome(result: input, engineLabel: "test", usedOnDeviceLLM: false)
             },
@@ -616,7 +616,7 @@ struct MeetingProofreadTests {
         let dependencies = MeetingPostProcessor.Dependencies(
             snapshot: { .empty },
             refine: { _, _, _, _, _, _ in .skipped(.disabled) },
-            analyze: { _, input, _, _, _, _ in
+            analyze: { _, input, _, _, _, _, _, _ in
                 await gate.pause()
                 var analyzed = input
                 analyzed.summary = "Outdated automated summary"
@@ -652,7 +652,7 @@ struct MeetingProofreadTests {
         let dependencies = MeetingPostProcessor.Dependencies(
             snapshot: { .empty },
             refine: { _, _, _, _, _, _ in .skipped(.disabled) },
-            analyze: { _, input, _, _, summaryTag, _ in
+            analyze: { _, input, _, _, summaryTag, _, _, _ in
                 #expect(summaryTag == "pt-BR")
                 await gate.pause()
                 var output = input
@@ -677,6 +677,61 @@ struct MeetingProofreadTests {
         await #expect(throws: MeetingPostProcessor.Failure.superseded) { try await run.value }
         #expect(record.persistenceSnapshot() == selected)
         #expect(record.summaryLanguageTag == "ar-SA")
+    }
+
+    @Test("format and custom instruction edits supersede suspended analysis", arguments: [false, true])
+    @MainActor
+    func summaryFormatChangeWins(custom: Bool) async throws {
+        let (context, record) = try persistedMeeting()
+        record.summaryFormat = .interview
+        record.summaryCustomInstructions = "Keep exact quotations"
+        try context.save()
+        let gate = SuspendedProofreadEngine()
+        let dependencies = MeetingPostProcessor.Dependencies(
+            snapshot: { .empty }, refine: { _, _, _, _, _, _ in .skipped(.disabled) },
+            analyze: { _, input, _, _, _, _, format, instructions in
+                #expect(format == .interview)
+                #expect(instructions == "Keep exact quotations")
+                await gate.pause()
+                var output = input
+                output.summary = "Stale generated output"
+                return MeetingAnalysisEngine.Outcome(result: output, engineLabel: "test", usedOnDeviceLLM: true)
+            }, save: { try $0.save() }, learnCorrections: { _, _ in })
+        let run = Task {
+            try await MeetingPostProcessor.refineAndAnalyze(record: record, context: context,
+                allowRefine: false, allowModelLoad: false, dependencies: dependencies)
+        }
+        await gate.waitUntilPaused()
+        if custom { record.summaryCustomInstructions = "Use topic headings" }
+        else { record.summaryFormat = .clientMeeting }
+        try context.save()
+        let selection = record.persistenceSnapshot()
+        await gate.resume()
+        await #expect(throws: MeetingPostProcessor.Failure.superseded) { try await run.value }
+        #expect(record.persistenceSnapshot() == selection)
+    }
+
+    @Test("explicit regeneration preserves prior notes when provider cannot generate cited minutes")
+    @MainActor
+    func unavailableRegenerationPreservesNotes() async throws {
+        let (context, record) = try persistedMeeting()
+        var prior = try #require(record.result)
+        prior.summary = "Prior reviewed notes"
+        try record.update(result: prior)
+        try context.save()
+        let snapshot = record.persistenceSnapshot()
+        let dependencies = MeetingPostProcessor.Dependencies(
+            snapshot: { .empty }, refine: { _, _, _, _, _, _ in .skipped(.disabled) },
+            analyze: { _, input, _, _, _, _, _, _ in
+                var fallback = input
+                fallback.summary = "Source excerpt"
+                return MeetingAnalysisEngine.Outcome(result: fallback, engineLabel: "Rules", usedOnDeviceLLM: false)
+            }, save: { try $0.save() }, learnCorrections: { _, _ in })
+        await #expect(throws: MeetingPostProcessor.Failure.summaryUnavailable) {
+            try await MeetingPostProcessor.refineAndAnalyze(record: record, context: context,
+                allowRefine: false, allowModelLoad: false, requireGeneratedSummary: true, dependencies: dependencies)
+        }
+        #expect(record.persistenceSnapshot() == snapshot)
     }
 
     @Test("automatic processing language canonicalizes evidence without changing preferences")
@@ -728,7 +783,7 @@ struct MeetingProofreadTests {
                 return .applied(result: corrected, changed: true, source: .qwen,
                                 correctionPairs: [(from: "Original words", to: "Stale automated correction")], providerRan: true)
             },
-            analyze: { _, input, _, _, _, _ in
+            analyze: { _, input, _, _, _, _, _, _ in
                 analyzed = true
                 await gate.pause()
                 var output = input
@@ -791,7 +846,7 @@ struct MeetingProofreadTests {
                     return .applied(result: input, changed: false, source: .appleIntelligence,
                                     correctionPairs: [], providerRan: true)
                 },
-                analyze: { _, input, _, _, _, _ in
+                analyze: { _, input, _, _, _, _, _, _ in
                     analyzed = true
                     if !refining { await gate.pause() }
                     var output = input

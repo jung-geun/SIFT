@@ -16,6 +16,19 @@ enum CloudModelCodec {
         case healthDataExcluded
     }
 
+    /// Reconciliation must pass conflictingKeys as temporarilyUnavailable.
+    /// Their absence from records never authorizes a tombstone or remote apply.
+    struct Snapshot {
+        var records = [String: Data]()
+        var conflictingKeys = Set<String>()
+
+        /// Strict export/migration consumers must reject a partial snapshot.
+        func validatedRecords() throws -> [String: Data] {
+            if let key = conflictingKeys.min() { throw CodecError.duplicateIdentity(key) }
+            return records
+        }
+    }
+
     private struct Envelope: Codable {
         let version: Int
         let entity: String
@@ -138,14 +151,22 @@ enum CloudModelCodec {
         func erased() -> AnyEntity {
             AnyEntity(name: name, validIdentity: validIdentity, validateSchema: validateSchema,
                 capture: { context, excludedTodoIDs, encoder in
-                    var result: [String: Data] = [:]
+                    var result = Snapshot()
                     for model in try context.fetch(FetchDescriptor<Model>()) {
                         if let todo = model as? Todo, todo.isHealthRelated { continue }
                         if let audit = model as? TaskAuditEvent, excludedTodoIDs.contains(audit.todoID) { continue }
                         if let behavior = model as? TaskBehaviorEvent, excludedTodoIDs.contains(behavior.todoID) { continue }
                         let key = try key(model)
-                        guard result[key] == nil else { throw CodecError.duplicateIdentity(key) }
-                        result[key] = try encoder.encode(envelope(model, encoder: encoder))
+                        guard !result.conflictingKeys.contains(key) else { continue }
+                        let data = try encoder.encode(envelope(model, encoder: encoder))
+                        if let previous = result.records[key], previous != data {
+                            // Unavailable is not deleted: the sync engine must
+                            // retain this identity's revisions and recovery journal.
+                            result.records.removeValue(forKey: key)
+                            result.conflictingKeys.insert(key)
+                        } else {
+                            result.records[key] = data
+                        }
                     }
                     return result
                 }, apply: { identity, envelope, context, app, decoder in
@@ -176,11 +197,26 @@ enum CloudModelCodec {
                         for match in matches { context.delete(match) }
                         return
                     }
-                    guard matches.count <= 1 else { throw CodecError.duplicateIdentity(name + "/" + identity) }
-                    if let existing = matches.first {
-                        for field in fields where !field.preservesLocalValueOnRestore { field.copy(decoded, existing) }
-                    } else {
+                    if matches.count > 1, let first = matches.first {
+                        let encoder = CloudModelCodec.encoder()
+                        let previous = try encoder.encode(self.envelope(first, encoder: encoder))
+                        // Validate the whole cohort before changing any row. A real
+                        // conflict remains explicit, even if the incoming value matches
+                        // one of its versions. No local version is silently discarded.
+                        for match in matches.dropFirst() {
+                            guard try encoder.encode(self.envelope(match, encoder: encoder)) == previous else {
+                                throw CodecError.duplicateIdentity(name + "/" + identity)
+                            }
+                        }
+                    }
+                    if matches.isEmpty {
                         context.insert(decoded)
+                    } else {
+                        // Keep every physical row and its restore-preserved local fields.
+                        // Updating just one would manufacture a conflict on the next capture.
+                        for existing in matches {
+                            for field in fields where !field.preservesLocalValueOnRestore { field.copy(decoded, existing) }
+                        }
                     }
                 })
         }
@@ -190,7 +226,7 @@ enum CloudModelCodec {
         let name: String
         let validIdentity: (String) -> Bool
         let validateSchema: () throws -> Void
-        let capture: (ModelContext, Set<UUID>, JSONEncoder) throws -> [String: Data]
+        let capture: (ModelContext, Set<UUID>, JSONEncoder) throws -> Snapshot
         let apply: (String, Envelope?, ModelContext, ModelContext, JSONDecoder) throws -> Void
     }
 
@@ -266,25 +302,27 @@ enum CloudModelCodec {
         for entity in entities { try entity.validateSchema() }
     }
 
-    static func captureMain(_ app: ModelContext) throws -> [String: Data] {
+    static func captureMain(_ app: ModelContext) throws -> Snapshot {
         try capture(groups: [(mainEntities, app)], app: app)
     }
 
-    static func capture(app: ModelContext, email: ModelContext, meeting: ModelContext) throws -> [String: Data] {
+    static func capture(app: ModelContext, email: ModelContext, meeting: ModelContext) throws -> Snapshot {
         try capture(groups: [(mainEntities, app), (emailEntities, email), (meetingEntities, meeting)], app: app)
     }
 
-    private static func capture(groups: [([AnyEntity], ModelContext)], app: ModelContext) throws -> [String: Data] {
+    private static func capture(groups: [([AnyEntity], ModelContext)], app: ModelContext) throws -> Snapshot {
         for (entities, context) in groups { try validate(entities, in: context) }
         let healthIDs = Set(try app.fetch(FetchDescriptor<Todo>()).filter(\.isHealthRelated).map(\.id))
         let encoder = encoder()
-        var payloads: [String: Data] = [:]
+        var result = Snapshot()
         for (entities, context) in groups {
             for entity in entities {
-                for (key, data) in try entity.capture(context, healthIDs, encoder) { payloads[key] = data }
+                let snapshot = try entity.capture(context, healthIDs, encoder)
+                result.records.merge(snapshot.records) { _, value in value }
+                result.conflictingKeys.formUnion(snapshot.conflictingKeys)
             }
         }
-        return payloads
+        return result
     }
 
     static func apply(key: String, payload: Data?, app: ModelContext, email: ModelContext, meeting: ModelContext) throws {
@@ -512,6 +550,8 @@ enum CloudModelCodec {
             .init("audioTrackStartSample", \.audioTrackStartSample), .init("createdAt", \.createdAt), .init("updatedAt", \.updatedAt),
             .init("modeRaw", \.modeRaw), .init("languageTag", \.languageTag), .init("summaryLanguageTag", \.summaryLanguageTag),
             .init("automaticLanguageDetection", \.automaticLanguageDetection, defaultValue: false),
+            .init("summaryFormatRaw", \.summaryFormatRaw, defaultValue: "minutes"),
+            .init("summaryCustomInstructions", \.summaryCustomInstructions, defaultValue: ""),
             .init("summaryKindRaw", \.summaryKindRaw), .init("summaryEngineLabel", \.summaryEngineLabel),
             .init("summaryFallbackReasonRaw", \.summaryFallbackReasonRaw), .init("summaryResultLanguageTag", \.summaryResultLanguageTag),
             .init("timezoneIdentifier", \.timezoneIdentifier), .init("statusRaw", \.statusRaw),

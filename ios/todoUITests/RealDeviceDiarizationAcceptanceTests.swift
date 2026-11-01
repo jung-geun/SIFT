@@ -169,10 +169,13 @@ final class RealDeviceDiarizationAcceptanceTests: XCTestCase {
         shot("detail-final")
         XCTAssertTrue(state.label.contains("기기에서 확인한 화자"), "Unexpected state: \(state.label)")
 
-        let labeledRow = app.descendants(matching: .any)
-            .matching(NSPredicate(format: "label CONTAINS %@", "화자 1")).firstMatch
+        let labeledRow = app.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS %@ AND identifier ENDSWITH %@", "화자 1", ".speaker")).firstMatch
         XCTAssertTrue(labeledRow.waitForExistence(timeout: 10), "No row labeled 화자 1")
-        labeledRow.press(forDuration: 1.2)
+        let segmentIdentifier = String(labeledRow.identifier.dropLast(".speaker".count))
+        let segmentMenu = app.buttons["\(segmentIdentifier).edit"]
+        XCTAssertTrue(segmentMenu.waitForExistence(timeout: 5), "Missing explicit segment edit control")
+        segmentMenu.tap()
         let edit = app.buttons["화자 수정"]
         XCTAssertTrue(edit.waitForExistence(timeout: 5))
         edit.tap()

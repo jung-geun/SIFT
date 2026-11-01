@@ -288,6 +288,53 @@ struct CloudReconcileDurabilityTests {
         #expect(Set(try fixture.records().map(\.revisionID)) == Set([a.revisionID, b.revisionID]))
     }
 
+    @Test("A held meeting namespace retains remote-only audio and pending recovery while unrelated data syncs",
+          arguments: ["pendingApply", "pendingPublication"])
+    func heldMeetingNamespacePreservesAssets(recovery: String) async throws {
+        let fixture = try DurabilityFixture()
+        defer { fixture.remove() }
+        let prefix = "file/Meetings/\(UUID().uuidString.lowercased())/"
+        let known = prefix + "audio/part-00.flac"
+        let remoteOnly = prefix + "audio/part-01.flac"
+        let original = Data("original audio asset".utf8)
+        let initialValues = [known: original, fixture.key: Data("old healthy task".utf8)]
+        let initial = try fixture.engine()
+        try await initial.reconcile(digests: initialValues.mapValues(fixture.digest),
+            load: { initialValues[$0] }, apply: { _, _ in Issue.record("Initial records must publish") })
+        let checkpoint = try #require(initial.journal.items[known])
+        let remote = try fixture.remote("new remote audio", clock: checkpoint.logicalClock + 1, key: known)
+        let unseen = try fixture.remote("remote-only audio", clock: remote.logicalClock, key: remoteOnly)
+        var journal = initial.journal
+        if recovery == "pendingApply" {
+            journal.pendingApplies[known] = CloudSyncPendingApply(sourceDigest: checkpoint.digest, target: remote)
+        } else {
+            journal.pendingPublications[known] = CloudSyncCheckpoint(digest: checkpoint.digest,
+                revisionID: UUID(), logicalClock: remote.logicalClock + 1, installationID: fixture.installation)
+        }
+        try JSONEncoder().encode(journal).write(to: fixture.journalURL, options: .atomic)
+        let heldIDs = Set(try fixture.records().filter { $0.itemKey.hasPrefix(prefix) }.map(\.revisionID))
+        let edited = Data("healthy task edit during held audio".utf8)
+        let values = [fixture.key: edited]
+        let engine = try fixture.engine()
+        try await engine.reconcile(digests: values.mapValues(fixture.digest),
+            isTemporarilyUnavailable: { $0.hasPrefix(prefix) }, load: { key in
+                #expect(key == fixture.key)
+                return values[key]
+            }, apply: { _, _ in Issue.record("Held remote-only audio must not restore") })
+        let records = try fixture.records()
+        #expect(Set(records.filter { $0.itemKey.hasPrefix(prefix) }.map(\.revisionID)) == heldIDs)
+        #expect(records.first { $0.revisionID == checkpoint.revisionID }?.payload == original)
+        #expect(records.first { $0.revisionID == remote.revisionID }?.payload == Data("new remote audio".utf8))
+        #expect(records.first { $0.revisionID == unseen.revisionID }?.payload == Data("remote-only audio".utf8))
+        #expect(records.filter { $0.itemKey.hasPrefix(prefix) }.allSatisfy { !$0.isTombstone })
+        #expect(records.first { $0.itemKey == fixture.key }?.payload == edited)
+        let restarted = try fixture.engine()
+        #expect(restarted.journal.items[known] == checkpoint)
+        #expect(restarted.journal.items[remoteOnly] == nil)
+        #expect(restarted.journal.pendingApplies[known]?.target == journal.pendingApplies[known]?.target)
+        #expect(restarted.journal.pendingPublications[known] == journal.pendingPublications[known])
+    }
+
     @Test("Cancellation or invalidation rolls back a staged group without deleting its prior revisions", arguments: [false, true])
     func interruptedPublicationGroup(cancel: Bool) async throws {
         let fixture = try DurabilityFixture()

@@ -41,10 +41,47 @@ struct MeetingConversationTimeline {
         let rows: [Row]
     }
 
+    struct Turn: Identifiable, Equatable {
+        var rows: [Row]
+        var presentation: MeetingSpeakerContinuity.Presentation
+        var id: Row.ID { rows[0].id }
+        var localStartMs: Int64 { rows[0].localStartMs }
+        var localEndMs: Int64 { rows.last?.localEndMs ?? rows[0].localEndMs }
+        var startSample: Int64? { rows[0].startSample }
+        var endSample: Int64? { rows.last?.endSample ?? rows[0].endSample }
+        var text: String {
+            rows.map { $0.text.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+                .joined(separator: " ")
+        }
+    }
+
     let rows: [Row]
     /// Deliberately not appended to `rows`: their position relative to other sources is unknown.
     let unalignedSources: [UnalignedSource]
     let speakerPresentation: [Row.ID: MeetingSpeakerContinuity.Presentation]
+
+    static func groupTurns(_ rows: [Row], presentation: [Row.ID: MeetingSpeakerContinuity.Presentation]) -> [Turn] {
+        var turns: [Turn] = []
+        for row in rows {
+            let itemPresentation = presentation[row.id]
+                ?? MeetingSpeakerContinuity.Presentation(speakerIDs: row.speakerIDs, isInherited: false, startsTurn: true, kind: .speaker)
+            if itemPresentation.startsTurn || turns.isEmpty || turns.last?.rows.first?.id.trackID != row.id.trackID {
+                turns.append(Turn(rows: [row], presentation: itemPresentation))
+            } else {
+                let index = turns.count - 1
+                let last = turns[index].presentation
+                turns[index].presentation = MeetingSpeakerContinuity.Presentation(
+                    speakerIDs: last.speakerIDs,
+                    isInherited: last.isInherited && itemPresentation.isInherited,
+                    startsTurn: true,
+                    kind: last.kind
+                )
+                turns[index].rows.append(row)
+            }
+        }
+        return turns
+    }
 
     init(sources: [Source], preservesSourceEntryOrder: Bool = false) {
         var aligned: [Row] = []
@@ -181,9 +218,9 @@ struct MeetingConversationTimeline {
 }
 
 /// Presentation only: never feeds attribution, editing, exports, or persisted evidence.
-/// A brief undecided phrase may borrow the previous single speaker for at most
-/// two seconds total, with the activity tracker's 50 ms adjacency gap. A known
-/// following speaker must agree. Inherited rows never renew the context budget.
+/// Matching source-local speakers bracket an unknown run into one displayed turn,
+/// regardless of run length or uncertain interval evidence. Ten-second pauses,
+/// manual assignments and nonidentical overlapping ranges remain hard boundaries.
 enum MeetingSpeakerContinuity {
     struct Presentation: Equatable {
         enum Kind: Equatable { case speaker, unknown, mixed }
@@ -193,11 +230,10 @@ enum MeetingSpeakerContinuity {
         let kind: Kind
     }
 
-    // Presentation bound for a short spoken phrase, not a model confidence threshold.
-    static let maximumUnknownContextMs: Int64 = 2_000
-    static let maximumAdjacentGapMs = MeetingSpeakerActivityTracker.liveMaximumGapFrames
-        * MeetingSpeakerActivityTracker.samplesPerFrame / MeetingSpeakerAlignment.samplesPerMillisecond
-
+    // Presentation bound for grouping same-speaker speech and bridging brief undetected gaps.
+    static let maximumUnknownContextMs: Int64 = 10_000
+    static let maximumAdjacentGapMs: Int64 = 5_000
+    static let maximumTurnGapMs: Int64 = 10_000
     static func project(_ rows: [MeetingConversationTimeline.Row]) -> [MeetingConversationTimeline.Row.ID: Presentation] {
         guard !rows.isEmpty else { return [:] }
         var blocked = Array(repeating: false, count: rows.count)
@@ -215,13 +251,43 @@ enum MeetingSpeakerContinuity {
             left.id.trackID == right.id.trackID && right.localStartMs >= left.localEndMs
                 && right.localStartMs - left.localEndMs <= maximumAdjacentGapMs
         }
+        func withinTurnGap(_ left: MeetingConversationTimeline.Row, _ right: MeetingConversationTimeline.Row) -> Bool {
+            left.id.trackID == right.id.trackID && right.localStartMs >= left.localEndMs
+                && right.localStartMs - left.localEndMs <= maximumTurnGapMs
+        }
+        // Resolve complete unknown runs before the conservative open-tail fallback.
+        // Segment speaker IDs are the anchors; interval guesses remain unchanged.
+        var bracketedSpeakers = Array<String?>(repeating: nil, count: rows.count)
+        var runStart = 0
+        while runStart < rows.count {
+            guard rows[runStart].speakerIDs.isEmpty, !blocked[runStart] else {
+                runStart += 1
+                continue
+            }
+            var runEnd = runStart + 1
+            while runEnd < rows.count, rows[runEnd].speakerIDs.isEmpty,
+                  !blocked[runEnd], withinTurnGap(rows[runEnd - 1], rows[runEnd]) {
+                runEnd += 1
+            }
+            if runStart > 0, runEnd < rows.count,
+               !blocked[runStart - 1], !blocked[runEnd],
+               withinTurnGap(rows[runStart - 1], rows[runStart]),
+               withinTurnGap(rows[runEnd - 1], rows[runEnd]) {
+                let before = Set(rows[runStart - 1].speakerIDs)
+                let after = Set(rows[runEnd].speakerIDs)
+                if before.count == 1, before == after, let speaker = before.first {
+                    for index in runStart..<runEnd { bracketedSpeakers[index] = speaker }
+                }
+            }
+            runStart = runEnd
+        }
         // nil means the live tail has no following evidence yet; [] is an
         // explicit contradictory/overlap/manual boundary, never an open tail.
         var following = Array<[String]?>(repeating: nil, count: rows.count)
         var unknownRunEnd = rows.map(\.localEndMs)
         for index in rows.indices.reversed() where index + 1 < rows.count {
             let next = rows[index + 1]
-            guard adjacent(rows[index], next) else { continue }
+            guard withinTurnGap(rows[index], next) else { continue }
             if blocked[index + 1] { following[index] = []; continue }
             if next.speakerIDs.isEmpty { unknownRunEnd[index] = unknownRunEnd[index + 1] }
             let ids = Array(Set(next.speakerIDs)).sorted()
@@ -241,12 +307,17 @@ enum MeetingSpeakerContinuity {
         var previousKind: Presentation.Kind?
         for (index, row) in rows.enumerated() {
             let sameSource = previous?.id.trackID == row.id.trackID
-            if (previous.map({ !adjacent($0, row) }) ?? true) || blocked[index] { anchor = nil }
+            if (previous.map({ !withinTurnGap($0, row) }) ?? true) || blocked[index] { anchor = nil }
             var ids = Array(Set(row.speakerIDs)).sorted()
+            let adjacentToPrevious = previous.map { adjacent($0, row) } ?? false
             var inherited = false
-            let mixed = ids.isEmpty && Set(row.evidenceSpeakerIDs).count > 1
-            if ids.isEmpty, !blocked[index], !mixed, let known = anchor,
+            let mixed = ids.isEmpty && Set(row.evidenceSpeakerIDs).count > 1 && bracketedSpeakers[index] == nil
+            if let speaker = bracketedSpeakers[index] {
+                ids = [speaker]
+                inherited = true
+            } else if ids.isEmpty, !blocked[index], !mixed, let known = anchor,
                row.localEndMs >= known.endMs,
+               adjacentToPrevious,
                unknownRunEnd[index] - known.endMs <= maximumUnknownContextMs,
                row.evidenceSpeakerIDs.allSatisfy({ $0 == known.speaker }),
                following[index].map({ $0 == [known.speaker] }) ?? true {
@@ -254,11 +325,24 @@ enum MeetingSpeakerContinuity {
                 inherited = true
             }
             let kind: Presentation.Kind = mixed ? .mixed : (ids.isEmpty ? .unknown : .speaker)
-            let startsTurn = previous == nil || !sameSource || ids != previousIDs || kind != previousKind
+            let gapExceeded = previous.map { row.localStartMs - $0.localEndMs > maximumTurnGapMs } ?? false
+            // Edited segments can share an exact range while current-ID order
+            // differs from lineage order. Keep their measured speaker heading
+            // together without allowing overlapping unknowns to inherit it.
+            let repeatsMeasuredSpeakerRange = blocked[index] && (previous.map {
+                sameSource && !$0.blocksSpeakerInheritance && !row.blocksSpeakerInheritance
+                    && row.localStartMs >= 0 && row.localEndMs > row.localStartMs
+                    && row.localStartMs == $0.localStartMs && row.localEndMs == $0.localEndMs
+                    && row.startSample == $0.startSample && row.endSample == $0.endSample
+                    && !$0.speakerIDs.isEmpty && !ids.isEmpty && ids == previousIDs
+            } ?? false)
+            let startsTurn = previous == nil || !sameSource || (blocked[index] && !repeatsMeasuredSpeakerRange)
+                || gapExceeded || ids != previousIDs || kind != previousKind
             result[row.id] = Presentation(speakerIDs: ids, isInherited: inherited, startsTurn: startsTurn, kind: kind)
             if !inherited {
-                anchor = ids.count == 1 && !blocked[index] && row.evidenceSpeakerIDs.allSatisfy({ $0 == ids[0] })
-                    ? (ids[0], row.localEndMs) : nil
+                let compatibleAnchor = ids.count == 1 && !blocked[index]
+                    && row.evidenceSpeakerIDs.allSatisfy({ $0 == ids[0] })
+                anchor = compatibleAnchor ? (ids[0], row.localEndMs) : nil
             }
             previous = row
             previousIDs = ids

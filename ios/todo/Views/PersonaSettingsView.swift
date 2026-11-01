@@ -9,6 +9,16 @@ struct PersonaSettingsView: View {
     @State private var languageOverrideRaw = AppLanguage.userOverride?.rawValue ?? ""
     @State private var selectedAppLanguage = AppLanguage.current
     @State private var showsAdvancedSettings = false
+    @ObservedObject private var llmService = OnDeviceLLMService.shared
+    @ObservedObject private var layaService = LayaDecisionService.shared
+
+    private var showsBetaSettings: Bool {
+        !FoundationModelsAvailability.isDeviceEligible
+            || !llmService.installedModels.isEmpty
+            || llmService.isLoading
+            || layaService.isModelInstalled
+            || layaService.isLoading
+    }
     var body: some View {
         ScrollViewReader { scrollProxy in
         AppTutorialObserving {
@@ -54,11 +64,13 @@ struct PersonaSettingsView: View {
                         .labelStyle(SettingsRowLabelStyle())
                 }
                 .accessibilityIdentifier("settings.aiRow")
-                NavigationLink(destination: BetaFeaturesSettingsView()) {
-                    Label(copy("settings.beta.title", fallback: "베타 기능"), systemImage: "flask")
-                        .labelStyle(SettingsRowLabelStyle())
+                if showsBetaSettings {
+                    NavigationLink(destination: BetaFeaturesSettingsView()) {
+                        Label(copy("settings.beta.title", fallback: "베타 기능"), systemImage: "flask")
+                            .labelStyle(SettingsRowLabelStyle())
+                    }
+                    .accessibilityIdentifier("settings.betaRow")
                 }
-                .accessibilityIdentifier("settings.betaRow")
             }
             Section {
                 NavigationLink(destination: AppInfoDetailView()) {
@@ -197,6 +209,7 @@ struct BetaFeaturesSettingsView: View {
 
     var body: some View {
         Form {
+            if !FoundationModelsAvailability.isDeviceEligible || !llmService.installedModels.isEmpty || llmService.isLoading {
             Section {
                 if !FoundationModelsAvailability.isDeviceEligible {
                     Toggle(copy("beta.localFallback.toggle", korean: "다운로드 모델로 대체", english: "Use a downloaded model as fallback"), isOn: Binding(
@@ -215,6 +228,7 @@ struct BetaFeaturesSettingsView: View {
                     Text(copy("beta.localFallback.description", korean: "Apple Intelligence 미지원 기기에서만 선택할 수 있습니다. 모델은 직접 설치해야 하며 켜거나 선택하는 것만으로 다운로드되지 않습니다. 기기에서 처리하며 배터리 사용이 늘 수 있습니다.", english: "Optional only on devices without Apple Intelligence support. Install a model manually; enabling or selecting one downloads nothing. Processing stays on device and may use more battery."))
                 }
             }
+            }
 
             if !FoundationModelsAvailability.isDeviceEligible || layaService.isModelInstalled || layaService.isLoading {
                 Section {
@@ -232,7 +246,9 @@ struct BetaFeaturesSettingsView: View {
                 } header: {
                     Text(copy("beta.laya.section", korean: "Laya · 베타", english: "Laya · Beta"))
                 } footer: {
+                    if !FoundationModelsAvailability.isDeviceEligible {
                     Text(copy("beta.laya.note", korean: "약 483 MB 모델을 직접 설치해야 하며 기기에서 처리합니다. 우선순위 품질 기준은 미달, 메일 판단 정확도는 미검증입니다. 원본을 확인하고 직접 저장하세요. 설치하지 않으면 규칙으로 처리합니다.", english: "Manually install the ~483 MB model for on-device processing. Priority quality missed its gate; email accuracy is unverified. Check the source and save explicitly. Without the model, rules apply."))
+                    }
                 }
             }
         }

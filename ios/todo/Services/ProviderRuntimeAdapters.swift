@@ -32,10 +32,9 @@ protocol FoundationModelsRuntime: Sendable {
     ) async throws -> FMBehaviorNarrativeOutput
 
 
-    func analyzeMeeting(
-        instructions: String,
-        userPrompt: String
-    ) async throws -> FMMeetingExtractionOutput
+    /// Plain prose generation for long-input tasks where a nested guided schema runs
+    /// out of output tokens. Defaults to unavailable so unrelated conformers need no code.
+    func respondText(instructions: String, userPrompt: String, maximumResponseTokens: Int) async throws -> String
 
     func correctTranscript(
         instructions: String,
@@ -105,12 +104,12 @@ struct LiveFoundationModelsRuntime: FoundationModelsRuntime {
         ).content
     }
 
-    func analyzeMeeting(
-        instructions: String,
-        userPrompt: String
-    ) async throws -> FMMeetingExtractionOutput {
+    func respondText(instructions: String, userPrompt: String, maximumResponseTokens: Int) async throws -> String {
+        // Greedy sampling: fixed input gives fixed output, so a meeting reprocesses
+        // to the same notes instead of a different set of tasks each time.
         let session = LanguageModelSession(instructions: instructions)
-        return try await session.respond(to: userPrompt, generating: FMMeetingExtractionOutput.self).content
+        return try await session.respond(to: userPrompt, options: GenerationOptions(
+            samplingMode: .greedy, maximumResponseTokens: maximumResponseTokens)).content
     }
 
     func correctTranscript(
@@ -132,6 +131,14 @@ struct LiveFoundationModelsRuntime: FoundationModelsRuntime {
     ) async throws -> FMEmailTodoDraftOutput {
         let session = LanguageModelSession(instructions: instructions)
         return try await session.respond(to: userPrompt, generating: FMEmailTodoDraftOutput.self).content
+    }
+}
+
+@available(iOS 26.0, *)
+extension FoundationModelsRuntime {
+    func respondText(instructions: String, userPrompt: String, maximumResponseTokens: Int) async throws -> String {
+        throw IntelligenceRoutingError.backendUnavailable(
+            provider: .foundationModels, reason: RuleFallbackReason.unavailable.rawValue)
     }
 }
 #endif

@@ -4,6 +4,7 @@ struct OpenAISettingsView: View {
     @ObservedObject private var connection = OpenAIConnection.shared
     @ObservedObject private var settings = SettingsStore.shared
     @ObservedObject private var regionalAvailability = OpenAIRegionalAvailability.shared
+    @ObservedObject private var usageStore = OpenAIUsageStore.shared
     @AppStorage(SettingsStore.betaOpenAIEnabledKey) private var providerEnabled = false
     @State private var connectionTask: Task<Void, Never>?
     @State private var errorMessage: String?
@@ -43,8 +44,6 @@ struct OpenAISettingsView: View {
                     }
                 ))
                 .accessibilityIdentifier("openai.enabled")
-                Text(copy("openai.settings.models", fallback: "기초 분석: gpt-6-luna\n직접 누른 고급 재요청: gpt-6.1-sol"))
-                    .font(.footnote.monospaced())
             } footer: {
                 Text(copy("openai.settings.connectionNotice", fallback: "선택 사항입니다. ChatGPT Plus·Pro 한도와 승인된 앱 권한을 사용하며, 로그인은 데이터 전송 동의가 아닙니다. 로컬 개인 프로젝트·오픈소스·승인된 앱에서 제공되며 유료·원격 호스팅 배포에는 OpenAI 승인이 필요합니다. 모델과 한도는 OpenAI가 정합니다."))
             }
@@ -140,7 +139,9 @@ struct OpenAISettingsView: View {
                 Text(copy("openai.settings.syncNotice", fallback: "앱의 iCloud 동기화와 iCloud 키체인을 켜면 같은 Apple 계정에서 연결을 복원할 수 있습니다. Apple의 동기화 완료 후 적용되며, 제공자 활성화와 전송 동의는 기기마다 설정합니다."))
             }
 
-            OpenAIModelCatalogSection(connection: connection)
+            if let active = connection.activeProfile {
+                usageSection(accountSubject: active.subject)
+            }
 
             Section {
                 Button(copy("openai.connection.test", fallback: "구독 연결 테스트")) {
@@ -200,7 +201,7 @@ struct OpenAISettingsView: View {
             guard regionalAvailability.isAvailable else { return }
             connection.refreshCredentials()
         }
-        .confirmationDialog(copy("openai.connections.deleteConfirmation", fallback: "이 기기의 모든 ChatGPT 연결 기록과 전송 동의를 지울까요?"), isPresented: $confirmDeleteConnections, titleVisibility: .visible) {
+        .confirmationDialog(copy("openai.connections.deleteConfirmation", fallback: "이 기기의 모든 ChatGPT 연결 기록, 전송 동의, 로컬 토큰 집계를 지울까요?"), isPresented: $confirmDeleteConnections, titleVisibility: .visible) {
             Button(copy("openai.connections.deleteAll", fallback: "연결 기록 모두 삭제"), role: .destructive) {
                 resetConnectionCheck()
                 connectionTask?.cancel()
@@ -237,6 +238,42 @@ struct OpenAISettingsView: View {
             Button(copy("openai.action.ok", fallback: "확인"), role: .cancel) { errorMessage = nil }
         } message: {
             Text(errorMessage ?? "")
+        }
+    }
+
+    private func usageSection(accountSubject: String) -> some View {
+        let totals = usageStore.totals(for: accountSubject)
+        return Section {
+            usageRow("openai.usage.input", fallback: "입력 토큰", value: totals?.inputTokens)
+                .accessibilityIdentifier("openai.usage.input")
+            usageRow("openai.usage.output", fallback: "출력 토큰", value: totals?.outputTokens)
+                .accessibilityIdentifier("openai.usage.output")
+            usageRow("openai.usage.cachedInput", fallback: "캐시된 입력 토큰", value: totals?.cachedInputTokens)
+                .accessibilityIdentifier("openai.usage.cachedInput")
+            if let totals {
+                usageRow("openai.usage.responses", fallback: "집계한 응답", value: totals.recordedResponses)
+                LabeledContent(copy("openai.usage.since", fallback: "집계 시작일")) {
+                    Text(totals.since, style: .date).foregroundStyle(.secondary)
+                }
+            } else {
+                Text(copy("openai.usage.unavailableNotice", fallback: "이 계정에서 사용량 정보가 포함된 완료 응답을 아직 집계하지 않았습니다."))
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
+        } header: {
+            Text(copy("openai.usage.section", fallback: "이 기기의 SIFT 토큰 사용량"))
+        } footer: {
+            Text(copy("openai.usage.notice", fallback: "현재 계정으로 이 기기의 SIFT에서 완료하고 사용량 정보를 받은 응답만 누적합니다. 캐시된 입력은 입력 토큰에 포함됩니다. 누락된 사용량은 추정하지 않으며, 계정 전체·다른 앱·월별 사용량이나 청구·남은 한도를 나타내지 않습니다. iCloud로 동기화하지 않으며, 연결 기록 모두 삭제 시 지워집니다."))
+        }
+    }
+
+    private func usageRow(_ key: String, fallback: String, value: Int?) -> some View {
+        LabeledContent(copy(key, fallback: fallback)) {
+            if let value {
+                Text(value.formatted()).monospacedDigit().foregroundStyle(.secondary)
+            } else {
+                Text(copy("openai.usage.unavailable", fallback: "사용량 정보 없음"))
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -312,84 +349,6 @@ struct OpenAISettingsView: View {
     }
 }
 
-private struct OpenAIModelCatalogSection: View {
-    @ObservedObject var connection: OpenAIConnection
-    @State private var models: [OpenAIAvailableModel] = []
-    @State private var loadedGeneration: UUID?
-    @State private var errorMessage: String?
-    @State private var isLoading = false
-    @State private var revision = 0
-
-    private struct RequestID: Hashable {
-        let generation: UUID
-        let revision: Int
-    }
-
-    var body: some View {
-        if connection.activeProfile != nil, connection.hasPlanPermission, !connection.needsLocalReauthorization {
-            Section {
-                if isLoading || loadedGeneration != connection.sessionGeneration {
-                    ProgressView(copy("openai.models.loading", "모델 목록 확인 중…"))
-                } else if let errorMessage {
-                    Text(errorMessage).font(.footnote).foregroundStyle(.orange)
-                } else if models.isEmpty {
-                    Text(copy("openai.models.empty", "표시할 수 있는 모델이 없습니다."))
-                        .font(.footnote).foregroundStyle(.secondary)
-                } else {
-                    ForEach(models) { model in
-                        VStack(alignment: .leading, spacing: AppTheme.Spacing.compact) {
-                            Text(model.displayName)
-                            if model.displayName != model.id {
-                                Text(model.id).font(.footnote.monospaced()).foregroundStyle(.secondary)
-                            }
-                        }
-                    }
-                }
-                Button(copy("openai.models.refresh", "모델 목록 새로고침")) { revision += 1 }
-                    .disabled(isLoading || connection.isSigningIn)
-                    .accessibilityIdentifier("openai.refreshModels")
-            } header: {
-                Text(copy("openai.models.section", "이 계정에서 제공하는 모델"))
-                    .accessibilityIdentifier("openai.modelCatalog")
-            } footer: {
-                VStack(alignment: .leading, spacing: AppTheme.Spacing.compact) {
-                    Text(copy("openai.models.notice", "계정의 모델 목록만 조회합니다. 추론이나 저장된 앱 데이터 전송은 없으며, 목록이 모든 API 사용 권한을 뜻하지는 않습니다."))
-                    Text(copy("openai.models.subscriptionCapabilities", AppLanguage.current == .english
-                        ? "This subscription connection supports eligible Responses API requests, not audio/video input or transcription APIs such as speaker diarization."
-                        : "이 구독 연결은 지원 대상 Responses API 요청에만 사용하며 음성·영상 입력과 화자 분리 등 전사 API는 지원하지 않습니다."))
-                }
-                .font(.footnote)
-                .fixedSize(horizontal: false, vertical: true)
-            }
-            .task(id: RequestID(generation: connection.sessionGeneration, revision: revision)) {
-                await loadModels()
-            }
-        }
-    }
-
-    private func loadModels() async {
-        let generation = connection.sessionGeneration
-        loadedGeneration = generation
-        models = []
-        errorMessage = nil
-        isLoading = true
-        defer {
-            if !Task.isCancelled, connection.sessionGeneration == generation { isLoading = false }
-        }
-        do {
-            let available = try await OpenAIProviderService().availableModels()
-            guard !Task.isCancelled, connection.sessionGeneration == generation else { return }
-            models = available
-        } catch {
-            guard !Task.isCancelled, connection.sessionGeneration == generation else { return }
-            errorMessage = OpenAIViewCopy.errorMessage(error)
-        }
-    }
-
-    private func copy(_ key: String, _ fallback: String) -> String {
-        OpenAIViewCopy.copy(key, fallback: fallback)
-    }
-}
 
 struct OpenAIConsentSection: View {
     let scope: OpenAIDataScope
@@ -423,6 +382,7 @@ struct OpenAIConsentSection: View {
         case .email: copy("openai.consent.email.title", fallback: "직접 선택한 메일의 외부 분석 허용")
         case .routines: copy("openai.consent.routines.title", fallback: "루틴·행동 기록의 외부 분석 허용")
         case .persona: copy("openai.consent.persona.title", fallback: "페르소나의 외부 분석 허용")
+        case .meetings: copy("openai.consent.meetings.title", fallback: "직접 선택한 회의의 외부 요약 허용")
         }
     }
 
@@ -436,6 +396,8 @@ struct OpenAIConsentSection: View {
             copy("openai.consent.routines.explanation", fallback: "직접 분석을 요청할 때 루틴 제목·주기·기록된 완료 시각·신뢰도 또는 결정론적 행동 통계를 OpenAI로 보냅니다. 완료 기록은 실제 활동 수행 증거가 아니며 건강 상태나 진단을 추론하지 않습니다. 확인·수정·할 일 생성은 직접 승인해야 합니다.")
         case .persona:
             copy("openai.consent.persona.explanation", fallback: "직접 분석을 요청하거나 동의한 할 일 정렬에서 저장된 페르소나 설명·선택 유형·결정론적 행동 근거를 OpenAI로 보냅니다. 결과는 미리보기이며 적용해야 저장됩니다. 메일·회의 원문은 포함하지 않습니다.")
+        case .meetings:
+            copy("openai.consent.meetings.explanation", fallback: "직접 재요약을 요청한 회의의 전사문과 요약 언어·형식·작성 지침을 OpenAI로 보냅니다. 여러 소스가 있는 회의는 소스 이름과 전사 안의 화자 표시도 포함할 수 있습니다. 음성 파일·다른 회의·개인 단어장은 보내지 않습니다. 성공하면 기존 요약과 검토용 할 일 후보를 교체하며, 실패·취소 시에는 기존 결과를 보존합니다. 자동 요약은 계속 기기 내에서 처리합니다.")
         }
     }
 

@@ -10,10 +10,17 @@ import SwiftData
 enum MeetingPostProcessor {
     enum Failure: LocalizedError, Equatable {
         case superseded
+        case summaryUnavailable
 
         var errorDescription: String? {
-            AppLanguage.localized("meeting.error.changedDuringSummary", defaultValue: "The meeting changed during processing. Please try again.",
-                                  language: .current, comment: "Meeting processing lost a race to an edit or deletion.")
+            switch self {
+            case .superseded:
+                return AppLanguage.localized("meeting.error.changedDuringSummary", defaultValue: "The meeting changed during processing. Please try again.",
+                    language: .current, comment: "Meeting processing lost a race to an edit or deletion.")
+            case .summaryUnavailable:
+                return AppLanguage.localized("meeting.error.summaryUnavailable", defaultValue: "A supported on-device model must be ready to generate meeting notes. Your existing notes have not changed.",
+                    language: .current, comment: "Meeting summary regeneration could not generate supported evidence-backed notes.")
+            }
         }
     }
 
@@ -24,6 +31,11 @@ enum MeetingPostProcessor {
         reporter: MeetingProcessingReporter? = nil
     ) throws {
         try Task.checkCancellation()
+        // Saved deletions detach backing data; even reading the ID can fault.
+        guard record.modelContext === context, !record.isDeleted else {
+            reporter?.reset()
+            throw Failure.superseded
+        }
         let meetingID = record.meetingID
         let descriptor = FetchDescriptor<MeetingRecord>(predicate: #Predicate { $0.meetingID == meetingID })
         guard let persisted = try context.fetch(descriptor).first,
@@ -42,12 +54,18 @@ enum MeetingPostProcessor {
         let automaticLanguageDetection: Bool
         let detectedLanguages: [String]
         let summaryLanguageTag: String
+        let summaryFormat: MeetingSummaryFormat
+        let summaryFormatRaw: String
+        let customInstructions: String
 
         init(record: MeetingRecord) {
             sourceLanguageTag = record.processingSourceLanguageTag
             savedSourceLanguageTag = record.languageTag
             automaticLanguageDetection = record.automaticLanguageDetection
             detectedLanguages = record.asrDetectedLanguages
+            summaryFormat = record.summaryFormat
+            summaryFormatRaw = record.summaryFormatRaw
+            customInstructions = record.summaryCustomInstructions
             // An explicit output choice wins; Automatic without one follows
             // the saved ASR evidence, never an empty/manual source placeholder.
             summaryLanguageTag = MeetingSummaryLanguages.requestedLanguageTag(
@@ -63,6 +81,8 @@ enum MeetingPostProcessor {
         guard record.languageTag == languages.savedSourceLanguageTag,
               record.automaticLanguageDetection == languages.automaticLanguageDetection,
               record.asrDetectedLanguages == languages.detectedLanguages,
+              record.summaryFormatRaw == languages.summaryFormatRaw,
+              record.summaryCustomInstructions == languages.customInstructions,
               MeetingSummaryLanguages.requestedLanguageTag(
                 sourceLanguageTag: record.processingSourceLanguageTag, savedSummaryLanguageTag: record.summaryLanguageTag
               ) == languages.summaryLanguageTag else {
@@ -96,7 +116,9 @@ enum MeetingPostProcessor {
             _ glossaryHint: String,
             _ sourceLanguageTag: String,
             _ summaryLanguageTag: String,
-            _ language: AppLanguage
+            _ language: AppLanguage,
+            _ summaryFormat: MeetingSummaryFormat,
+            _ customInstructions: String
         ) async throws -> MeetingAnalysisEngine.Outcome
         let save: (_ context: ModelContext) throws -> Void
         let learnCorrections: (_ meetingID: String, _ pairs: [MeetingRefinementEngine.CorrectionPair]) async -> Void
@@ -114,15 +136,37 @@ enum MeetingPostProcessor {
                         allowModelLoad: allowModelLoad
                     )
                 },
-                analyze: { meetingID, result, glossaryHint, sourceLanguageTag, summaryLanguageTag, language in
+                analyze: { meetingID, result, glossaryHint, sourceLanguageTag, summaryLanguageTag, language, format, custom in
                     try await MeetingAnalysisEngine().analyze(
                         meetingID: meetingID,
                         result: result,
                         glossaryHint: glossaryHint,
                         sourceLanguageTag: sourceLanguageTag,
                         summaryLanguageTag: summaryLanguageTag,
-                        language: language
+                        language: language, summaryFormat: format, customInstructions: custom
                     )
+                },
+                save: { try $0.save() },
+                learnCorrections: { _, _ in }
+            )
+        }
+
+        /// Explicit summary-only retry; never reads or sends the user vocabulary.
+        static func summary(model: MeetingSummaryModel) -> Dependencies {
+            Dependencies(
+                snapshot: { .empty },
+                refine: { _, result, _, _, _, _ in .skipped(.disabled, result: result) },
+                analyze: { meetingID, result, _, source, output, language, format, custom in
+                    if let tier = model.openAITier {
+                        return try await MeetingAnalysisEngine().analyzeWithOpenAI(
+                            meetingID: meetingID, result: result, sourceLanguageTag: source,
+                            summaryLanguageTag: output, language: language,
+                            summaryFormat: format, customInstructions: custom, tier: tier)
+                    }
+                    return try await MeetingAnalysisEngine().analyzeWithAppleIntelligence(
+                        meetingID: meetingID, result: result, sourceLanguageTag: source,
+                        summaryLanguageTag: output, language: language,
+                        summaryFormat: format, customInstructions: custom)
                 },
                 save: { try $0.save() },
                 learnCorrections: { _, _ in }
@@ -173,6 +217,7 @@ enum MeetingPostProcessor {
         context: ModelContext,
         allowRefine: Bool,
         allowModelLoad: Bool,
+        requireGeneratedSummary: Bool = false,
         reporter: MeetingProcessingReporter? = nil,
         dependencies: Dependencies? = nil
     ) async throws -> Result {
@@ -293,7 +338,8 @@ enum MeetingPostProcessor {
         try requireCurrent(record, in: context, revision: sourceRevision, data: sourceData, reporter: reporter)
         try requireLanguages(record, languages: languages, reporter: reporter)
         let analysis = try await dependencies.analyze(
-            meetingID, result, analysisHint, sourceLanguageTag, summaryLanguageTag, language
+            meetingID, result, analysisHint, sourceLanguageTag, summaryLanguageTag, language,
+            languages.summaryFormat, languages.customInstructions
         )
         do {
             try requireCurrent(record, in: context, revision: sourceRevision, data: sourceData, reporter: reporter)
@@ -301,6 +347,11 @@ enum MeetingPostProcessor {
         } catch Failure.superseded {
             reporter?.reset()
             throw Failure.superseded
+        }
+        if requireGeneratedSummary,
+           analysis.summaryKind != .generated || analysis.result.summarySections?.isEmpty != false {
+            reporter?.reset()
+            throw Failure.summaryUnavailable
         }
         let analysisLabel = analysis.engineSource?.displayName(language: .current)
             ?? AppLanguage.localized(
@@ -312,6 +363,7 @@ enum MeetingPostProcessor {
         let attributedResult = MeetingActionAttribution.applying(to: analysis.result, meetingID: meetingID,
             profiles: record.diarization?.profiles ?? [])
         do {
+            try analysis.authorizationCheck?()
             try MeetingRecordCommitter.persist(
                 record: record,
                 save: { try dependencies.save(context) },

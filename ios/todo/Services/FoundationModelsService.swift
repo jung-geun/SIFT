@@ -221,44 +221,6 @@ struct FMEmailTodoDraftOutput {
     var senderEmail: String
 }
 
-/// 회의 전사 액션 후보 (LLM 출력). sourceSegmentNumber는 프롬프트에 제시한
-/// 1-based 전사 구간 번호이며, 호출부에서 실제 segment.id로 매핑한다.
-@available(iOS 26.0, *)
-@Generable
-struct FMMeetingActionItem {
-    @Guide(description: "Meeting action title, at most 40 characters, in exactly the requested summary language tag. Preserve source evidence and proper nouns.")
-    var title: String
-
-    @Guide(description: "One or two sentence context note in exactly the requested summary language tag, or empty. Preserve source evidence and proper nouns.")
-    var notes: String
-
-    @Guide(description: "Explicit deadline as canonical UTC ISO8601 yyyy-MM-dd'T'HH:mm:ss.SSSZ, always Z, preserving the source timezone's absolute instant. Empty when absent; never infer.")
-    var dueDateISO: String
-
-    @Guide(description: "1-based transcript segment number supporting this action; must exist in the supplied list.")
-    var sourceSegmentNumber: Int
-}
-
-/// 회의 전사 분석 출력. ProviderMeetingExtraction과 1:1 대응.
-@available(iOS 26.0, *)
-@Generable
-struct FMMeetingExtractionOutput {
-    @Guide(description: "Meeting topic noun phrase, at most 15 characters, in exactly the requested summary language tag. Empty when unclear.")
-    var title: String
-
-    @Guide(description: "Objective two-to-four sentence meeting summary in exactly the requested summary language tag. Facts only; no speculation or advice.")
-    var summary: String
-
-    @Guide(description: "Only decisions explicitly agreed or confirmed in the transcript, one sentence each in exactly the requested summary language tag. Empty when absent.")
-    var decisions: [String]
-
-    @Guide(description: "Only unanswered or follow-up questions grounded in the transcript, in exactly the requested summary language tag. Empty when absent.")
-    var unresolvedQuestions: [String]
-
-    @Guide(description: "Only explicit commitments, requests, or action candidates grounded in the transcript. Empty when absent.")
-    var actions: [FMMeetingActionItem]
-}
-
 /// 전사 교정 결과의 단일 구간. 원문 구간 번호와 교정된 전체 텍스트를 담는다.
 @available(iOS 26.0, *)
 @Generable
@@ -688,9 +650,8 @@ struct FoundationModelsService {
 
     // MARK: - 회의 전사 분석
 
-    /// 회의 전사문을 온디바이스 LLM으로 분석해 요약·결정·질문·액션 후보를 만든다.
-    /// `sourceSegmentNumber`(1-based)를 실제 `segment.id`로 매핑하고, 목록 밖
-    /// 번호나 빈 제목은 버려 환각 액션이 태스크로 새지 않게 한다.
+    /// 온디바이스 최종 요약 문장의 할 일 여부를 함께 생성한다. 별도 작업명을
+    /// 만들지 않고, 근거 확인된 원래 요약 문장과 분류만 저장한다.
     func analyzeMeeting(
         meetingID: String,
         segments: [MeetingSegment],
@@ -699,6 +660,9 @@ struct FoundationModelsService {
         summaryLanguageTag: String,
         language: AppLanguage,
         transcriptCharCap: Int = 6_000,
+        summaryFormat: MeetingSummaryFormat = .minutes,
+        customInstructions: String = "",
+        sourceLanguageTags: [String]? = nil,
         supportsLocale: (Locale) -> Bool = { SystemLanguageModel.default.supportsLocale($0) }
     ) async throws -> ProviderMeetingExtraction {
         guard policy.authorizes(.foundationModels, for: .meetingAnalysis) else {
@@ -707,81 +671,40 @@ struct FoundationModelsService {
                 reason: RuleFallbackReason.providerDisabled.rawValue
             )
         }
-        try MeetingSummaryLanguages.requireSupport(
-            provider: .foundationModels,
-            sourceLanguageTag: sourceLanguageTag,
-            summaryLanguageTag: summaryLanguageTag,
-            supportsLocale: supportsLocale
-        )
-        // 컨텍스트 창(~4096토큰) 방어: 문자 예산 안에서만 구간을 전달한다.
-        var numbered = [String]()
-        var included = [MeetingSegment]()   // 1-based 번호 → segment 매핑
-        var used = 0
-        for segment in segments {
-            let line = "\(included.count + 1). \(segment.text)"
-            if used + line.count > transcriptCharCap, !included.isEmpty { break }
-            numbered.append(line)
-            included.append(segment)
-            used += line.count
+        guard sourceLanguageTags?.isEmpty != true else {
+            throw IntelligenceRoutingError.parseFailed(provider: .foundationModels, reason: "Meeting source language evidence is empty.")
         }
-        guard !included.isEmpty else {
-            return ProviderMeetingExtraction(title: "", summary: "", decisions: [], unresolvedQuestions: [], actionDrafts: [])
+        for source in sourceLanguageTags ?? [sourceLanguageTag] {
+            try MeetingSummaryLanguages.requireSupport(provider: .foundationModels,
+                sourceLanguageTag: source, summaryLanguageTag: summaryLanguageTag, supportsLocale: supportsLocale)
         }
-        let glossaryBlock = Self.glossaryBlock(glossaryHint, language: language)
-        let prompt = """
-        \(glossaryBlock)[전사 구간]
-        \(numbered.joined(separator: "\n"))
-
-        \(Prompts.MeetingFM.requestSuffix(sourceLanguageTag: sourceLanguageTag, summaryLanguageTag: summaryLanguageTag))
-        """
-        let instructions = Prompts.MeetingFM.systemInstruction(
-            sourceLanguageTag: sourceLanguageTag,
-            summaryLanguageTag: summaryLanguageTag
-        )
-        LLMDebugLogger.request(
-            provider: "AFM",
-            operation: "analyzeMeeting",
-            metadata: [
-                "meetingID: \(meetingID)",
-                "includedSegments: \(included.count)",
-                "transcriptCharCap: \(transcriptCharCap)"
-            ],
-            systemPrompt: instructions,
-            userPrompt: prompt
-        )
-        let output = try await runtime.analyzeMeeting(
-            instructions: instructions,
-            userPrompt: prompt
-        )
-        LLMDebugLogger.response(
-            provider: "AFM",
-            operation: "analyzeMeeting",
-            text: "title=\(output.title)\nsummary=\(output.summary)\ndecisions=\(output.decisions.joined(separator: " | "))\nunresolvedQuestions=\(output.unresolvedQuestions.joined(separator: " | "))\nactions=\(output.actions.map { "#\($0.sourceSegmentNumber) title=\($0.title) due=\($0.dueDateISO) notes=\($0.notes)" }.joined(separator: "\n"))"
-        )
-
-        let drafts: [ProviderActionDraftInput] = output.actions.compactMap { item in
-            let index = item.sourceSegmentNumber - 1
-            guard index >= 0, index < included.count else { return nil }
-            let title = item.title.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !title.isEmpty else { return nil }
-            let due = item.dueDateISO.trimmingCharacters(in: .whitespacesAndNewlines)
-            return ProviderActionDraftInput(
-                title: title,
-                notes: item.notes.trimmingCharacters(in: .whitespacesAndNewlines),
-                assignee: nil,
-                dueAtISO8601: due.isEmpty ? nil : due,
-                sourceSegmentIDs: [included[index].id],
-                confidence: 0.7,
-                requiresReview: true
-            )
+        // A nested guided schema ran out of output tokens before it reached `actions` on a
+        // real 47-minute meeting, which sent the whole analysis to the rule fallback.
+        // Generate plain prose per speaker-aware slice and ground it to the transcript
+        // in code instead.
+        let output = try await MeetingNarrativePipeline.run(
+            segments: segments, summaryLanguage: summaryLanguageTag,
+            summaryGuidance: summaryFormat.analysisGuidance, customInstructions: customInstructions,
+            glossaryHint: glossaryHint
+        ) { instructions, prompt, maximumTokens in
+            try Task.checkCancellation()
+            return try await runtime.respondText(instructions: instructions, userPrompt: prompt,
+                                                 maximumResponseTokens: maximumTokens)
+        }
+        guard !output.sections.isEmpty else {
+            throw IntelligenceRoutingError.parseFailed(provider: .foundationModels,
+                reason: "Meeting response contained no grounded summary.")
+        }
+        let sections = output.sections.enumerated().map { index, section in
+            ProviderMeetingSummarySection(id: "summary-\(index)",
+                title: section.title.isEmpty ? summaryFormat.displayName() : section.title,
+                items: section.items.map { ProviderMeetingSummaryItem(text: $0.text, sourceSegmentIDs: $0.segmentIDs, isTask: $0.isTask) })
         }
         return ProviderMeetingExtraction(
-            title: output.title.trimmingCharacters(in: .whitespacesAndNewlines),
-            summary: output.summary.trimmingCharacters(in: .whitespacesAndNewlines),
-            decisions: output.decisions.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty },
-            unresolvedQuestions: output.unresolvedQuestions.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty },
-            actionDrafts: drafts
-        )
+            title: output.title, summary: sections.map { $0.title + "\n" + $0.items.map(\.text).joined(separator: "\n") }.joined(separator: "\n\n"),
+            decisions: [], unresolvedQuestions: [],
+            actionDrafts: [],
+            summarySections: sections)
     }
 
     // MARK: - 회의 전사 교정 (녹음 완료·재전사 후)
@@ -825,7 +748,7 @@ struct FoundationModelsService {
             )
         }
 
-        // 문자 예산 단위로 전 구간을 배치 분할(analyzeMeeting은 앞부분만, 교정은 전체 커버).
+        // 문자 예산 단위로 전 구간을 배치 분할해 교정한다.
         var batches = [[Int]]()
         var current = [Int]()
         var used = 0

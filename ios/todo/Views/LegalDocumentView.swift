@@ -23,7 +23,7 @@ enum LegalDocument: String, CaseIterable {
 
     var effectiveDate: String {
         let (key, fallback): (String, String) = switch self {
-        case .privacy: ("legal.privacy.effectiveDate", "시행일: 2026년 7월 31일")
+        case .privacy: ("legal.privacy.effectiveDate", "시행일: 2026년 11월 9일 · 공고일: 2026년 11월 1일")
         case .terms: ("legal.terms.effectiveDate", "시행일: 2026년 10월 13일")
         }
         return AppLanguage.localized(key, defaultValue: fallback, language: .current, comment: "Effective date for this legal document.")
@@ -375,13 +375,15 @@ private struct PrivacyPolicyContent: View {
                 ("legal.privacy.ai.default", "기본값은 Apple Intelligence입니다. 지원하지 않는 기기에서는 베타 기능에서 로컬 언어 모델을 직접 다운로드하고 사용을 허용할 수 있습니다. 사용 가능한 모델이 없으면 규칙 기반으로 처리합니다."),
             ])
             LegalBullets([
-                "OpenAI 제공자 활성화·ChatGPT 계정의 구독 사용 권한·데이터별 전송 동의가 있어야 외부 분석을 실행합니다. 할 일·메일·루틴·페르소나 동의는 기기별로 분리합니다.",
                 "기초 요청은 gpt-6-luna, 메일 중요 내용·루틴·페르소나의 직접 고급 재요청은 gpt-6.1-sol입니다. 계정에 모델이 없으면 다른 모델로 몰래 대체하지 않습니다.",
-                "자동 할 일 정렬에서 메일·회의 출처 내용은 항상 기기 내 규칙으로 처리합니다. 회의 음성·전사·화자 정보는 OpenAI로 보내지 않습니다.",
                 "OpenAI 요청은 공개 Responses API에서 store:false·stream:true로 실행하며 완료된 응답만 사용합니다. 이는 제공자의 모든 서버 보관이 0일이라는 보장이 아니며 OpenAI 데이터 정책이 적용됩니다.",
             ])
             LegalLocalizedBullets(items: [
+                ("legal.privacy.ai.scopeConsent", "OpenAI 제공자 활성화·ChatGPT 계정의 구독 사용 권한·데이터별 전송 동의가 있어야 외부 분석을 실행합니다. 할 일·메일·루틴·페르소나·회의 동의는 기기별로 분리합니다."),
+                ("legal.privacy.ai.meetingRetry", "자동 할 일 정렬의 메일·회의 출처와 회의 자동 요약은 기기 내에서 처리합니다. 회의 공유 동의 후 직접 GPT 재요약을 실행할 때만 선택한 회의의 전사문·요약 설정·작성 지침을 OpenAI로 보냅니다. 여러 소스 회의에는 소스 이름·화자 표시가 포함될 수 있습니다. 원음·다른 회의·개인 단어장은 보내지 않으며 성공한 요약과 검토 후보만 교체합니다. 실패·취소 시 기존 결과를 보존합니다."),
                 ("openai.connection.testExplanation", "테스트는 저장된 앱 데이터 대신 고정 메시지만 전송하며 구독 한도를 사용합니다. 제공자 활성화나 데이터별 전송 동의 없이 실행할 수 있습니다."),
+                ("openai.usage.notice", "현재 계정으로 이 기기의 SIFT에서 완료하고 사용량 정보를 받은 응답만 누적합니다. 캐시된 입력은 입력 토큰에 포함됩니다. 누락된 사용량은 추정하지 않으며, 계정 전체·다른 앱·월별 사용량이나 청구·남은 한도를 나타내지 않습니다. iCloud로 동기화하지 않으며, 연결 기록 모두 삭제 시 지워집니다."),
+                ("openai.account.planUnavailableNotice", "OpenAI에서 확인 가능한 요금제 정보를 제공하지 않았습니다. 아래 구독 사용 권한 표시는 요금제 등급을 뜻하지 않습니다."),
             ])
 
             Text(legalCopy(
@@ -400,8 +402,10 @@ private struct PrivacyPolicyContent: View {
             Text(legalCopy("legal.privacy.audioImport.title", defaultValue: "1-7. 로컬 오디오 가져오기 (선택)"))
                 .font(.subheadline.bold())
             LegalLocalizedBullets(items: [
-                ("legal.privacy.audioImport.storage", "사용자가 선택한 오디오를 읽기 전용으로 열어 기기 내 회의 음성으로 변환·저장합니다. 원본은 바꾸지 않고 기본 파일명만 기록합니다. 전체 iCloud 저장에 명시적으로 동의하면 음성 복사본과 전사문을 같은 Apple 계정에서 저장·복원합니다. 외부 AI로 보내지는 않습니다. 회의 삭제 시 앱 안의 복사본을 삭제합니다."),
+                ("legal.privacy.audioImport.storage", "사용자가 선택한 오디오를 읽기 전용으로 열어 기기 내 회의 음성으로 변환·저장합니다. 원본은 바꾸지 않고 기본 파일명만 기록합니다. 전체 iCloud 저장 동의 후 음성 복사본과 전사문을 같은 Apple 계정에서 복원합니다. 가져오기·전사는 외부 AI로 보내지 않으며, 별도 동의와 직접 요청을 거친 GPT 재요약에는 전사문만 사용합니다. 회의 삭제 시 앱 안의 복사본을 삭제합니다."),
                 ("legal.privacy.audioImport.processing", "가져오기는 마이크 권한이나 자동 모델 다운로드를 시작하지 않습니다. 파일 제공자가 원본을 내려받는 경우 해당 제공자의 정책이 적용됩니다. 오프라인 모델 미설치나 전사 실패 후에도 가져온 음성을 보존해 재시도할 수 있습니다."),
+                ("legal.privacy.audioDownload.scope", "선택한 소스의 원본 ZIP·WAV 또는 모든 소스 원본 ZIP을 저장할 수 있습니다. Mac은 저장 창에서 사용자가 선택한 대상에만 읽기·쓰기 권한을 받으며 가져오기 원본은 수정하지 않습니다. 회의 기록 삭제는 모든 소스·전사·요약·앱 내부 원음을 함께 삭제하고 이미 등록한 할 일과 외부 다운로드 복사본은 유지합니다."),
+                ("legal.privacy.meetingDetection.scope", "Mac 회의 감지는 직접 켠 경우 허용된 앱의 식별자·이름과 입력/출력 활동 여부만 메모리에서 확인합니다. 브라우저 사이트·음성·회의 내용은 감지하지 않으며 자동으로 녹음하지 않습니다. 녹음 시작과 시스템 권한·참가자 동의는 별개입니다."),
             ])
 
             Text(legalCopy("health.title", defaultValue: "건강·운동 기록"))
@@ -546,7 +550,7 @@ private struct PrivacyPolicyContent: View {
         }
 
         LegalCard(number: 9, title: "방침 변경") {
-            LegalBody(text: "본 방침이 변경될 경우, 앱 업데이트 노트 또는 앱 내 알림을 통해 최소 7일 전에 고지합니다. 변경된 방침의 시행일 이후 앱을 계속 사용하면 변경 사항에 동의한 것으로 간주합니다.")
+            LegalLocalizedBullets(items: [("legal.privacy.changes.notice", "방침 변경은 앱 업데이트 노트 또는 앱 내 알림으로 최소 7일 전에 고지합니다. 메일·녹음 등 저장·전송 범위 확대는 기존 동의나 계속 사용으로 허용된 것으로 간주하지 않으며 각 기기의 별도 명시적 선택을 적용합니다.")])
         }
 
         LegalCard(number: 10, title: "문의") {

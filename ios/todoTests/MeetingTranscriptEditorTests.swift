@@ -374,9 +374,9 @@ struct MeetingTranscriptEditorTests {
         #expect(acceptedCount == 0)
     }
 
-    @Test("importer rejects drafts from a pre-edit revision")
+    @Test("importer rejects summary items from a pre-edit transcript")
     @MainActor
-    func staleDraftRejectedAfterEdit() throws {
+    func staleSummaryItemRejectedAfterEdit() throws {
         // cloudKitDatabase: .none — otherwise .automatic tries CloudKit mirroring
         // on a host without an iCloud account and crashes save() (serial run).
         let meetingConfig = ModelConfiguration(isStoredInMemoryOnly: true, cloudKitDatabase: .none)
@@ -385,22 +385,27 @@ struct MeetingTranscriptEditorTests {
         let todoContainer = try ModelContainer(for: AppDataContainer.appSchema, configurations: [todoConfig])
 
         let record = MeetingRecord(meetingID: meetingID)
-        let original = makeResult()
+        var original = makeResult()
+        let item = MeetingSummaryItem(id: "reviewed-summary", text: "Review the existing summary sentence.", citations: [
+            MeetingSummaryCitation(trackID: meetingID, segmentID: "seg-2", transcriptRevision: original.transcriptRevision)
+        ], isTask: true)
+        original.summarySections = [MeetingSummarySection(id: "actions", title: "Actions", items: [item])]
+        original.summarySourceFingerprint = MeetingSummaryEvidence.sourceFingerprint(original)
         try record.update(result: original, status: .ready)
         meetingContainer.mainContext.insert(record)
         try meetingContainer.mainContext.save()
 
-        let staleRevision = record.transcriptRevision
         let edited = try MeetingTranscriptEditor.editText(
             result: original, meetingID: meetingID, segmentID: "seg-2", text: "수정된 내용"
         )
         try record.update(result: edited, status: .ready)
         try meetingContainer.mainContext.save()
 
-        #expect(throws: MeetingTodoImportError.staleOrUnknownDraft) {
-            try MeetingTodoImporter.confirm(
-                draftID: "draft-1",
-                transcriptRevision: staleRevision,
+        #expect(throws: MeetingTodoImportError.staleOrUnknownSummaryItem) {
+            try MeetingTodoImporter.confirmSummaryItem(
+                sectionID: "actions",
+                itemID: item.id,
+                reviewedSourceRef: MeetingTodoImporter.summarySourceRef(item: item, meetingID: record.meetingID),
                 meeting: record,
                 todoContext: todoContainer.mainContext,
                 meetingContext: meetingContainer.mainContext

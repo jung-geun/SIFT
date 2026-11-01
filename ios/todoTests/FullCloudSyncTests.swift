@@ -8,6 +8,363 @@ import Testing
 @Suite("Full iCloud data reconciliation", .serialized)
 @MainActor
 struct FullCloudSyncTests {
+    @Test("Additive migration uses the persisted legacy bit, not its colliding getter or absent bytes")
+    func additiveLegacyStoreMigrationUsesSQLDeletionProof() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("SIFTLegacyCloud-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let url = root.appendingPathComponent("cloud.store")
+        let deletedID = UUID()
+        let liveData = Data("preserved legacy live bytes".utf8)
+        try autoreleasepool {
+            let schema = Schema([LegacyFullCloudSchema.CloudDataRevision.self])
+            let old = try ModelContainer(for: schema, configurations: [ModelConfiguration(schema: schema,
+                url: url, cloudKitDatabase: .none)])
+            let context = ModelContext(old)
+            let deletion = LegacyFullCloudSchema.CloudDataRevision(key: "Todo/a-deleted", payload: nil)
+            deletion.revisionID = deletedID
+            context.insert(deletion)
+            context.insert(LegacyFullCloudSchema.CloudDataRevision(key: "Todo/b-live", payload: liveData))
+            let unproven = LegacyFullCloudSchema.CloudDataRevision(key: "Todo/z-unproven", payload: nil)
+            unproven.isDeleted = false
+            context.insert(unproven)
+            try context.save()
+        }
+        let schema = Schema([CloudDataRevision.self])
+        let store = try ModelContainer(for: schema, configurations: [ModelConfiguration(schema: schema,
+            url: url, cloudKitDatabase: .none)])
+        let context = ModelContext(store)
+        let rows = try context.fetch(FetchDescriptor<CloudDataRevision>())
+        let deletion = try #require(rows.first { $0.revisionID == deletedID })
+        #expect(!deletion.isTombstone)
+        let legacyIDs = try CloudDataRevision.persistedLegacyTombstoneIDs(in: context)
+        #expect(legacyIDs == [deletion.persistentModelID])
+        let engine = try FullCloudSyncEngine(cloud: context, installationID: UUID().uuidString,
+            journalURL: root.appendingPathComponent("new-device-journal.json"))
+        var local = ["Todo/a-deleted": Data("stale local value".utf8), "Todo/b-live": liveData,
+            "Todo/z-unproven": Data("protected unproven value".utf8)]
+        var enqueues = 0
+        await #expect(throws: FullCloudSyncError.revisionValidation(.missingPayload)) {
+            try await engine.reconcile(digests: local.mapValues(CloudFileStore.digest),
+                didEnqueue: { enqueues += 1 }, load: { local[$0] }, apply: { local[$0] = $1 })
+        }
+        #expect(enqueues == 1)
+        #expect(local["Todo/a-deleted"] == nil)
+        #expect(local["Todo/b-live"] == liveData)
+        #expect(local["Todo/z-unproven"] == Data("protected unproven value".utf8))
+        let saved = try ModelContext(store).fetch(FetchDescriptor<CloudDataRevision>())
+        #expect(saved.count == 3)
+        #expect(saved.first { $0.revisionID == deletedID }?.isTombstone == true)
+        #expect(saved.first { $0.itemKey == "Todo/z-unproven" }?.isTombstone == false)
+        #expect(saved.first { $0.itemKey == "Todo/b-live" }?.payload == liveData)
+    }
+
+    @Test("Durable deletion checkpoints repair the same legacy revision without manufacturing a newer one",
+        arguments: ["items", "pendingPublications", "pendingApplies"])
+    func provenLegacyTombstoneKeepsItsIdentity(proofSource: String) async throws {
+        let fixture = try CloudSyncFixture()
+        defer { fixture.remove() }
+        try FileManager.default.createDirectory(at: fixture.root, withIntermediateDirectories: true)
+        let key = "Todo/synthetic-legacy"
+        let installation = UUID().uuidString
+        let context = ModelContext(fixture.cloud)
+        let legacy = CloudDataRevision(itemKey: key, clock: 5, installationID: installation, payload: nil)
+        legacy.isTombstone = false
+        context.insert(legacy)
+        try context.save()
+        let proof = CloudSyncCheckpoint(digest: nil, revisionID: legacy.revisionID,
+            logicalClock: 5, installationID: installation)
+        var journal = CloudSyncJournal()
+        switch proofSource {
+        case "items": journal.items[key] = proof
+        case "pendingPublications": journal.pendingPublications[key] = proof
+        default: journal.pendingApplies[key] = CloudSyncPendingApply(sourceDigest: nil, target: proof)
+        }
+        let url = fixture.root.appendingPathComponent("trusted.json")
+        try JSONEncoder().encode(journal).write(to: url, options: .atomic)
+        let engine = try FullCloudSyncEngine(cloud: ModelContext(fixture.cloud), installationID: installation, journalURL: url)
+        var enqueues = 0
+        try await engine.reconcile(digests: [:], didEnqueue: { enqueues += 1 }, load: { _ in nil },
+            apply: { _, payload in #expect(payload == nil) })
+        #expect(enqueues == 1)
+        #expect(engine.didEnqueueChanges)
+        #expect(engine.journal.items[key] == proof)
+        let saved = try ModelContext(fixture.cloud).fetch(FetchDescriptor<CloudDataRevision>())
+        #expect(saved.count == 1)
+        #expect(saved.first?.revisionID == proof.revisionID)
+        #expect(saved.first?.logicalClock == proof.logicalClock)
+        #expect(saved.first?.installationID == proof.installationID)
+        #expect(saved.first?.isTombstone == true)
+        #expect(saved.first?.payload == nil)
+
+        let joining = try fixture.peer("joining")
+        joining.values[key] = Data("stale local content".utf8)
+        try await joining.reconcile()
+        #expect(joining.values[key] == nil)
+        #expect(!joining.engine.didEnqueueChanges)
+        #expect(joining.engine.journal.items[key] == proof)
+    }
+
+    @Test("Persisted tombstone state survives save and reopen independently from object lifecycle state")
+    func diskTombstoneFlagSurvivesSaveAndReopen() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("SIFTTombstone-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let url = root.appendingPathComponent("cloud.store")
+        let schema = Schema([CloudDataRevision.self])
+        func container() throws -> ModelContainer {
+            try ModelContainer(for: schema, configurations: [ModelConfiguration(schema: schema,
+                url: url, cloudKitDatabase: .none)])
+        }
+        let id = UUID()
+        try autoreleasepool {
+            let store = try container()
+            let context = ModelContext(store)
+            let tombstone = CloudDataRevision(itemKey: "Todo/deleted", clock: 1,
+                installationID: UUID().uuidString, payload: nil)
+            tombstone.revisionID = id
+            #expect(tombstone.isTombstone)
+            context.insert(tombstone)
+            try context.save()
+            #expect(tombstone.isTombstone)
+        }
+        let reopened = try container()
+        let rows = try ModelContext(reopened).fetch(FetchDescriptor<CloudDataRevision>())
+        let tombstone = try #require(rows.first)
+        #expect(tombstone.revisionID == id)
+        #expect(tombstone.isTombstone)
+        #expect(tombstone.payload == nil)
+    }
+
+    @Test("Exact durable deletion proof repairs only its flag and preserves a newer pending live write")
+    func provenLegacyTombstonePreservesNewerPublication() async throws {
+        let fixture = try CloudSyncFixture()
+        defer { fixture.remove() }
+        try FileManager.default.createDirectory(at: fixture.root, withIntermediateDirectories: true)
+        let key = "permission-history/synthetic-choice"
+        let installation = UUID().uuidString
+        let context = ModelContext(fixture.cloud)
+        let legacy = CloudDataRevision(itemKey: key, clock: 5, installationID: installation, payload: nil)
+        legacy.isTombstone = false
+        context.insert(legacy)
+        try context.save()
+        let originalID = legacy.revisionID
+        let deletion = CloudSyncCheckpoint(digest: nil, revisionID: originalID,
+            logicalClock: 5, installationID: installation)
+        let live = Data("newer explicit choice".utf8)
+        let publication = CloudSyncCheckpoint(digest: CloudFileStore.digest(live), revisionID: UUID(),
+            logicalClock: 6, installationID: installation)
+        var journal = CloudSyncJournal()
+        journal.items[key] = deletion
+        journal.pendingPublications[key] = publication
+        let url = fixture.root.appendingPathComponent("trusted.json")
+        try JSONEncoder().encode(journal).write(to: url, options: .atomic)
+        let engine = try FullCloudSyncEngine(cloud: ModelContext(fixture.cloud), installationID: installation, journalURL: url)
+        var enqueues = 0
+        try await engine.reconcile(digests: [key: CloudFileStore.digest(live)], didEnqueue: { enqueues += 1 },
+            load: { _ in live }, apply: { _, _ in Issue.record("Repair cannot delete the newer local choice") })
+        #expect(enqueues == 2) // one flag repair, one existing intended publication
+        #expect(engine.didEnqueueChanges)
+        #expect(engine.journal.items[key] == publication)
+        #expect(engine.journal.pendingPublications[key] == nil)
+        let saved = try ModelContext(fixture.cloud).fetch(FetchDescriptor<CloudDataRevision>())
+        #expect(saved.count == 1)
+        #expect(saved.first?.revisionID == publication.revisionID)
+        #expect(saved.first?.logicalClock == publication.logicalClock)
+        #expect(saved.first?.payload == live)
+        #expect(saved.first?.isTombstone == false)
+    }
+
+    @Test("Legacy tombstone repair requires exact durable identity and absent bytes",
+        arguments: ["unproven", "revision", "clock", "installation", "digest", "payload", "revoked", "held"])
+    func unprovenLegacyTombstoneIsNotRepaired(mismatch: String) async throws {
+        let fixture = try CloudSyncFixture()
+        defer { fixture.remove() }
+        try FileManager.default.createDirectory(at: fixture.root, withIntermediateDirectories: true)
+        let key = "Todo/synthetic-legacy"
+        let installation = UUID().uuidString
+        let context = ModelContext(fixture.cloud)
+        let legacy = CloudDataRevision(itemKey: key, clock: 5, installationID: installation, payload: nil)
+        legacy.isTombstone = false
+        if mismatch == "payload" { legacy.payload = Data("present protected bytes".utf8) }
+        context.insert(legacy)
+        try context.save()
+        var proof = CloudSyncCheckpoint(digest: nil, revisionID: legacy.revisionID,
+            logicalClock: 5, installationID: installation)
+        switch mismatch {
+        case "revision": proof.revisionID = UUID()
+        case "clock": proof.logicalClock = 4
+        case "installation": proof.installationID = UUID().uuidString
+        case "digest": proof.digest = "non-deletion fingerprint"
+        default: break
+        }
+        var journal = CloudSyncJournal()
+        if mismatch != "unproven" { journal.items[key] = proof }
+        let url = fixture.root.appendingPathComponent("untrusted.json")
+        try JSONEncoder().encode(journal).write(to: url, options: .atomic)
+        let engine = try FullCloudSyncEngine(cloud: ModelContext(fixture.cloud), installationID: installation, journalURL: url)
+        let operation = {
+            try await engine.reconcile(digests: [:], temporarilyUnavailable: mismatch == "held" ? [key] : [],
+                isValid: { mismatch != "revoked" }, load: { _ in nil },
+                apply: { _, _ in Issue.record("Unproven repair cannot delete local content") })
+        }
+        if mismatch == "held" {
+            _ = try await operation()
+        } else if mismatch == "revoked" {
+            await #expect(throws: CancellationError.self) { try await operation() }
+        } else {
+            await #expect(throws: FullCloudSyncError.self) { try await operation() }
+        }
+        #expect(!engine.didEnqueueChanges)
+        let saved = try ModelContext(fixture.cloud).fetch(FetchDescriptor<CloudDataRevision>())
+        #expect(saved.count == 1)
+        #expect(saved.first?.revisionID == legacy.revisionID)
+        #expect(saved.first?.isTombstone == false)
+        #expect(saved.first?.contentDigest == "")
+        #expect(saved.first?.payload == legacy.payload)
+    }
+
+    @Test("Reader validation identifies the exact invariant without disclosing cloud content",
+        arguments: CloudRevisionValidation.Failure.allCases)
+    func preciseRevisionValidationFailure(reason: CloudRevisionValidation.Failure) throws {
+        let original = Data("private valid payload".utf8)
+        let installation = UUID().uuidString
+        let expected = CloudSyncCheckpoint(digest: CloudFileStore.digest(original), revisionID: UUID(),
+            logicalClock: 5, installationID: installation)
+        var key = "private/key"
+        var clock: Int64 = 5
+        var writer = installation
+        var deleted = false
+        var digest = try #require(expected.digest)
+        var payload: Data? = original
+        switch reason {
+        case .itemKeyMismatch: key = "different/private/key"
+        case .logicalClockMismatch: clock = 4
+        case .installationMismatch: writer = UUID().uuidString
+        case .missingPayload: payload = nil
+        case .unexpectedDeletedPayload: deleted = true
+        case .digestMetadataMismatch: digest = "mismatched metadata"
+        case .payloadDigestMismatch: payload = Data("private changed payload".utf8)
+        }
+        #expect(throws: FullCloudSyncError.revisionValidation(reason)) {
+            try CloudRevisionValidation.validate(key: key, clock: clock, installation: writer,
+                isDeleted: deleted, contentDigest: digest, payload: payload,
+                expectedKey: "private/key", expected: expected)
+        }
+        let error = FullCloudSyncError.revisionValidation(reason) as NSError
+        #expect(error.domain == "SIFT.FullCloudSync")
+        #expect(error.code == 100 + reason.rawValue)
+        #expect(error.userInfo.isEmpty)
+        #expect(!error.localizedDescription.contains("private"))
+    }
+
+    @Test("Valid payload, empty data and deletion retain their distinct meanings")
+    func validRevisionPayloadAndDeletion() throws {
+        let installation = UUID().uuidString
+        let payloads: [Data?] = [Data("valid".utf8), Data(), nil]
+        for payload in payloads {
+            let expected = CloudSyncCheckpoint(digest: payload.map(CloudFileStore.digest), revisionID: UUID(),
+                logicalClock: 5, installationID: installation)
+            try CloudRevisionValidation.validate(key: "Todo/synthetic", clock: 5, installation: installation,
+                isDeleted: payload == nil, contentDigest: expected.digest ?? "", payload: payload,
+                expectedKey: "Todo/synthetic", expected: expected)
+        }
+    }
+
+    @Test("A prepared store and deferred content cannot erase a failed content reconciliation")
+    func deferredContentRetainsFailure() {
+        var state = FullCloudSyncFailureState()
+        state.record(FullCloudSyncError.invalidRevision, channel: .reconciliation)
+        let original = state.failures[.reconciliation]
+        state.prepared()
+        state.reconciledContent(completed: false)
+        #expect(state.failures[.reconciliation] == original)
+        state.reconciledContent(completed: true)
+        #expect(state.failures.isEmpty)
+    }
+
+    @Test("A successful app-data export cannot resolve an independent import or reconciliation failure")
+    func exportRetainsIndependentFailures() {
+        var state = FullCloudSyncFailureState()
+        let failure = NSError(domain: "SyntheticCloud", code: 17)
+        state.record(failure, channel: .transport(.appData, .export))
+        state.record(failure, channel: .transport(.appData, .import))
+        state.record(FullCloudSyncError.invalidRevision, channel: .reconciliation)
+        state.recoveredTransport(store: .appData, event: .export)
+        #expect(state.failures[.transport(.appData, .export)] == nil)
+        #expect(state.failures[.transport(.appData, .import)] != nil)
+        #expect(state.failures[.reconciliation] != nil)
+        state.reconciledContent(completed: true)
+        #expect(state.failures.count == 1)
+        state.recoveredTransport(store: .appData, event: .import)
+        #expect(state.failures.isEmpty)
+    }
+
+    @Test("Transport recovery is specific to both the store and event type")
+    func transportRecoveryIsStoreAndEventSpecific() {
+        var state = FullCloudSyncFailureState()
+        let failure = NSError(domain: "SyntheticCloud", code: 23)
+        state.record(failure, channel: .transport(.legacy, .import))
+        state.record(failure, channel: .transport(.appData, .setup))
+        state.recoveredTransport(store: .appData, event: .import)
+        state.recoveredTransport(store: .appData, event: .export)
+        #expect(state.failures.count == 2)
+        state.recoveredTransport(store: .legacy, event: .import)
+        #expect(state.failures.count == 1)
+        #expect(state.failures[.transport(.appData, .setup)] != nil)
+        state.recoveredTransport(store: .appData, event: .setup)
+        #expect(state.failures.isEmpty)
+    }
+
+    @Test("Preparation recovery does not hide content or transport failures")
+    func preparationRecoveryIsIndependent() {
+        var state = FullCloudSyncFailureState()
+        let failure = NSError(domain: "SyntheticCloud", code: 29)
+        state.record(failure, channel: .preparation)
+        state.record(failure, channel: .reconciliation)
+        state.record(failure, channel: .transport(.appData, .export))
+        state.prepared()
+        #expect(state.failures[.preparation] == nil)
+        #expect(state.failures.count == 2)
+    }
+
+    @Test("Cancellation preserves the real error and failure details omit private descriptions")
+    func cancellationPreservesSafeFailureDetails() {
+        var state = FullCloudSyncFailureState()
+        state.record(NSError(domain: "SyntheticCloud", code: 31,
+            userInfo: [NSLocalizedDescriptionKey: "private record and credential text"]), channel: .reconciliation)
+        let original = state.failures[.reconciliation]
+        state.record(CancellationError(), channel: .reconciliation)
+        #expect(state.failures[.reconciliation] == original)
+        #expect(original?.domain == "SyntheticCloud")
+        #expect(original?.code == 31)
+        #expect(original?.isIdentityConflict == false)
+        #expect(!String(describing: state).contains("private record and credential text"))
+    }
+
+    @Test("A new account lifecycle starts without failures from the previous account")
+    func newAccountFailureStateIsEmpty() {
+        var state = FullCloudSyncFailureState()
+        state.record(FullCloudSyncError.invalidRevision, channel: .reconciliation)
+        state.record(NSError(domain: "SyntheticCloud", code: 37), channel: .transport(.appData, .export))
+        state = FullCloudSyncFailureState()
+        #expect(state.failures.isEmpty)
+    }
+
+    @Test("An identity conflict cannot overwrite an independent ordinary error")
+    func conflictAndOrdinaryFailureRemainIndependent() {
+        var state = FullCloudSyncFailureState()
+        state.record(NSError(domain: "SyntheticCloud", code: 41), channel: .transport(.appData, .import))
+        state.record(CloudModelCodec.CodecError.duplicateIdentity("private-key"), channel: .reconciliation)
+        #expect(state.failures[.reconciliation]?.isIdentityConflict == true)
+        #expect(state.failures.values.contains(where: { !$0.isIdentityConflict }))
+        state.recoveredTransport(store: .appData, event: .import)
+        #expect(state.failures.count == 1)
+        let allConflicts = state.failures.values.allSatisfy(\.isIdentityConflict)
+        #expect(allConflicts)
+        #expect(!String(describing: state).contains("private-key"))
+    }
+
     @Test("Cancelled device approval stops remaining connection families and all automatic retries stay quiet")
     func credentialCancellationStopsFamilies() async throws {
         var reads = [(String, Bool)]()
@@ -100,6 +457,78 @@ struct FullCloudSyncTests {
             #expect(connections.pendingFamilies.isEmpty)
             #expect(contexts == [true, false])
         }
+    }
+
+    @Test("Quiet refresh preserves the last outcome instead of restarting visible progress", arguments: [false, true])
+    func quietRefreshPreservesActionableOutcome(blocked: Bool) async {
+        var suspend = false
+        var entered: CheckedContinuation<Void, Never>?
+        var release: CheckedContinuation<Void, Never>?
+        let connections = FullCloudConnectionSync(operations: [
+            .init(family: .gmailIMAP) {
+                if blocked { throw KeychainStoreError.authenticationRequired }
+            },
+            .init(family: .vocabulary) {
+                if suspend {
+                    await withCheckedContinuation { continuation in
+                        release = continuation
+                        entered?.resume(); entered = nil
+                    }
+                }
+            }
+        ])
+        #expect(await connections.reconcile() == nil)
+        let outcome = connections.state
+        let completed = connections.completedFamilyCount
+        suspend = true
+        let refresh = Task { await connections.reconcile() }
+        await withCheckedContinuation { continuation in
+            entered = continuation
+            if release != nil { entered?.resume(); entered = nil }
+        }
+        #expect(connections.state == outcome)
+        #expect(connections.state != .checking)
+        #expect(connections.currentFamily == nil)
+        #expect(connections.completedFamilyCount == completed)
+        release?.resume()
+        _ = await refresh.value
+        #expect(connections.state == (blocked ? .awaitingApproval : .prepared))
+        #expect(connections.blockedFamilies == (blocked ? [.gmailIMAP] : []))
+    }
+
+    @Test("Approval tapped during a quiet pass starts once after that pass without overlapping")
+    func approvalDuringQuietRefreshIsNotDropped() async {
+        var calls = 0
+        var entered: CheckedContinuation<Void, Never>?
+        var release: CheckedContinuation<Void, Never>?
+        var authorized: CheckedContinuation<Void, Never>?
+        let connections = FullCloudConnectionSync(operations: [.init(family: .google) {
+            calls += 1
+            if calls == 1 {
+                await withCheckedContinuation { continuation in
+                    release = continuation
+                    entered?.resume(); entered = nil
+                }
+            } else { authorized?.resume(); authorized = nil }
+        }])
+        let refresh = Task { await connections.reconcile() }
+        await withCheckedContinuation { continuation in
+            entered = continuation
+            if release != nil { entered?.resume(); entered = nil }
+        }
+        connections.authorize()
+        connections.authorize()
+        #expect(calls == 1)
+        await withCheckedContinuation { continuation in
+            authorized = continuation
+            release?.resume()
+        }
+        _ = await refresh.value
+        // Await the authorization loop's final actor turn, not just its operation.
+        while connections.isAuthorizing { await Task.yield() }
+        #expect(calls == 2)
+        #expect(connections.state == .prepared)
+        #expect(connections.pendingFamilies.isEmpty)
     }
 
     @Test("Duplicate authorize taps and foreground-style passes cannot overlap an in-flight attempt")
@@ -227,7 +656,7 @@ struct FullCloudSyncTests {
         try await fresh.reconcile()
         #expect(fresh.values[key] == nil)
         let remote = try ModelContext(fixture.cloud).fetch(FetchDescriptor<CloudDataRevision>())
-        #expect(remote.filter { $0.itemKey == key }.allSatisfy { $0.isDeleted && $0.payload == nil })
+        #expect(remote.filter { $0.itemKey == key }.allSatisfy { $0.isTombstone && $0.payload == nil })
         #expect(remote.filter { $0.itemKey == key }.count == 1)
     }
 
@@ -268,9 +697,174 @@ struct FullCloudSyncTests {
         context.insert(record)
         try context.save()
         peer.failLoad = false
-        await #expect(throws: FullCloudSyncError.self) { try await peer.reconcile() }
+        await #expect(throws: FullCloudSyncError.revisionValidation(.payloadDigestMismatch)) {
+            try await peer.reconcile()
+        }
         #expect(peer.values[key] == Data("changed".utf8))
         #expect(peer.engine.journal.items[key]?.revisionID != record.revisionID)
+        #expect(try context.fetch(FetchDescriptor<CloudDataRevision>()).contains { $0.revisionID == record.revisionID })
+        #expect(record.payload == Data("original".utf8))
+    }
+
+    @Test("A non-deleted revision with missing bytes is held intact and retries the same revision after delivery")
+    func missingPayloadIsRetainedUntilSameRevisionIsReadable() async throws {
+        let fixture = try CloudSyncFixture()
+        defer { fixture.remove() }
+        let peer = try fixture.peer("receiver")
+        let key = "Todo/held-revision"
+        let retained = Data("retained local value".utf8)
+        let incoming = Data("validated incoming value".utf8)
+        peer.values[key] = retained
+        let context = ModelContext(fixture.cloud)
+        let revision = CloudDataRevision(itemKey: key, clock: 1,
+            installationID: UUID().uuidString, payload: nil)
+        revision.isTombstone = false
+        revision.contentDigest = CloudFileStore.digest(incoming)
+        context.insert(revision)
+        try context.save()
+        let id = revision.revisionID
+
+        await #expect(throws: FullCloudSyncError.revisionValidation(.missingPayload)) {
+            try await peer.reconcile()
+        }
+        #expect(peer.values[key] == retained)
+        #expect(peer.engine.journal.items[key] == nil)
+        #expect(peer.engine.journal.pendingApplies[key]?.target.revisionID == id)
+        #expect(!peer.engine.didEnqueueChanges)
+        #expect(try context.fetchCount(FetchDescriptor<CloudDataRevision>()) == 1)
+        #expect(revision.payload == nil)
+
+        // Simulate later delivery to the same immutable cloud revision. Never
+        // synthesize replacement bytes from the retained local value.
+        revision.payload = incoming
+        try context.save()
+        try await peer.reconcile()
+        #expect(peer.values[key] == incoming)
+        #expect(peer.engine.journal.items[key]?.revisionID == id)
+        #expect(peer.engine.journal.pendingApplies[key] == nil)
+        #expect(!peer.engine.didEnqueueChanges)
+        #expect(try context.fetchCount(FetchDescriptor<CloudDataRevision>()) == 1)
+    }
+
+    @Test("A missing early asset preserves both revisions while independent later restores and writes progress")
+    func missingPayloadDoesNotStarveIndependentKeys() async throws {
+        let fixture = try CloudSyncFixture()
+        defer { fixture.remove() }
+        let peer = try fixture.peer("receiver")
+        let heldKey = "Todo/a-held"
+        let restoreKey = "Todo/y-restore"
+        let publishKey = "Todo/z-publish"
+        let retained = Data("retained original".utf8)
+        let delivered = Data("eventually delivered".utf8)
+        let restored = Data("independent remote".utf8)
+        let published = Data("independent local".utf8)
+        peer.values[heldKey] = retained
+        peer.values[publishKey] = published
+        let context = ModelContext(fixture.cloud)
+        let old = CloudDataRevision(itemKey: heldKey, clock: 1,
+            installationID: UUID().uuidString, payload: retained)
+        let missing = CloudDataRevision(itemKey: heldKey, clock: 2,
+            installationID: UUID().uuidString, payload: nil)
+        missing.isTombstone = false
+        missing.contentDigest = CloudFileStore.digest(delivered)
+        let independent = CloudDataRevision(itemKey: restoreKey, clock: 1,
+            installationID: UUID().uuidString, payload: restored)
+        context.insert(old); context.insert(missing); context.insert(independent)
+        try context.save()
+
+        await #expect(throws: FullCloudSyncError.revisionValidation(.missingPayload)) {
+            try await peer.reconcile()
+        }
+        #expect(peer.values[heldKey] == retained)
+        #expect(peer.values[restoreKey] == restored)
+        #expect(peer.engine.journal.items[heldKey] == nil)
+        #expect(peer.engine.journal.pendingApplies[heldKey]?.target.revisionID == missing.revisionID)
+        #expect(peer.engine.journal.items[restoreKey]?.revisionID == independent.revisionID)
+        #expect(peer.engine.journal.items[publishKey]?.digest == CloudFileStore.digest(published))
+        #expect(peer.engine.didEnqueueChanges)
+        let saved = try ModelContext(fixture.cloud).fetch(FetchDescriptor<CloudDataRevision>())
+        #expect(saved.filter { $0.itemKey == heldKey }.count == 2)
+        #expect(saved.contains { $0.revisionID == old.revisionID && $0.payload == retained })
+        #expect(saved.contains { $0.revisionID == missing.revisionID && $0.payload == nil && !$0.isTombstone })
+        #expect(saved.contains { $0.itemKey == publishKey && $0.payload == published })
+
+        // A restart still reports the held asset instead of false completion,
+        // but does not republish already committed unrelated content.
+        let restarted = try fixture.peer("receiver", installation: peer.installation)
+        restarted.values = peer.values
+        await #expect(throws: FullCloudSyncError.revisionValidation(.missingPayload)) {
+            try await restarted.reconcile()
+        }
+        #expect(!restarted.engine.didEnqueueChanges)
+        #expect(restarted.values[heldKey] == retained)
+        #expect(try ModelContext(fixture.cloud).fetchCount(FetchDescriptor<CloudDataRevision>()) == saved.count)
+    }
+
+    @Test("Missing bytes cannot acknowledge pending publication metadata or overwrite its suspect revision")
+    func missingPayloadRetainsPublicationIntentAndAllowsOtherWrites() async throws {
+        let fixture = try CloudSyncFixture()
+        defer { fixture.remove() }
+        let peer = try fixture.peer("publisher")
+        let heldKey = "Todo/a-held-publication"
+        let data = Data("original pending source".utf8)
+        peer.values[heldKey] = data
+        peer.failLoad = true
+        await #expect(throws: CloudFixtureError.self) { try await peer.reconcile() }
+        let pending = try #require(peer.engine.journal.pendingPublications[heldKey])
+        let context = ModelContext(fixture.cloud)
+        let missing = CloudDataRevision(itemKey: heldKey, clock: pending.logicalClock,
+            installationID: pending.installationID, payload: nil)
+        missing.revisionID = pending.revisionID
+        missing.isTombstone = false
+        missing.contentDigest = try #require(pending.digest)
+        context.insert(missing)
+        try context.save()
+        peer.failLoad = false
+        let otherKey = "Todo/z-independent"
+        let otherData = Data("independent pending source".utf8)
+        peer.values[otherKey] = otherData
+
+        await #expect(throws: FullCloudSyncError.revisionValidation(.missingPayload)) {
+            try await peer.reconcile()
+        }
+        #expect(peer.values[heldKey] == data)
+        #expect(peer.engine.journal.items[heldKey] == nil)
+        #expect(peer.engine.journal.pendingPublications[heldKey] == pending)
+        #expect(peer.engine.journal.items[otherKey]?.digest == CloudFileStore.digest(otherData))
+        let saved = try ModelContext(fixture.cloud).fetch(FetchDescriptor<CloudDataRevision>())
+        #expect(saved.filter { $0.itemKey == heldKey }.count == 1)
+        #expect(saved.contains { $0.revisionID == pending.revisionID && $0.payload == nil && !$0.isTombstone })
+        #expect(saved.contains { $0.itemKey == otherKey && $0.payload == otherData })
+
+        missing.payload = data
+        try context.save()
+        try await peer.reconcile()
+        #expect(peer.engine.journal.pendingPublications[heldKey] == nil)
+        #expect(peer.engine.journal.items[heldKey] == pending)
+        #expect(!peer.engine.didEnqueueChanges)
+    }
+
+    @Test("Missing preference bytes cannot let dependent later bodies use an unvalidated representation")
+    func missingPreferencePayloadStopsDependentBodies() async throws {
+        let fixture = try CloudSyncFixture()
+        defer { fixture.remove() }
+        let peer = try fixture.peer("receiver")
+        let context = ModelContext(fixture.cloud)
+        let missing = CloudDataRevision(itemKey: "preference/synthetic-marker", clock: 1,
+            installationID: UUID().uuidString, payload: nil)
+        missing.isTombstone = false
+        missing.contentDigest = CloudFileStore.digest(Data("marker".utf8))
+        let body = CloudDataRevision(itemKey: "EmailMessage/dependent", clock: 1,
+            installationID: UUID().uuidString, payload: Data("dependent body".utf8))
+        context.insert(missing); context.insert(body)
+        try context.save()
+        await #expect(throws: FullCloudSyncError.revisionValidation(.missingPayload)) {
+            try await peer.reconcile()
+        }
+        #expect(peer.values.isEmpty)
+        #expect(peer.engine.journal.items.isEmpty)
+        #expect(!peer.engine.didEnqueueChanges)
+        #expect(try context.fetchCount(FetchDescriptor<CloudDataRevision>()) == 2)
     }
 
     @Test("Unchanged data is not uploaded again and restart resumes its durable baseline")
@@ -380,7 +974,7 @@ struct FullCloudSyncTests {
         }
         sourceDefaults.set(GmailIMAPContentMigration.currentVersion, forKey: "pieroot.todo.gmailIMAP.contentVersion." + account)
         let source = try fixture.peer("source")
-        source.values = try CloudModelCodec.capture(app: sourceApp, email: sourceEmail, meeting: sourceMeeting)
+        source.values = try CloudModelCodec.capture(app: sourceApp, email: sourceEmail, meeting: sourceMeeting).validatedRecords()
         source.values.merge(try CloudPreferenceStore.capture(defaults: sourceDefaults)) { _, value in value }
         try await source.reconcile()
         let receiver = try fixture.peer("receiver")
@@ -520,4 +1114,27 @@ private struct CloudSyncFixture {
     }
 
     func remove() { try? FileManager.default.removeItem(at: root) }
+}
+
+/// Historical schema exists only to exercise a real on-disk additive migration.
+private enum LegacyFullCloudSchema {
+    @Model
+    final class CloudDataRevision {
+        var revisionID: UUID = UUID()
+        @Attribute(.allowsCloudEncryption) var itemKey: String = ""
+        var logicalClock: Int64 = 0
+        var installationID: String = ""
+        var isDeleted: Bool = false
+        var contentDigest: String = ""
+        @Attribute(.externalStorage, .allowsCloudEncryption) var payload: Data?
+
+        init(key: String, payload: Data?) {
+            itemKey = key
+            logicalClock = 1
+            installationID = UUID().uuidString
+            isDeleted = payload == nil
+            contentDigest = payload.map(CloudFileStore.digest) ?? ""
+            self.payload = payload
+        }
+    }
 }

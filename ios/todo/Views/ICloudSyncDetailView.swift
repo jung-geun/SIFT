@@ -31,6 +31,17 @@ struct ICloudSyncDetailView: View {
                 if let error = sync.errorMessage {
                     Text(error).font(.footnote).foregroundStyle(.orange)
                         .accessibilityIdentifier("settings.sync.full.error")
+                    ForEach(failedChannels, id: \.self) { channel in
+                        if let failure = sync.failureState.failures[channel] {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(failurePhase(channel)).font(.footnote.weight(.medium))
+                                Text(verbatim: "\(failure.domain) · \(failure.code)")
+                                    .font(.caption.monospaced()).textSelection(.enabled)
+                            }
+                            .foregroundStyle(.orange)
+                            .accessibilityIdentifier("settings.sync.full.failure.\(failureKey(channel))")
+                        }
+                    }
                 }
             } footer: {
                 if SettingsStore.supportsICloud {
@@ -39,23 +50,6 @@ struct ICloudSyncDetailView: View {
                     Text(AppLanguage.localized("settings.sync.unavailableMessage", defaultValue: "이 빌드에서는 iCloud 동기화를 사용할 수 없습니다. 기존 데이터는 기기에만 보존됩니다.", language: .current))
                 }
             }
-
-            Section(copy("settings.sync.full.includes.title", "Included in full storage", "전체 저장에 포함")) {
-                Label(copy("settings.sync.full.includes.tasks", "Tasks, personas, audit and behavior history", "할 일·페르소나·감사 기록·행동 분석"), systemImage: "checklist")
-                Label(copy("settings.sync.full.includes.mail", "Email content, analysis and learned decisions", "메일 본문·분석 결과·학습 기록"), systemImage: "envelope")
-                Label(copy("settings.sync.full.includes.meetings", "Meeting audio, transcripts, speakers and edits", "회의 원본 음성·전사·화자·편집 내역"), systemImage: "waveform")
-                Label(copy("settings.sync.full.includes.routines", "Routines and personalized vocabulary", "루틴·개인화 학습 사전"), systemImage: "repeat")
-                Label(copy("settings.sync.full.includes.settings", "App settings and model selections", "앱 설정·모델 선택 설정"), systemImage: "slider.horizontal.3")
-                Label(copy("settings.sync.full.includes.connections", "Account connections through iCloud Keychain", "iCloud 키체인을 통한 계정 연결 정보"), systemImage: "key")
-            }
-
-            Section(copy("settings.sync.full.device.title", "Remains device-specific", "기기별로 유지")) {
-                Text(copy("settings.sync.full.device.health", "Personal health information is excluded under Apple's rules. Health data and OS permissions are read or authorized on each device.", "Apple 정책에 따라 개인 건강정보는 제외합니다. 건강 데이터와 OS 권한은 각 기기에서 읽거나 승인합니다."))
-                Text(copy("settings.sync.full.device.models", "Model files are not uploaded. Laya, the local LLM and speech models must be downloaded and verified on each device before they can be selected.", "모델 설치파일은 업로드하지 않습니다. Laya·로컬 LLM·음성 모델은 각 기기에서 다운로드와 검증을 마쳐야 선택할 수 있습니다."))
-                Text(copy("settings.sync.full.device.permissions", "Saved permission history does not grant access on a new device. Confirm external-AI sharing, background mail and device-specific calendar choices locally; restored outbox history does not automatically replay mail actions.", "저장된 권한 내역만으로 새 기기에 권한을 부여하지 않습니다. 외부 AI 전송·메일 백그라운드 접근·기기별 캘린더 선택은 해당 기기에서 확인하며, 복원된 대기 작업 내역으로 메일 작업을 자동 재실행하지 않습니다."))
-            }
-            .font(.footnote)
-            .foregroundStyle(.secondary)
 
             if enabled {
                 AccountConnectionSyncSection(sync: sync.connectionSync,
@@ -77,10 +71,10 @@ struct ICloudSyncDetailView: View {
                         Task { try? await sync.synchronizeNow() }
                     }
                     .accessibilityIdentifier("settings.sync.full.retry")
+                    .disabled(sync.synchronizing)
+                    if sync.synchronizing { ProgressView() }
                 } header: {
                     Text(copy("settings.sync.full.status.title", "iCloud status", "iCloud 상태"))
-                } footer: {
-                    Text(copy("settings.sync.full.dataTransport", "This status covers app data, not account connections. Data appears on other devices after Apple's transfer completes. Recordings consume iCloud storage; quota or network failures are not treated as completed sync.", "이 상태는 계정 연결 정보가 아닌 앱 데이터의 전송 상태입니다. Apple의 전송이 완료된 뒤 다른 기기에 적용됩니다. 녹음은 iCloud 저장공간을 사용하며 용량·네트워크 오류를 동기화 완료로 처리하지 않습니다."))
                 }
             }
         }
@@ -93,6 +87,38 @@ struct ICloudSyncDetailView: View {
             Button("취소", role: .cancel) {}
         } message: {
             Text(copy("settings.sync.full.confirm.storageMessage", "This stores email bodies, recordings and transcripts, routines, vocabulary and settings under your Apple account. Account connections use iCloud Keychain; protected connections require a separate action and device authentication. Health data, OS grants and model downloads are excluded. This does not authorize ChatGPT sharing.", "같은 Apple 계정에 메일 본문·회의 녹음/전사·루틴·학습 사전·설정을 저장합니다. 계정 연결 정보는 iCloud 키체인을 사용하며, 보호된 연결 정보는 별도 작업과 기기 인증이 필요합니다. 건강정보·OS 권한·모델 다운로드는 제외하며 ChatGPT 전송 동의와 별개입니다."))
+        }
+    }
+
+    private var failedChannels: [FullCloudSyncFailureState.Channel] {
+        sync.failureState.failures.keys.sorted { failureKey($0) < failureKey($1) }
+    }
+
+    private func failureKey(_ channel: FullCloudSyncFailureState.Channel) -> String {
+        switch channel {
+        case .preparation: return "0.prepare"
+        case .reconciliation: return "1.reconcile"
+        case .transport(let store, let event): return "2.\(store.rawValue).\(event.rawValue)"
+        }
+    }
+
+    private func failurePhase(_ channel: FullCloudSyncFailureState.Channel) -> String {
+        switch channel {
+        case .preparation:
+            return copy("settings.sync.full.phase.prepare", "iCloud account and store preparation", "iCloud 계정·저장소 준비")
+        case .reconciliation:
+            return copy("settings.sync.full.phase.reconcile", "App-data validation and restore", "앱 데이터 검증·복원")
+        case .transport(let store, let event):
+            let source = store == .appData
+                ? copy("settings.sync.full.phase.appData", "App data", "앱 데이터")
+                : copy("settings.sync.full.phase.legacy", "Earlier app data", "이전 앱 데이터")
+            let operation: String
+            switch event {
+            case .setup: operation = copy("settings.sync.full.phase.setup", "iCloud setup", "iCloud 초기화")
+            case .import: operation = copy("settings.sync.full.phase.import", "iCloud download", "iCloud 내려받기")
+            case .export: operation = copy("settings.sync.full.phase.export", "iCloud upload", "iCloud 올리기")
+            }
+            return source + " · " + operation
         }
     }
 
@@ -120,7 +146,7 @@ private struct AccountConnectionSyncSection: View {
     var body: some View {
         Section {
             Text(status).accessibilityIdentifier("settings.sync.connections.status")
-            if !canAuthorize {
+            if !canAuthorize && sync.state != .prepared {
                 Text(copy("connections.accountWaiting", "Account connection approval is unavailable until the iCloud Apple account is verified. Check the app-data status below; no device authentication has started.", "iCloud Apple 계정이 확인되기 전에는 계정 연결 정보를 승인할 수 없습니다. 아래 앱 데이터 상태를 확인해 주세요. 기기 인증은 시작하지 않았습니다."))
                     .font(.footnote).foregroundStyle(.secondary)
             }
@@ -143,7 +169,7 @@ private struct AccountConnectionSyncSection: View {
             if sync.isAuthorizing {
                 Button(copy("connections.stop", "Stop account connection sync", "계정 연결 정보 동기화 중지"), role: .cancel) { sync.cancelAuthorization() }
                     .accessibilityIdentifier("settings.sync.connections.stop")
-            } else {
+            } else if sync.state != .prepared {
                 Button(copy("connections.authorize", "Authorize account connection sync", "계정 연결 정보 동기화 승인"), action: authorize)
                     .disabled(!canAuthorize || sync.state == .checking)
                     .accessibilityIdentifier("settings.sync.connections.authorize")
@@ -151,9 +177,11 @@ private struct AccountConnectionSyncSection: View {
         } header: {
             Text(copy("connections.title", "Account connection sync", "계정 연결 정보 동기화"))
         } footer: {
-            VStack(alignment: .leading, spacing: 8) {
+            if sync.state != .prepared {
+                VStack(alignment: .leading, spacing: 8) {
                 Text(copy("connections.purpose", "This action unlocks protected connection secrets only to prepare them for iCloud Keychain. It ends after the listed families are checked or at the first authentication cancellation or failure. Cancel in the system dialog or stop here; local data and existing credentials are retained. Automatic sync never requests this approval again; retry only with this button.", "이 작업은 보호된 연결 정보를 잠금 해제해 iCloud 키체인 저장을 준비합니다. 표시된 항목을 확인하면 종료되며, 인증을 취소하거나 인증에 실패하면 즉시 멈춥니다. 시스템 창에서 취소하거나 여기서 중지해도 로컬 데이터와 기존 연결 정보는 보존됩니다. 자동 동기화는 승인을 다시 요청하지 않으며 이 버튼으로만 재시도합니다."))
                 Text(copy("connections.authentication", "Your Apple account identifies iCloud storage. Touch ID, Face ID or this device's login password/passcode unlocks device Keychain items; it is not a mail app password. Never enter a mail app password into an OS authentication dialog. Prompt count depends on protected connections and the OS, not a fixed number. OS permissions and biometric data are not uploaded, and this action does not enable background mail or AI sharing.", "Apple 계정은 iCloud 저장 계정을 확인합니다. Touch ID·Face ID 또는 이 기기의 로그인 암호·암호 코드는 기기 키체인의 잠금을 해제하며, 메일 앱 비밀번호와 다릅니다. OS 인증 창에 메일 앱 비밀번호를 입력하지 마세요. 인증 횟수는 보호된 연결 정보와 OS에 따라 다르며 고정되어 있지 않습니다. OS 권한과 생체정보는 업로드하지 않고, 이 작업으로 메일 백그라운드 접근이나 AI 전송을 켜지 않습니다."))
+                }
             }
         }
         .onDisappear { sync.cancelAuthorization() }
@@ -165,8 +193,8 @@ private struct AccountConnectionSyncSection: View {
         case .checking: copy("connections.checking", "Checking account connections without authentication prompts…", "인증 창 없이 계정 연결 정보를 확인하는 중…")
         case .authorizing: copy("connections.authorizing", "Preparing account connections with your device approval…", "기기 승인을 받아 계정 연결 정보를 준비하는 중…")
         case .prepared: copy("connections.prepared", "Account connections prepared locally. iCloud Keychain delivery is controlled by Apple.", "계정 연결 정보의 기기 내 준비가 완료되었습니다. iCloud 키체인 전송은 Apple이 처리합니다.")
-        case .awaitingApproval: copy("connections.awaiting", "Account connection sync awaiting approval. App-data storage continues.", "계정 연결 정보 동기화 승인 대기 중입니다. 앱 데이터 저장은 계속 진행합니다.")
-        case .cancelled: copy("connections.cancelled", "Account connection sync stopped · awaiting approval. Existing credentials and local data are retained. App-data storage continues.", "계정 연결 정보 동기화 중지 · 승인 대기 중입니다. 기존 연결 정보와 로컬 데이터는 보존되며 앱 데이터 저장은 계속 진행합니다.")
+        case .awaitingApproval: copy("connections.awaiting", "Waiting will not start account connection sync. Choose Authorize account connection sync to continue. App-data synchronization is separate.", "기다려도 계정 연결 정보 동기화는 시작되지 않습니다. 계속하려면 ‘계정 연결 정보 동기화 승인’을 누르세요. 앱 데이터 동기화는 별도입니다.")
+        case .cancelled: copy("connections.cancelled", "Account connection sync stopped. Choose Authorize account connection sync to retry. Existing credentials and local data are retained; app-data synchronization is separate.", "계정 연결 정보 동기화를 중지했습니다. 다시 하려면 ‘계정 연결 정보 동기화 승인’을 누르세요. 기존 연결 정보와 로컬 데이터는 보존되며 앱 데이터 동기화는 별도입니다.")
         case .failed: copy("connections.failed", "Account connection sync could not finish. Existing credentials are retained; check Keychain availability and retry. App-data errors are shown separately.", "계정 연결 정보 동기화를 완료하지 못했습니다. 기존 연결 정보는 보존됩니다. 키체인 상태를 확인한 뒤 다시 시도하세요. 앱 데이터 오류는 별도로 표시됩니다.")
         }
     }

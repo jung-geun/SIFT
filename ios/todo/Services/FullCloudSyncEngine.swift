@@ -10,7 +10,10 @@ final class CloudDataRevision {
     @Attribute(.allowsCloudEncryption) var itemKey: String = ""
     var logicalClock: Int64 = 0
     var installationID: String = ""
-    var isDeleted: Bool = false
+    // Frozen legacy wire column: CloudKit forbids renaming/removing it, and
+    // PersistentModel.isDeleted makes its generated accessor unsafe to use.
+    private var isDeleted: Bool = false
+    var isTombstone: Bool = false
     var contentDigest: String = ""
     @Attribute(.externalStorage, .allowsCloudEncryption) var payload: Data?
 
@@ -18,9 +21,21 @@ final class CloudDataRevision {
         self.itemKey = itemKey
         self.logicalClock = clock
         self.installationID = installationID
-        self.isDeleted = payload == nil
+        self.isTombstone = payload == nil
         self.contentDigest = digest ?? payload.map(CloudFileStore.digest) ?? ""
         self.payload = payload
+    }
+
+    /// A store predicate reads the legacy persisted bit without invoking the
+    /// conflicting getter. Exclude pending objects so SQL, not lifecycle state,
+    /// determines which old rows have an explicit persisted deletion marker.
+    static func persistedLegacyTombstoneIDs(in context: ModelContext) throws -> Set<PersistentIdentifier> {
+        var descriptor = FetchDescriptor<CloudDataRevision>(predicate: #Predicate {
+            $0.isDeleted && !$0.isTombstone
+        })
+        descriptor.includePendingChanges = false
+        descriptor.propertiesToFetch = [\.revisionID]
+        return try Set(context.fetch(descriptor).map(\.persistentModelID))
     }
 }
 
@@ -58,8 +73,52 @@ nonisolated struct CloudSyncJournal: Codable, Sendable {
     }
 }
 
-nonisolated enum FullCloudSyncError: Error {
+nonisolated enum FullCloudSyncError: Error, CustomNSError, Equatable {
     case invalidRevision, invalidJournal, clockOverflow, persistentStoreUnavailable
+    case revisionValidation(CloudRevisionValidation.Failure)
+
+    static var errorDomain: String { "SIFT.FullCloudSync" }
+    var errorCode: Int {
+        switch self {
+        case .invalidRevision: return 0
+        case .invalidJournal: return 1
+        case .clockOverflow: return 2
+        case .persistentStoreUnavailable: return 3
+        case .revisionValidation(let failure): return 100 + failure.rawValue
+        }
+    }
+}
+
+/// Validation reports only the failed invariant, never the key, bytes or IDs.
+nonisolated enum CloudRevisionValidation {
+    enum Failure: Int, CaseIterable, Sendable {
+        case itemKeyMismatch = 1
+        case logicalClockMismatch
+        case installationMismatch
+        case missingPayload
+        case unexpectedDeletedPayload
+        case digestMetadataMismatch
+        case payloadDigestMismatch
+    }
+
+    static func validate(key: String, clock: Int64, installation: String,
+                         isDeleted: Bool, contentDigest: String, payload: Data?,
+                         expectedKey: String, expected: CloudSyncCheckpoint) throws {
+        guard key == expectedKey else { throw FullCloudSyncError.revisionValidation(.itemKeyMismatch) }
+        guard clock == expected.logicalClock else { throw FullCloudSyncError.revisionValidation(.logicalClockMismatch) }
+        guard installation == expected.installationID else { throw FullCloudSyncError.revisionValidation(.installationMismatch) }
+        if isDeleted {
+            guard payload == nil else { throw FullCloudSyncError.revisionValidation(.unexpectedDeletedPayload) }
+        } else {
+            guard payload != nil else { throw FullCloudSyncError.revisionValidation(.missingPayload) }
+        }
+        guard contentDigest == (expected.digest ?? "") else {
+            throw FullCloudSyncError.revisionValidation(.digestMetadataMismatch)
+        }
+        guard try payload.map(CloudRevisionPayloadReader.digest) == expected.digest else {
+            throw FullCloudSyncError.revisionValidation(.payloadDigestMismatch)
+        }
+    }
 }
 
 /// Wall-clock skew cannot resurrect an older deletion.
@@ -87,16 +146,27 @@ private actor CloudRevisionPayloadReader {
         guard let revision = try modelContext.fetch(descriptor).first,
               revision.persistentModelID == id else { throw CancellationError() }
         let data = revision.payload
-        guard revision.itemKey == key, revision.logicalClock == expected.logicalClock,
-              revision.installationID == expected.installationID,
-              revision.isDeleted == (data == nil),
-              revision.contentDigest == (expected.digest ?? ""),
-              try data.map(Self.digest) == expected.digest else {
-            throw FullCloudSyncError.invalidRevision
-        }
+        try CloudRevisionValidation.validate(key: revision.itemKey, clock: revision.logicalClock,
+            installation: revision.installationID, isDeleted: revision.isTombstone,
+            contentDigest: revision.contentDigest, payload: data, expectedKey: key, expected: expected)
         try Task.checkCancellation()
         validated[key] = expected
         return needsPayload ? data : nil
+    }
+
+    func confirmsLegacyTombstone(id: PersistentIdentifier, key: String,
+                                 expected: CloudSyncCheckpoint) throws -> Bool {
+        try Task.checkCancellation()
+        let revisionID = expected.revisionID
+        var descriptor = FetchDescriptor<CloudDataRevision>(predicate: #Predicate { $0.revisionID == revisionID })
+        descriptor.fetchLimit = 1
+        guard let revision = try modelContext.fetch(descriptor).first,
+              revision.persistentModelID == id, revision.itemKey == key,
+              revision.logicalClock == expected.logicalClock,
+              revision.installationID == expected.installationID,
+              expected.digest == nil, !revision.isTombstone,
+              revision.contentDigest.isEmpty else { throw CancellationError() }
+        return revision.payload == nil
     }
 
     nonisolated static func digest(_ data: Data) throws -> String {
@@ -148,13 +218,18 @@ final class FullCloudSyncEngine {
     /// operation fails; `isValid` fences mutations after asynchronous work.
     @discardableResult
     func reconcile(digests: [String: String], temporarilyUnavailable: Set<String> = [],
+                   isTemporarilyUnavailable: (String) -> Bool = { _ in false },
                    isValid: () -> Bool = { true }, didEnqueue: (() -> Void)? = nil,
                    load: (String) async throws -> Data?,
                    apply: (String, Data?) async throws -> Void) async throws -> Int {
+        func isUnavailable(_ key: String) -> Bool {
+            temporarilyUnavailable.contains(key) || isTemporarilyUnavailable(key)
+        }
         didEnqueueChanges = false
+        var missingPayloadKeys = Set<String>()
         try checkCurrent(isValid)
         var descriptor = FetchDescriptor<CloudDataRevision>()
-        descriptor.propertiesToFetch = [\.revisionID, \.itemKey, \.logicalClock, \.installationID, \.isDeleted, \.contentDigest]
+        descriptor.propertiesToFetch = [\.revisionID, \.itemKey, \.logicalClock, \.installationID, \.isTombstone, \.contentDigest]
         let revisions = try cloud.fetch(descriptor)
         var latest = [String: CloudDataRevision]()
         var revisionsByKey = [String: [CloudDataRevision]]()
@@ -166,7 +241,7 @@ final class FullCloudSyncEngine {
             try checkCurrent(isValid)
             storeIdentifier = revision.persistentModelID.storeIdentifier
             guard revision.logicalClock > 0, UUID(uuidString: revision.installationID) != nil,
-                  !revision.itemKey.isEmpty, !revision.isDeleted || revision.contentDigest.isEmpty else {
+                  !revision.itemKey.isEmpty, !revision.isTombstone || revision.contentDigest.isEmpty else {
                 throw FullCloudSyncError.invalidRevision
             }
             maximumClock = max(maximumClock, revision.logicalClock)
@@ -176,9 +251,10 @@ final class FullCloudSyncEngine {
         }
         guard maximumClock < Int64.max else { throw FullCloudSyncError.clockOverflow }
         let nextClock = maximumClock + 1
+        try await repairLegacyTombstones(revisions, isUnavailable: isUnavailable, isValid: isValid, didEnqueue: didEnqueue)
 
         var completingApplies = [String: CloudDataRevision]()
-        for (key, pending) in journal.pendingApplies where !temporarilyUnavailable.contains(key) {
+        for (key, pending) in journal.pendingApplies where !isUnavailable(key) {
             try checkCurrent(isValid)
             let local = digests[key]
             if local == pending.target.digest, let remote = latest[key], checkpoint(remote) == pending.target {
@@ -196,9 +272,21 @@ final class FullCloudSyncEngine {
             journal.pendingApplies.removeValue(forKey: key)
             journalDirty = true
         }
-        for (key, pending) in journal.pendingPublications where !temporarilyUnavailable.contains(key) {
+        for (key, pending) in journal.pendingPublications where !isUnavailable(key) {
             try checkCurrent(isValid)
-            if revisionsByKey[key, default: []].contains(where: { checkpoint($0) == pending }) {
+            if let saved = revisionsByKey[key, default: []].first(where: { checkpoint($0) == pending }) {
+                // Metadata alone does not prove that this publication's external
+                // bytes are readable. Keep its durable intent until validated.
+                do {
+                    _ = try await materialize(saved, needsPayload: false)
+                    try checkCurrent(isValid)
+                } catch FullCloudSyncError.revisionValidation(.missingPayload) {
+                    guard !CloudPreferenceStore.isPreferenceKey(key) else {
+                        throw FullCloudSyncError.revisionValidation(.missingPayload)
+                    }
+                    missingPayloadKeys.insert(key)
+                    continue
+                }
                 remember(key, pending)
                 journal.pendingPublications.removeValue(forKey: key)
                 journalDirty = true
@@ -213,7 +301,7 @@ final class FullCloudSyncEngine {
             return a != b ? a : first < second
         }
         var operations = [String: Operation]()
-        for key in orderedKeys where !temporarilyUnavailable.contains(key) {
+        for key in orderedKeys where !isUnavailable(key) && !missingPayloadKeys.contains(key) {
             try checkCurrent(isValid)
             if let remote = completingApplies[key] {
                 operations[key] = .apply(remote)
@@ -296,59 +384,70 @@ final class FullCloudSyncEngine {
             for key in orderedKeys {
                 try checkCurrent(isValid)
                 guard let operation = operations[key] else { continue }
-                switch operation {
-                case .apply(let remote):
-                    try commitPublications()
-                    let target = checkpoint(remote)
-                    let payload = try await materialize(remote)
-                    try checkCurrent(isValid)
-                    try await apply(key, payload)
-                    try checkCurrent(isValid)
-                    restored += 1
-                    remember(key, target)
-                    journal.pendingApplies.removeValue(forKey: key)
-                    journalDirty = true
-                case .publish(let intended):
-                    if let remote = latest[key] {
+                do {
+                    switch operation {
+                    case .apply(let remote):
+                        try commitPublications()
+                        let target = checkpoint(remote)
+                        let payload = try await materialize(remote)
+                        try checkCurrent(isValid)
+                        try await apply(key, payload)
+                        try checkCurrent(isValid)
+                        restored += 1
+                        remember(key, target)
+                        journal.pendingApplies.removeValue(forKey: key)
+                        journalDirty = true
+                    case .publish(let intended):
+                        if let remote = latest[key] {
+                            _ = try await materialize(remote, needsPayload: false)
+                            try checkCurrent(isValid)
+                        }
+                        let data = try await load(key)
+                        try checkCurrent(isValid)
+                        let hashing = Task.detached { try data.map(CloudRevisionPayloadReader.digest) }
+                        let digest = try await withTaskCancellationHandler {
+                            try await hashing.value
+                        } onCancel: {
+                            hashing.cancel()
+                        }
+                        try checkCurrent(isValid)
+                        guard digest == intended.digest else { throw CloudFileError.changingFile }
+                        let size = data?.count ?? 0
+                        if !publications.isEmpty, size > payloadLimit - payloadBytes {
+                            try commitPublications()
+                        }
+                        let revision = CloudDataRevision(itemKey: key, clock: intended.logicalClock,
+                            installationID: intended.installationID, payload: data, digest: intended.digest ?? "")
+                        revision.revisionID = intended.revisionID
+                        try checkCurrent(isValid)
+                        cloud.insert(revision)
+                        for old in revisionsByKey[key, default: []] {
+                            try checkCurrent(isValid)
+                            cloud.delete(old)
+                        }
+                        publications.append((key, intended, revision))
+                        payloadBytes += size
+                        if publications.count >= publicationLimit || payloadBytes >= payloadLimit {
+                            try commitPublications()
+                        }
+                    case .inspect(let remote, let adopt):
                         _ = try await materialize(remote, needsPayload: false)
                         try checkCurrent(isValid)
+                        if adopt { remember(key, checkpoint(remote)) }
                     }
-                    let data = try await load(key)
-                    try checkCurrent(isValid)
-                    let hashing = Task.detached { try data.map(CloudRevisionPayloadReader.digest) }
-                    let digest = try await withTaskCancellationHandler {
-                        try await hashing.value
-                    } onCancel: {
-                        hashing.cancel()
+                } catch FullCloudSyncError.revisionValidation(.missingPayload) {
+                    // An unreadable cloud asset must neither be replaced with
+                    // local bytes nor starve independent keys later in the pass.
+                    // Preference markers can govern decoding of subsequent mail
+                    // bodies, so their failure still stops dependent work.
+                    guard !CloudPreferenceStore.isPreferenceKey(key) else {
+                        throw FullCloudSyncError.revisionValidation(.missingPayload)
                     }
-                    try checkCurrent(isValid)
-                    guard digest == intended.digest else { throw CloudFileError.changingFile }
-                    let size = data?.count ?? 0
-                    if !publications.isEmpty, size > payloadLimit - payloadBytes {
-                        try commitPublications()
-                    }
-                    let revision = CloudDataRevision(itemKey: key, clock: intended.logicalClock,
-                        installationID: intended.installationID, payload: data, digest: intended.digest ?? "")
-                    revision.revisionID = intended.revisionID
-                    try checkCurrent(isValid)
-                    cloud.insert(revision)
-                    for old in revisionsByKey[key, default: []] {
-                        try checkCurrent(isValid)
-                        cloud.delete(old)
-                    }
-                    publications.append((key, intended, revision))
-                    payloadBytes += size
-                    if publications.count >= publicationLimit || payloadBytes >= payloadLimit {
-                        try commitPublications()
-                    }
-                case .inspect(let remote, let adopt):
-                    _ = try await materialize(remote, needsPayload: false)
-                    try checkCurrent(isValid)
-                    if adopt { remember(key, checkpoint(remote)) }
+                    missingPayloadKeys.insert(key)
                 }
             }
             try commitPublications()
-            for key in orderedKeys where !temporarilyUnavailable.contains(key) {
+            for key in orderedKeys where !isUnavailable(key) && !missingPayloadKeys.contains(key) {
                 if case .publish? = operations[key] { continue }
                 guard let remote = latest[key] else { continue }
                 for old in revisionsByKey[key, default: []] where old !== remote {
@@ -364,6 +463,9 @@ final class FullCloudSyncEngine {
             }
             try checkCurrent(isValid)
             try persistJournal()
+            // Other keys can make durable progress, but this is not a completed
+            // reconciliation and must not clear the service's real error.
+            if !missingPayloadKeys.isEmpty { throw FullCloudSyncError.revisionValidation(.missingPayload) }
             return restored
         } catch {
             // A changing/unreadable later source must not starve valid earlier
@@ -379,6 +481,61 @@ final class FullCloudSyncEngine {
             cloud.rollback()
             throw error
         }
+    }
+
+    /// The frozen legacy wire field collided with PersistentModel lifecycle
+    /// state. Accept only its SQL-backed true bit or an exact durable deletion
+    /// checkpoint, plus absent bytes; missing data alone never proves deletion.
+    private func repairLegacyTombstones(_ revisions: [CloudDataRevision], isUnavailable: (String) -> Bool,
+                                        isValid: () -> Bool, didEnqueue: (() -> Void)?) async throws {
+        var durable: CloudSyncJournal?
+        var readDurable = false
+        let legacyTombstoneIDs = try CloudDataRevision.persistedLegacyTombstoneIDs(in: cloud)
+        var confirmed = [CloudDataRevision]()
+        for revision in revisions where !isUnavailable(revision.itemKey)
+                && !revision.isTombstone && revision.contentDigest.isEmpty {
+            try checkCurrent(isValid)
+            let hasPersistedDeletion = legacyTombstoneIDs.contains(revision.persistentModelID)
+            if !hasPersistedDeletion && !readDurable {
+                readDurable = true
+                if FileManager.default.fileExists(atPath: journalURL.path) {
+                    let saved = try JSONDecoder().decode(CloudSyncJournal.self, from: Data(contentsOf: journalURL))
+                    guard saved.version == 1 else { throw FullCloudSyncError.invalidJournal }
+                    durable = saved
+                }
+            }
+            let key = revision.itemKey
+            func provesDeletion(_ value: CloudSyncCheckpoint?) -> Bool {
+                guard let value else { return false }
+                return value.digest == nil && value.revisionID == revision.revisionID
+                    && value.logicalClock == revision.logicalClock && value.installationID == revision.installationID
+            }
+            guard hasPersistedDeletion || provesDeletion(durable?.items[key])
+                    || provesDeletion(durable?.pendingPublications[key])
+                    || provesDeletion(durable?.pendingApplies[key]?.target) else { continue }
+            let expected = CloudSyncCheckpoint(digest: nil, revisionID: revision.revisionID,
+                logicalClock: revision.logicalClock, installationID: revision.installationID)
+            if payloadReader == nil {
+                let container = cloud.container
+                payloadReader = await Task.detached { CloudRevisionPayloadReader(modelContainer: container) }.value
+            }
+            guard let payloadReader else { throw FullCloudSyncError.persistentStoreUnavailable }
+            guard try await payloadReader.confirmsLegacyTombstone(id: revision.persistentModelID,
+                key: key, expected: expected) else { continue }
+            try checkCurrent(isValid)
+            confirmed.append(revision)
+        }
+        guard !confirmed.isEmpty else { return }
+        try checkCurrent(isValid)
+        for revision in confirmed { revision.isTombstone = true }
+        do { try cloud.save() }
+        catch { cloud.rollback(); throw error }
+        // This context deliberately observed the pre-repair flag. Recreate it
+        // before normal payload validation rather than reuse that old snapshot.
+        payloadReader = nil
+        didEnqueueChanges = true
+        didEnqueue?()
+        try checkCurrent(isValid)
     }
 
     private func materialize(_ remote: CloudDataRevision, needsPayload: Bool = true) async throws -> Data? {
@@ -414,7 +571,7 @@ final class FullCloudSyncEngine {
     }
 
     private func checkpoint(_ revision: CloudDataRevision) -> CloudSyncCheckpoint {
-        CloudSyncCheckpoint(digest: revision.isDeleted ? nil : revision.contentDigest,
+        CloudSyncCheckpoint(digest: revision.isTombstone ? nil : revision.contentDigest,
             revisionID: revision.revisionID, logicalClock: revision.logicalClock, installationID: revision.installationID)
     }
 

@@ -203,35 +203,6 @@ struct LocalizationRuntimeTests {
         }
     }
 
-    @Test("Meeting draft localization preserves source transcript and canonical action identity")
-    func meetingDraftSourceIdentity() throws {
-        let meetingID = "00000000-0000-4000-8000-000000000001"
-        let source = MeetingResult(transcriptRevision: 7, segments: [
-            MeetingSegment(id: "source_segment", startMs: 0, endMs: 1_000, text: "Please send the original report")
-        ])
-        let analyzer = MeetingTranscriptAnalysisService()
-        let baseline = try #require(analyzer.analyze(meetingID: meetingID, result: source, language: .english).actionDrafts.first)
-        for identifier in Self.identifiers {
-            let language = AppLanguage(rawValue: identifier)
-            let result = analyzer.analyze(meetingID: meetingID, result: source, language: language)
-            let draft = try #require(result.actionDrafts.first)
-            #expect(result.segments == source.segments)
-            #expect(result.transcriptRevision == source.transcriptRevision)
-            #expect(draft.id == baseline.id)
-            #expect(draft.title == baseline.title)
-            #expect(draft.sourceSegmentIDs == ["source_segment"])
-            #expect(draft.notes.contains(source.segments[0].text))
-            #expect(draft.requiresReview)
-        }
-        // Unsupported deterministic source grammar is preserved, not guessed or translated.
-        let unmatched = MeetingResult(segments: [
-            MeetingSegment(id: "french-source", startMs: 0, endMs: 1_000, text: "Veuillez envoyer le rapport")
-        ])
-        let unchanged = analyzer.analyze(meetingID: meetingID, result: unmatched, language: .french)
-        #expect(unchanged.segments == unmatched.segments)
-        #expect(unchanged.actionDrafts.isEmpty)
-    }
-
 
     @Test("Selecting an app language cannot bypass speech backend locale and asset capability checks")
     func speechBackendCapabilityBoundary() async {

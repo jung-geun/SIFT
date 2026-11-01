@@ -4,7 +4,7 @@ import Foundation
 import SwiftData
 import UniformTypeIdentifiers
 
-/// Files-app import only: no microphone session, Speech authorization, network
+/// Local file import only: no microphone session, Speech authorization, network
 /// upload, or model download. The caller starts saved-audio ASR after commit.
 nonisolated enum MeetingAudioImportService {
     static let allowedContentTypes: [UTType] = [.audio]

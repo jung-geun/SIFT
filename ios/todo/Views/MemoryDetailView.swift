@@ -97,18 +97,14 @@ struct MemoryDetailView: View {
                 OpenAIConsentSection(scope: .routines)
             }
 
-            Section {
-                if analyses.isEmpty {
-                    Text("아직 저장된 분석이 없습니다.")
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                } else {
+            if !analyses.isEmpty {
+                Section {
                     ForEach(analyses) { analysis in
                         savedAnalysisCard(analysis)
                     }
+                } header: {
+                    Text("저장된 분석")
                 }
-            } header: {
-                Text("저장된 분석")
             }
         }
         .appFormStyle()

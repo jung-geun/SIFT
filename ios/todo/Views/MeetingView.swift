@@ -18,6 +18,15 @@ struct MeetingView: View {
     @State private var consentAccepted = false
     @State private var microphoneRequested = true
     @State private var appAudioRequested = false
+    @State private var outputAudioRequested: Bool = {
+        #if targetEnvironment(macCatalyst)
+        true
+        #else
+        false
+        #endif
+    }()
+    @State private var detectedProcessID: Int32?
+    @State private var detectedProcessName: String?
     @State private var sourceChangeInProgress = false
     @State private var showingDisclosure = false
     @State private var currentMeetingID: String?
@@ -42,6 +51,14 @@ struct MeetingView: View {
     @ObservedObject private var settings = SettingsStore.shared
     @State private var meetingScreenVisible = false
     @State private var navigationPath: [String] = []
+    @State private var pendingDeleteMeetingIDs: [String] = []
+    @State private var showingDeleteConfirmation = false
+    @State private var isDeletingMeetings = false
+    @State private var isExporting = false
+    @State private var audioDownload: MeetingAudioDownload?
+    @State private var audioDownloadError: String?
+    @State private var audioDownloadTask: Task<Void, Never>?
+    @State private var audioDownloadRequestID: UUID?
 
 
     private var showsSourceControlsBeforeRecording: Bool {
@@ -262,23 +279,7 @@ struct MeetingView: View {
                 if !meetings.isEmpty {
                     Section {
                         ForEach(meetings) { meeting in
-                            NavigationLink(value: meeting.meetingID) {
-                                HStack(alignment: .top, spacing: AppTheme.Spacing.item) {
-                                    Image(systemName: "waveform")
-                                        .foregroundStyle(AppTheme.accent)
-                                        .frame(width: 24)
-                                        .accessibilityHidden(true)
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        Text(meeting.result?.title.isEmpty == false ? meeting.result!.title
-                                             : (meeting.importedAudioFileName ?? copy("meeting.title.untitled", fallback: "회의")))
-                                            .font(.body.weight(.medium))
-                                        Text(meeting.updatedAt, format: .dateTime.year().month().day().hour().minute())
-                                            .font(.caption)
-                                            .foregroundStyle(AppTheme.secondaryText)
-                                    }
-                                }
-                            }
-                            .accessibilityIdentifier("meeting.row.\(meeting.meetingID)")
+                            meetingRow(meeting)
                         }
                         .onDelete(perform: deleteMeetings)
                     } header: {
@@ -321,7 +322,10 @@ struct MeetingView: View {
             }
             .alert(copy("meeting.alert.recordingNotice.title", fallback: "녹음 안내"), isPresented: $showingDisclosure) {
                 Button(copy("취소", fallback: "취소"), role: .cancel) {}
-                Button(copy("녹음 시작", fallback: "녹음 시작")) { startRecording() }
+                Button(copy("녹음 시작", fallback: "녹음 시작")) {
+                    consentAccepted = true
+                    startRecording()
+                }
             } message: {
                 Text(copy(
                     "meeting.alert.recordingNotice.message",
@@ -385,6 +389,38 @@ struct MeetingView: View {
                 Text(coordinator.failure ?? copy("meeting.error.unknown", fallback: "알 수 없는 오류"))
             }
         }
+        .confirmationDialog(
+            copy("meeting.manage.deleteConfirm", fallback: AppLanguage.current == .english
+                ? "Delete this meeting record?" : "회의 기록을 삭제할까요?"),
+            isPresented: $showingDeleteConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button(copy("meeting.manage.delete", fallback: AppLanguage.current == .english
+                ? "Delete meeting record" : "회의 기록 삭제"), role: .destructive) {
+                let selectedIDs = pendingDeleteMeetingIDs
+                pendingDeleteMeetingIDs = []
+                deleteConfirmedMeetings(ids: selectedIDs)
+            }
+            .disabled(meetingManagementUnavailable)
+            Button(copy("action.cancel", fallback: AppLanguage.current == .english ? "Cancel" : "취소"), role: .cancel) {
+                pendingDeleteMeetingIDs = []
+            }
+        } message: {
+            Text(copy("meeting.manage.deleteMessage", fallback: AppLanguage.current == .english
+                ? "All audio sources, transcripts and summaries in this meeting will be deleted. Previously added tasks are kept."
+                : "회의에 포함된 모든 음성 소스, 전사와 요약이 삭제됩니다. 이미 등록한 할 일은 유지됩니다."))
+        }
+        .meetingAudioDownload($audioDownload) { error in
+            audioDownloadError = error.localizedDescription
+        }
+        .alert(copy("meeting.manage.downloadFailed", fallback: AppLanguage.current == .english
+            ? "Audio download failed" : "음성 다운로드 실패"),
+               isPresented: Binding(get: { audioDownloadError != nil },
+                                    set: { if !$0 { audioDownloadError = nil } })) {
+            Button(copy("확인", fallback: "확인"), role: .cancel) { audioDownloadError = nil }
+        } message: {
+            Text(audioDownloadError ?? "")
+        }
         .sheet(item: $diagnosticErrorSnapshot) { snapshot in
             NavigationStack {
                 DiagnosticReportView(
@@ -418,6 +454,18 @@ struct MeetingView: View {
         }
         #if targetEnvironment(macCatalyst)
         .background(MeetingRecordingMacSceneAnchor(sessionID: coordinator.recordingActivity?.sessionID))
+        .modifier(MeetingDetectionIntentHandler { intent in
+            guard showsSourceControlsBeforeRecording, pendingStartTask == nil else { return }
+            microphoneRequested = true
+            outputAudioRequested = true
+            appAudioRequested = false
+            detectedProcessID = intent.processID
+            detectedProcessName = intent.displayName
+            navigationPath.removeAll()
+            coordinator.refreshOutputRoutes()
+            if consentAccepted { startRecording() }
+            else { showingDisclosure = true }
+        })
         #endif
         .onReceive(recordingActivity.$navigationRequestID) { requestID in
             guard requestID != nil else { return }
@@ -434,6 +482,7 @@ struct MeetingView: View {
         .onAppear { meetingScreenVisible = true }
         .task {
             refreshSummaryLanguageOptions()
+            coordinator.refreshOutputRoutes()
             appleLanguages = await MeetingTranscriptionLanguages.apple()
             await whisperModel.refresh()
             refreshRecordingLanguageOptions()
@@ -449,6 +498,9 @@ struct MeetingView: View {
         .onChange(of: SettingsStore.betaSelectedProvider()) { _, _ in refreshSummaryLanguageOptions() }
         .onDisappear {
             cancelPendingStart()
+            audioDownloadTask?.cancel()
+            pendingDeleteMeetingIDs = []
+            showingDeleteConfirmation = false
             meetingScreenVisible = false
             Task { await speakerPrewarmer.releaseUnused() }
         }
@@ -479,6 +531,128 @@ struct MeetingView: View {
             guard !Task.isCancelled, meetingScreenVisible else { return }
             await speakerPrewarmer.prepareIfAvailable()
         }
+        }
+    }
+
+    private var meetingManagementUnavailable: Bool {
+        isExporting || audioDownload != nil || isDeletingMeetings
+    }
+
+    private var meetingDownloadUnavailable: Bool {
+        meetingManagementUnavailable || showingDeleteConfirmation
+    }
+
+    private func meetingRow(_ meeting: MeetingRecord) -> some View {
+        HStack(spacing: AppTheme.Spacing.item) {
+            NavigationLink(value: meeting.meetingID) {
+                HStack(alignment: .top, spacing: AppTheme.Spacing.item) {
+                    Image(systemName: "waveform")
+                        .foregroundStyle(AppTheme.accent)
+                        .frame(width: 24)
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(meeting.result?.title.isEmpty == false ? meeting.result!.title
+                             : (meeting.importedAudioFileName ?? copy("meeting.title.untitled", fallback: "회의")))
+                            .font(.body.weight(.medium))
+                        Text(meeting.updatedAt, format: .dateTime.year().month().day().hour().minute())
+                            .font(.caption)
+                            .foregroundStyle(AppTheme.secondaryText)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            .accessibilityIdentifier("meeting.row.\(meeting.meetingID)")
+            Menu {
+                meetingActions(meeting)
+            } label: {
+                Label(copy("meeting.manage.actions", fallback: AppLanguage.current == .english
+                    ? "Meeting actions" : "회의 작업"), systemImage: "ellipsis")
+                    .labelStyle(.iconOnly)
+                    .frame(minWidth: 44, minHeight: 44)
+            }
+            .buttonStyle(.borderless)
+            .accessibilityIdentifier("meeting.manage.\(meeting.meetingID)")
+            .disabled(meetingManagementUnavailable)
+        }
+        .contextMenu { meetingActions(meeting) }
+    }
+
+    @ViewBuilder private func meetingActions(_ meeting: MeetingRecord) -> some View {
+        if meeting.isAudioTrackGroup {
+            Button(copy("meeting.manage.downloadAll", fallback: AppLanguage.current == .english
+                ? "Download all original sources (ZIP)" : "모든 소스 원본 다운로드 (ZIP)")) {
+                prepareAudioDownload(meeting)
+            }
+            .accessibilityIdentifier("meeting.download.all.\(meeting.meetingID)")
+            .disabled(meetingDownloadUnavailable)
+            // Snapshot validated membership; preparation reports malformed groups
+            // instead of silently exporting whichever sources remain readable.
+            let sources = (try? MeetingAudioTrackStore.tracks(for: meeting, in: modelContext)) ?? []
+            ForEach(sources) { source in
+                Menu(source.audioTrackDisplayName) {
+                    sourceDownloadActions(meeting, sourceID: source.meetingID)
+                }
+                .accessibilityIdentifier("meeting.download.source.\(source.meetingID).menu")
+            }
+        } else {
+            sourceDownloadActions(meeting)
+        }
+        Divider()
+        Button(role: .destructive) {
+            requestMeetingDeletion(ids: [meeting.meetingID])
+        } label: {
+            Label(copy("meeting.manage.delete", fallback: AppLanguage.current == .english
+                ? "Delete meeting record" : "회의 기록 삭제"), systemImage: "trash")
+        }
+        .accessibilityIdentifier("meeting.delete.\(meeting.meetingID)")
+        .disabled(meetingManagementUnavailable)
+    }
+
+    @ViewBuilder private func sourceDownloadActions(_ meeting: MeetingRecord, sourceID: String? = nil) -> some View {
+        Button(copy("meeting.manage.downloadOriginal", fallback: AppLanguage.current == .english
+            ? "Download original recording (ZIP)" : "원본 음성 다운로드 (ZIP)")) {
+            prepareAudioDownload(meeting, sourceID: sourceID)
+        }
+        .accessibilityIdentifier("meeting.download.source.\(sourceID ?? meeting.meetingID).original")
+        .disabled(meetingDownloadUnavailable)
+        Button(copy("meeting.manage.downloadWAV", fallback: AppLanguage.current == .english
+            ? "Download audio (WAV)" : "음성 다운로드 (WAV)")) {
+            prepareAudioDownload(meeting, sourceID: sourceID, format: .wav)
+        }
+        .accessibilityIdentifier("meeting.download.source.\(sourceID ?? meeting.meetingID).wav")
+        .disabled(meetingDownloadUnavailable)
+    }
+
+    private func prepareAudioDownload(_ meeting: MeetingRecord, sourceID: String? = nil,
+                                      format: MeetingAudioDownloadFormat = .original) {
+        guard !meetingDownloadUnavailable else { return }
+        let requestID = UUID()
+        audioDownloadRequestID = requestID
+        isExporting = true
+        audioDownloadError = nil
+        audioDownloadTask = Task { @MainActor in
+            defer {
+                if audioDownloadRequestID == requestID {
+                    isExporting = false
+                    audioDownloadTask = nil
+                    audioDownloadRequestID = nil
+                }
+            }
+            do {
+                guard isCurrent(meeting), meeting.parentMeetingID == nil else {
+                    throw MeetingCaptureRecoveryStore.RecoveryError.invalidManifest
+                }
+                let download = try await MeetingAudioDownload.prepare(record: meeting, in: modelContext,
+                    sourceID: sourceID, format: format)
+                try Task.checkCancellation()
+                guard audioDownloadRequestID == requestID else { return }
+                guard isCurrent(meeting) else { throw MeetingCaptureRecoveryStore.RecoveryError.invalidManifest }
+                audioDownload = download
+            } catch is CancellationError {
+            } catch {
+                guard !Task.isCancelled, audioDownloadRequestID == requestID else { return }
+                audioDownloadError = error.localizedDescription
+            }
         }
     }
 
@@ -541,41 +715,41 @@ struct MeetingView: View {
         let timeline = MeetingConversationTimeline.live(coordinator.liveTracks)
         let tracks = Dictionary(uniqueKeysWithValues: coordinator.liveTracks.map { ($0.meetingID, $0) })
         let profiles = tracks.mapValues { MeetingSpeakerLabelFormatter.liveProfiles($0.liveSpeakerOrdinals) }
+        let turns = MeetingConversationTimeline.groupTurns(timeline.rows, presentation: timeline.speakerPresentation)
         return ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(timeline.rows) { row in
-                        let presentation = timeline.speakerPresentation[row.id]
-                        let startsTurn = presentation?.startsTurn ?? true
+                    ForEach(Array(turns.enumerated()), id: \.element.id) { index, turn in
+                        let sourceChanged = index == 0 || turns[index - 1].id.trackID != turn.id.trackID
                         let speakerLabel = MeetingSpeakerLabelFormatter.label(
-                            for: presentation?.speakerIDs ?? row.speakerIDs,
-                            profiles: profiles[row.id.trackID] ?? [:], state: .provisional,
-                            kind: presentation?.kind ?? .speaker)
+                            for: turn.presentation.speakerIDs,
+                            profiles: profiles[turn.id.trackID] ?? [:], state: .provisional,
+                            kind: turn.presentation.kind)
                         VStack(alignment: .leading, spacing: 4) {
-                            if startsTurn {
-                                Text(tracks[row.id.trackID]?.conversationSourceLabel ?? "")
+                            if sourceChanged {
+                                Text(tracks[turn.id.trackID]?.conversationSourceLabel ?? "")
                                     .font(.subheadline.weight(.medium)).foregroundStyle(.primary)
-                                Text(speakerLabel)
-                                    .font(.caption).foregroundStyle(AppTheme.secondaryText)
                             }
+                            Text(speakerLabel)
+                                .font(.caption).foregroundStyle(AppTheme.secondaryText)
                             HStack(alignment: .firstTextBaseline, spacing: AppTheme.Spacing.compact) {
-                                Text(row.text).textSelection(.enabled)
+                                Text(turn.text).textSelection(.enabled)
                                     .frame(maxWidth: .infinity, alignment: .leading)
-                                if let sample = row.startSample {
+                                if let sample = turn.startSample {
                                     Text(duration(sample * 1_000 / MeetingMediaTimeline.sampleRate))
                                         .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                                         .fixedSize(horizontal: true, vertical: false)
                                 }
                             }
                         }
-                        .padding(.top, startsTurn && row.id != timeline.rows.first?.id ? AppTheme.Spacing.item : 2)
+                        .padding(.top, index == 0 ? 2 : AppTheme.Spacing.item)
                         .padding(.bottom, 2)
-                        .id(row.id)
+                        .id(turn.id)
                         .accessibilityElement(children: .combine)
                         .accessibilityValue(MeetingSpeakerLabelFormatter.accessibilityValue(
-                            speakerLabel: speakerLabel, source: tracks[row.id.trackID]?.conversationSourceLabel,
-                            inherited: presentation?.isInherited == true))
-                        .accessibilityIdentifier("meeting.liveTranscript.\(row.id.trackID).\(row.id.localID)")
+                            speakerLabel: speakerLabel, source: tracks[turn.id.trackID]?.conversationSourceLabel,
+                            inherited: turn.presentation.isInherited))
+                        .accessibilityIdentifier("meeting.liveTranscript.\(turn.id.trackID).\(turn.id.localID)")
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -584,7 +758,9 @@ struct MeetingView: View {
             .clipped()
             .accessibilityIdentifier("meeting.conversation.live")
             .onChange(of: timeline.rows.last) { _, row in
-                if let row { proxy.scrollTo(row.id, anchor: .bottom) }
+                if let row, let turn = turns.last(where: { $0.rows.contains(where: { $0.id == row.id }) }) {
+                    proxy.scrollTo(turn.id, anchor: .bottom)
+                }
             }
         }
     }
@@ -685,6 +861,58 @@ struct MeetingView: View {
                 .font(.caption).foregroundStyle(.secondary)
         }
 
+        #if targetEnvironment(macCatalyst)
+        Toggle(copy("meeting.output.record", fallback: AppLanguage.current == .english ? "Record output device" : "출력 장치 녹음"), isOn: Binding(
+            get: { active ? coordinator.outputAudioState == .receivingAudio : outputAudioRequested },
+            set: { requested in
+                if active {
+                    sourceChangeInProgress = true
+                    Task {
+                        defer { sourceChangeInProgress = false }
+                        do { try await coordinator.setOutputAudioEnabled(requested, consentConfirmed: consentAccepted) }
+                        catch { coordinator.reportFailure(error) }
+                    }
+                } else { outputAudioRequested = requested }
+            }))
+            .disabled(!enabled || !consentAccepted)
+            .accessibilityIdentifier("meeting.source.output.toggle")
+        if (outputAudioRequested && consentAccepted) || active {
+            Picker(copy("meeting.output.device", fallback: AppLanguage.current == .english ? "Output device" : "출력 장치"), selection: Binding<String?>(
+                get: { coordinator.selectedOutputRouteID },
+                set: { route in
+                    do { try coordinator.selectOutputRoute(id: route) }
+                    catch { coordinator.reportFailure(error) }
+                })) {
+                Text(copy("meeting.output.default", fallback: AppLanguage.current == .english ? "System default output" : "시스템 기본 출력")).tag(nil as String?)
+                ForEach(coordinator.outputAudioRoutes) { route in Text(route.name).tag(Optional(route.id)) }
+                if let selected = coordinator.selectedOutputRouteID, !coordinator.outputAudioRoutes.contains(where: { $0.id == selected }) {
+                    Text(copy("meeting.output.selectedUnavailable", fallback: AppLanguage.current == .english ? "Selected output unavailable" : "선택한 출력 사용 불가")).tag(Optional(selected))
+                }
+            }
+            .disabled(!enabled || active)
+            .accessibilityIdentifier("meeting.source.output.route")
+            if let warning = coordinator.outputRouteWarning { Text(warning).font(.caption).foregroundStyle(AppTheme.warning) }
+            if active {
+                Text(outputAudioStatus).font(.caption).foregroundStyle(.secondary)
+            } else {
+                Button(copy("meeting.output.refresh", fallback: AppLanguage.current == .english ? "Refresh output devices" : "출력 장치 새로고침")) { coordinator.refreshOutputRoutes() }
+                    .font(.caption)
+                Text(copy("meeting.output.explanation", fallback: AppLanguage.current == .english
+                    ? "Records the selected output stream without changing playback. A disconnected device or changed default stops this source."
+                    : "재생 장치를 변경하지 않고 선택한 출력 스트림을 녹음합니다. 장치 연결이 끊기거나 기본 출력이 변경되면 이 소스는 중지됩니다."))
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if let name = detectedProcessName {
+                HStack {
+                    Text(name).font(.caption)
+                    Button(copy("meeting.output.allApps", fallback: AppLanguage.current == .english ? "Record all apps instead" : "대신 모든 앱 녹음")) {
+                        detectedProcessID = nil
+                        detectedProcessName = nil
+                    }.font(.caption).disabled(active)
+                }
+            }
+        }
+        #endif
         if appAudioAvailable {
         Toggle(copy(
             {
@@ -694,7 +922,13 @@ struct MeetingView: View {
                 return "meeting.source.app.ios"
                 #endif
             }(),
-            fallback: AppLanguage.current == .english ? "Record other apps' full-screen audio" : "전체 화면의 다른 앱 소리 녹음"
+            fallback: {
+                #if targetEnvironment(macCatalyst)
+                AppLanguage.current == .english ? "Record app content (system picker)" : "앱 콘텐츠 녹음 (시스템 선택기)"
+                #else
+                AppLanguage.current == .english ? "Record other apps' full-screen audio" : "전체 화면의 다른 앱 소리 녹음"
+                #endif
+            }()
         ),
                isOn: Binding(
                 get: {
@@ -751,7 +985,7 @@ struct MeetingView: View {
                     catch { coordinator.reportFailure(error) }
                 }
             }
-            .disabled(!enabled || !consentAccepted || coordinator.appAudioSources.count >= 4)
+            .disabled(!enabled || !consentAccepted || coordinator.appAudioSources.count >= (coordinator.outputAudioState == .receivingAudio ? 3 : 4))
             .accessibilityIdentifier("meeting.audioTrack.addSource")
             #else
             Text(appAudioStatus(for: coordinator.appAudioState))
@@ -792,6 +1026,15 @@ struct MeetingView: View {
     private var appAudioAvailable: Bool {
         if case .available = coordinator.appAudioAvailability { return true }
         return false
+    }
+
+    private var outputAudioStatus: String {
+        switch coordinator.outputAudioState {
+        case .disabled: return copy("meeting.output.off", fallback: AppLanguage.current == .english ? "Output recording off" : "출력 녹음 꺼짐")
+        case .selecting, .waitingForAudio: return copy("meeting.output.waiting", fallback: AppLanguage.current == .english ? "Authorizing output audio" : "출력 오디오 권한 확인 중")
+        case .receivingAudio: return copy("meeting.output.receiving", fallback: AppLanguage.current == .english ? "Recording selected output" : "선택한 출력 녹음 중")
+        case .unavailable(let reason): return reason
+        }
     }
 
     private func appAudioStatus(for state: MeetingAppAudioCapture.State) -> String {
@@ -851,13 +1094,13 @@ struct MeetingView: View {
                 .disabled(sourceChangeInProgress || finalizingCaptureID != nil || importingMeetingID != nil
                           || processingReporter.isBusy || diarizingMeetingID != nil || !consentAccepted
                           || (automaticLanguageDetection ? !automaticDetectionAvailable : languageTag.isEmpty)
-                          || (!microphoneRequested && !appAudioRequested))
+                          || (!microphoneRequested && !appAudioRequested && !outputAudioRequested))
         }
     }
 
     private func startRecording() {
         guard meetingScreenVisible, consentAccepted, pendingStartTask == nil,
-              finalizingCaptureID == nil, !sourceChangeInProgress, microphoneRequested || appAudioRequested,
+              finalizingCaptureID == nil, !sourceChangeInProgress, microphoneRequested || appAudioRequested || outputAudioRequested,
               automaticLanguageDetection ? automaticDetectionAvailable : !languageTag.isEmpty else { return }
         sourceChangeInProgress = true
         let chosenLanguages = (source: automaticLanguageDetection ? "" : languageTag,
@@ -893,7 +1136,9 @@ struct MeetingView: View {
                     appAudioEnabled: appAudioRequested,
                     consentConfirmed: consentAccepted, summaryLanguageTag: chosenLanguages.summary,
                     deferTranscription: deferred,
-                    automaticLanguageDetection: chosenLanguages.automatic
+                    automaticLanguageDetection: chosenLanguages.automatic,
+                    outputAudioEnabled: outputAudioRequested, outputProcessID: detectedProcessID,
+                    outputProcessName: detectedProcessName
                 )
                 if Task.isCancelled || !consentAccepted || !meetingScreenVisible {
                     await coordinator.cancel()
@@ -1044,6 +1289,22 @@ struct MeetingView: View {
         }
         processingReporter.reset()
         refreshTrackGroup(parent)
+        guard !Task.isCancelled, isCurrent(parent) else { return }
+        guard case .providers(let providers) = BetaFeaturePolicy().routingDecision(for: .meetingAnalysis),
+              providers.contains(where: { provider in
+                  switch provider {
+                  case .foundationModels: FoundationModelsService.isAvailable
+                  case .onDevice: OnDeviceLLMService.shared.isModelLoaded
+                  default: false
+                  }
+              }) else { return }
+        do {
+            if try MeetingGroupSummaryService.canGenerate(parent: parent, in: modelContext),
+               try !MeetingGroupSummaryService.isSummaryCurrent(parent: parent, in: modelContext) {
+                _ = try await MeetingGroupSummaryService.generate(parent: parent, in: modelContext)
+            }
+        } catch is CancellationError { return }
+        catch { coordinator.reportFailure(error) }
     }
 
     private func offlineFailureMessage(for record: MeetingRecord) -> String {
@@ -1181,9 +1442,34 @@ struct MeetingView: View {
     }
 
     private func deleteMeetings(at offsets: IndexSet) {
-        let selected = offsets.map { meetings[$0] }
-        Task {
-            for meeting in selected {
+        requestMeetingDeletion(ids: offsets.compactMap { meetings.indices.contains($0) ? meetings[$0].meetingID : nil })
+    }
+
+    private func requestMeetingDeletion(ids: [String]) {
+        guard !meetingManagementUnavailable, !showingDeleteConfirmation, !ids.isEmpty else { return }
+        pendingDeleteMeetingIDs = ids
+        showingDeleteConfirmation = true
+    }
+
+    private func deleteConfirmedMeetings(ids: [String]) {
+        guard !meetingManagementUnavailable, !ids.isEmpty else { return }
+        isDeletingMeetings = true
+        Task { @MainActor in
+            defer { isDeletingMeetings = false }
+            for id in ids {
+                let meeting: MeetingRecord
+                do {
+                    var descriptor = FetchDescriptor<MeetingRecord>(predicate: #Predicate {
+                        $0.meetingID == id && $0.parentMeetingID == nil
+                    })
+                    descriptor.fetchLimit = 1
+                    guard let current = try modelContext.fetch(descriptor).first else { continue }
+                    meeting = current
+                } catch {
+                    coordinator.reportFailure(copy("meeting.audioTrack.deleteFailed", fallback: AppLanguage.current == .english
+                        ? "The meeting tracks could not be deleted. Try again." : "회의 트랙을 삭제하지 못했습니다. 다시 시도하세요."))
+                    continue
+                }
                 stopTasks[meeting.meetingID]?.cancel()
                 do {
                     let tracks = meeting.isAudioTrackGroup ? try MeetingAudioTrackStore.tracks(for: meeting, in: modelContext) : []
@@ -1204,6 +1490,7 @@ struct MeetingView: View {
                     await coordinator.cancel()
                     releaseCapture(meeting.meetingID)
                 }
+                guard isCurrent(meeting) else { continue }
                 do { try MeetingAudioTrackDeletion.delete(parent: meeting, in: modelContext) }
                 catch {
                     coordinator.reportFailure(copy("meeting.audioTrack.deleteFailed", fallback: AppLanguage.current == .english

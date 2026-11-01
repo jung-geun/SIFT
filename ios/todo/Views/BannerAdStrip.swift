@@ -40,35 +40,40 @@ struct BannerAdStrip: View {
     }
 }
 
-/// Settings entry point, independent of whether this screen is ad-eligible. UMP alone decides
-/// whether the row exists. Errors are generic/localized and appear only after a button action.
+/// Always discoverable on iOS, even before Google has configured/required a form.
+/// User actions refresh UMP; app-owned UI never substitutes for Google's consent choices.
 @MainActor
 struct AdMobPrivacyOptionsRow: View {
     @ObservedObject private var consent = AdMobConsentManager.shared
     @StateObject private var presenter = PrivacyPresenterState()
     @State private var presentationTask: Task<Void, Never>?
     @State private var showsError = false
+    @State private var noFormRequired = false
 
     init() {}
 
     var body: some View {
-        Group {
-            if consent.isPrivacyOptionsRequired {
-                Button {
-                    presentOptions()
-                } label: {
+        Section {
+            Button {
+                presentOptions()
+            } label: {
+                HStack {
                     Label(AdMobCopy.privacyTitle, systemImage: "hand.raised")
                         .labelStyle(SettingsRowLabelStyle())
-                }
-                .disabled(consent.isBusy || presentationTask != nil)
-                .accessibilityIdentifier("settings.adPrivacyOptions")
-                .background(PrivacyOptionsPresenter(presenter: presenter).allowsHitTesting(false))
-                .alert(AdMobCopy.errorTitle, isPresented: $showsError) {
-                    Button(AdMobCopy.okayTitle, role: .cancel) {}
-                } message: {
-                    Text(AdMobCopy.errorMessage)
+                    Spacer()
+                    if presentationTask != nil { ProgressView() }
                 }
             }
+            .disabled(consent.isBusy || presentationTask != nil)
+            .accessibilityIdentifier("settings.adPrivacyOptions")
+            .background(PrivacyOptionsPresenter(presenter: presenter).allowsHitTesting(false))
+            .alert(noFormRequired ? AdMobCopy.privacyTitle : AdMobCopy.errorTitle, isPresented: $showsError) {
+                Button(AdMobCopy.okayTitle, role: .cancel) {}
+            } message: {
+                Text(noFormRequired ? AdMobCopy.notRequired : AdMobCopy.errorMessage)
+            }
+        } footer: {
+            Text(AdMobCopy.explanation)
         }
         .onDisappear {
             // UMP's presentation itself cannot be cancelled. Its consent gate remains closed
@@ -81,6 +86,7 @@ struct AdMobPrivacyOptionsRow: View {
 
     private func presentOptions() {
         guard presentationTask == nil else { return }
+        noFormRequired = false
         guard let controller = presenter.controller else {
             showsError = true
             return
@@ -88,7 +94,12 @@ struct AdMobPrivacyOptionsRow: View {
         presentationTask = Task { @MainActor in
             defer { presentationTask = nil }
             do {
-                try await consent.presentPrivacyOptions(from: controller)
+                let presented = try await consent.presentPrivacyOptions(from: controller)
+                guard !Task.isCancelled, presenter.controller?.viewIfLoaded?.window != nil else { return }
+                if !presented {
+                    noFormRequired = true
+                    showsError = true
+                }
             } catch is CancellationError {
                 // Navigation/background cancellation is not a user-facing SDK error.
             } catch {
