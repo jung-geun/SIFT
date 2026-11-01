@@ -156,7 +156,7 @@ SIFT는 아래 서비스를 이용하며, 이 과정에서 일부 데이터가 �
 | Google LLC | 미국 외 다수 | Gmail 조회·읽음/휴지통 변경 요청 및 OAuth·IMAP 인증 | 이메일 연동 | [Google Privacy Policy](https://policies.google.com/privacy) |
 | Google LLC — AdMob·UMP (광고 제공 버전) | 미국 외 다수 | 광고 동의 선택·상태, IP·대략적 추정 위치, 앱·기기 식별자, 광고 노출·클릭 등 상호작용, SDK 진단·성능 정보 | 광고 동의 관리·비개인화 광고 제공·부정행위 방지·측정·성능 개선 | [Google Privacy Policy](https://policies.google.com/privacy), [파트너 사이트·앱 정보 이용](https://policies.google.com/technologies/partner-sites), [iOS SDK 데이터 공개 안내](https://developers.google.com/admob/ios/privacy/data-disclosure) |
 | Microsoft Corporation | 미국 외 다수 | Outlook IMAP 인증·메일 조회·사용자가 실행한 읽음/휴지통 변경 요청 | 선택형 Outlook 이메일 연동 | [Microsoft Privacy Statement](https://privacy.microsoft.com/privacystatement) |
-| OpenAI | 미국 외 다수 | 공식 로그인·계정/등록 정보, 별도 동의·요청한 할 일·메일·루틴·페르소나/행동 설명 | 선택형 ChatGPT 연결·분석 | [OpenAI Privacy Policy](https://openai.com/policies/privacy-policy/) |
+| OpenAI | 미국 외 다수 | 공식 로그인·계정/등록 정보, 별도 동의·요청한 할 일·메일·루틴·페르소나/행동 설명·회의 전사문과 선택한 요약 설정 | 선택형 ChatGPT 연결·분석 | [OpenAI Privacy Policy](https://openai.com/policies/privacy-policy/) |
 | Cloudflare, Inc. | 미국 외 다수 | 사용자가 승인한 오류 보고·기능 제안·선택적 진단 첨부, 전송에 필요한 네트워크 정보 | 비공개 피드백 접수·저장·남용 방지 | [Cloudflare Privacy Policy](https://www.cloudflare.com/privacypolicy/) |
 
 ---
