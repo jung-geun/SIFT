@@ -170,10 +170,6 @@ struct RoutineDetailView: View {
                         Button(copy("routines.remote.cancel", fallback: "요청 취소"), role: .cancel) { analysisTask?.cancel() }
                     }
                     if let narrative {
-                        Text(narrative.modelID)
-                            .font(.footnote.monospaced())
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
                         Text(narrative.summary)
                             .fixedSize(horizontal: false, vertical: true)
                         ForEach(narrative.observations, id: \.self) {

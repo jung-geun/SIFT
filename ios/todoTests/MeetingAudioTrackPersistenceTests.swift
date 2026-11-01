@@ -122,7 +122,8 @@ struct MeetingAudioTrackPersistenceTests {
         let root = try temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let artifact = try capture(root: root)
-        let container = try memoryContainer()
+        let store = root.appendingPathComponent("sibling-rollback.store")
+        let container = try diskContainer(at: store)
         let context = ModelContext(container)
         context.autosaveEnabled = false
         let first = recovery(artifact.tracks[0], parentID: artifact.meetingID)
@@ -134,14 +135,32 @@ struct MeetingAudioTrackPersistenceTests {
         let sibling = try record(first.meetingID, in: context)
         let parentBefore = parent.persistenceSnapshot()
         let siblingBefore = sibling.persistenceSnapshot()
+        let markerURL = root.appendingPathComponent(second.meetingID).appendingPathComponent("capture-recovery.json")
+        let markerBefore = try Data(contentsOf: markerURL)
+        let audioBefore = try audioBytes(artifact)
         #expect(throws: TrackPersistenceTestError.saveFailed) {
             try MeetingCaptureRecoveryPersister.persist(second, in: context, rootURL: root,
-                save: { _ in throw TrackPersistenceTestError.saveFailed })
+                save: { pending in
+                    // Fail the complete child/membership transaction, even when
+                    // the parent's projected result and status did not change.
+                    #expect(pending.hasChanges)
+                    #expect(try record(second.meetingID, in: pending).status == .transcriptFinalizationFailed)
+                    #expect(parent.audioTrackIDs == parentBefore.audioTrackIDs + [second.meetingID])
+                    #expect(parent.resultData == parentBefore.resultData)
+                    #expect(parent.statusRaw == parentBefore.statusRaw)
+                    throw TrackPersistenceTestError.saveFailed
+                })
         }
         #expect(parent.persistenceSnapshot() == parentBefore)
         #expect(sibling.persistenceSnapshot() == siblingBefore)
         #expect(try context.fetch(FetchDescriptor<MeetingRecord>()).count == 2)
         #expect(MeetingCaptureRecoveryStore.scan(rootURL: root).recoveries.map(\.meetingID) == [second.meetingID])
+        #expect(try Data(contentsOf: markerURL) == markerBefore)
+        #expect(try audioBytes(artifact) == audioBefore)
+        let reopened = ModelContext(try diskContainer(at: store))
+        #expect(try record(parent.meetingID, in: reopened).persistenceSnapshot() == parentBefore)
+        #expect(try record(sibling.meetingID, in: reopened).persistenceSnapshot() == siblingBefore)
+        #expect(try reopened.fetch(FetchDescriptor<MeetingRecord>()).count == 2)
         try MeetingCaptureRecoveryPersister.persist(second, in: context, rootURL: root)
         #expect(try MeetingAudioTrackStore.tracks(for: parent, in: context).count == 2)
     }
@@ -175,7 +194,12 @@ struct MeetingAudioTrackPersistenceTests {
         let reopened = try diskContainer(at: store)
         let context = ModelContext(reopened)
         context.autosaveEnabled = false
+        // Phase two must already be durable even though the unfinished sibling
+        // left the parent's projected status unchanged during refresh.
+        let durableChild = try record(stale.meetingID, in: context)
+        #expect(durableChild.persistenceSnapshot() == committed)
         try MeetingCaptureRecoveryPersister.persist(failed, in: context, rootURL: root)
+        #expect(durableChild.persistenceSnapshot() == committed)
         try MeetingCaptureRecoveryPersister.persist(stale, in: context, rootURL: root)
         let child = try record(stale.meetingID, in: context)
         let sibling = try record(failed.meetingID, in: context)
@@ -475,14 +499,23 @@ struct MeetingAudioTrackPersistenceTests {
         try context.save()
         let rowBefore = row.persistenceSnapshot()
         let parentBefore = parent.persistenceSnapshot()
+        let audioBefore = try audioBytes(artifact)
         #expect(throws: TrackPersistenceTestError.saveFailed) {
             try MeetingCaptureRecoveryPersister.persist(stopped, in: context, rootURL: root,
-                save: { _ in throw TrackPersistenceTestError.saveFailed })
+                save: { pending in
+                    #expect(pending.hasChanges)
+                    #expect(row.status == .transcriptFinalizationFailed)
+                    #expect(row.refinementEngineLabel.isEmpty && row.offlineASRFailure == nil)
+                    #expect(parent.resultData == parentBefore.resultData)
+                    #expect(parent.statusRaw == parentBefore.statusRaw)
+                    throw TrackPersistenceTestError.saveFailed
+                })
         }
         #expect(row.persistenceSnapshot() == rowBefore)
         #expect(parent.persistenceSnapshot() == parentBefore)
         #expect(try Data(contentsOf: activeURL) == activeBytes)
         #expect(try Data(contentsOf: stoppedURL) == stoppedBytes)
+        #expect(try audioBytes(artifact) == audioBefore)
         try MeetingCaptureRecoveryPersister.persist(stopped, in: context, rootURL: root)
         #expect(row.status == .transcriptFinalizationFailed)
         #expect(row.result == child.provisionalResult)
@@ -490,6 +523,14 @@ struct MeetingAudioTrackPersistenceTests {
         #expect(parent.result?.segments.isEmpty == true && parent.audioManifest == nil)
         #expect(!FileManager.default.fileExists(atPath: activeURL.path))
         #expect(!FileManager.default.fileExists(atPath: stoppedURL.path))
+    }
+
+    private func audioBytes(_ artifact: MeetingCaptureArtifact) throws -> [Data] {
+        try artifact.tracks.flatMap { track in
+            try track.audioManifest.parts.map { part in
+                try Data(contentsOf: track.directoryURL.appendingPathComponent(part.fileName))
+            }
+        }
     }
 
     @Test("active recovery accepts an aliased root but rejects an escaping child symlink")

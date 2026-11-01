@@ -149,7 +149,7 @@ extension OpenAICredentialStore {
     var synchronizationEnabled: Bool { SettingsStore.isICloudSyncEnabled }
     private(set) var synchronizationIssue: OpenAIConnectionError?
     private var publicationKey: String { "pieroot.todo.openai.device.publication.\(deviceService)" }
-    private struct PublicationState: Codable {
+    private struct PublicationState: Codable, Equatable {
         var baseDigest: Data?
         var baseKnown: Bool
         var localDigest: Data
@@ -180,6 +180,7 @@ extension OpenAICredentialStore {
     }
 
     private func savePublicationState(_ state: PublicationState) throws {
+        guard try publicationState() != state else { return }
         defaults.set(try JSONEncoder().encode(state), forKey: publicationKey)
     }
 

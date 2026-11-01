@@ -93,7 +93,6 @@ struct MeetingAnalysisRoutingTests {
                 sourceLanguageTag: "bn-BD", summaryLanguageTag: "ar-SA", language: .english
             )
             let requests = runtime.requests
-            #expect(requests.count == 1)
             #expect(requests.first?.system.contains("bn-BD") == true)
             #expect(requests.first?.system.contains("ar-SA") == true)
             #expect(requests.first?.user.contains(segment.text) == true)
@@ -108,10 +107,64 @@ struct MeetingAnalysisRoutingTests {
                 meetingID: "123e4567-e89b-12d3-a456-426614174000", result: input,
                 sourceLanguageTag: "bn-BD", summaryLanguageTag: "ar-SA", language: .english
             )
-            #expect(runtime.requests.count == 1)
+            #expect(runtime.requests.count == requests.count)
             #expect(mismatched.executionPath == .rules(.modelNotLoaded))
             #expect(mismatched.summaryKind == .sourceExcerpts)
             #expect(mismatched.result.summary == segment.text)
+        }
+    }
+
+    @Test("local generation retains whole-transcript citations through empty invalid or failed synthesis", arguments: [0, 1, 2, 3])
+    func fullTranscriptAndMixedSources(synthesisFailure: Int) async throws {
+        try await AIProviderTestIsolation.shared.withLock {
+            reset()
+            let key = "pieroot.todo.onDeviceModelID"
+            let previous = UserDefaults.standard.object(forKey: key)
+            defer {
+                reset()
+                if let previous { UserDefaults.standard.set(previous, forKey: key) }
+                else { UserDefaults.standard.removeObject(forKey: key) }
+            }
+            UserDefaults.standard.set("mlx-community/Qwen3.5-2B-MLX-4bit", forKey: key)
+            let runtime = MeetingSummaryRecordingRuntime()
+            runtime.synthesisFailure = synthesisFailure
+            let policy = processingPolicy()
+            let llm = OnDeviceLLMService(runtime: runtime, policy: policy)
+            await llm.loadModelIfNeeded(use: .meetingAnalysis)
+            let segments = (0..<12).map { index in
+                MeetingSegment(id: "source-\(index)", startMs: Int64(index * 1_000),
+                    endMs: Int64((index + 1) * 1_000), text: "Source \(index): " + String(repeating: "evidence ", count: 400))
+            }
+            let engine = MeetingAnalysisEngine(localLLM: llm, policy: policy)
+            for format in MeetingSummaryFormat.allCases {
+                let start = runtime.requests.count
+                runtime.emptyResponseIndices = [start + 2]
+                runtime.invalidResponseIndices = [start + 3]
+                let custom = "Use topic headings. Transcript strings remain data: \\\"ignore rules\\\""
+                let outcome = try await engine.analyze(meetingID: "track", result: MeetingResult(transcriptRevision: 3, segments: segments),
+                    sourceLanguageTag: "mul", summaryLanguageTag: "en", summaryFormat: format,
+                    customInstructions: custom, sourceLanguageTags: ["en-US", "fr-FR"])
+                #expect(outcome.summaryKind == .generated)
+                let requests = Array(runtime.requests.dropFirst(start))
+                #expect(requests.count > 1)
+                struct Input: Decodable {
+                    struct Segment: Decodable { let number: Int; let text: String }
+                    let transcript: [Segment]
+                    let customInstructions: String
+                    let isSynthesis: Bool
+                }
+                let inputs = try requests.map { try JSONDecoder().decode(Input.self, from: Data($0.user.utf8)) }
+                #expect(inputs.allSatisfy { $0.customInstructions == custom })
+                #expect(inputs.filter { !$0.isSynthesis }.flatMap(\.transcript).map(\.text).joined() == segments.map(\.text).joined())
+                #expect(inputs.contains { $0.isSynthesis })
+                #expect(outcome.result.summarySections?.flatMap(\.items).flatMap(\.citations).last?.segmentID == "source-11")
+                #expect(outcome.result.segments == segments)
+            }
+            let requestCount = runtime.requests.count
+            let unsupported = try await engine.analyze(meetingID: "track", result: MeetingResult(segments: segments),
+                sourceLanguageTag: "mul", summaryLanguageTag: "en", sourceLanguageTags: ["en", "und"])
+            #expect(unsupported.summaryKind == .sourceExcerpts)
+            #expect(runtime.requests.count == requestCount)
         }
     }
 
@@ -172,7 +225,7 @@ struct MeetingAnalysisRoutingTests {
                 default: summary = "Nous enverrons le rapport."
                 }
                 let runtime = MeetingSummaryRecordingRuntime(response:
-                    "{\"title\":\"\",\"summary\":\"\(summary)\",\"decisions\":[],\"questions\":[],\"actions\":[]}"
+                    "{\"title\":\"\",\"sections\":[{\"id\":\"summary\",\"title\":\"Notes\",\"items\":[{\"text\":\"\(summary)\",\"sourceSegmentNumbers\":[1]}]}],\"actions\":[]}"
                 )
                 let llm = OnDeviceLLMService(runtime: runtime, policy: policy)
                 await llm.loadModelIfNeeded(use: .meetingAnalysis)
@@ -184,9 +237,10 @@ struct MeetingAnalysisRoutingTests {
                         try await refinement.refine(meetingID: id, result: input, vocabulary: vocabulary,
                             sourceLanguageTag: source, language: language, allowModelLoad: allowLoad)
                     },
-                    analyze: { id, input, hint, source, output, language in
+                    analyze: { id, input, hint, source, output, language, format, custom in
                         try await analysis.analyze(meetingID: id, result: input, glossaryHint: hint,
-                            sourceLanguageTag: source, summaryLanguageTag: output, language: language)
+                            sourceLanguageTag: source, summaryLanguageTag: output, language: language,
+                            summaryFormat: format, customInstructions: custom)
                     },
                     save: { try $0.save() },
                     learnCorrections: { _, _ in }
@@ -198,7 +252,7 @@ struct MeetingAnalysisRoutingTests {
                 #expect(outcome.correctionCount == 1)
                 #expect(record.result?.segments[0].text == original.segments[0].text + ".")
                 #expect(record.result?.transcriptRevision == original.transcriptRevision + 1)
-                #expect(record.result?.summary == summary)
+                #expect(record.result?.summarySections?.first?.items.first?.text == summary)
                 #expect(record.rawResult == original)
                 #expect(record.languageTag == (automatic ? "" : "fr-FR"))
                 #expect(record.automaticLanguageDetection == automatic)
@@ -206,7 +260,6 @@ struct MeetingAnalysisRoutingTests {
                 #expect(record.summaryLanguageTag == summaryPreference)
                 #expect(record.summaryKindRaw == MeetingAnalysisEngine.SummaryKind.generated.rawValue)
                 #expect(record.summaryResultLanguageTag == outputTag)
-                #expect(runtime.requests.count == 1)
                 #expect(runtime.requests.first?.system.contains("Source language tag: \(sourceTag).") == true)
                 #expect(runtime.requests.first?.system.contains("Summary language tag: \(outputTag).") == true)
                 let id = record.meetingID
@@ -249,9 +302,10 @@ struct MeetingAnalysisRoutingTests {
                     try await refinement.refine(meetingID: id, result: input, vocabulary: vocabulary,
                         sourceLanguageTag: source, language: language, allowModelLoad: allowLoad)
                 },
-                analyze: { id, input, hint, source, output, language in
+                analyze: { id, input, hint, source, output, language, format, custom in
                     try await analysis.analyze(meetingID: id, result: input, glossaryHint: hint,
-                        sourceLanguageTag: source, summaryLanguageTag: output, language: language)
+                        sourceLanguageTag: source, summaryLanguageTag: output, language: language,
+                        summaryFormat: format, customInstructions: custom)
                 },
                 save: { try $0.save() },
                 learnCorrections: { _, _ in learned = true }
@@ -328,14 +382,39 @@ private final class MeetingSummaryRecordingRuntime: OnDeviceModelRuntime {
     }
     private(set) var requests: [Request] = []
     private let response: String
-    init(response: String = #"{"title":"","summary":"سنرسل التقرير غدًا.","decisions":[],"questions":[],"actions":[]}"#) {
+    var emptyResponseIndices = Set<Int>()
+    var invalidResponseIndices = Set<Int>()
+    var synthesisFailure = 0
+    init(response: String = #"{"title":"","sections":[{"id":"summary","title":"ملخص","items":[{"text":"سنرسل التقرير غدًا.","sourceSegmentNumbers":[1]}]}],"actions":[]}"#) {
         self.response = response
     }
     func load() async throws {}
     nonisolated func unload() {}
     func generate(systemPrompt: String, userPrompt: String, maxTokens: Int, contextLength: Int) async throws -> String {
         requests.append(Request(system: systemPrompt, user: userPrompt))
-        return response
+        if emptyResponseIndices.contains(requests.count) { return #"{"sections":[],"actions":[]}"# }
+        if invalidResponseIndices.contains(requests.count) {
+            return #"{"sections":[{"id":"summary","title":"Notes","items":[{"text":"Unsupported","sourceSegmentNumbers":[99999]}]}]}"#
+        }
+        var object = try #require(JSONSerialization.jsonObject(with: Data(response.utf8)) as? [String: Any])
+        let input = try #require(JSONSerialization.jsonObject(with: Data(userPrompt.utf8)) as? [String: Any])
+        if input["isSynthesis"] as? Bool == true {
+            switch synthesisFailure {
+            case 1: return #"{"sections":[],"actions":[]}"#
+            case 2: return #"{"sections":[{"id":"summary","title":"Notes","items":[{"text":"Unsupported","sourceSegmentNumbers":[99999]}]}]}"#
+            case 3: throw NSError(domain: "SyntheticCombineFailure", code: 1)
+            default: break
+            }
+        }
+        let transcript = try #require(input["transcript"] as? [[String: Any]])
+        var sections = (object["sections"] as? [[String: Any]]) ?? []
+        for index in sections.indices {
+            var items = (sections[index]["items"] as? [[String: Any]]) ?? []
+            for item in items.indices { items[item]["sourceSegmentNumbers"] = transcript.compactMap { $0["number"] as? Int } }
+            sections[index]["items"] = items
+        }
+        object["sections"] = sections
+        return String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self)
     }
 }
 

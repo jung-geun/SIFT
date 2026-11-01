@@ -19,4 +19,25 @@ protocol MeetingAudioFilePickerBridging: NSObjectProtocol {
     init()
     func chooseAudioFile(_ completion: @escaping (URL?, NSError?) -> Void)
     func cancelAudioFilePicker()
+    func copiedFileURLs() -> [URL]
+    func saveAudioFile(_ source: URL, completion: @escaping (URL?, NSError?) -> Void)
+    func cancelAudioFileSave()
+}
+
+/// Detection reads process metadata only. This ABI exposes no audio buffers or capture operations.
+@MainActor
+@objc(SIFTMeetingDetectionBridging)
+protocol MeetingDetectionBridging: NSObjectProtocol {
+    init()
+    var isSupported: Bool { get }
+    func setHandlers(snapshot: @escaping (NSArray) -> Void,
+                     lifecycle: @escaping (String) -> Void,
+                     decision: @escaping (String, String) -> Void)
+    func startMonitoring() -> Bool
+    func stopMonitoring()
+    func refreshMetadata()
+    func presentSuggestion(token: String, title: String, message: String,
+                           startLabel: String, skipLabel: String, expiresAt: Date)
+    func dismissSuggestion()
+    func invalidate()
 }

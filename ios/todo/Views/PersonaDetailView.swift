@@ -73,24 +73,30 @@ struct PersonaDetailView: View {
                         showOnboardingResetup = true
                     } label: {
                         Label("페르소나 다시 설정", systemImage: "arrow.clockwise")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.borderless)
                     
                     Button {
                         startGeneration()
                     } label: {
-                        if isGenerating {
-                            HStack(spacing: 8) {
-                                ProgressView().controlSize(.small)
-                                Text("행동 근거 분석 중…")
+                        Group {
+                            if isGenerating {
+                                HStack(spacing: 8) {
+                                    ProgressView().controlSize(.small)
+                                    Text("행동 근거 분석 중…")
+                                }
+                            } else {
+                                Label(
+                                    personas.first?.descriptionText.isEmpty ?? true ? AppLanguage.localized("persona.detail.generate", defaultValue: "Generate Persona", language: .current, comment: "Action generating a persona from behavior patterns.") : AppLanguage.localized("persona.detail.improve", defaultValue: "Update Persona", language: .current, comment: "Action improving an existing persona from behavior patterns."),
+                                    systemImage: "person.crop.circle.badge.checkmark"
+                                )
+                                .fontWeight(.medium)
                             }
-                        } else {
-                            Label(
-                                personas.first?.descriptionText.isEmpty ?? true ? AppLanguage.localized("persona.detail.generate", defaultValue: "Generate Persona", language: .current, comment: "Action generating a persona from behavior patterns.") : AppLanguage.localized("persona.detail.improve", defaultValue: "Update Persona", language: .current, comment: "Action improving an existing persona from behavior patterns."),
-                                systemImage: "person.crop.circle.badge.checkmark"
-                            )
-                            .fontWeight(.medium)
                         }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
                     }
                     .buttonStyle(.borderless)
                     .disabled(isGenerating)

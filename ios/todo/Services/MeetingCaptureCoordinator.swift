@@ -318,6 +318,17 @@ final class MeetingCaptureCoordinator: ObservableObject {
     private var selectedAppAudioSourceDescription: String? { appAudioCapture?.selectedSourceDescription }
     private var appAudioCapture: MeetingAppAudioCapture?
     private var appAudioInputSink: MeetingAppAudioInputSink?
+    @Published private(set) var outputAudioState: MeetingAppAudioCapture.State = .disabled
+    @Published private(set) var outputAudioRoutes: [MeetingOutputAudioRoute] = []
+    @Published private(set) var selectedOutputRouteID: String? = UserDefaults.standard.string(forKey: "meeting.outputRouteID")
+    @Published private(set) var outputRouteWarning: String?
+    private var outputCapture: MeetingOutputAudioCapture?
+    private var outputSink: MeetingAppAudioInputSink?
+    private let outputSource = MeetingAudioSourceRouter.Source.application("output-device")
+    private var outputSourceLabel: String?
+    private var outputProcessID: Int32?
+    private var outputProcessName: String?
+    private var changingOutputSource = false
     private var pickerMicrophoneApproval: Int?
     @Published private(set) var usesSystemPickerMicrophone = false
     private var requestedPickerMicrophone = false
@@ -417,10 +428,11 @@ final class MeetingCaptureCoordinator: ObservableObject {
     func start(
         meetingID: String, languageTag: String, microphoneEnabled: Bool = true,
         appAudioEnabled: Bool = false, consentConfirmed: Bool = false, summaryLanguageTag: String? = nil,
-        deferTranscription: Bool = false, automaticLanguageDetection: Bool = false
+        deferTranscription: Bool = false, automaticLanguageDetection: Bool = false,
+        outputAudioEnabled: Bool = false, outputProcessID: Int32? = nil, outputProcessName: String? = nil
     ) async throws {
         guard !starting, status == .ready || status == .cancelled || status == .failed else { throw CaptureError.invalidState }
-        guard microphoneEnabled || appAudioEnabled else { throw CaptureError.noAudioSource }
+        guard microphoneEnabled || appAudioEnabled || outputAudioEnabled else { throw CaptureError.noAudioSource }
         starting = true
         defer { starting = false }
         // A failed picker must never clean up a previous recording's saved path.
@@ -462,6 +474,10 @@ final class MeetingCaptureCoordinator: ObservableObject {
             // No writer, analyzer, microphone permission, or retained audio exists
             // until the system picker has consented and the app stream has started.
             if appAudioEnabled { try await capture.selectSourceAndWait(consentConfirmed: consentConfirmed) }
+            if outputAudioEnabled {
+                try await prepareOutputAudio(processID: outputProcessID, processName: outputProcessName,
+                                             consentConfirmed: consentConfirmed, generation: generation)
+            }
             try Task.checkCancellation()
             guard captureGeneration == generation else { throw CancellationError() }
             if microphoneEnabled && !usesSystemPickerMicrophone {
@@ -476,6 +492,7 @@ final class MeetingCaptureCoordinator: ObservableObject {
                                     automaticLanguageDetection: automaticLanguageDetection,
                                     microphoneEnabled: usesSystemPickerMicrophone ? appSink.microphoneConsent.isPermitted : microphoneEnabled,
                                     appAudioEnabled: appAudioEnabled,
+                                    outputAudioEnabled: outputAudioEnabled,
                                     generation: generation, appSink: appSink)
         } catch {
             clearRecordingActivity()
@@ -487,6 +504,8 @@ final class MeetingCaptureCoordinator: ObservableObject {
             }
             appSink.attach(nil)
             stopMicrophoneHardware()
+            outputSink?.attach(nil)
+            outputCapture?.stop()
             await capture.stop()
             await canonicalPipeline?.cancel()
             await MeetingLiveSpeakerPrewarmer.shared.releaseUnused()
@@ -506,7 +525,7 @@ final class MeetingCaptureCoordinator: ObservableObject {
     private func startPrepared(
         meetingID: String, languageTag: String, summaryLanguageTag: String?, deferTranscription: Bool,
         automaticLanguageDetection: Bool, microphoneEnabled: Bool,
-        appAudioEnabled: Bool, generation: UUID, appSink: MeetingAppAudioInputSink
+        appAudioEnabled: Bool, outputAudioEnabled: Bool, generation: UUID, appSink: MeetingAppAudioInputSink
     ) async throws {
         voiceProcessingRequested = SettingsStore.shared.effectiveMeetingVoiceProcessingEnabled
         recordingDiarizationEnabled = SettingsStore.shared.effectiveMeetingDiarizationEnabled
@@ -546,6 +565,11 @@ final class MeetingCaptureCoordinator: ObservableObject {
             primaryAppSourceID = capture.sourceID
             appSources[capture.sourceID] = AppSource(capture: capture, sink: appSink, source: .appAudio, trackID: track.meetingID)
         }
+        if outputAudioEnabled {
+            guard outputAudioState == .receivingAudio else { throw MeetingOutputAudioCapture.Failure.unavailable }
+            _ = try await createTrack(source: outputSource, kind: .application,
+                                      label: outputSourceLabel, startSample: 0)
+        }
         if tracks.values.allSatisfy({ $0.timeline == nil }) {
             await MeetingLiveSpeakerPrewarmer.shared.releaseUnused()
         }
@@ -567,6 +591,12 @@ final class MeetingCaptureCoordinator: ObservableObject {
         if appAudioEnabled {
             pipeline.setSelection(selectedAppAudioSourceDescription, source: .appAudio, hostTime: startTime)
             pipeline.setEnabled(true, source: .appAudio, hostTime: startTime)
+        }
+        if outputAudioEnabled {
+            guard outputAudioState == .receivingAudio else { throw MeetingOutputAudioCapture.Failure.unavailable }
+            pipeline.setSelection(outputSourceLabel, source: outputSource, hostTime: startTime)
+            pipeline.setEnabled(true, source: outputSource, hostTime: startTime)
+            outputSink?.attach(pipeline, source: outputSource)
         }
         for (source, id) in activeSourceTracks {
             if let offset = pipeline.sessionStartSample(for: source) { tracks[id]?.setStartSample(offset) }
@@ -848,7 +878,8 @@ final class MeetingCaptureCoordinator: ObservableObject {
               !addingAppSource, let router = canonicalPipeline else { throw CaptureError.invalidState }
         guard consentConfirmed else { throw MeetingAppAudioCapture.CaptureError.consentRequired }
         let running = appSources.values.filter { $0.capture.state == .waitingForAudio || $0.capture.state == .receivingAudio }
-        guard running.count < 4, MeetingAppAudioCapture.supportsMultipleSources || running.isEmpty else {
+        let applicationLimit = activeSourceTracks[outputSource] == nil ? 4 : 3
+        guard running.count < applicationLimit, MeetingAppAudioCapture.supportsMultipleSources || running.isEmpty else {
             throw CaptureError.invalidState
         }
         addingAppSource = true
@@ -915,6 +946,94 @@ final class MeetingCaptureCoordinator: ObservableObject {
             appAudioState = .disabled
         }
         publishAppSources()
+    }
+
+    func refreshOutputRoutes() {
+        #if targetEnvironment(macCatalyst)
+        do {
+            outputAudioRoutes = try MeetingOutputAudioCapture.routes()
+            outputRouteWarning = selectedOutputRouteID.map { selected in
+                outputAudioRoutes.contains(where: { $0.id == selected }) ? nil : MeetingAppAudioCapture.message(
+                    "meeting.output.selectedUnavailable", "Selected output unavailable. Choose an available output before starting.", "선택한 출력을 사용할 수 없습니다. 시작 전에 사용 가능한 출력을 선택하세요.")
+            } ?? nil
+        } catch { outputAudioRoutes = []; outputRouteWarning = error.localizedDescription }
+        #endif
+    }
+
+    func selectOutputRoute(id: String?) throws {
+        guard !starting, status != .recording, status != .paused else { throw CaptureError.invalidState }
+        refreshOutputRoutes()
+        guard id == nil || outputAudioRoutes.contains(where: { $0.id == id }) else { throw MeetingOutputAudioCapture.Failure.unavailable }
+        selectedOutputRouteID = id
+        UserDefaults.standard.set(id, forKey: "meeting.outputRouteID")
+        outputRouteWarning = nil
+    }
+
+    private func prepareOutputAudio(processID: Int32?, processName: String?, consentConfirmed: Bool, generation: UUID) async throws {
+        refreshOutputRoutes()
+        let route = selectedOutputRouteID.flatMap { id in outputAudioRoutes.first(where: { $0.id == id }) }
+        guard selectedOutputRouteID == nil || route != nil else { throw MeetingOutputAudioCapture.Failure.unavailable }
+        self.outputProcessID = processID
+        self.outputProcessName = processName
+        let sink = MeetingAppAudioInputSink()
+        let source = outputSource
+        let capture = MeetingOutputAudioCapture(source: source,
+            receive: { buffer, hostTime, source in sink.enqueue(buffer, hostTime: hostTime, source: source) },
+            changed: { [weak self] state in
+                guard let self, self.captureGeneration == generation else { return }
+                self.outputAudioState = state
+                if case .unavailable(let reason) = state {
+                    sink.setEnabled(false, hostTime: Self.hostTime)
+                    sink.attach(nil)
+                    self.outputRouteWarning = reason
+                    if self.terminalIntent == nil, self.activeSourceTracks[source] != nil {
+                        Task { @MainActor [weak self] in await self?.retireSource(source, revoke: true) }
+                    }
+                }
+            })
+        outputSink = sink
+        outputCapture = capture
+        let label = route?.name ?? outputAudioRoutes.first(where: { $0.isDefault && $0.streamIndex == 0 })?.name
+            ?? MeetingAppAudioCapture.message("meeting.output.default", "System default output", "시스템 기본 출력")
+        outputSourceLabel = processName.map { "\(label) · \($0)" } ?? label
+        try await capture.start(route: route, processID: processID, consentConfirmed: consentConfirmed)
+        guard captureGeneration == generation else { capture.stop(); throw CancellationError() }
+    }
+
+    func setOutputAudioEnabled(_ enabled: Bool, consentConfirmed: Bool) async throws {
+        guard status == .recording || status == .paused, terminalIntent == nil, let router = canonicalPipeline else { throw CaptureError.invalidState }
+        guard !changingOutputSource else { throw CaptureError.invalidState }
+        changingOutputSource = true
+        defer { changingOutputSource = false }
+        if !enabled {
+            outputSink?.attach(nil)
+            outputCapture?.stop()
+            await retireSource(outputSource, revoke: true)
+            return
+        }
+        guard outputAudioState != .receivingAudio else { return }
+        let generation = captureGeneration
+        do {
+            guard appSources.values.filter({ $0.capture.state == .waitingForAudio || $0.capture.state == .receivingAudio }).count < 4 else { throw CaptureError.invalidState }
+            if let retiring = sourceRetirements[outputSource] { await retiring.value }
+            guard captureGeneration == generation, terminalIntent == nil else { throw CancellationError() }
+            try await prepareOutputAudio(processID: outputProcessID, processName: outputProcessName, consentConfirmed: consentConfirmed, generation: generation)
+            guard captureGeneration == generation, terminalIntent == nil else { throw CancellationError() }
+            let track = try await createTrack(source: outputSource, kind: .application, label: outputSourceLabel, startSample: 0)
+            guard outputAudioState == .receivingAudio else { throw MeetingOutputAudioCapture.Failure.unavailable }
+            router.setSelection(outputSourceLabel, source: outputSource, hostTime: Self.hostTime)
+            router.setEnabled(true, source: outputSource, hostTime: Self.hostTime)
+            track.setStartSample(router.sessionStartSample(for: outputSource) ?? 0)
+            try journalActive(track)
+            outputSink?.attach(router, source: outputSource)
+            if status == .paused { outputCapture?.pause() }
+            publishTracks()
+        } catch {
+            outputSink?.attach(nil)
+            outputCapture?.stop()
+            await retireSource(outputSource, revoke: true)
+            throw error
+        }
     }
 
 
@@ -1315,6 +1434,7 @@ final class MeetingCaptureCoordinator: ObservableObject {
         microphoneRMS = 0
         appAudioRMS = 0
         canonicalPipeline?.pause(hostTime: Self.hostTime)
+        outputCapture?.pause()
         #if targetEnvironment(macCatalyst)
         catalystMicrophone?.pause()
         #else
@@ -1336,6 +1456,7 @@ final class MeetingCaptureCoordinator: ObservableObject {
            appAudioInputSink?.microphoneConsent.isPermitted == true { try engine.start() }
         #endif
         canonicalPipeline?.resume(hostTime: Self.hostTime)
+        outputCapture?.resume()
         status = .recording
         startRecordingMeterCadence()
     }
@@ -1418,6 +1539,10 @@ final class MeetingCaptureCoordinator: ObservableObject {
             await entry?.capture.stop()
             appSources[id] = nil
             publishAppSources()
+        } else if source == outputSource {
+            outputSink?.attach(nil)
+            outputCapture?.stop()
+            outputRouteWarning = MeetingAppAudioCapture.message("meeting.output.stopped", "Output capture stopped. Select the output again to continue.", "출력 캡처가 중지되었습니다. 계속하려면 출력을 다시 선택하세요.")
         }
         await retireSource(source, revoke: true)
     }
@@ -1493,6 +1618,9 @@ final class MeetingCaptureCoordinator: ObservableObject {
         if let thermalObserver { NotificationCenter.default.removeObserver(thermalObserver) }
         thermalObserver = nil
         stopMicrophoneHardware()
+        outputSink?.attach(nil)
+        outputCapture?.stop()
+        outputAudioState = .disabled
         for source in appSources.values { source.sink.attach(nil); await source.capture.stop() }
         appAudioCapture = nil
         appAudioState = .disabled
@@ -1543,6 +1671,14 @@ final class MeetingCaptureCoordinator: ObservableObject {
 
     private func resetCaptureReferences() {
         clearRecordingActivity()
+        outputSink?.attach(nil)
+        outputCapture?.stop()
+        outputSink = nil
+        outputCapture = nil
+        outputAudioState = .disabled
+        outputSourceLabel = nil
+        outputProcessID = nil
+        outputProcessName = nil
         recordingMeterColors.removeAll()
         appAudioInputSink?.revokeMicrophone()
         appAudioInputSink?.attach(nil)

@@ -79,7 +79,7 @@ private final class ProviderConsent: @unchecked Sendable {
             return "synthetic-test-credential"
         }, generation: { session.generation }, consent: consent.allows, enabled: { enabled }, prepareSession: {
             session.preparationCount += 1
-        }, regionAllowed: regionAllowed)
+        }, regionAllowed: regionAllowed, accountSubject: { nil })
     }
 
     @Test("restricted storefront denies every remote entry before authentication or network",
@@ -112,7 +112,7 @@ private final class ProviderConsent: @unchecked Sendable {
             region.allowed = false
             return "synthetic-test-credential"
         }, generation: { session.generation }, consent: { _ in true }, enabled: { true },
-           prepareSession: {}, regionAllowed: { region.allowed })
+           prepareSession: {}, regionAllowed: { region.allowed }, accountSubject: { nil })
         await #expect(throws: OpenAIRequestError.disabled) {
             switch operation {
             case "models": _ = try await provider.availableModels()
@@ -134,7 +134,7 @@ private final class ProviderConsent: @unchecked Sendable {
             session.authenticationCount += 1
             return "synthetic-test-credential"
         }, generation: { session.generation }, consent: { _ in true }, enabled: { true },
-           prepareSession: { region.allowed = false }, regionAllowed: { region.allowed })
+           prepareSession: { region.allowed = false }, regionAllowed: { region.allowed }, accountSubject: { nil })
         await #expect(throws: OpenAIRequestError.disabled) {
             switch operation {
             case "models": _ = try await provider.availableModels()
@@ -425,10 +425,6 @@ private final class ProviderConsent: @unchecked Sendable {
         await #expect(throws: OpenAIRequestError.invalidResponse) {
             try await service(transport).generateJSON(systemInstruction: "Analyze", userPrompt: "private", scope: .tasks)
         }
-        let payload = try #require(transport.requests.last?.httpBody)
-        let body = try #require(try JSONSerialization.jsonObject(with: payload) as? [String: Any])
-        let text = try #require(body["text"] as? [String: [String: String]])
-        #expect(text["format"]?["type"] == "json_object")
     }
 
     @Test("a no-app-data connection check cannot publish success from an invalidated account")
@@ -464,7 +460,7 @@ private final class ProviderConsent: @unchecked Sendable {
         let transport = ProviderLoopbackTransport(endpoint: endpoint)
         let provider = OpenAIProviderService(
             transport: transport, accessToken: { "synthetic-loopback-only" }, generation: { fixture.generation },
-            consent: { _ in false }, enabled: { false }, prepareSession: {}, regionAllowed: { true }
+            consent: { _ in false }, enabled: { false }, prepareSession: {}, regionAllowed: { true }, accountSubject: { nil }
         )
         #expect(try await provider.verifySubscriptionConnection() == "gpt-6-luna")
         #expect(transport.requests.map { $0.url!.path } == ["/v1/models", "/v1/responses"])
@@ -476,6 +472,181 @@ private final class ProviderConsent: @unchecked Sendable {
         #expect(Set(body.keys) == ["model", "instructions", "input", "store", "stream"])
         #expect(body["store"] as? Bool == false)
         #expect(body["stream"] as? Bool == true)
+    }
+
+    @Test("JSON analysis passes input admission even when JSON instructions are outside user data")
+    func structuredHTTPInputContract() async throws {
+        let reply = #"{"summary":"검증된 회의 결정"}"#
+        let sse = (try delta(reply) + completed()).joined(separator: "\n") + "\n"
+        let fixture = try ProviderHTTPFixture(sse: sse)
+        let endpoint = try await fixture.start()
+        defer { fixture.stop() }
+        let transport = ProviderLoopbackTransport(endpoint: endpoint)
+        let result = try await service(transport).generateJSON(
+            systemInstruction: "Return a JSON object containing a summary.",
+            userPrompt: #"{"transcript":[{"number":1,"text":"보고서는 금요일까지 공유합니다."}]}"#,
+            scope: .meetings)
+        #expect(result == reply)
+        #expect(transport.requests.filter { $0.httpMethod == "POST" }.count == 1)
+    }
+
+    @Test("headerless subscription SSE uses finalized message items before empty terminal output",
+          arguments: ["missing", "empty", "typed", "mixedCase"], [false, true])
+    func subscriptionHTTPStreamEnvelope(header: String, fullTrace: Bool) async throws {
+        let reply = #"{"summary":"finalized evidence"}"#
+        let item: [String: Any] = ["id": "msg_final", "type": "message", "role": "assistant", "status": "completed",
+                                   "content": [["type": "output_text", "text": reply]]]
+        let lines = try delta(#"{"summary":"unfinished draft"}"#)
+            + event(["type": "response.output_item.done", "output_index": 0, "item": ["type": "reasoning"]])
+            + event(["type": "response.output_item.done", "output_index": 1, "item": item])
+            + event(["type": "response.completed", "response": ["status": "completed", "output": []]], separator: false)
+        let contentType: String?
+        switch header {
+        case "missing": contentType = nil
+        case "empty": contentType = ""
+        case "mixedCase": contentType = "Text/Event-Stream; charset=utf-8"
+        default: contentType = "text/event-stream; charset=utf-8"
+        }
+        let fixture = try ProviderHTTPFixture(sse: lines.joined(separator: "\n"), inferenceContentType: contentType)
+        let endpoint = try await fixture.start()
+        defer { fixture.stop() }
+        let result = try await LLMDebugLogger.withOpenAITrace(operation: "test.streamEnvelope", includeContent: fullTrace) {
+            try await service(ProviderLoopbackTransport(endpoint: endpoint)).generateJSON(
+                systemInstruction: "Return JSON", userPrompt: "synthetic", scope: .meetings)
+        }
+        #expect(result == reply)
+    }
+
+    @Test("fixed-message connection checks accept completed subscription envelopes with app-data sharing off",
+          arguments: ["missing", "empty", "typed"], [false, true])
+    func connectionHTTPStreamEnvelope(header: String, fullTrace: Bool) async throws {
+        let item: [String: Any] = ["id": "msg_probe", "type": "message", "role": "assistant", "status": "completed",
+                                   "content": [["type": "output_text", "text": "Connection confirmed."]]]
+        let lines = try event(["type": "response.output_item.done", "output_index": 1, "item": item])
+            + event(["type": "response.completed", "response": ["status": "completed", "output": []]], separator: false)
+        let contentType: String? = header == "missing" ? nil : header == "empty" ? "" : "text/event-stream"
+        let fixture = try ProviderHTTPFixture(sse: lines.joined(separator: "\n"), inferenceContentType: contentType)
+        let endpoint = try await fixture.start()
+        defer { fixture.stop() }
+        let consent = ProviderConsent(); consent.revoke()
+        let provider = service(ProviderLoopbackTransport(endpoint: endpoint), consent: consent, enabled: false)
+        let model = try await LLMDebugLogger.withOpenAITrace(operation: "test.connectionEnvelope", includeContent: fullTrace) {
+            try await provider.verifySubscriptionConnection()
+        }
+        #expect(model == "gpt-6-luna")
+    }
+
+    @Test("finalized items never authorize missing completion, malformed output or terminal failures",
+          arguments: ["missingCompletion", "missingDone", "incompleteMessage", "malformedDone", "duplicateIndex",
+                      "duplicateIdentity", "nonJSONMessage", "explicitBadSnapshot", "explicitEmptyText", "lateError",
+                      "terminalError", "incompleteDetails", "wrongMIME", "nonSSE"])
+    func subscriptionHTTPFinalizedOutputFailures(outcome: String) async throws {
+        let reply = #"{"summary":"finalized evidence"}"#
+        var item: [String: Any] = ["id": "msg_final", "type": "message", "role": "assistant", "status": "completed",
+                                   "content": [["type": "output_text", "text": reply]]]
+        var response: [String: Any] = ["status": "completed", "output": []]
+        var expected: OpenAIRequestError = .invalidResponse
+        switch outcome {
+        case "missingCompletion", "nonSSE": expected = .interrupted
+        case "incompleteMessage": item["status"] = "in_progress"
+        case "malformedDone": item["content"] = [["type": "output_text", "text": 7]]
+        case "nonJSONMessage": item["content"] = [["type": "output_text", "text": "Connection confirmed."]]
+        case "explicitBadSnapshot": response["output"] = [["type": "message", "content": [["type": "output_text", "text": 7]]]]
+        case "explicitEmptyText": response["output"] = [["type": "message", "content": [["type": "output_text", "text": ""]]]]
+        case "lateError", "terminalError": response["error"] = ["code": "server_error"]; expected = .failed
+        case "incompleteDetails": response["incomplete_details"] = ["reason": "max_output_tokens"]; expected = .failed
+        default: break
+        }
+        var lines = try delta(#"{"summary":"unfinished draft"}"#)
+        if outcome != "missingDone" {
+            lines += try event(["type": "response.output_item.done", "output_index": 1, "item": item])
+        }
+        if outcome == "duplicateIndex" || outcome == "duplicateIdentity" {
+            if outcome == "duplicateIndex" { item["content"] = [["type": "output_text", "text": "contradiction"]] }
+            lines += try event(["type": "response.output_item.done", "output_index": outcome == "duplicateIndex" ? 1 : 2, "item": item])
+        }
+        if outcome != "missingCompletion" {
+            lines += try event(["type": outcome == "lateError" ? "response.failed" : "response.completed", "response": response])
+        }
+        let sse = outcome == "nonSSE" ? reply : lines.joined(separator: "\n") + "\n"
+        let fixture = try ProviderHTTPFixture(sse: sse, inferenceContentType: outcome == "wrongMIME" ? "application/json" : nil)
+        let endpoint = try await fixture.start()
+        defer { fixture.stop() }
+        await #expect(throws: expected) {
+            try await service(ProviderLoopbackTransport(endpoint: endpoint)).generateJSON(
+                systemInstruction: "Return JSON", userPrompt: "synthetic", scope: .meetings)
+        }
+    }
+
+    @Test("finalized message indexes order output and exact duplicate events do not duplicate text")
+    func subscriptionHTTPFinalizedOutputOrder() async throws {
+        let first: [String: Any] = ["id": "msg_first", "type": "message", "role": "assistant", "status": "completed",
+                                    "content": [["type": "output_text", "text": #"{"summary":"#]]]
+        let second: [String: Any] = ["id": "msg_second", "type": "message", "role": "assistant", "status": "completed",
+                                     "content": [["type": "output_text", "text": #""finalized evidence"}"#]]]
+        let lines = try event(["type": "response.output_item.done", "output_index": 7, "item": second])
+            + event(["type": "response.output_item.done", "output_index": 2, "item": first])
+            + event(["type": "response.output_item.done", "output_index": 2, "item": first])
+            + event(["type": "response.completed", "response": ["status": "completed", "output": []]])
+        let fixture = try ProviderHTTPFixture(sse: lines.joined(separator: "\n") + "\n", inferenceContentType: nil)
+        let endpoint = try await fixture.start()
+        defer { fixture.stop() }
+        let result = try await service(ProviderLoopbackTransport(endpoint: endpoint)).generateJSON(
+            systemInstruction: "Return JSON", userPrompt: "synthetic", scope: .meetings)
+        #expect(result == #"{"summary":"finalized evidence"}"#)
+    }
+
+    @Test("completed response usage is exact, optional, deduplicated and account-fenced",
+          arguments: ["valid", "noSeparator", "missing", "malformed", "boolean", "negative", "cacheExceedsInput", "interrupted", "accountChanged", "invalidJSON"])
+    func completedResponseUsage(outcome: String) async throws {
+        let suite = "OpenAIProviderUsage.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = OpenAIUsageStore(defaults: defaults)
+        let session = ProviderSession()
+        let transport = ResponseTransport()
+        var usage: [String: Any] = ["input_tokens": 123, "output_tokens": 45,
+                                    "input_tokens_details": ["cached_tokens": 64]]
+        if outcome == "malformed" { usage["output_tokens"] = "45" }
+        if outcome == "boolean" { usage["output_tokens"] = true }
+        if outcome == "negative" { usage["output_tokens"] = -1 }
+        if outcome == "cacheExceedsInput" { usage["input_tokens_details"] = ["cached_tokens": 124] }
+        var terminal: [String: Any] = ["id": "resp-usage", "status": "completed"]
+        if outcome != "missing" { terminal["usage"] = usage }
+        let reply = outcome == "invalidJSON" ? "not a JSON object" : #"{"summary":"decision"}"#
+        transport.lines = try delta(reply)
+        if outcome != "interrupted" {
+            transport.lines += try event(["type": "response.completed", "response": terminal], separator: outcome != "noSeparator")
+        }
+        if outcome == "accountChanged" {
+            transport.onLine = { index in if index == 2 { session.generation = UUID() } }
+        }
+        let provider = OpenAIProviderService(transport: transport, accessToken: { "synthetic-usage" },
+            generation: { session.generation }, consent: { _ in true }, enabled: { true }, prepareSession: {},
+            regionAllowed: { true }, accountSubject: { "person-a" }, usageStore: store)
+        if outcome == "accountChanged" {
+            await #expect(throws: CancellationError.self) {
+                try await provider.generateJSON(systemInstruction: "Return JSON", userPrompt: "synthetic", scope: .meetings)
+            }
+        } else if outcome == "interrupted" || outcome == "invalidJSON" {
+            await #expect(throws: outcome == "interrupted" ? OpenAIRequestError.interrupted : .invalidResponse) {
+                try await provider.generateJSON(systemInstruction: "Return JSON", userPrompt: "synthetic", scope: .meetings)
+            }
+        } else {
+            #expect(try await provider.generateJSON(systemInstruction: "Return JSON", userPrompt: "synthetic", scope: .meetings) == reply)
+            // Repeated terminal response IDs must not inflate device-local metrics.
+            #expect(try await provider.generateJSON(systemInstruction: "Return JSON", userPrompt: "synthetic", scope: .meetings) == reply)
+        }
+        if ["valid", "noSeparator", "invalidJSON"].contains(outcome) {
+            let totals = try #require(store.totals(for: "person-a"))
+            #expect(totals.inputTokens == 123)
+            #expect(totals.outputTokens == 45)
+            #expect(totals.cachedInputTokens == 64)
+            #expect(totals.recordedResponses == 1)
+        } else {
+            #expect(store.totals(for: "person-a") == nil)
+        }
+        #expect(store.totals(for: "person-b") == nil)
     }
 
     @Test("a catalog and partial text cannot authorize an invalid HTTP completion",
@@ -593,15 +764,17 @@ private nonisolated final class ProviderHTTPFixture: @unchecked Sendable {
     private let queue = DispatchQueue(label: "todo.tests.openai.responses")
     private let sse: String
     private let inferenceStatus: Int
+    private let inferenceContentType: String?
     // Mutable socket state is confined to queue, never the test's busy MainActor.
     private var readiness: CheckedContinuation<URL, Error>?
     private var connections: [UUID: NWConnection] = [:]
     private var timeout: DispatchWorkItem?
     private var stopped = false
 
-    init(sse: String, inferenceStatus: Int = 200) throws {
+    init(sse: String, inferenceStatus: Int = 200, inferenceContentType: String? = "text/event-stream; charset=utf-8") throws {
         self.sse = sse
         self.inferenceStatus = inferenceStatus
+        self.inferenceContentType = inferenceContentType
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: .any)
         listener = try NWListener(using: parameters, on: .any)
@@ -683,12 +856,21 @@ private nonisolated final class ProviderHTTPFixture: @unchecked Sendable {
                     let catalog = #"{"models":[{"slug":"gpt-6-luna","display_name":"GPT-6 Luna","visibility":"list"}]}"#
                     let isCatalog = lines.first == "GET /v1/models HTTP/1.1"
                     let isInference = lines.first == "POST /v1/responses HTTP/1.1"
-                    let body = isCatalog ? catalog : isInference ? self.sse : "{}"
-                    let type = isInference && self.inferenceStatus == 200 ? "text/event-stream; charset=utf-8" : "application/json"
-                    let status = isCatalog ? "200 OK" : isInference ? "\(self.inferenceStatus) Fixture" : "404 Not Found"
+                    let requestBody = try? JSONSerialization.jsonObject(with: Data(bytes[separator.upperBound...])) as? [String: Any]
+                    let format = (requestBody?["text"] as? [String: Any])?["format"] as? [String: Any]
+                    let input = requestBody?["input"] as? [[String: String]] ?? []
+                    let rejectsJSONInput = isInference && format?["type"] as? String == "json_object"
+                        && !input.contains { $0["content"]?.localizedCaseInsensitiveContains("json") == true }
+                    let body = isCatalog ? catalog : rejectsJSONInput
+                        ? #"{"error":{"type":"invalid_request_error","param":"input","message":"Response input messages must contain the word 'json' to use json_object."}}"#
+                        : isInference ? self.sse : "{}"
+                    let inferenceStatus = rejectsJSONInput ? 400 : self.inferenceStatus
+                    let type = isInference && inferenceStatus == 200 ? self.inferenceContentType : "application/json"
+                    let status = isCatalog ? "200 OK" : isInference ? "\(inferenceStatus) Fixture" : "404 Not Found"
                     // CRLF exercises the real byte framer's empty-line handling.
                     let payload = isInference ? body.replacingOccurrences(of: "\n", with: "\r\n") : body
-                    let response = "HTTP/1.1 \(status)\r\nContent-Type: \(type)\r\nContent-Length: \(payload.utf8.count)\r\nConnection: close\r\n\r\n\(payload)"
+                    let contentTypeHeader = type.map { "Content-Type: \($0)\r\n" } ?? ""
+                    let response = "HTTP/1.1 \(status)\r\n\(contentTypeHeader)Content-Length: \(payload.utf8.count)\r\nConnection: close\r\n\r\n\(payload)"
                     connection.send(content: Data(response.utf8), completion: .contentProcessed { [weak self] _ in
                         self?.close(id)
                     })

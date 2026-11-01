@@ -19,8 +19,6 @@ struct AISettingsView: View {
                         .foregroundStyle(.secondary)
                 }
                 .accessibilityIdentifier("ai.apple.status")
-            } footer: {
-                Text(copy("ai.apple.default", korean: "기본 AI이며 기기에서 처리합니다. 사용할 수 없으면 규칙으로 처리합니다. 미지원 기기의 다운로드 모델 대체 기능은 베타 설정에서 선택할 수 있습니다.", english: "The default AI processes on device. When unavailable, rules apply. Devices without support can opt into downloaded-model fallback in Beta settings."))
             }
 
             if regionalAvailability.isAvailable {
@@ -123,6 +121,8 @@ struct AISettingsView: View {
 
 /// Model state and actions share one full-width settings row in every install state.
 struct ModelManagementRow<Status: View, Actions: View>: View {
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     let status: Status
     let actions: Actions
 
@@ -132,18 +132,23 @@ struct ModelManagementRow<Status: View, Actions: View>: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: AppTheme.Spacing.item) {
+        let layout = horizontalSizeClass == .compact || dynamicTypeSize.isAccessibilitySize
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: AppTheme.Spacing.compact))
+            : AnyLayout(HStackLayout(spacing: AppTheme.Spacing.item))
+        layout {
             status
+                .labelStyle(.titleAndIcon)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
             actions
                 .frame(maxWidth: .infinity, alignment: .trailing)
-                .buttonStyle(.bordered)
-                .controlSize(.regular)
+                .fixedSize(horizontal: false, vertical: true)
         }
+        .buttonStyle(.bordered)
+        .controlSize(.regular)
         .fixedSize(horizontal: false, vertical: true)
         .lineLimit(nil)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, AppTheme.Spacing.compact)
     }
 }
 
@@ -234,33 +239,56 @@ struct OnDeviceModelManagementSection: View {
         if supported && !FoundationModelsAvailability.isDeviceEligible {
             let installed = installedOptions
             if allowsModelUse && !installed.isEmpty {
-                Picker(copy("beta.model.active", korean: "사용할 로컬 모델", english: "Local model to use"), selection: Binding<String?>(
-                    get: { installed.contains(where: { $0.id == modelID }) ? modelID : nil },
-                    set: { selected in
-                        guard let selected, installed.contains(where: { $0.id == selected }) else { return }
-                        if llmService.loadedModelIdentifier != selected { llmService.unloadModel() }
-                        modelID = selected
-                        SettingsStore.shared.normalizeBetaSelectedProvider()
+                let selectedName = installed.first(where: { $0.id == modelID })?.displayName
+                    ?? copy("beta.model.noneInstalled", korean: "설치된 모델을 선택하세요", english: "Choose an installed model")
+                VStack(alignment: .leading, spacing: AppTheme.Spacing.compact) {
+                    Text(copy("beta.model.active", korean: "사용할 로컬 모델", english: "Local model to use"))
+                    Menu {
+                        Picker(copy("beta.model.active", korean: "사용할 로컬 모델", english: "Local model to use"), selection: Binding<String?>(
+                            get: { installed.contains(where: { $0.id == modelID }) ? modelID : nil },
+                            set: { selected in
+                                guard let selected, installed.contains(where: { $0.id == selected }) else { return }
+                                if llmService.loadedModelIdentifier != selected { llmService.unloadModel() }
+                                modelID = selected
+                                SettingsStore.shared.normalizeBetaSelectedProvider()
+                            }
+                        )) {
+                            if !installed.contains(where: { $0.id == modelID }) {
+                                Text(copy("beta.model.noneInstalled", korean: "설치된 모델을 선택하세요", english: "Choose an installed model"))
+                                    .tag(Optional<String>.none)
+                            }
+                            ForEach(installed) { model in Text(model.displayName).tag(Optional(model.id)) }
+                        }
+                        .pickerStyle(.inline)
+                    } label: {
+                        modelMenuLabel(selectedName)
                     }
-                )) {
-                    if !installed.contains(where: { $0.id == modelID }) {
-                        Text(copy("beta.model.noneInstalled", korean: "설치된 모델을 선택하세요", english: "Choose an installed model"))
-                            .tag(Optional<String>.none)
-                    }
-                    ForEach(installed) { model in Text(model.displayName).tag(Optional(model.id)) }
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityLabel(copy("beta.model.active", korean: "사용할 로컬 모델", english: "Local model to use"))
+                    .accessibilityValue(selectedName)
+                    .accessibilityIdentifier("beta.model.installedPicker")
+                    .disabled(llmService.isLoading || llmService.isDeleting)
                 }
-                .pickerStyle(.menu)
-                .controlSize(.regular)
-                .accessibilityIdentifier("beta.model.installedPicker")
+                .fixedSize(horizontal: false, vertical: true)
+            }
+            let downloadName = OnDeviceLLMService.availableModels.first(where: { $0.id == downloadModelID })?.displayName ?? downloadModelID
+            VStack(alignment: .leading, spacing: AppTheme.Spacing.compact) {
+                Text(copy("beta.model.downloadTarget", korean: "설치할 로컬 모델", english: "Local model to install"))
+                Menu {
+                    Picker(copy("beta.model.downloadTarget", korean: "설치할 로컬 모델", english: "Local model to install"), selection: $downloadModelID) {
+                        ForEach(OnDeviceLLMService.availableModels) { model in Text(model.displayName).tag(model.id) }
+                    }
+                    .pickerStyle(.inline)
+                } label: {
+                    modelMenuLabel(downloadName)
+                }
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityLabel(copy("beta.model.downloadTarget", korean: "설치할 로컬 모델", english: "Local model to install"))
+                .accessibilityValue(downloadName)
                 .disabled(llmService.isLoading || llmService.isDeleting)
+                .accessibilityIdentifier("beta.model.downloadPicker")
             }
-            Picker(copy("beta.model.downloadTarget", korean: "설치할 로컬 모델", english: "Local model to install"), selection: $downloadModelID) {
-                ForEach(OnDeviceLLMService.availableModels) { model in Text(model.displayName).tag(model.id) }
-            }
-            .pickerStyle(.menu)
-            .controlSize(.regular)
-            .disabled(llmService.isLoading || llmService.isDeleting)
-            .accessibilityIdentifier("beta.model.downloadPicker")
+            .fixedSize(horizontal: false, vertical: true)
             ModelManagementRow {
                 if llmService.isLoading {
                     ProgressView(value: llmService.downloadProgress)
@@ -290,6 +318,15 @@ struct OnDeviceModelManagementSection: View {
                     ? modelID : OnDeviceLLMService.defaultModelID
             }
             if let error = llmService.loadError { Text(error).font(.footnote).foregroundStyle(.red) }
+        } else if llmService.isLoading {
+            ModelManagementRow {
+                ProgressView(value: llmService.downloadProgress)
+            } actions: {
+                Button(copy("beta.model.cancel", korean: "다운로드 취소", english: "Cancel download"), role: .cancel) {
+                    llmService.unloadModel(reason: .manual)
+                }
+                .accessibilityIdentifier("beta.model.localCancelDownload")
+            }
         } else {
             if !FoundationModelsAvailability.isDeviceEligible {
                 ModelManagementRow {
@@ -314,6 +351,19 @@ struct OnDeviceModelManagementSection: View {
                 .accessibilityIdentifier("beta.model.localDelete")
             }
         }
+    }
+
+    private func modelMenuLabel(_ name: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: AppTheme.Spacing.compact) {
+            Text(name)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+            Image(systemName: "chevron.up.chevron.down")
+                .imageScale(.small)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     private func copy(_ key: String, korean: String, english: String) -> String {

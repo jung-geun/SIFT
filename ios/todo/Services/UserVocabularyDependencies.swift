@@ -72,14 +72,14 @@ func makeVocabularyMeetingDependencies(_ service: UserVocabularyService?) -> Mee
                 allowModelLoad: allowModelLoad
             )
         },
-        analyze: { meetingID, result, hint, sourceLanguageTag, summaryLanguageTag, language in
+        analyze: { meetingID, result, hint, sourceLanguageTag, summaryLanguageTag, language, format, custom in
             try await MeetingAnalysisEngine().analyze(
                 meetingID: meetingID,
                 result: result,
                 glossaryHint: hint,
                 sourceLanguageTag: sourceLanguageTag,
                 summaryLanguageTag: summaryLanguageTag,
-                language: language
+                language: language, summaryFormat: format, customInstructions: custom
             )
         },
         save: { try $0.save() },

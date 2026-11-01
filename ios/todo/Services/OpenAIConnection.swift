@@ -105,6 +105,7 @@ import CryptoKit
     private let makeListener: @MainActor () -> any OpenAILoopbackListening
     private let makeBrowser: @MainActor () -> any OpenAIAuthenticationBrowser
     private let regionAllowed: @MainActor () -> Bool
+    private let clearLocalUsage: @MainActor () -> Void
     private var pending: Pending?
     private var refreshes: [String: (id: UUID, generation: UUID, task: Task<String, Error>)] = [:]
     private var discoveryCache: Discovery?
@@ -116,12 +117,14 @@ import CryptoKit
          sleep: @escaping @MainActor (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
          makeListener: @escaping @MainActor () -> any OpenAILoopbackListening = { OpenAILoopbackListener() },
          makeBrowser: @escaping @MainActor () -> any OpenAIAuthenticationBrowser = { OpenAISystemAuthenticationBrowser() },
-         regionAllowed: @escaping @MainActor () -> Bool = { OpenAIRegionalAvailability.allowsRequests }) {
+         regionAllowed: @escaping @MainActor () -> Bool = { OpenAIRegionalAvailability.allowsRequests },
+         clearLocalUsage: @escaping @MainActor () -> Void = { OpenAIUsageStore.shared.clearAll() }) {
         self.store = store ?? OpenAIKeychainCredentialStore()
         self.transport = transport ?? OpenAIURLSessionTransport()
         self.now = now; self.sleep = sleep
         self.makeListener = makeListener; self.makeBrowser = makeBrowser
         self.regionAllowed = regionAllowed
+        self.clearLocalUsage = clearLocalUsage
         synchronizationEnabled = self.store.synchronizationEnabled
         refreshCredentials()
     }
@@ -391,6 +394,7 @@ import CryptoKit
     /// Returns only after bounded revocation attempts; failed secure erasure is never reported as success.
     func deleteAllLocalCredentials() async throws {
         cancelSignIn(); invalidateSession()
+        clearLocalUsage()
         let deletionGeneration = sessionGeneration
         let renewable = snapshot.registrations.compactMap { registration -> (String, String)? in
             guard let token = registration.tokens?.refresh else { return nil }

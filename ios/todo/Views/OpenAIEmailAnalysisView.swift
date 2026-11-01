@@ -59,7 +59,6 @@ struct OpenAIEmailAnalysisView: View {
             }
             OpenAIConsentSection(scope: .email)
             Section(AppLanguage.localized("mail.openai.explicitRequest", defaultValue: "Explicit request", language: .current)) {
-                Text(initialTier.modelID).font(.caption.monospaced())
                 Button(AppLanguage.localized("mail.openai.sendRequest", defaultValue: "Send and analyze with this model", language: .current)) { request(initialTier) }
                     .disabled(email?.body.isEmpty != false || isRequesting)
                     .accessibilityIdentifier("mail.openai.request")
@@ -75,7 +74,6 @@ struct OpenAIEmailAnalysisView: View {
             }
             if let result {
                 Section(AppLanguage.localized("mail.openai.preview.title", defaultValue: "Remote analysis · unsaved review preview", language: .current)) {
-                    Text(result.modelID).font(.caption.monospaced()).foregroundStyle(.secondary)
                     Text(result.summary)
                     ForEach(result.keyPoints, id: \.self) { Text($0).font(.subheadline) }
                     if !result.actionItems.isEmpty {

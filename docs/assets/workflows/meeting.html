@@ -3707,11 +3707,8 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
       }
       .toolbar {
         position: relative;
-        top: 0;
-        right: 0;
-        flex-wrap: wrap;
         justify-content: flex-end;
-        width: 100%;
+        width: max-content;
         max-width: 100%;
         margin-left: auto;
         margin-bottom: 1rem;
@@ -5521,7 +5518,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         </div>
         <ul>
           <li>&bull; 일부 언어·기기에서는 전사가 불가하며, 완성 전사가 없는 실패는 재시도가 필요합니다.</li>
-          <li>&bull; 모델 설치는 별도 네트워크 작업입니다. 회의 음성·전사·화자는 OpenAI 분석에 보내지 않습니다.</li>
+          <li>&bull; 모델 설치는 별도 네트워크 작업입니다. 자동 요약은 로컬이며 별도 동의·직접 요청한 GPT 재요약만 전사문을 보냅니다. 음성은 보내지 않습니다.</li>
         </ul>
       </div>
     </div>

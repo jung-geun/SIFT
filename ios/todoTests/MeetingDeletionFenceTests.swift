@@ -223,7 +223,7 @@ struct MeetingDeletionFenceTests {
         try MeetingCaptureRecoveryPersister.persist(pending(track), in: meeting, rootURL: fixture.meetings)
         let audioURL = track.directoryURL.appendingPathComponent("part-00.flac")
         let original = try Data(contentsOf: audioURL)
-        let payloads = try CloudModelCodec.capture(app: app, email: email, meeting: meeting)
+        let payloads = try CloudModelCodec.capture(app: app, email: email, meeting: meeting).validatedRecords()
         let recordKey = try #require(payloads.keys.first { $0.hasPrefix("MeetingRecord/") })
         if preexistingFence { try MeetingDeletionFence.recordDeletion(meetingID: track.meetingID, rootURL: fixture.meetings) }
         #expect(throws: InjectedSaveFailure.self) {

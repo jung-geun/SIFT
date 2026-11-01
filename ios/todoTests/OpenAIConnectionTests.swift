@@ -140,7 +140,8 @@ import Testing
     var listenerCreations = 0
     var browserCreations = 0
 
-    init(credentialStore: (any OpenAICredentialStore)? = nil) throws {
+    init(credentialStore: (any OpenAICredentialStore)? = nil,
+         clearLocalUsage: @escaping @MainActor () -> Void = {}) throws {
         signer = try AuthSigner()
         connection = OpenAIConnection(store: credentialStore ?? store, transport: transport, now: { [now] in now },
                                       sleep: { _ in }, makeListener: { [unowned self] in
@@ -165,7 +166,8 @@ import Testing
                 return true
             }
             return self.browser
-        }, regionAllowed: { [unowned self] in self.regionAllowed })
+        }, regionAllowed: { [unowned self] in self.regionAllowed },
+           clearLocalUsage: clearLocalUsage)
         transport.handler = { [unowned self] request in
             switch request.url!.path {
             case "/.well-known/openid-configuration":
@@ -778,6 +780,34 @@ extension OpenAIConnectionTests {
         #expect(h.store.blocked == ["oaiapp_first", "oaiapp_second"])
     }
 
+    @Test("sign-out retains local usage but complete deletion clears all accounts even when credential erasure fails", arguments: [false, true])
+    func localUsageDeletionPolicy(failCredentialErasure: Bool) async throws {
+        let suite = "OpenAIConnectionUsage.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let usage = OpenAIUsageStore(defaults: defaults)
+        let h = try AuthHarness(clearLocalUsage: { usage.clearAll() })
+        try await h.connection.signIn()
+        let counts = OpenAIResponseUsage(inputTokens: 123, outputTokens: 45, cachedInputTokens: 64)
+        #expect(usage.record(accountSubject: "person-a", responseID: "response-a", usage: counts))
+        #expect(usage.record(accountSubject: "person-b", responseID: "response-b", usage: counts))
+        await h.connection.signOut()
+        let retained = OpenAIUsageStore(defaults: defaults)
+        #expect(retained.totals(for: "person-a")?.inputTokens == 123)
+        #expect(retained.totals(for: "person-b")?.cachedInputTokens == 64)
+        try await h.connection.signIn()
+        h.store.failWrites = failCredentialErasure
+        if failCredentialErasure {
+            await #expect(throws: OpenAIConnectionError.storage) { try await h.connection.deleteAllLocalCredentials() }
+        } else {
+            try await h.connection.deleteAllLocalCredentials()
+        }
+        let restarted = OpenAIUsageStore(defaults: defaults)
+        #expect(restarted.totals(for: "person-a") == nil)
+        #expect(restarted.totals(for: "person-b") == nil)
+        #expect(defaults.object(forKey: OpenAIUsageStore.storageKey) == nil)
+    }
+
     @Test func completeDeletionDuringRefreshCannotRestoreAccountsOrTokens() async throws {
         let h = try AuthHarness(); h.expires = 30
         try await h.connection.signIn()
@@ -932,10 +962,18 @@ extension OpenAIConnectionTests {
     }
 }
 
+@MainActor private final class ReceiptCountingDefaults: UserDefaults {
+    private(set) var receiptWrites = 0
+    override func set(_ value: Any?, forKey key: String) {
+        if key.hasPrefix("pieroot.todo.openai.device.publication.") { receiptWrites += 1 }
+        super.set(value, forKey: key)
+    }
+}
+
 /// Two installations share only the portable Keychain service, never a device record or defaults suite.
 @MainActor private final class AuthKeychainFixture {
     let namespace = "pieroot.todo.tests.openai.\(UUID().uuidString)"
-    let firstDefaults: UserDefaults
+    let firstDefaults: ReceiptCountingDefaults
     let secondDefaults: UserDefaults
     let firstSuite: String
     let secondSuite: String
@@ -948,7 +986,7 @@ extension OpenAIConnectionTests {
     init(sync: Bool) throws {
         firstSuite = namespace + ".first.defaults"
         secondSuite = namespace + ".second.defaults"
-        firstDefaults = try #require(UserDefaults(suiteName: firstSuite))
+        firstDefaults = try #require(ReceiptCountingDefaults(suiteName: firstSuite))
         secondDefaults = try #require(UserDefaults(suiteName: secondSuite))
         previousSyncPreference = UserDefaults.standard.object(forKey: "pieroot.todo.iCloudSyncEnabled")
         previousConsentVersion = UserDefaults.standard.object(forKey: UserCloudSyncPolicy.consentKey)
@@ -992,6 +1030,28 @@ extension OpenAIConnectionTests {
 }
 
 extension OpenAIConnectionTests {
+    @Test("Unchanged connection checks do not rewrite receipts and rearm full-cloud synchronization")
+    func unchangedConnectionChecksConverge() async throws {
+        try await AIProviderTestIsolation.shared.withLock {
+            guard SettingsStore.supportsICloud else { return }
+            let fixture = try AuthKeychainFixture(sync: true)
+            defer { fixture.cleanup() }
+            let harness = try AuthHarness(credentialStore: fixture.store())
+            try await harness.connection.signIn()
+            let local = try #require(try fixture.local())
+            let portable = try #require(try fixture.portable())
+            let writes = fixture.firstDefaults.receiptWrites
+            let connections = FullCloudConnectionSync(operations: [.openAI(harness.connection)])
+            for _ in 0..<34 { #expect(await connections.reconcile() == nil) }
+            #expect(fixture.firstDefaults.receiptWrites == writes)
+            #expect(try fixture.local() == local)
+            #expect(try fixture.portable() == portable)
+            #expect(connections.state == .prepared)
+            #expect(connections.pendingFamilies.isEmpty)
+            #expect(harness.connection.activeProfileID == "oaiapp_first")
+        }
+    }
+
     @Test("A receiver's off-state account choice does not freeze a newer refresh-owner rotation")
     func pendingAccountChoiceAdoptsOwnerRotation() async throws {
         try await AIProviderTestIsolation.shared.withLock {

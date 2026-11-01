@@ -1,51 +1,127 @@
 import Foundation
+import CryptoKit
 import SwiftData
 
 @MainActor
 enum MeetingTodoImporter {
-    /// Imports the persisted draft rather than caller-provided fields, so a stale or
-    /// modified UI draft cannot create a Todo that differs from the reviewed meeting.
-    static func confirm(
-        draftID: String,
-        transcriptRevision: Int,
+    /// Identity follows the reviewed content and its original evidence, not a
+    /// provider's positional item ID or the section in which it was rendered.
+    static func summarySourceRef(item: MeetingSummaryItem, meetingID: String) -> String {
+        let citations = canonicalCitations(item.citations)
+        var hash = SHA256()
+        func append(_ value: String) {
+            let bytes = Data(value.utf8)
+            hash.update(data: Data("\(bytes.count):".utf8))
+            hash.update(data: bytes)
+        }
+        append(item.text)
+        for citation in citations {
+            append(citation.trackID)
+            append(citation.segmentID)
+            append(String(citation.transcriptRevision))
+        }
+        let digest = hash.finalize().map { String(format: "%02x", $0) }.joined()
+        return "meeting:\(meetingID):summary:\(digest)"
+    }
+
+    /// Includes proven registrations made by the former draft UI. A title
+    /// match alone cannot alias a task from different original evidence.
+    static func summarySourceRefs(item: MeetingSummaryItem, meeting: MeetingRecord) -> Set<String> {
+        var refs: Set<String> = [summarySourceRef(item: item, meetingID: meeting.meetingID)]
+        guard !meeting.isAudioTrackGroup, let result = meeting.result,
+              result.transcriptRevision == meeting.transcriptRevision,
+              !item.citations.isEmpty,
+              item.citations.allSatisfy({ $0.trackID == meeting.meetingID && $0.transcriptRevision == meeting.transcriptRevision }) else {
+            return refs
+        }
+        let segmentIDs = Set(item.citations.map(\.segmentID))
+        for draft in result.actionDrafts where draft.title == item.text
+            && !draft.sourceSegmentIDs.isEmpty && Set(draft.sourceSegmentIDs) == segmentIDs {
+            refs.insert("meeting:\(meeting.meetingID):action:\(draft.id)")
+        }
+        return refs
+    }
+
+    /// Resolves the persisted sentence and original track-qualified evidence at
+    /// the moment of review. Adding a task never invokes analysis or naming.
+    static func confirmSummaryItem(
+        sectionID: String,
+        itemID: String,
+        reviewedSourceRef: String,
         meeting: MeetingRecord,
         todoContext: ModelContext,
         meetingContext: ModelContext
     ) throws -> Todo {
-        guard transcriptRevision == meeting.transcriptRevision,
-              let result = meeting.result,
-              let draft = result.actionDrafts.first(where: { $0.id == draftID })
-        else {
-            throw MeetingTodoImportError.staleOrUnknownDraft
+        guard let result = meeting.result,
+              let sections = result.summarySections,
+              sections.lazy.filter({ $0.id == sectionID }).count == 1,
+              let section = sections.first(where: { $0.id == sectionID }),
+              section.items.lazy.filter({ $0.id == itemID }).count == 1,
+              let item = section.items.first(where: { $0.id == itemID }),
+              !item.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              MeetingSummaryTaskClassification.isTask(item, in: section, result: result),
+              !item.citations.isEmpty else {
+            throw MeetingTodoImportError.staleOrUnknownSummaryItem
         }
-        let attribution = MeetingTranscriptAttribution(meetingID: meeting.meetingID, result: result,
-            profiles: meeting.diarization?.profiles ?? [])
-        guard !MeetingActionAttribution.isCompleted(draft,
-            completedSegmentIDs: MeetingActionAttribution.completedOnlySegmentIDs(in: attribution)) else {
-            throw MeetingTodoImportError.staleOrUnknownDraft
+        let sourceRef = summarySourceRef(item: item, meetingID: meeting.meetingID)
+        guard sourceRef == reviewedSourceRef else {
+            throw MeetingTodoImportError.staleOrUnknownSummaryItem
         }
-        // Resolve from the same persisted transcript and latest manual names shown in review.
-        // Keep the reviewed draft identity so a rename cannot duplicate an already imported task.
-        var reviewedDraft = draft
-        reviewedDraft.assignee = MeetingActionAttribution.supportedAssignee(for: draft, attribution: attribution)
 
-        let language = AppLanguage.current
-        let sourceRef = "meeting:\(meeting.meetingID):action:\(draft.id)"
-        let descriptor = FetchDescriptor<Todo>(predicate: #Predicate { todo in
-            todo.sourceRef == sourceRef
-        })
+        let tracks: [MeetingRecord]
+        if meeting.isAudioTrackGroup {
+            do {
+                guard try MeetingGroupSummaryService.summaryEvidenceValidity(parent: meeting, in: meetingContext) == .current else {
+                    throw MeetingTodoImportError.staleOrUnknownSummaryItem
+                }
+                tracks = try MeetingAudioTrackStore.tracks(for: meeting, in: meetingContext)
+            } catch is MeetingCaptureRecoveryStore.RecoveryError {
+                throw MeetingTodoImportError.staleOrUnknownSummaryItem
+            }
+        } else {
+            guard result.transcriptRevision == meeting.transcriptRevision,
+                  result.summarySourceFingerprint == MeetingSummaryEvidence.sourceFingerprint(result) else {
+                throw MeetingTodoImportError.staleOrUnknownSummaryItem
+            }
+            tracks = [meeting]
+        }
+        var evidence: [String] = []
+        for citation in canonicalCitations(item.citations) {
+            guard let track = tracks.first(where: { $0.meetingID == citation.trackID }),
+                  track.transcriptRevision == citation.transcriptRevision,
+                  let source = track.result,
+                  source.transcriptRevision == citation.transcriptRevision,
+                  source.segments.lazy.filter({ $0.id == citation.segmentID }).count == 1,
+                  let segment = source.segments.first(where: { $0.id == citation.segmentID }),
+                  !segment.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw MeetingTodoImportError.staleOrUnknownSummaryItem
+            }
+            evidence.append("[\(citation.trackID) · \(citation.segmentID) · r\(citation.transcriptRevision)]\n\(segment.text)")
+        }
+
+        // Validate even on a duplicate tap: an existing registration must not
+        // make changed or no-longer-actionable summary evidence importable.
+        let descriptor = FetchDescriptor<Todo>(predicate: #Predicate { $0.sourceRef == sourceRef })
+        var registered = try todoContext.fetch(descriptor).first
+        if registered == nil {
+            let legacyRefs = summarySourceRefs(item: item, meeting: meeting).subtracting([sourceRef])
+            for legacyRef in legacyRefs.sorted() {
+                let legacyDescriptor = FetchDescriptor<Todo>(predicate: #Predicate { $0.sourceRef == legacyRef })
+                if let existing = try todoContext.fetch(legacyDescriptor).first {
+                    existing.sourceRef = sourceRef
+                    try todoContext.save()
+                    registered = existing
+                    break
+                }
+            }
+        }
         let todo: Todo
-        if let existing = try todoContext.fetch(descriptor).first {
+        if let existing = registered {
             todo = existing
         } else {
-            todo = Todo(
-                title: draft.title,
-                notes: notes(for: reviewedDraft, meetingID: meeting.meetingID, language: language),
-                dueDate: MeetingDate.date(draft.dueAtISO8601),
-                source: .meeting,
-                sourceRef: sourceRef,
-                reminderOffsets: []
-            )
+            todo = Todo(title: item.text,
+                        notes: ([meetingNote(meetingID: meeting.meetingID, language: .current)] + evidence).joined(separator: "\n\n"),
+                        dueDate: nil, source: .meeting, sourceRef: sourceRef, reminderOffsets: [])
             todo.triageStatus = TodoTriage.review.rawValue
             todo.aiNeedsNotification = false
             todo.aiRecommendedTime = nil
@@ -61,54 +137,35 @@ enum MeetingTodoImporter {
         return todo
     }
 
-    private static func notes(for draft: MeetingActionDraft, meetingID: String, language: AppLanguage) -> String {
-        var lines = [String]()
-        if !draft.notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            lines.append(draft.notes.trimmingCharacters(in: .whitespacesAndNewlines))
+    private static func canonicalCitations(_ citations: [MeetingSummaryCitation]) -> [MeetingSummaryCitation] {
+        Set(citations).sorted {
+            if $0.trackID != $1.trackID { return $0.trackID < $1.trackID }
+            if $0.segmentID != $1.segmentID { return $0.segmentID < $1.segmentID }
+            return $0.transcriptRevision < $1.transcriptRevision
         }
-        if let assignee = draft.assignee?.trimmingCharacters(in: .whitespacesAndNewlines), !assignee.isEmpty {
-            lines.append(
-                {
-                    let defaultValue = language == .english
-                        ? "Assignee: \(assignee)"
-                        : "담당자: \(assignee)"
-                    let localized = AppLanguage.localized(
-                        "meeting.notes.assignee",
-                        defaultValue: defaultValue,
-                        language: language,
-                        comment: "Meeting action assignee note"
-                    )
-                    return localized == defaultValue
-                        ? localized
-                        : String(format: localized, locale: language.locale, assignee)
-                }()
-            )
-        }
-        lines.append(
-            {
-                let defaultValue = language == .english
-                    ? "Meeting: \(meetingID)"
-                    : "회의: \(meetingID)"
-                let localized = AppLanguage.localized(
-                    "meeting.notes.meeting",
-                    defaultValue: defaultValue,
-                    language: language,
-                    comment: "Meeting action source note"
-                )
-                return localized == defaultValue
-                    ? localized
-                    : String(format: localized, locale: language.locale, meetingID)
-            }()
+    }
+
+    private static func meetingNote(meetingID: String, language: AppLanguage) -> String {
+        let defaultValue = language == .english
+            ? "Meeting: \(meetingID)"
+            : "회의: \(meetingID)"
+        let localized = AppLanguage.localized(
+            "meeting.notes.meeting",
+            defaultValue: defaultValue,
+            language: language,
+            comment: "Meeting action source note"
         )
-        return lines.joined(separator: "\n")
+        return localized == defaultValue
+            ? localized
+            : String(format: localized, locale: language.locale, meetingID)
     }
 }
 
 enum MeetingTodoImportError: LocalizedError, Equatable {
-    case staleOrUnknownDraft
+    case staleOrUnknownSummaryItem
 
     var errorDescription: String? {
         AppLanguage.localized("meeting.action.error.staleDraft", defaultValue: "This action item has changed. Review the meeting again before adding it.",
-                              language: .current, comment: "A stale or missing meeting action draft cannot be imported.")
+                              language: .current, comment: "A stale or missing meeting summary item cannot be imported.")
     }
 }

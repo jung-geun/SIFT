@@ -6,12 +6,12 @@
   "input": "/Users/pieroot/code/todo/docs/assets/workflows/meeting.workflow.json",
   "output": "/Users/pieroot/code/todo/docs/assets/workflows/meeting.html",
   "specification": {
-    "sha256": "bd0d5672fc320b84375dea8cadbdacabda82d5ebe660540b014df74f1b8d1579",
-    "bytes": 2744
+    "sha256": "a090ba2dfd2b5ab36c2f083680153e45ca2e974bdd37dd8b5aef46998c1bb5e7",
+    "bytes": 2810
   },
   "artifact": {
-    "sha256": "72dc7ac3268b6568f10e2e3476ff62eb115c6d1ecdf288005e66efb22c0bcaa8",
-    "bytes": 806729
+    "sha256": "8821fa7fb99ac7598ff5e7267a66577dca429dfcabe0b5f431a1e8c84aeb0e26",
+    "bytes": 806743
   },
   "validation": {
     "checksPassed": 9,

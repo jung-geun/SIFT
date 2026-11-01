@@ -11,7 +11,6 @@ struct MeetingDetailView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.userVocabulary) private var userVocabulary
-    @State private var isAnalyzing = false
     @State private var analysisError: String?
     let meeting: MeetingRecord
     @StateObject private var player = MeetingAudioPlaybackController()
@@ -20,7 +19,8 @@ struct MeetingDetailView: View {
     @State private var waveformError: String?
     @State private var isExporting = false
     @State private var exportError: String?
-    @State private var exportShare: MeetingExportShare?
+    @State private var exportShare: MeetingAudioDownload?
+    @State private var settingsExportShare: MeetingAudioDownload?
     @State private var isRetryingTranscript = false
     @State private var isRetryingOfflineTranscript = false
     @State private var retryError: String?
@@ -48,6 +48,18 @@ struct MeetingDetailView: View {
     @StateObject private var processingReporter = MeetingProcessingReporter()
     @ScaledMetric(relativeTo: .body) private var transcriptViewportHeight = 300
     private let transcriptViewportAnchor = "meeting-transcript-viewport"
+    @State private var documentTab: MeetingDocumentTab = .transcript
+    @State private var showingSettings = false
+    @State private var showingSummaryModels = false
+    @State private var showingSettingsSummaryModels = false
+    @State private var citationTarget: String?
+    @State private var citationRequest = UUID()
+    @State private var processingTask: Task<Void, Never>?
+    @State private var customInstructionsDraft = ""
+    @State private var customInstructionsOriginal = ""
+    @State private var processingNotice: String?
+    @State private var summaryUpdatedAt: Date?
+    var initialCitation: MeetingSummaryCitation? = nil
 
     private var contentInset: CGFloat {
         horizontalSizeClass == .compact ? 16 : AppTheme.Spacing.section
@@ -65,11 +77,21 @@ struct MeetingDetailView: View {
             List {
                 audioSection
                 if let result = meeting.result {
-                    transcriptSection(result)
-                    analysisSection(result)
-                    decisionsSection(result)
-                    questionsSection(result)
-                    MeetingActionDraftSection(record: meeting, sourceLabel: meeting.audioTrackDisplayName)
+                    Section {
+                        Picker(MeetingLanguageCopy.text("meeting.document.title", "Meeting document"), selection: $documentTab) {
+                            ForEach(MeetingDocumentTab.allCases) { tab in Text(tab.title).tag(tab) }
+                        }
+                        .pickerStyle(.segmented)
+                        .accessibilityIdentifier("meeting.document.tabs")
+                    }
+                    if documentTab == .transcript { transcriptSection(result) }
+                    if documentTab == .summary {
+                        analysisSection(result)
+                        if result.summarySections?.isEmpty != false {
+                            decisionsSection(result)
+                            questionsSection(result)
+                        }
+                    }
                 }
                 if meeting.parentMeetingID != nil {
                     Section(AppLanguage.localized("meeting.audioTrack.source", defaultValue: AppLanguage.current == .english ? "Audio source" : "음성 소스", language: .current,
@@ -83,33 +105,6 @@ struct MeetingDetailView: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
-                if !transcriptionLanguages.isEmpty || !summaryLanguageOptions.isEmpty {
-                Section(MeetingLanguageCopy.text("meeting.languages.section", "Processing languages")) {
-                    if !transcriptionLanguages.isEmpty {
-                        MeetingLanguagePicker(title: MeetingLanguageCopy.sourceTitle,
-                            selection: Binding(get: { meeting.languageTag }, set: { saveLanguage($0, summary: false) }),
-                            options: transcriptionLanguages, identifier: "meeting.detail.sourceLanguage",
-                            automaticLanguageDetection: Binding(get: { meeting.automaticLanguageDetection }, set: saveAutomaticLanguageDetection),
-                            automaticDetectionAvailable: offlineModelInstalled)
-                    }
-                    if !summaryLanguageOptions.isEmpty {
-                        MeetingLanguagePicker(title: MeetingLanguageCopy.summaryTitle,
-                            selection: Binding(get: { resolvedSummaryLanguageTag }, set: { saveLanguage($0, summary: true) }),
-                            options: summaryLanguageOptions, identifier: "meeting.detail.summaryLanguage")
-                    }
-                    Text(MeetingLanguageCopy.text("meeting.languages.reprocess", "Language changes apply to your next transcription or summary request. Existing original text is not translated or replaced automatically."))
-                        .font(.caption).foregroundStyle(.secondary)
-                    MeetingAIAccuracyNotice()
-                    if meeting.automaticLanguageDetection {
-                        MeetingAutomaticLanguageNotice()
-                        if !offlineModelInstalled {
-                            Text(AppLanguage.localized("meeting.offlineTranscription.installRequired", defaultValue: "Install the Whisper model in Settings → Meeting to use offline transcription.", language: .current, comment: "Offline transcription requires installing its model."))
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                    }
-                }
-                .disabled(isReprocessing)
-                }
                 if meeting.status == .transcriptFinalizationFailed, let manifest = meeting.audioManifest {
                     failedFinalizationSection(manifest)
                 }
@@ -118,46 +113,18 @@ struct MeetingDetailView: View {
         .navigationTitle("회의 기록")
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
-                if meeting.result != nil && (canRegenerateSummary || canRetryAppleTranscript || canRetryOfflineTranscript || canRetrySpeakers) {
-                    Menu {
-                        if canRegenerateSummary {
-                            Button("다시 요약") { regenerateSummary() }
-                        }
-                        if canRetryAppleTranscript {
-                            Button("다시 전사") {
-                                showingRetranscribeConfirm = true
-                            }
-                        }
-                        if canRetryOfflineTranscript {
-                            Button(AppLanguage.localized("meeting.offlineTranscription.retry", defaultValue: "Transcribe offline", language: .current, comment: "Retry offline transcription from the meeting menu.")) {
-                                showingOfflineRetranscribeConfirm = true
-                            }
-                            .accessibilityIdentifier("meeting.offlineTranscription.retry")
-                        }
-                        if canRetrySpeakers {
-                            Button(AppLanguage.localized(
-                                "meeting.diarization.retry",
-                                defaultValue: AppLanguage.current == .english ? "Detect speakers again" : "화자 다시 분석",
-                                language: .current,
-                                comment: "Explicit on-device speaker diarization retry from saved audio."
-                            )) {
-                                retrySpeakers()
-                            }
-                            .accessibilityIdentifier("meeting.diarization.retry")
-                        }
-                    } label: {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                    .accessibilityLabel("회의 다시 정리")
-                    .disabled(isReprocessing)
+                Button { showingSettings = true } label: {
+                    Image(systemName: "slider.horizontal.3")
                 }
-                if let manifest = meeting.audioManifest {
+                .accessibilityLabel(MeetingLanguageCopy.text("meeting.settings.title", "Meeting settings"))
+                .accessibilityIdentifier("meeting.settings.open")
+                if meeting.audioManifest != nil {
                     Menu {
-                        Button("원본 아카이브 (FLAC + manifest)") {
-                            export(manifest: manifest) { try MeetingAudioExporter.exportSourceArchive(manifest: $0) }
+                        Button(MeetingLanguageCopy.text("meeting.manage.downloadOriginal", "Download original recording (ZIP)")) {
+                            export(format: .original)
                         }
-                        Button("병합 오디오 (WAV)") {
-                            export(manifest: manifest) { try MeetingAudioExporter.exportMergedAudio(manifest: $0) }
+                        Button(MeetingLanguageCopy.text("meeting.manage.downloadWAV", "Download audio (WAV)")) {
+                            export(format: .wav)
                         }
                     } label: {
                         Image(systemName: "square.and.arrow.up")
@@ -232,29 +199,23 @@ struct MeetingDetailView: View {
         } message: {
             Text(player.errorMessage ?? AppLanguage.localized("meeting.playback.unknownError", defaultValue: "Unknown playback error", language: .current, comment: "Fallback when the playback error has no message."))
         }
-        .sheet(item: $exportShare) { share in
-            ActivityShareSheet(items: [share.url])
+        .meetingAudioDownload($exportShare) { exportError = $0.localizedDescription }
+        .sheet(isPresented: $showingSettings) {
+            processingSettings
+                .onAppear {
+                    customInstructionsDraft = meeting.summaryCustomInstructions
+                    customInstructionsOriginal = meeting.summaryCustomInstructions
+                }
+                .onDisappear { _ = commitCustomInstructions() }
         }
-        .confirmationDialog("저장된 음성으로 다시 전사할까요?", isPresented: $showingRetranscribeConfirm, titleVisibility: .visible) {
-            Button("다시 전사", role: .destructive) {
-                if let manifest = meeting.audioManifest { retryTranscript(manifest: manifest) }
+        .sheet(isPresented: $showingSummaryModels) {
+            MeetingSummaryView(meeting: meeting) {
+                summaryUpdatedAt = meeting.updatedAt
+                documentTab = .summary
             }
-            Button("취소", role: .cancel) {}
-        } message: {
-            Text("현재 전사문과 분석 결과가 새 전사로 대체됩니다. 원본 음성은 보존됩니다.")
         }
-        .confirmationDialog(
-            AppLanguage.localized("meeting.offlineTranscription.confirm.title", defaultValue: "Transcribe saved audio offline?", language: .current, comment: "Confirmation before replacing the transcript with offline transcription."),
-            isPresented: $showingOfflineRetranscribeConfirm, titleVisibility: .visible
-        ) {
-            Button(AppLanguage.localized("meeting.offlineTranscription.transcribe", defaultValue: "Transcribe offline", language: .current, comment: "Confirm offline transcription of saved audio."), role: .destructive) {
-                retryOfflineTranscript()
-            }
-            Button("취소", role: .cancel) {}
-        } message: {
-            Text(meeting.importedAudioFileName != nil
-                 ? AppLanguage.localized("meeting.offlineTranscription.confirm.imported", defaultValue: "This replaces the current transcript and analysis. The imported audio remains saved.", language: .current, comment: "Offline retranscription confirmation for imported audio.")
-                 : AppLanguage.localized("meeting.offlineTranscription.confirm.recorded", defaultValue: "This replaces the current transcript and analysis. Saved audio and the original Apple transcript are preserved.", language: .current, comment: "Offline retranscription confirmation for recorded audio."))
+        .task(id: initialCitation) {
+            if let initialCitation { openCitation(initialCitation) }
         }
         .alert("전사 내용 수정", isPresented: Binding(get: { textEditTarget != nil }, set: { if !$0 { textEditTarget = nil } }), presenting: textEditTarget) { segment in
             TextField("전사 내용", text: $textEditDraft, axis: .vertical)
@@ -374,11 +335,6 @@ struct MeetingDetailView: View {
             savedSummaryLanguageTag: meeting.summaryLanguageTag)
     }
 
-    private var canRegenerateSummary: Bool {
-        meeting.result?.segments.isEmpty == false
-            && MeetingSummaryLanguages.canSummarize(sourceLanguageTag: meeting.processingSourceLanguageTag,
-                summaryLanguageTag: resolvedSummaryLanguageTag)
-    }
 
     private var canRetryAppleTranscript: Bool {
         meeting.audioManifest != nil && meeting.importedAudioFileName == nil
@@ -520,30 +476,72 @@ struct MeetingDetailView: View {
     }
 
 
+    private struct TranscriptTurnGroup: Identifiable {
+        let segments: [MeetingSegment]
+        let presentation: MeetingSpeakerContinuity.Presentation
+        var id: String { segments[0].id }
+        var startMs: Int64 { segments[0].startMs }
+        var endMs: Int64 { segments.last?.endMs ?? segments[0].endMs }
+        var text: String {
+            segments.map { $0.text.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+                .joined(separator: " ")
+        }
+        func contains(_ segmentID: String?) -> Bool {
+            guard let segmentID else { return false }
+            return segments.contains { $0.id == segmentID || $0.stableLineageID == segmentID }
+        }
+    }
+
+    private func groupedTranscriptTurns(_ segments: [MeetingSegment]) -> [TranscriptTurnGroup] {
+        var groups: [TranscriptTurnGroup] = []
+        for segment in segments {
+            let rowID = MeetingConversationTimeline.Row.ID(trackID: meeting.meetingID, localID: segment.stableLineageID)
+            let presentation = speakerDisplay.continuity[rowID]
+                ?? MeetingSpeakerContinuity.Presentation(speakerIDs: segment.speakerIDs, isInherited: false, startsTurn: true, kind: .speaker)
+            if presentation.startsTurn || groups.isEmpty {
+                groups.append(TranscriptTurnGroup(segments: [segment], presentation: presentation))
+            } else {
+                let last = groups.removeLast()
+                let updatedPresentation = MeetingSpeakerContinuity.Presentation(
+                    speakerIDs: last.presentation.speakerIDs,
+                    isInherited: last.presentation.isInherited && presentation.isInherited,
+                    startsTurn: true,
+                    kind: last.presentation.kind
+                )
+                groups.append(TranscriptTurnGroup(segments: last.segments + [segment], presentation: updatedPresentation))
+            }
+        }
+        return groups
+    }
+
     @ViewBuilder
     private func transcriptSection(_ result: MeetingResult) -> some View {
         let visibleSegments = result.segments.filter {
             !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
+        let turns = groupedTranscriptTurns(visibleSegments)
         let activeSegmentID = activeSegmentID(in: result)
+        let activeTurnID = turns.first(where: { $0.contains(activeSegmentID) })?.id
+        let citationTurnID = turns.first(where: { $0.contains(citationTarget) })?.id
         Section("전사문") {
+            speakerStatus
 
-            if visibleSegments.isEmpty {
+            if turns.isEmpty {
                 ContentUnavailableView("전사문이 없습니다", systemImage: "waveform.slash")
             } else {
                 ScrollViewReader { proxy in
                     ScrollView(.vertical) {
-                        LazyVStack(alignment: .leading, spacing: 0) {
-                            ForEach(visibleSegments) { segment in
-                                transcriptRow(
-                                    segment,
+                        LazyVStack(alignment: .leading, spacing: 2) {
+                            ForEach(turns) { turn in
+                                transcriptTurnRow(
+                                    turn,
+                                    isFirstTurn: turn.id == turns.first?.id,
                                     result: result,
-                                    isActive: segment.id == activeSegmentID,
-                                    presentation: speakerDisplay.continuity[.init(trackID: meeting.meetingID,
-                                        localID: segment.stableLineageID)],
-                                    correction: correction(for: segment.id)
+                                    isActive: turn.id == activeTurnID,
+                                    isCited: turn.id == citationTurnID
                                 )
-                                .id(segment.id)
+                                .id(turn.id)
                             }
                         }
                         .frame(maxWidth: 784, alignment: .leading)
@@ -557,7 +555,12 @@ struct MeetingDetailView: View {
                         bottom: 0, trailing: contentInset - AppTheme.Spacing.item))
                     .listRowSeparator(.hidden)
                     .id(transcriptViewportAnchor)
-                    .onChange(of: activeSegmentID) { _, activeID in
+                    .task(id: citationRequest) {
+                        await Task.yield()
+                        guard !Task.isCancelled, let targetID = citationTurnID ?? citationTarget else { return }
+                        proxy.scrollTo(targetID, anchor: .center)
+                    }
+                    .onChange(of: activeTurnID) { _, activeID in
                         guard let activeID else { return }
                         if reduceMotion {
                             proxy.scrollTo(activeID, anchor: .center)
@@ -596,10 +599,16 @@ struct MeetingDetailView: View {
 
     @ViewBuilder
     private func analysisSection(_ result: MeetingResult) -> some View {
-        if (!result.summary.isEmpty && meeting.summaryKindRaw != "sourceExcerpts")
-            || meeting.offlineASRFailure != nil || processingReporter.isBusy || isAnalyzing || isDiarizing
-            || analysisError != nil || retryError != nil || speakerError != nil || segmentEditError != nil {
+
         Section {
+            MeetingSummaryEntry(isProcessing: isReprocessing) {
+                showingSummaryModels = true
+            }
+            if let summaryUpdatedAt, summaryUpdatedAt == meeting.updatedAt {
+                Text(MeetingLanguageCopy.text("meeting.summary.success", "Summary regenerated. Review its citations."))
+                    .font(.caption).foregroundStyle(.secondary)
+                    .accessibilityIdentifier("meeting.summary.success")
+            }
             if let failure = meeting.offlineASRFailure {
                 Text(failure == .modelUnavailable
                      ? AppLanguage.localized("meeting.offlineTranscription.modelUnavailable", defaultValue: "Whisper model unavailable. Install it in Settings → Meeting and retry.", language: .current, comment: "Offline transcription could not run because its model is unavailable.")
@@ -608,24 +617,8 @@ struct MeetingDetailView: View {
                         : AppLanguage.localized("meeting.audioTrack.offlineFailed", defaultValue: "Offline transcription failed. Your earlier transcript is intact.", language: .current, comment: "Offline transcription failed while preserving the previous valid transcript.")))
                     .font(.caption).foregroundStyle(AppTheme.warning)
             }
-            if !result.summary.isEmpty, meeting.summaryKindRaw != "sourceExcerpts" {
-                VStack(alignment: .leading, spacing: AppTheme.Spacing.item) {
-                    Label(meeting.summaryKindRaw == "generated"
-                        ? MeetingLanguageCopy.text("meeting.languages.generated", "AI summary")
-                        : MeetingLanguageCopy.text("meeting.languages.excerpts", "Source excerpts / unverified summary"),
-                        systemImage: meeting.summaryKindRaw == "generated" ? "sparkles" : "text.quote")
-                        .font(.subheadline.weight(.semibold)).foregroundStyle(AppTheme.accent)
-                    if let tag = meeting.summaryResultLanguageTag {
-                        Text(MeetingLanguageOption(id: tag).displayName(locale: AppLanguage.current.locale))
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                    Text(result.summary)
-                    MeetingAIAccuracyNotice()
-                }
-                .frame(maxWidth: 760, alignment: .leading)
-                .frame(maxWidth: .infinity, alignment: .center)
+            MeetingCitedSummaryView(result: result, record: meeting, openCitation: openCitation)
                 .listRowInsets(EdgeInsets(top: 16, leading: contentInset, bottom: 16, trailing: contentInset))
-            }
 
             if processingReporter.isBusy {
                 MeetingProcessingStatusView(
@@ -634,10 +627,6 @@ struct MeetingDetailView: View {
                     offlineTranscription: isRetryingOfflineTranscript,
                     transcriptionProgress: processingReporter.transcriptionProgress
                 )
-            }
-            if isAnalyzing {
-                ProgressView("요약을 다시 만드는 중")
-                    .font(.caption)
             }
             if isDiarizing { speakerStatus }
             if let analysisError {
@@ -653,116 +642,86 @@ struct MeetingDetailView: View {
                 Text(segmentEditError).font(.caption).foregroundStyle(AppTheme.destructive)
             }
         }
-        }
     }
 
-    @ViewBuilder
-    private func transcriptMetadata(_ segment: MeetingSegment, correction: MeetingProofread.SegmentCorrection?) -> some View {
-        Text("\(duration(segment.startMs))–\(duration(segment.endMs))")
-            .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-        if let confidence = segment.confidence, confidence < 0.5 {
-            Label("확인 필요", systemImage: "exclamationmark.triangle.fill")
-                .font(.caption).foregroundStyle(AppTheme.warning)
-        }
-        if correction != nil {
-            Text("AI 교정")
-                .font(.caption.weight(.medium)).foregroundStyle(AppTheme.success)
-        }
-    }
 
-    private func transcriptRow(
-        _ segment: MeetingSegment,
+    private func transcriptTurnRow(
+        _ turn: TranscriptTurnGroup,
+        isFirstTurn: Bool,
         result: MeetingResult,
         isActive: Bool,
-        presentation: MeetingSpeakerContinuity.Presentation?,
-        correction: MeetingProofread.SegmentCorrection?
+        isCited: Bool
     ) -> some View {
-        let startsTurn = presentation?.startsTurn ?? true
+        let firstSegment = turn.segments[0]
+        let primaryID = isCited ? (turn.segments.first(where: { $0.id == citationTarget || $0.stableLineageID == citationTarget })?.id ?? firstSegment.id) : firstSegment.id
+        let knownSpeaker = !turn.presentation.speakerIDs.isEmpty || turn.presentation.kind == .mixed || speakerDisplay.mixedSegmentIDs.contains(firstSegment.id)
+        let turnCorrections = turn.segments.compactMap { correction(for: $0.id) }
+        let hasLowConfidence = turn.segments.contains { ($0.confidence ?? 1.0) < 0.5 }
         return VStack(alignment: .leading, spacing: 4) {
-            if startsTurn {
-                Text(speakerLabel(for: segment, presentation: presentation))
-                    .font(.caption.weight(.medium)).foregroundStyle(AppTheme.secondaryText)
-            }
-            HStack(alignment: .firstTextBaseline, spacing: AppTheme.Spacing.compact) {
-                transcriptText(segment, isActive: isActive, correction: correction)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                VStack(alignment: .trailing, spacing: 2) {
-                    transcriptMetadata(segment, correction: correction)
-                }
-                .fixedSize(horizontal: true, vertical: false)
-            }
-        }
-        .padding(.top, startsTurn ? AppTheme.Spacing.compact : 2)
-        .padding(.bottom, 2)
-        .padding(.horizontal, AppTheme.Spacing.item)
-        .contentShape(Rectangle())
-        .onTapGesture {
-            seek(to: segment)
-        }
-        .overlay(alignment: .leading) {
-            if isActive {
-                Rectangle()
-                    .fill(AppTheme.accent)
-                    .frame(width: 3)
-            }
-        }
-        .background(
-            isActive ? AppTheme.accentSoft : Color.clear,
-            in: RoundedRectangle(cornerRadius: AppTheme.controlRadius, style: .continuous)
-        )
-        .animation(AppTheme.motion(reduceMotion: reduceMotion), value: isActive)
-        .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(isActive ? [.isSelected, .isButton] : .isButton)
-        .accessibilityHint(isActive
-            ? AppLanguage.localized("meeting.transcript.playbackHint.active", defaultValue: "Current playback segment. Double-tap to play from this segment.", language: .current, comment: "Accessibility hint for the currently playing transcript segment.")
-            : AppLanguage.localized("meeting.transcript.playbackHint", defaultValue: "Double-tap to play from this segment.", language: .current, comment: "Accessibility hint for a playable transcript segment."))
-        .accessibilityValue(
-            MeetingSpeakerLabelFormatter.accessibilityValue(
-                speakerLabel: speakerLabel(for: segment, presentation: presentation),
-                transcript: correction.map {
-                    String(format: AppLanguage.localized("meeting.transcript.correction.accessibilityValue", defaultValue: "Before correction: %1$@. After correction: %2$@.", language: .current, comment: "Accessibility comparison of original and corrected transcript text."), locale: AppLanguage.current.locale, $0.before, $0.after)
-                } ?? segment.text,
-                inherited: presentation?.isInherited == true)
-        )
-        .contextMenu {
-            Button("내용 수정") {
-                textEditDraft = segment.text
-                textEditTarget = segment
-            }
-            .disabled(isReprocessing)
-            Button("화자 수정") {
-                speakerSheetTarget = segment
-            }
-            .disabled(isReprocessing || meeting.audioManifest == nil)
-            Button("구간 분할") {
-                splitSegment(segment, result: result)
-            }
-            .disabled(isReprocessing)
-            Button("이전 구간과 병합") {
-                applyEdit {
-                    try MeetingTranscriptEditor.mergeWithPrevious(
-                        result: $0,
-                        meetingID: meeting.meetingID,
-                        segmentID: segment.id
-                    )
+            MeetingTranscriptProseRow(
+                text: turn.text,
+                sourceLabel: isFirstTurn ? meeting.audioTrackDisplayName : nil,
+                speakerLabel: knownSpeaker ? speakerLabel(for: firstSegment, presentation: turn.presentation) : nil,
+                timeRange: "\(duration(turn.startMs))–\(duration(turn.endMs))",
+                identifier: "meeting.transcript.segment.\(primaryID)",
+                highlighted: isActive || isCited,
+                canPlay: meeting.audioManifest != nil
+            ) { seek(to: firstSegment) }
+            .contextMenu {
+                if turn.segments.count == 1 {
+                    transcriptSegmentActions(firstSegment, result: result)
+                } else {
+                    ForEach(turn.segments) { segment in
+                        Menu("\(duration(segment.startMs)) · \(segment.text.prefix(48))") {
+                            transcriptSegmentActions(segment, result: result)
+                        }
+                    }
                 }
             }
-            .disabled(isReprocessing)
+            if !turnCorrections.isEmpty {
+                DisclosureGroup(MeetingLanguageCopy.text("meeting.transcript.correction", "AI correction")) {
+                    ForEach(Array(turnCorrections.enumerated()), id: \.offset) { _, item in
+                        Text(inlineAttributed(item.tokens)).textSelection(.enabled)
+                    }
+                }
+                .font(.caption).padding(.horizontal, AppTheme.Spacing.item)
+            }
+            if hasLowConfidence {
+                Label("확인 필요", systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(AppTheme.warning)
+                    .padding(.horizontal, AppTheme.Spacing.item)
+            }
         }
+        .padding(.top, isFirstTurn ? 0 : AppTheme.Spacing.compact)
     }
 
     @ViewBuilder
-    private func transcriptText(_ segment: MeetingSegment, isActive: Bool,
-                                correction: MeetingProofread.SegmentCorrection?) -> some View {
-        if let correction {
-            Text(inlineAttributed(correction.tokens))
-                .fontWeight(isActive ? .semibold : .regular)
-        } else {
-            Text(segment.text)
-                .fontWeight(isActive ? .semibold : .regular)
-                .foregroundStyle((player.isPlaying || player.isPaused) && !isActive ? Color.secondary : Color.primary)
+    private func transcriptSegmentActions(_ segment: MeetingSegment, result: MeetingResult) -> some View {
+        Button("내용 수정") {
+            textEditDraft = segment.text
+            textEditTarget = segment
         }
+        .disabled(isReprocessing)
+        Button("화자 수정") {
+            speakerSheetTarget = segment
+        }
+        .disabled(isReprocessing || meeting.audioManifest == nil)
+        Button("구간 분할") {
+            splitSegment(segment, result: result)
+        }
+        .disabled(isReprocessing)
+        Button("이전 구간과 병합") {
+            applyEdit {
+                try MeetingTranscriptEditor.mergeWithPrevious(
+                    result: $0,
+                    meetingID: meeting.meetingID,
+                    segmentID: segment.id
+                )
+            }
+        }
+        .disabled(isReprocessing)
     }
+
 
     private func seek(to segment: MeetingSegment) {
         guard let manifest = meeting.audioManifest else { return }
@@ -776,12 +735,13 @@ struct MeetingDetailView: View {
     private var isDiarizing: Bool { isQueuingSpeakers || diarizationActivity.isRunning(meeting.meetingID) }
 
     private var isReprocessing: Bool {
-        meeting.status == .finalizingTranscript || isAnalyzing || isRetryingTranscript || isDiarizing
+        meeting.status == .finalizingTranscript || isRetryingTranscript || isDiarizing
     }
 
     private func speakerLabel(for segment: MeetingSegment,
                               presentation: MeetingSpeakerContinuity.Presentation?) -> String {
-        if segment.speakerIDs.isEmpty, speakerDisplay.mixedSegmentIDs.contains(segment.id) {
+        if (presentation?.speakerIDs ?? segment.speakerIDs).isEmpty,
+           (presentation?.kind == .mixed || speakerDisplay.mixedSegmentIDs.contains(segment.id)) {
             return AppLanguage.localized(
                 "meeting.speaker.mixed",
                 defaultValue: AppLanguage.current == .english
@@ -793,7 +753,7 @@ struct MeetingDetailView: View {
         }
         return MeetingSpeakerLabelFormatter.label(
             for: presentation?.speakerIDs ?? segment.speakerIDs, profiles: speakerDisplay.profiles,
-            state: presentation?.isInherited == true ? .provisional : .final,
+            state: .final,
             kind: presentation?.kind ?? .speaker
         )
     }
@@ -950,8 +910,9 @@ struct MeetingDetailView: View {
         retryError = nil
         analysisError = nil
         processingReporter.reset()
+        processingNotice = nil
         processingReporter.startTranscribing(totalMilliseconds: manifest.totalSamples / 16)
-        Task {
+        processingTask = Task {
             defer { isRetryingTranscript = false }
             let (updates, continuation) = AsyncStream<MeetingTranscriptionProgress.Update>.makeStream(bufferingPolicy: .bufferingNewest(1))
             let observing = Task {
@@ -981,6 +942,7 @@ struct MeetingDetailView: View {
                 }.sorted { ($0.startMs, $0.endMs, $0.id) < ($1.startMs, $1.endMs, $1.id) }
                 let baseResult = MeetingResult(transcriptRevision: revision, segments: segments)
 
+                try Task.checkCancellation()
                 guard meeting.transcriptRevision == source.transcriptRevision,
                       meeting.resultData == sourceData,
                       meeting.audioManifest == manifest else {
@@ -1000,7 +962,9 @@ struct MeetingDetailView: View {
             } catch {
                 continuation.finish()
                 await observing.value
-                retryError = error.localizedDescription
+                if error is CancellationError {
+                    processingNotice = MeetingLanguageCopy.text("meeting.settings.cancelled", "Processing cancelled. Saved audio and the last successfully saved results are unchanged.")
+                } else { retryError = error.localizedDescription }
                 processingReporter.reset()
             }
         }
@@ -1013,7 +977,8 @@ struct MeetingDetailView: View {
         retryError = nil
         analysisError = nil
         processingReporter.reset()
-        Task {
+        processingNotice = nil
+        processingTask = Task {
             defer {
                 isRetryingTranscript = false
                 isRetryingOfflineTranscript = false
@@ -1029,7 +994,9 @@ struct MeetingDetailView: View {
                 }
                 await finishRetranscription()
             } catch {
-                retryError = error.localizedDescription
+                if error is CancellationError {
+                    processingNotice = MeetingLanguageCopy.text("meeting.settings.cancelled", "Processing cancelled. Saved audio and the last successfully saved results are unchanged.")
+                } else { retryError = error.localizedDescription }
                 processingReporter.reset()
             }
         }
@@ -1038,11 +1005,13 @@ struct MeetingDetailView: View {
     /// Both ASR engines release their audio resources before speaker replay.
     private func finishRetranscription() async {
         processingReporter.set(.idle)
+        guard !Task.isCancelled else { return }
         do {
             speakerError = try await runSpeakerPass().userMessage
         } catch {
             speakerError = error.localizedDescription
         }
+        guard !Task.isCancelled else { return }
         do {
             _ = try await MeetingPostProcessor.refineAndAnalyze(
                 record: meeting,
@@ -1079,7 +1048,7 @@ struct MeetingDetailView: View {
         guard !isReprocessing else { return }
         speakerError = nil
         let hadAnalysis = meeting.result.map { !$0.summary.isEmpty || !$0.actionDrafts.isEmpty } ?? false
-        Task {
+        processingTask = Task {
             let outcome: MeetingDiarizationPostProcessor.Outcome
             do {
                 outcome = try await runSpeakerPass()
@@ -1106,42 +1075,22 @@ struct MeetingDetailView: View {
         }
     }
 
-    private func export(manifest: MeetingAudioManifest, using operation: @escaping @Sendable (MeetingAudioManifest) throws -> URL) {
+    private func export(format: MeetingAudioDownloadFormat, fromSettings: Bool = false) {
+        guard !isExporting else { return }
         isExporting = true
         exportError = nil
         Task {
+            defer { isExporting = false }
             do {
-                let url = try await Task.detached(priority: .userInitiated) {
-                    try operation(manifest)
-                }.value
-                exportShare = MeetingExportShare(url: url)
+                let download = try await MeetingAudioDownload.prepare(record: meeting, in: meetingContext, format: format)
+                if fromSettings { settingsExportShare = download }
+                else { exportShare = download }
             } catch {
                 exportError = error.localizedDescription
             }
-            isExporting = false
         }
     }
 
-    private func regenerateSummary() {
-        guard !isReprocessing else { return }
-        isAnalyzing = true
-        analysisError = nil
-        retryError = nil
-        processingReporter.reset()
-        Task {
-            defer { isAnalyzing = false }
-            do {
-                _ = try await MeetingPostProcessor.refineAndAnalyze(
-                    record: meeting, context: meetingContext, allowRefine: false, allowModelLoad: false,
-                    reporter: processingReporter, dependencies: makeVocabularyMeetingDependencies(userVocabulary?.service))
-            } catch is CancellationError {
-                processingReporter.reset()
-            } catch {
-                analysisError = error.localizedDescription
-                processingReporter.reset()
-            }
-        }
-    }
 
 
     private func totalMs(_ manifest: MeetingAudioManifest) -> Int64 {
@@ -1189,17 +1138,171 @@ enum MeetingTranscriptEditCommitter {
     }
 }
 
-private struct MeetingExportShare: Identifiable {
-    let url: URL
-    var id: String { url.absoluteString }
-}
 
-struct ActivityShareSheet: UIViewControllerRepresentable {
-    let items: [Any]
 
-    func makeUIViewController(context: Context) -> UIActivityViewController {
-        UIActivityViewController(activityItems: items, applicationActivities: nil)
+private extension MeetingDetailView {
+    var processingSettings: some View {
+        NavigationStack {
+            Form {
+                Section(MeetingLanguageCopy.text("meeting.settings.transcription", "Transcription")) {
+                    if !transcriptionLanguages.isEmpty {
+                        MeetingLanguagePicker(title: MeetingLanguageCopy.sourceTitle,
+                            selection: Binding(get: { meeting.languageTag }, set: { saveLanguage($0, summary: false) }),
+                            options: transcriptionLanguages, identifier: "meeting.detail.sourceLanguage",
+                            automaticLanguageDetection: Binding(get: { meeting.automaticLanguageDetection }, set: saveAutomaticLanguageDetection),
+                            automaticDetectionAvailable: offlineModelInstalled)
+                    }
+                    Text(MeetingLanguageCopy.text("meeting.settings.retranscribeHelp", "Choose the source language, then explicitly retranscribe. Your current transcript stays available until the new transcription succeeds. Original audio is preserved."))
+                        .font(.caption).foregroundStyle(.secondary)
+                    if canRetryAppleTranscript {
+                        Button(MeetingLanguageCopy.text("meeting.settings.retranscribe", "Retranscribe saved audio")) { showingRetranscribeConfirm = true }
+                            .accessibilityIdentifier("meeting.settings.retranscribe")
+                    }
+                    if canRetryOfflineTranscript {
+                        Button(MeetingLanguageCopy.text("meeting.offlineTranscription.retry", "Transcribe offline")) { showingOfflineRetranscribeConfirm = true }
+                            .accessibilityIdentifier("meeting.offlineTranscription.retry")
+                    }
+                    if !canRetryAppleTranscript && !canRetryOfflineTranscript {
+                        Text(MeetingLanguageCopy.text("meeting.settings.transcriptionUnavailable", "Transcription is unavailable for this source or language. Install the Whisper model in Settings → Meeting for offline transcription."))
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    if canRetrySpeakers {
+                        Button(MeetingLanguageCopy.text("meeting.diarization.retry", "Detect speakers again")) { retrySpeakers() }
+                            .accessibilityIdentifier("meeting.diarization.retry")
+                    }
+                }
+                .disabled(isReprocessing)
+                Section(MeetingLanguageCopy.text("meeting.document.summary", "Summary")) {
+                    if !summaryLanguageOptions.isEmpty {
+                        MeetingLanguagePicker(title: MeetingLanguageCopy.summaryTitle,
+                            selection: Binding(get: { resolvedSummaryLanguageTag }, set: { saveLanguage($0, summary: true) }),
+                            options: summaryLanguageOptions, identifier: "meeting.detail.summaryLanguage")
+                    } else {
+                        LabeledContent(MeetingLanguageCopy.summaryTitle, value: MeetingLanguageOption(id: resolvedSummaryLanguageTag).displayName(locale: AppLanguage.current.locale))
+                    }
+                    MeetingSummaryFormatControls(
+                        format: Binding(get: { meeting.summaryFormat }, set: { value in saveSummarySettings { meeting.summaryFormat = value } }),
+                        instructions: $customInstructionsDraft)
+                    Text(MeetingLanguageCopy.text("meeting.settings.explicitRegenerate", "Saved settings apply to the next summary. Regenerate explicitly to replace the existing summary; the transcript is not changed."))
+                        .font(.caption).foregroundStyle(.secondary)
+                    MeetingSummaryEntry(isProcessing: isReprocessing) {
+                        guard commitCustomInstructions() else { return }
+                        showingSettingsSummaryModels = true
+                    }
+                    .disabled(meeting.summaryFormat == .custom && customInstructionsDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+                .disabled(isReprocessing)
+                Section(MeetingLanguageCopy.text("meeting.settings.recordings", "Audio recordings")) {
+                    Text(meeting.audioTrackDisplayName).font(.subheadline.weight(.medium))
+                    Text(meeting.createdAt, format: .dateTime.year().month().day().hour().minute()).font(.caption).foregroundStyle(.secondary)
+                    if meeting.audioManifest != nil {
+                        Button(MeetingLanguageCopy.text("meeting.manage.downloadOriginal", "Download original recording (ZIP)")) {
+                            export(format: .original, fromSettings: true)
+                        }
+                        .accessibilityIdentifier("meeting.settings.downloadOriginal")
+                        Button(MeetingLanguageCopy.text("meeting.manage.downloadWAV", "Download audio (WAV)")) {
+                            export(format: .wav, fromSettings: true)
+                        }
+                        .accessibilityIdentifier("meeting.settings.downloadWAV")
+                    }
+                    if isExporting { ProgressView(MeetingLanguageCopy.text("meeting.settings.exporting", "Preparing recording download")) }
+                }
+                .disabled(isExporting)
+                if isReprocessing || processingReporter.isBusy {
+                    Section {
+                        MeetingProcessingStatusView(phase: processingReporter.phase, showsTranscription: processingReporter.includesTranscription,
+                            offlineTranscription: isRetryingOfflineTranscript, transcriptionProgress: processingReporter.transcriptionProgress)
+                        Button(MeetingLanguageCopy.text("meeting.settings.cancelProcessing", "Cancel processing"), role: .cancel) {
+                            processingTask?.cancel()
+                            processingNotice = MeetingLanguageCopy.text("meeting.settings.cancelled", "Processing cancelled. Saved audio and the last successfully saved results are unchanged.")
+                            speakerPassTask?.cancel()
+                            Task { await MeetingDiarizationPostProcessor.cancel(meetingID: meeting.meetingID) }
+                        }
+                        .accessibilityIdentifier("meeting.settings.cancelProcessing")
+                    }
+                }
+                if let processingNotice {
+                    Section { Text(processingNotice).foregroundStyle(.secondary).accessibilityIdentifier("meeting.settings.cancelled") }
+                }
+                if let error = analysisError ?? retryError ?? speakerError ?? segmentEditError ?? exportError {
+                    Section { Text(error).foregroundStyle(AppTheme.destructive).accessibilityIdentifier("meeting.settings.error") }
+                }
+            }
+            .navigationTitle(MeetingLanguageCopy.text("meeting.settings.title", "Meeting settings"))
+            .toolbar { ToolbarItem(placement: .confirmationAction) {
+                Button(MeetingLanguageCopy.text("meeting.settings.done", "Done")) {
+                    if commitCustomInstructions() { showingSettings = false }
+                }
+            } }
+        }
+        .meetingAudioDownload($settingsExportShare) { exportError = $0.localizedDescription }
+        .sheet(isPresented: $showingSettingsSummaryModels) {
+            MeetingSummaryView(meeting: meeting) {
+                summaryUpdatedAt = meeting.updatedAt
+                documentTab = .summary
+                showingSettings = false
+            }
+        }
+        .confirmationDialog("저장된 음성으로 다시 전사할까요?", isPresented: $showingRetranscribeConfirm, titleVisibility: .visible) {
+            Button("다시 전사", role: .destructive) {
+                if let manifest = meeting.audioManifest { retryTranscript(manifest: manifest) }
+            }
+            Button("취소", role: .cancel) {}
+        } message: {
+            Text("현재 전사문과 분석 결과가 새 전사로 대체됩니다. 원본 음성은 보존됩니다.")
+        }
+        .confirmationDialog(
+            AppLanguage.localized("meeting.offlineTranscription.confirm.title", defaultValue: "Transcribe saved audio offline?", language: .current, comment: "Confirmation before replacing the transcript with offline transcription."),
+            isPresented: $showingOfflineRetranscribeConfirm, titleVisibility: .visible
+        ) {
+            Button(AppLanguage.localized("meeting.offlineTranscription.transcribe", defaultValue: "Transcribe offline", language: .current, comment: "Confirm offline transcription of saved audio."), role: .destructive) {
+                retryOfflineTranscript()
+            }
+            Button("취소", role: .cancel) {}
+        } message: {
+            Text(meeting.importedAudioFileName != nil
+                 ? AppLanguage.localized("meeting.offlineTranscription.confirm.imported", defaultValue: "This replaces the current transcript and analysis. The imported audio remains saved.", language: .current, comment: "Offline retranscription confirmation for imported audio.")
+                 : AppLanguage.localized("meeting.offlineTranscription.confirm.recorded", defaultValue: "This replaces the current transcript and analysis. Saved audio and the original Apple transcript are preserved.", language: .current, comment: "Offline retranscription confirmation for recorded audio."))
+        }
     }
 
-    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
+    @discardableResult
+    func commitCustomInstructions() -> Bool {
+        guard customInstructionsDraft != customInstructionsOriginal else { return true }
+        guard !isReprocessing else { return false }
+        do {
+            try MeetingRecordCommitter.persist(record: meeting, save: { try meetingContext.save() }) {
+                meeting.summaryCustomInstructions = customInstructionsDraft
+                meeting.updatedAt = Date()
+            }
+            customInstructionsOriginal = customInstructionsDraft
+            return true
+        } catch {
+            analysisError = error.localizedDescription
+            return false
+        }
+    }
+
+    func saveSummarySettings(_ mutate: () -> Void) {
+        guard !isReprocessing else { return }
+        do {
+            try MeetingRecordCommitter.persist(record: meeting, save: { try meetingContext.save() }) {
+                mutate()
+                meeting.updatedAt = Date()
+            }
+        } catch { analysisError = error.localizedDescription }
+    }
+
+    func openCitation(_ citation: MeetingSummaryCitation) {
+        guard citation.trackID == meeting.meetingID, let result = meeting.result,
+              citation.transcriptRevision == result.transcriptRevision,
+              let segment = result.segments.first(where: { $0.id == citation.segmentID || $0.stableLineageID == citation.segmentID }) else {
+            analysisError = MeetingLanguageCopy.text("meeting.summary.citationUnavailable", "This transcript source has changed or is unavailable. Regenerate the summary to refresh its references.")
+            return
+        }
+        if player.isPlaying { player.pause() }
+        documentTab = .transcript
+        citationTarget = segment.id
+        citationRequest = UUID()
+    }
 }

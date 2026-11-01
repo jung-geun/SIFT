@@ -25,7 +25,7 @@ struct CloudModelCodecTests {
         }
 
         func capture() throws -> [String: Data] {
-            try CloudModelCodec.capture(app: app, email: email, meeting: meeting)
+            try CloudModelCodec.capture(app: app, email: email, meeting: meeting).validatedRecords()
         }
 
         func apply(_ key: String, _ payload: Data?) throws {
@@ -168,6 +168,8 @@ struct CloudModelCodecTests {
         meeting.summaryEngineLabel = "raw-summary-engine"
         meeting.summaryFallbackReasonRaw = "raw-summary-fallback"
         meeting.summaryResultLanguageTag = "fr-FR"
+        meeting.summaryFormat = .interview
+        meeting.summaryCustomInstructions = "Keep exact quotations"
         meeting.statusRaw = "future-status"
         meeting.transcriptRevision = 31
         meeting.resultData = Data([0, 1, 2, 255])
@@ -445,6 +447,8 @@ struct CloudModelCodecTests {
         let legacy = try editPayload(payload) { object in
             var fields = try #require(object["fields"] as? [String: String])
             fields.removeValue(forKey: "automaticLanguageDetection")
+            fields.removeValue(forKey: "summaryFormatRaw")
+            fields.removeValue(forKey: "summaryCustomInstructions")
             object["fields"] = fields
         }
         try destination.apply(key, legacy)
@@ -454,6 +458,8 @@ struct CloudModelCodecTests {
         #expect(!restored.automaticLanguageDetection)
         #expect(restored.languageTag == "ko-KR")
         #expect(restored.summaryLanguageTag == "fr-FR")
+        #expect(restored.summaryFormat == .minutes)
+        #expect(restored.summaryCustomInstructions.isEmpty)
         #expect(restored.asrDetectedLanguages == ["ko", "en", "ko"])
         #expect(restored.resultData == Data([0, 1, 2, 255]))
         let recaptured = try #require(destination.capture()[key])
@@ -559,15 +565,207 @@ struct CloudModelCodecTests {
         #expect(firstPayloads != secondPayloads)
     }
 
+    @Test("Equivalent physical duplicates export once and every local copy accepts remote updates")
+    func equivalentDuplicatesMakeForwardProgressWithoutDeletingRows() throws {
+        let stores = try Stores(), remote = try Stores()
+        let first = seed(stores)
+        let original = try stores.capture()
+        let second = seed(stores)
+        // Recreate all twelve portable identities, not SwiftData object identities.
+        // Every other seeded field is deterministic, including raw blobs/metadata.
+        second.todo.id = first.todo.id
+        second.persona.id = first.persona.id
+        second.audit.id = first.audit.id
+        second.audit.todoID = first.todo.id
+        second.behavior.id = first.behavior.id
+        second.behavior.todoID = first.todo.id
+        second.analysis.id = first.analysis.id
+        second.meeting.confirmedTodoIDs = first.meeting.confirmedTodoIDs
+        second.glossary.id = first.glossary.id
+        second.source.generation = first.source.generation
+        second.observation.id = first.observation.id
+        second.observation.sourceGeneration = first.source.generation
+        first.email.hasBeenViewedInApp = false
+        second.email.hasBeenViewedInApp = true
+        try stores.save()
+
+        #expect(try stores.capture() == original)
+        #expect(!stores.app.hasChanges && !stores.email.hasChanges && !stores.meeting.hasChanges)
+        try remote.apply(stores.capture())
+        #expect(try remote.capture() == original)
+        let remoteTodo = try #require(remote.app.fetch(FetchDescriptor<Todo>()).first)
+        let remoteEmail = try #require(remote.email.fetch(FetchDescriptor<EmailMessage>()).first)
+        let remoteMetadata = try #require(remote.meeting.fetch(FetchDescriptor<VocabularyStoreMetadata>()).first)
+        remoteTodo.title = "Remote updated task"
+        remoteTodo.notes = "Complete new notes"
+        remoteTodo.updatedAt = date.addingTimeInterval(100)
+        remoteEmail.subject = "Remote updated subject"
+        remoteMetadata.hmacVerifier = "updated-opaque-verifier"
+        remoteMetadata.lastCompletedBackfillAt = nil
+        let updated = try remote.capture()
+        try stores.apply(updated)
+        #expect(first.todo.title == remoteTodo.title && second.todo.title == remoteTodo.title)
+        #expect(first.todo.notes == remoteTodo.notes && second.todo.notes == remoteTodo.notes)
+        #expect(first.metadata.hmacVerifier == remoteMetadata.hmacVerifier)
+        #expect(second.metadata.hmacVerifier == remoteMetadata.hmacVerifier)
+        #expect(first.metadata.lastCompletedBackfillAt == nil && second.metadata.lastCompletedBackfillAt == nil)
+        #expect(first.email.subject == remoteEmail.subject && second.email.subject == remoteEmail.subject)
+        #expect(!first.email.hasBeenViewedInApp && second.email.hasBeenViewedInApp)
+        #expect(try stores.capture() == updated)
+        try stores.apply(updated)
+        try stores.save()
+        #expect(try stores.capture() == updated)
+        #expect(try stores.app.fetchCount(FetchDescriptor<Todo>()) == 2)
+        #expect(try stores.app.fetchCount(FetchDescriptor<Persona>()) == 2)
+        #expect(try stores.app.fetchCount(FetchDescriptor<TaskAuditEvent>()) == 2)
+        #expect(try stores.app.fetchCount(FetchDescriptor<TaskBehaviorEvent>()) == 2)
+        #expect(try stores.app.fetchCount(FetchDescriptor<MemoryAnalysis>()) == 2)
+        #expect(try stores.app.fetchCount(FetchDescriptor<MailAnalysisLedgerRecord>()) == 2)
+        #expect(try stores.email.fetchCount(FetchDescriptor<EmailMessage>()) == 2)
+        #expect(try stores.meeting.fetchCount(FetchDescriptor<MeetingRecord>()) == 2)
+        #expect(try stores.meeting.fetchCount(FetchDescriptor<MeetingGlossaryTerm>()) == 2)
+        #expect(try stores.meeting.fetchCount(FetchDescriptor<VocabularyStoreMetadata>()) == 2)
+        #expect(try stores.meeting.fetchCount(FetchDescriptor<VocabularySourceState>()) == 2)
+        #expect(try stores.meeting.fetchCount(FetchDescriptor<VocabularyObservation>()) == 2)
+    }
+
+    @Test("A divergent identity holds its versions and recovery state while a healthy edit syncs",
+          arguments: ["checkpoint", "pendingApply", "pendingPublication"])
+    func conflictingIdentityDoesNotStarveHealthyData(recovery: String) async throws {
+        let stores = try Stores()
+        let conflicted = Todo(title: "Original conflicted task")
+        let healthy = Todo(title: "Original healthy task")
+        stores.app.insert(conflicted)
+        stores.app.insert(healthy)
+        try stores.save()
+        let conflictKey = "Todo/" + conflicted.id.uuidString.lowercased()
+        let healthyKey = "Todo/" + healthy.id.uuidString.lowercased()
+        let baseline = try stores.capture()
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("SIFTConflictHold-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cloudSchema = Schema([CloudDataRevision.self])
+        let cloud = try ModelContainer(for: cloudSchema, configurations: [
+            ModelConfiguration(schema: cloudSchema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)
+        ])
+        let context = ModelContext(cloud)
+        let installation = UUID().uuidString
+        let journalURL = root.appendingPathComponent("journal.json")
+        let initial = try FullCloudSyncEngine(cloud: context, installationID: installation, journalURL: journalURL)
+        try await initial.reconcile(digests: baseline.mapValues(CloudFileStore.digest),
+            load: { baseline[$0] }, apply: { _, _ in Issue.record("Initial local records must publish") })
+        let checkpoint = try #require(initial.journal.items[conflictKey])
+        let remote = CloudDataRevision(itemKey: conflictKey, clock: checkpoint.logicalClock + 1,
+            installationID: UUID().uuidString, payload: baseline[conflictKey])
+        context.insert(remote)
+        try context.save()
+        let remoteCheckpoint = CloudSyncCheckpoint(digest: checkpoint.digest, revisionID: remote.revisionID,
+            logicalClock: remote.logicalClock, installationID: remote.installationID)
+        var journal = initial.journal
+        if recovery == "pendingApply" {
+            journal.pendingApplies[conflictKey] = CloudSyncPendingApply(sourceDigest: checkpoint.digest,
+                target: remoteCheckpoint)
+        } else if recovery == "pendingPublication" {
+            journal.pendingPublications[conflictKey] = CloudSyncCheckpoint(digest: checkpoint.digest,
+                revisionID: UUID(), logicalClock: remote.logicalClock + 1, installationID: installation)
+        }
+        try JSONEncoder().encode(journal).write(to: journalURL, options: .atomic)
+        let heldRevisions = try context.fetch(FetchDescriptor<CloudDataRevision>()).filter { $0.itemKey == conflictKey }
+        let heldIDs = Set(heldRevisions.map(\.revisionID))
+        let second = Todo(id: conflicted.id, title: "Different local version")
+        let third = Todo(id: conflicted.id, title: "Third local version")
+        stores.app.insert(second)
+        stores.app.insert(third)
+        healthy.title = "Healthy edit must reach the cloud"
+        try stores.save()
+        let snapshot = try CloudModelCodec.capture(app: stores.app, email: stores.email, meeting: stores.meeting)
+        #expect(snapshot.conflictingKeys == [conflictKey])
+        #expect(snapshot.records[conflictKey] == nil)
+        let held = try FullCloudSyncEngine(cloud: context, installationID: installation, journalURL: journalURL)
+        for _ in 0..<2 {
+            try await held.reconcile(digests: snapshot.records.mapValues(CloudFileStore.digest),
+                temporarilyUnavailable: snapshot.conflictingKeys, load: { key in
+                    #expect(key != conflictKey)
+                    return snapshot.records[key]
+                }, apply: { _, _ in Issue.record("A conflicted local version must not be restored over") })
+        }
+        let after = try context.fetch(FetchDescriptor<CloudDataRevision>())
+        let conflictRevisions = after.filter { $0.itemKey == conflictKey }
+        #expect(Set(conflictRevisions.map(\.revisionID)) == heldIDs)
+        #expect(conflictRevisions.allSatisfy { !$0.isTombstone && $0.payload == baseline[conflictKey] })
+        #expect(after.first { $0.itemKey == healthyKey }?.payload == snapshot.records[healthyKey])
+        #expect(conflicted.title == "Original conflicted task")
+        #expect(second.title == "Different local version" && third.title == "Third local version")
+        #expect(try stores.app.fetchCount(FetchDescriptor<Todo>()) == 4)
+        let restarted = try FullCloudSyncEngine(cloud: ModelContext(cloud), installationID: installation, journalURL: journalURL)
+        #expect(restarted.journal.items[conflictKey] == checkpoint)
+        #expect(restarted.journal.pendingApplies[conflictKey]?.sourceDigest == journal.pendingApplies[conflictKey]?.sourceDigest)
+        #expect(restarted.journal.pendingApplies[conflictKey]?.target == journal.pendingApplies[conflictKey]?.target)
+        #expect(restarted.journal.pendingPublications[conflictKey] == journal.pendingPublications[conflictKey])
+        // Only an explicit local resolution releases the held identity.
+        stores.app.delete(second)
+        stores.app.delete(third)
+        try stores.save()
+        let resolved = try CloudModelCodec.capture(app: stores.app, email: stores.email, meeting: stores.meeting)
+        #expect(resolved.conflictingKeys.isEmpty)
+        try await restarted.reconcile(digests: resolved.records.mapValues(CloudFileStore.digest),
+            temporarilyUnavailable: resolved.conflictingKeys, load: { resolved.records[$0] }, apply: { key, payload in
+                try stores.apply(key, payload)
+                try stores.save()
+            })
+        #expect(restarted.journal.pendingApplies[conflictKey] == nil)
+        #expect(restarted.journal.pendingPublications[conflictKey] == nil)
+        #expect(try stores.app.fetchCount(FetchDescriptor<Todo>()) == 2)
+        #expect(healthy.title == "Healthy edit must reach the cloud")
+    }
+
+    @Test("Different metadata values fail closed before capture or restore can choose a winner",
+        arguments: ["schemaRepairVersion", "hmacVerifier", "lastCompletedBackfillAt", "lastCompletedBackfillExtractorVersion"])
+    func conflictingMetadataRemainsExplicit(field: String) throws {
+        let stores = try Stores()
+        let first = VocabularyStoreMetadata()
+        stores.meeting.insert(first)
+        let original = try stores.capture()
+        let key = try #require(original.keys.first)
+        let second = VocabularyStoreMetadata()
+        switch field {
+        case "schemaRepairVersion": second.schemaRepairVersion = 1
+        case "hmacVerifier": second.hmacVerifier = "different-opaque-verifier"
+        case "lastCompletedBackfillAt": second.lastCompletedBackfillAt = date
+        default: second.lastCompletedBackfillExtractorVersion = 1
+        }
+        stores.meeting.insert(second)
+        try stores.save()
+        let expected = CloudModelCodec.CodecError.duplicateIdentity(key)
+        #expect(throws: expected) { try stores.capture() }
+        // Even a payload equal to one local version cannot erase the other.
+        #expect(throws: expected) { try stores.apply(key, original[key]) }
+        #expect(try stores.meeting.fetchCount(FetchDescriptor<VocabularyStoreMetadata>()) == 2)
+        #expect(first.schemaRepairVersion == 0 && first.hmacVerifier.isEmpty)
+        #expect(first.lastCompletedBackfillAt == nil && first.lastCompletedBackfillExtractorVersion == 0)
+        switch field {
+        case "schemaRepairVersion": #expect(second.schemaRepairVersion == 1)
+        case "hmacVerifier": #expect(second.hmacVerifier == "different-opaque-verifier")
+        case "lastCompletedBackfillAt": #expect(second.lastCompletedBackfillAt == date)
+        default: #expect(second.lastCompletedBackfillExtractorVersion == 1)
+        }
+        #expect(!stores.meeting.hasChanges)
+    }
+
     @Test("Duplicate portable identities are reported rather than silently dropping a row")
     func duplicateIdentityFailsClosed() throws {
         let stores = try Stores()
         let first = Todo(title: "First version")
-        let second = Todo(id: first.id, title: "Different version")
         stores.app.insert(first)
+        let original = try stores.capture()
+        let key = try #require(original.keys.first)
+        let second = Todo(id: first.id, title: "Different version")
         stores.app.insert(second)
-        #expect(throws: CloudModelCodec.CodecError.self) { try stores.capture() }
+        try stores.save()
+        #expect(throws: CloudModelCodec.CodecError.duplicateIdentity(key)) { try stores.capture() }
+        #expect(throws: CloudModelCodec.CodecError.duplicateIdentity(key)) { try stores.apply(key, original[key]) }
+        #expect(first.title == "First version" && second.title == "Different version")
         #expect(try stores.app.fetch(FetchDescriptor<Todo>()).count == 2)
+        #expect(!stores.app.hasChanges)
     }
     @Test("Divergent natural-key ledger versions are retained with deterministic import identities")
     func ledgerConflictMergeIsLosslessAndIdempotent() throws {

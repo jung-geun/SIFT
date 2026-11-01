@@ -142,10 +142,10 @@ final class AdMobConsentManager: ObservableObject {
     /// Call only for an explicit privacy-options button action. UMP does not provide a
     /// cancellation API: cancellation suppresses the caller's alert, but the gate stays closed
     /// until UMP dismisses/completes. Never overlap a startup form or another privacy form.
-    func presentPrivacyOptions(from presenter: UIViewController) async throws {
+    /// Returns false when Google reports that no consent or privacy form is needed.
+    func presentPrivacyOptions(from presenter: UIViewController) async throws -> Bool {
         try Task.checkCancellation()
-        guard isPrivacyOptionsRequired, !isBusy,
-              AdMobPresentation.isReady(presenter) else {
+        guard !isBusy, AdMobPresentation.isReady(presenter) else {
             throw PrivacyOptionsError.unavailable
         }
 
@@ -155,17 +155,38 @@ final class AdMobConsentManager: ObservableObject {
         publishState()
         defer {
             isEditingPrivacy = false
+            startupPhase = .finished
             // UMP updates canRequestAds and privacyOptionsRequirementStatus before completion.
             publishState()
         }
 
         do {
-            try await ConsentForm.presentPrivacyOptionsForm(from: presenter)
+            // Explicit user action may retry a previous failed configuration/network update.
+            // Keep the privacy gate closed for the entire update + presentation operation.
+            let failed: Bool = await withCheckedContinuation { continuation in
+                ConsentInformation.shared.requestConsentInfoUpdate(with: RequestParameters()) { error in
+                    continuation.resume(returning: error != nil)
+                }
+            }
+            informationPhase = .finished
+            informationUpdateFailed = failed
+            try Task.checkCancellation()
+            guard !failed, AdMobPresentation.isReady(presenter) else {
+                throw PrivacyOptionsError.unavailable
+            }
+            if ConsentInformation.shared.consentStatus == .required {
+                try await ConsentForm.loadAndPresentIfRequired(from: presenter)
+            } else if ConsentInformation.shared.privacyOptionsRequirementStatus == .required {
+                try await ConsentForm.presentPrivacyOptionsForm(from: presenter)
+            } else {
+                return false
+            }
+            try Task.checkCancellation()
+            return true
         } catch {
             if Task.isCancelled { throw CancellationError() }
             throw PrivacyOptionsError.unavailable
         }
-        try Task.checkCancellation()
     }
 
     private func startSDKIfPermitted() {
@@ -231,9 +252,11 @@ enum AdMobPresentation {
 /// Catalog-backed copy; never expose raw SDK errors.
 nonisolated enum AdMobCopy {
 
-    static var privacyTitle: String { localized("ads.privacy.options", "광고 개인정보 옵션") }
+    static var privacyTitle: String { localized("ads.consent.title", "광고 동의 및 개인정보") }
     static var errorTitle: String { localized("ads.privacy.error.title", "광고 개인정보 설정") }
     static var errorMessage: String { localized("ads.privacy.error.message", "현재 광고 개인정보 설정을 열 수 없습니다. 잠시 후 다시 시도하세요.") }
+    static var explanation: String { localized("ads.consent.explanation", "Google에서 필요한 광고 동의와 개인정보 선택을 확인합니다. 선택은 Google 양식에서 변경할 수 있습니다.") }
+    static var notRequired: String { localized("ads.consent.notRequired", "현재 Google에서 표시할 동의 양식이나 변경할 개인정보 옵션이 없다고 안내했습니다.") }
     static var okayTitle: String { localized("action.close", "닫기") }
 
     private static func localized(_ key: String, _ fallback: String) -> String {

@@ -54,15 +54,16 @@ final class AISettingsUITests: SIFTUITestCase {
             reveal(app.switches["beta.voiceProcessing.toggle"])
             reveal(app.switches["beta.autoRefine.toggle"])
             tap(app.navigationBars.buttons.element(boundBy: 0), message: "Return to Settings")
-            tap(app.buttons["settings.betaRow"], message: "Open local model management")
-            let picker = app.descendants(matching: .any).matching(identifier: "beta.model.downloadPicker").firstMatch
-            if picker.exists {
-                reveal(picker)
-                let action = app.buttons[app.buttons["beta.model.localDelete"].exists ? "beta.model.localDelete" : "beta.model.localDownload"].firstMatch
-                reveal(action)
+            if openBetaSettingsIfAvailable() {
+                let picker = app.descendants(matching: .any).matching(identifier: "beta.model.downloadPicker").firstMatch
+                if picker.exists {
+                    reveal(picker)
+                    let action = app.buttons[app.buttons["beta.model.localDelete"].exists ? "beta.model.localDelete" : "beta.model.localDownload"].firstMatch
+                    reveal(action)
+                }
+                XCTAssertFalse(app.buttons["beta.model.localCancelDownload"].exists, "Opening Beta must not start a model download.")
+                capture("\(language.rawValue) - Beta local model management")
             }
-            XCTAssertFalse(app.buttons["beta.model.localCancelDownload"].exists, "Opening Beta must not start a model download.")
-            capture("\(language.rawValue) - Beta local model management")
             app.terminate()
         }
     }
@@ -93,7 +94,10 @@ final class AISettingsUITests: SIFTUITestCase {
     func testLocalFallbackControlsInstallationWithoutDownloading() throws {
         launch(.init(language: .english, additionalArguments: ["-ui-test-reset-beta", "-sift-test-ad-free"]))
         openSettings()
-        tap(app.buttons["settings.betaRow"], message: "Open optional local models")
+        guard openBetaSettingsIfAvailable() else {
+            XCTAssertFalse(app.buttons["beta.model.localDownload"].exists, "Apple-supported hardware without installed or loading models does not need fallback management.")
+            return
+        }
         let fallback = app.switches["beta.localFallback.toggle"]
         let download = app.buttons["beta.model.localDownload"]
         guard fallback.exists else {
@@ -147,10 +151,25 @@ final class AISettingsUITests: SIFTUITestCase {
         }
     }
 
+    private func openBetaSettingsIfAvailable() -> Bool {
+        let beta = app.buttons["settings.betaRow"]
+        #if targetEnvironment(simulator)
+        requireHittable(beta, message: "Simulators do not support Apple Intelligence and must retain access to local fallback management.")
+        #else
+        guard beta.exists else { return false }
+        #endif
+        tap(beta, message: "Open local model management")
+        return true
+    }
+
     private func openAISettings() {
         openSettings()
         tap(app.buttons["settings.aiRow"], message: "Open AI settings")
         require(app.descendants(matching: .any).matching(identifier: "ai.apple.status").firstMatch, message: "AI settings did not open.")
+        for identifier in ["openai.modelCatalog", "openai.refreshModels"] {
+            XCTAssertFalse(app.descendants(matching: .any).matching(identifier: identifier).firstMatch.exists,
+                           "AI settings must not expose a nonselectable model catalog.")
+        }
     }
 
     private func assertRestrictedStorefront(_ storefront: String, language: Language) {
@@ -160,7 +179,10 @@ final class AISettingsUITests: SIFTUITestCase {
         openAISettings()
         assertOpenAIControlsAbsent()
         tap(app.navigationBars.buttons.element(boundBy: 0), message: "Return to Settings")
-        tap(app.buttons["settings.betaRow"], message: "Open local model management")
+        guard openBetaSettingsIfAvailable() else {
+            XCTAssertFalse(app.switches["beta.laya.toggle"].exists, "Apple-supported devices must not activate local fallback models.")
+            return
+        }
         let fallback = app.switches["beta.localFallback.toggle"]
         if !fallback.exists {
             XCTAssertFalse(app.switches["beta.laya.toggle"].exists, "Apple-supported devices must not activate local fallback models.")
@@ -184,7 +206,8 @@ final class AISettingsUITests: SIFTUITestCase {
         for identifier in [
             "settings.openAIRow", "openai.enabled", "openai.signIn", "openai.activeAccount",
             "openai.testConnection", "openai.modelCatalog", "openai.refreshModels",
-            "openai.consent.tasks", "openai.consent.email", "openai.consent.routines", "openai.consent.persona"
+            "openai.consent.tasks", "openai.consent.email", "openai.consent.routines", "openai.consent.persona",
+            "openai.consent.meetings"
         ] {
             XCTAssertFalse(app.descendants(matching: .any).matching(identifier: identifier).firstMatch.exists,
                            "Restricted storefront must not expose \(identifier).")

@@ -15,6 +15,12 @@ struct MeetingAudioImportSheet: View {
     @State private var summaryLanguageOptions: [MeetingLanguageOption] = []
     #if targetEnvironment(macCatalyst)
     @StateObject private var nativeFilePicker = MeetingAudioFilePicker()
+    @State private var selectedFile: MeetingAudioImportSelection?
+    @State private var selectionID = UUID()
+    @State private var readingFile = false
+    @State private var dropTargeted = false
+    @State private var fileSelectionError: String?
+    @State private var selectionProgress: Progress?
     #else
     @State private var showingFilePicker = false
     #endif
@@ -52,11 +58,12 @@ struct MeetingAudioImportSheet: View {
                         errorMessage = nil
                         cancelled = false
                         #if targetEnvironment(macCatalyst)
+                        fileSelectionError = nil
                         nativeFilePicker.choose { result in
                             switch result {
                             case .success(let url):
-                                if let url { selectedURL = url }
-                            case .failure(let error): errorMessage = error.localizedDescription
+                                if let url { selectFile(urls: [url]) }
+                            case .failure(let error): fileSelectionError = error.localizedDescription
                             }
                         }
                         #else
@@ -66,7 +73,39 @@ struct MeetingAudioImportSheet: View {
                         Label(copy("meeting.audioImport.chooseFile", fallback: "오디오 파일 선택"), systemImage: "doc.badge.plus")
                     }
                     .accessibilityIdentifier("meeting.audioImport.chooseFile")
-                    .disabled(importing)
+                    .disabled(importing || selectingFile)
+                    #if targetEnvironment(macCatalyst)
+                    Button(action: pasteFile) {
+                        Label(copy("meeting.audioImport.pasteFile", fallback: "오디오 파일 붙여넣기"), systemImage: "document.on.clipboard")
+                    }
+                    .accessibilityIdentifier("meeting.audioImport.pasteFile")
+                    .disabled(importing || selectingFile)
+                    Text(copy("meeting.audioImport.dropHint", fallback: "Finder에서 파일 하나를 여기로 끌어 놓거나, 복사 후 ⌘V로 붙여넣으세요."))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("meeting.audioImport.dropHint")
+                        .frame(maxWidth: .infinity, minHeight: 60, alignment: .leading)
+                        .padding(8)
+                        .contentShape(Rectangle())
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 8)
+                                .strokeBorder(.tint, style: StrokeStyle(lineWidth: dropTargeted ? 2 : 1, dash: [6, 4]))
+                                .opacity(dropTargeted ? 1 : 0.35)
+                                .allowsHitTesting(false)
+                        }
+                        .overlay {
+                            MeetingAudioFileInput(enabled: !importing && !selectingFile,
+                                drop: receiveDrop, targeted: { dropTargeted = $0 })
+                        }
+                    if readingFile {
+                        ProgressView(copy("meeting.audioImport.readingFile", fallback: "파일 확인 중…"))
+                    }
+                    if let fileSelectionError {
+                        Text(verbatim: fileSelectionError)
+                            .foregroundStyle(AppTheme.destructive)
+                            .accessibilityIdentifier("meeting.audioImport.selectionError")
+                    }
+                    #endif
                     if let selectedURL {
                         Text(verbatim: selectedURL.lastPathComponent)
                             .font(.subheadline)
@@ -113,7 +152,7 @@ struct MeetingAudioImportSheet: View {
                             .accessibilityIdentifier("meeting.audioImport.cancel")
                     } else {
                         Button(copy("meeting.audioImport.start", fallback: "이 기기로 가져오기")) { startImport() }
-                            .disabled(selectedURL == nil || (!automaticLanguageDetection && languageTag.isEmpty))
+                            .disabled(selectedURL == nil || selectingFile || (!automaticLanguageDetection && languageTag.isEmpty))
                             .accessibilityIdentifier("meeting.audioImport.start")
                     }
                     if cancelled {
@@ -129,6 +168,9 @@ struct MeetingAudioImportSheet: View {
                 }
             }
             .appFormStyle()
+            #if targetEnvironment(macCatalyst)
+            .background(MeetingAudioFileInput(enabled: !importing && !selectingFile, paste: pasteFile))
+            #endif
             .navigationTitle(copy("meeting.audioImport.title", fallback: "오디오 가져오기"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -167,9 +209,89 @@ struct MeetingAudioImportSheet: View {
             importTask?.cancel()
             #if targetEnvironment(macCatalyst)
             nativeFilePicker.cancel()
+            selectionID = UUID()
+            selectionProgress?.cancel()
+            selectionProgress = nil
+            selectedFile = nil
             #endif
         }
     }
+
+    private var selectingFile: Bool {
+        #if targetEnvironment(macCatalyst)
+        readingFile || nativeFilePicker.isPresented
+        #else
+        false
+        #endif
+    }
+
+    #if targetEnvironment(macCatalyst)
+    private func pasteFile() {
+        guard !importing, !selectingFile else { return }
+        let urls = nativeFilePicker.copiedFileURLs()
+        if urls.isEmpty {
+            fileSelectionError = MeetingAudioImportSelection.Failure.noCopiedFile.localizedDescription
+        } else { selectFile(urls: urls) }
+    }
+
+    private func selectFile(urls: [URL]) {
+        guard !importing, !readingFile else { return }
+        do {
+            let selection = try MeetingAudioImportSelection(urls: urls)
+            selectedFile = selection
+            selectedURL = selection.url
+            errorMessage = nil
+            fileSelectionError = nil
+            cancelled = false
+        } catch { fileSelectionError = error.localizedDescription }
+    }
+
+    private func receiveDrop(_ providers: [NSItemProvider]) -> Bool {
+        guard !importing, !selectingFile else { return false }
+        guard providers.count == 1 else {
+            fileSelectionError = MeetingAudioImportSelection.Failure.singleFileRequired.localizedDescription
+            return false
+        }
+        let token = UUID()
+        selectionID = token
+        readingFile = true
+        fileSelectionError = nil
+        let receive: @Sendable (URL?, Bool, Error?) -> Void = { url, inPlace, error in
+            // Finder advertises audio, not public.file-url. Retain the original
+            // read grant inside the callback, never an expired temporary URL.
+            let result: Result<MeetingAudioImportSelection, Error> = Result {
+                guard error == nil, inPlace, let url else { throw MeetingAudioImportService.Failure.unavailableInput }
+                return try MeetingAudioImportSelection(urls: [url])
+            }
+            Task { @MainActor in
+                guard selectionID == token else { return }
+                readingFile = false
+                selectionProgress = nil
+                switch result {
+                case .success(let selection):
+                    selectedFile = selection
+                    selectedURL = selection.url
+                    errorMessage = nil
+                    fileSelectionError = nil
+                    cancelled = false
+                case .failure(let error): fileSelectionError = error.localizedDescription
+                }
+            }
+        }
+        let provider = providers[0]
+        if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+            provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, error in
+                let url = (item as? URL) ?? (item as? Data).flatMap { URL(dataRepresentation: $0, relativeTo: nil) }
+                receive(url, true, error)
+            }
+        } else if let audioType = provider.registeredTypeIdentifiers.first(where: { UTType($0)?.conforms(to: .audio) == true }) {
+            selectionProgress = provider.loadInPlaceFileRepresentation(forTypeIdentifier: audioType, completionHandler: receive)
+        } else {
+            receive(nil, false, MeetingAudioImportService.Failure.unsupportedAudio)
+        }
+        return true
+    }
+    #endif
 
     private func copy(_ key: String, fallback: String) -> String {
         AppLanguage.localized(key, defaultValue: fallback, language: .current,
@@ -195,8 +317,14 @@ struct MeetingAudioImportSheet: View {
         cancelling = false
         cancelled = false
         errorMessage = nil
+        #if targetEnvironment(macCatalyst)
+        let selection = selectedFile
+        #endif
         importTask = Task { @MainActor in
             defer {
+                #if targetEnvironment(macCatalyst)
+                withExtendedLifetime(selection) {}
+                #endif
                 importTask = nil
                 cancelling = false
                 operationID = nil

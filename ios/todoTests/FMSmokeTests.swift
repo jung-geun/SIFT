@@ -72,12 +72,6 @@ private final class CapturingEmailRuntime: @unchecked Sendable, FoundationModels
         userPrompt: String
     ) async throws -> FMBehaviorNarrativeOutput { fatalError("unexpected runtime call") }
 
-
-    func analyzeMeeting(
-        instructions: String,
-        userPrompt: String
-    ) async throws -> FMMeetingExtractionOutput { fatalError("unexpected runtime call") }
-
     func correctTranscript(
         instructions: String,
         userPrompt: String,
@@ -126,11 +120,6 @@ private struct NarrativeRuntime: FoundationModelsRuntime {
         instructions: String,
         userPrompt: String
     ) async throws -> FMBehaviorNarrativeOutput { behaviorOutput }
-
-    func analyzeMeeting(
-        instructions: String,
-        userPrompt: String
-    ) async throws -> FMMeetingExtractionOutput { fatalError("unexpected runtime call") }
 
     func correctTranscript(
         instructions: String,

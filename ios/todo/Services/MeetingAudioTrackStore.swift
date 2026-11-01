@@ -53,17 +53,39 @@ enum MeetingAudioTrackStore {
             : AppLanguage.localized("meeting.title.untitled", defaultValue: "Meeting", language: .current,
                                     comment: "Fallback title for an untitled meeting.")
         let status: MeetingStatus
-        if children.contains(where: { $0.status == .finalizingTranscript || $0.status == .stopping }) {
+        if children.contains(where: {
+            [.recording, .paused, .interrupted, .stopping, .finalizingTranscript, .extractingActions].contains($0.status)
+        }) {
             status = .finalizingTranscript
         } else if children.contains(where: { $0.status == .ready }) {
             status = .ready
         } else {
             status = .transcriptFinalizationFailed
         }
+        var result = parent.result ?? MeetingResult(title: title)
+        // New output preferences request regeneration; only changed source
+        // evidence invalidates an already saved summary during a track refresh.
+        if try MeetingGroupSummaryService.summaryEvidenceValidity(parent: parent, in: context) == .invalid {
+            result.summary = ""
+            result.summarySections = nil
+            result.summarySourceFingerprint = nil
+            result.decisions = []
+            result.unresolvedQuestions = []
+            result.actionDrafts = []
+        }
+        result.title = title
+        // Keep the declared source order. Sorting a display projection is not
+        // permission to rewrite group membership or invalidate its analysis.
+        guard parent.result != result || parent.status != status else {
+            // Recovery and finalization can change a child or group membership
+            // without changing this projection. Persist that transaction before
+            // the caller is allowed to discard its recovery journal.
+            if context.hasChanges { try save(context) }
+            return
+        }
         try MeetingRecordCommitter.persist(record: parent, save: { try save(context) }) {
-            parent.audioTrackIDs = children.map(\.meetingID)
             // No transcript concatenation or speaker reassignment at group level.
-            try parent.update(result: MeetingResult(title: title), status: status)
+            try parent.update(result: result, status: status)
         }
     }
 

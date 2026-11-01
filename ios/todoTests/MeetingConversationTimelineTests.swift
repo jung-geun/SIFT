@@ -153,14 +153,49 @@ struct MeetingConversationTimelineTests {
     func boundedUnknownContext() {
         let leading = [displayRow("unknown", 0, 100, []), displayRow("a", 100, 1_000, ["A"])]
         #expect(MeetingSpeakerContinuity.project(leading)[leading[0].id]?.speakerIDs == [])
-        for unknown in [displayRow("long", 1_000, 3_001, []), displayRow("silence", 1_051, 1_150, [])] {
+        for unknown in [displayRow("long", 1_000, 11_001, []), displayRow("silence", 6_001, 6_150, [])] {
             #expect(MeetingSpeakerContinuity.project([displayRow("a", 0, 1_000, ["A"]), unknown])[unknown.id]?.speakerIDs == [])
         }
-        let chain = [displayRow("a", 0, 1_000, ["A"]), displayRow("u1", 1_000, 1_800, []),
-                     displayRow("u2", 1_800, 2_600, []), displayRow("u3", 2_600, 3_100, [])]
+        let chain = [displayRow("a", 0, 1_000, ["A"]), displayRow("u1", 1_000, 4_500, []),
+                     displayRow("u2", 4_500, 8_000, []), displayRow("u3", 8_000, 11_100, [])]
         let display = MeetingSpeakerContinuity.project(chain)
         #expect(chain.dropFirst().allSatisfy { display[$0.id]?.speakerIDs == [] })
         #expect(display[chain[1].id]?.isInherited == false)
+
+        let bridgedChain = [displayRow("a", 0, 1_000, ["A"]), displayRow("u1", 1_200, 3_000, []),
+                            displayRow("u2", 3_200, 5_000, []), displayRow("a2", 5_500, 7_000, ["A"])]
+        let bridgedDisplay = MeetingSpeakerContinuity.project(bridgedChain)
+        #expect(bridgedChain.allSatisfy { bridgedDisplay[$0.id]?.speakerIDs == ["A"] })
+        #expect(bridgedChain.map { bridgedDisplay[$0.id]?.startsTurn } == [true, false, false, false])
+        let turns = MeetingConversationTimeline.groupTurns(bridgedChain, presentation: bridgedDisplay)
+        #expect(turns.count == 1)
+        #expect(turns[0].text == "a u1 u2 a2")
+        let bracketedPause = [displayRow("a", 0, 1_000, ["A"]),
+                              displayRow("u", 7_000, 7_500, []),
+                              displayRow("a2", 8_000, 9_000, ["A"])]
+        let pauseDisplay = MeetingSpeakerContinuity.project(bracketedPause)
+        #expect(MeetingConversationTimeline.groupTurns(bracketedPause, presentation: pauseDisplay).map(\.text) == ["a u a2"])
+        #expect(bracketedPause[1].speakerIDs.isEmpty)
+
+        let paused = [displayRow("a1", 0, 1_000, ["A"]), displayRow("a2", 12_000, 13_000, ["A"])]
+        let pausedDisplay = MeetingSpeakerContinuity.project(paused)
+        #expect(paused.map { pausedDisplay[$0.id]?.startsTurn } == [true, true])
+        #expect(MeetingConversationTimeline.groupTurns(paused, presentation: pausedDisplay).count == 2)
+    }
+
+    @Test("Matching endpoints join a long unknown run, different endpoints and pauses do not")
+    func completeUnknownRun() {
+        let a = displayRow("a", 0, 1_000, ["A"])
+        let unknowns = [displayRow("u1", 1_000, 12_000, []), displayRow("u2", 12_000, 24_000, [])]
+        let same = [a] + unknowns + [displayRow("a2", 24_000, 25_000, ["A"])]
+        let display = MeetingSpeakerContinuity.project(same)
+        #expect(MeetingConversationTimeline.groupTurns(same, presentation: display).map(\.text) == ["a u1 u2 a2"])
+        #expect(unknowns.allSatisfy { $0.speakerIDs.isEmpty })
+        let different = [a] + unknowns + [displayRow("b", 24_000, 25_000, ["B"])]
+        let differentDisplay = MeetingSpeakerContinuity.project(different)
+        #expect(unknowns.allSatisfy { differentDisplay[$0.id]?.speakerIDs == [] })
+        let paused = [a, displayRow("u", 11_001, 12_000, []), displayRow("a2", 12_000, 13_000, ["A"])]
+        #expect(MeetingSpeakerContinuity.project(paused)[paused[1].id]?.speakerIDs == [])
     }
 
     @Test("Source changes, manual boundaries, mixed evidence and overlapping time do not inherit")
@@ -181,9 +216,19 @@ struct MeetingConversationTimelineTests {
         #expect(MeetingSpeakerContinuity.project([a, overlap, unknown])[unknown.id]?.speakerIDs == [])
         #expect(MeetingSpeakerContinuity.project([a, overlap])[overlap.id]?.startsTurn == true)
         #expect(MeetingSpeakerContinuity.project([a, manual, unknown])[unknown.id]?.speakerIDs == [])
+        let following = displayRow("a2", 1_100, 2_000, ["A"])
+        let manualDisplay = MeetingSpeakerContinuity.project([a, manual, following])
+        #expect(manualDisplay[manual.id]?.speakerIDs == [])
+        for undecided in [conflict, mixed] {
+            let bracketed = MeetingSpeakerContinuity.project([a, undecided, following])
+            #expect(bracketed[undecided.id]?.speakerIDs == ["A"])
+            #expect(bracketed[undecided.id]?.isInherited == true)
+            #expect(bracketed[undecided.id]?.startsTurn == false)
+            #expect(undecided.speakerIDs.isEmpty)
+        }
     }
 
-    @Test("Contradictory interval evidence cannot anchor or confirm a single-speaker display guess")
+    @Test("Conflicting interval guesses cannot anchor open tails but matching segment speakers bracket unknowns")
     func conflictingKnownEvidence() {
         let unknown = displayRow("unknown", 1_000, 1_200, [])
         for evidence in [["B"], ["A", "B"]] {
@@ -195,8 +240,8 @@ struct MeetingConversationTimelineTests {
             var following = displayRow("following", 1_200, 2_000, ["A"])
             following.evidenceSpeakerIDs = evidence
             let bounded = MeetingSpeakerContinuity.project([displayRow("a", 0, 1_000, ["A"]), unknown, following])
-            #expect(bounded[unknown.id]?.speakerIDs == [])
-            #expect(bounded[unknown.id]?.isInherited == false)
+            #expect(bounded[unknown.id]?.speakerIDs == ["A"])
+            #expect(bounded[unknown.id]?.isInherited == true)
             #expect(following.speakerIDs == ["A"])
         }
         var compatible = displayRow("compatible", 0, 1_000, ["A"])
@@ -298,7 +343,61 @@ struct MeetingConversationTimelineTests {
         #expect(rows.map(\.id.localID) == ["z", "a"])
         #expect(rows.map(\.text) == segments.map(\.text))
         #expect(rows.map { individual.speakerPresentation[$0.id]?.startsTurn } == [true, false])
+        #expect(rows.map(\.id.trackID) == ["tie", "tie"])
+        #expect(rows.map(\.speakerIDs) == segments.map(\.speakerIDs))
+        #expect(rows.map(\.localStartMs) == segments.map(\.startMs))
+        #expect(rows.map(\.localEndMs) == segments.map(\.endMs))
+        #expect(rows.allSatisfy { $0.startSample == nil && $0.endSample == nil })
+        let turns = MeetingConversationTimeline.groupTurns(rows, presentation: individual.speakerPresentation)
+        #expect(turns.map(\.text) == ["First rendered Second rendered"])
+        #expect(turns.flatMap(\.rows) == rows)
         #expect(record.persistenceSnapshot() == before)
+    }
+
+    @Test("Exact tied ranges share measured headings but never infer overlapping unknown speakers")
+    func tiedMeasuredSpeakerRanges() {
+        for aligned in [false, true] {
+            var rows = [displayRow("z", 0, 1_000, ["B", "A"]),
+                        displayRow("a", 0, 1_000, ["A", "B"])]
+            if aligned {
+                for index in rows.indices {
+                    let row = rows[index]
+                    rows[index] = .init(id: row.id, localStartMs: row.localStartMs, localEndMs: row.localEndMs,
+                                       startSample: 15, endSample: 16_015, text: row.text, speakerIDs: row.speakerIDs)
+                }
+            }
+            let display = MeetingSpeakerContinuity.project(rows)
+            #expect(rows.map { display[$0.id]?.startsTurn } == [true, false])
+            #expect(rows.map { display[$0.id]?.speakerIDs } == [["A", "B"], ["A", "B"]])
+            #expect(rows.allSatisfy { display[$0.id]?.isInherited == false })
+            #expect(MeetingConversationTimeline.groupTurns(rows, presentation: display).flatMap(\.rows) == rows)
+        }
+        let rows = [displayRow("a", 0, 1_000, ["A"]), displayRow("u", 0, 1_000, []),
+                    displayRow("tail", 1_000, 1_100, [])]
+        let display = MeetingSpeakerContinuity.project(rows)
+        #expect(rows.dropFirst().allSatisfy { display[$0.id]?.speakerIDs == [] })
+        #expect(rows.allSatisfy { display[$0.id]?.isInherited == false })
+    }
+
+    @Test("Tied heading continuity retains zero-duration, manual, source and real overlap boundaries")
+    func tiedSpeakerBoundaries() {
+        let first = displayRow("first", 0, 1_000, ["A"])
+        var manual = displayRow("manual", 0, 1_000, ["A"])
+        manual.blocksSpeakerInheritance = true
+        let pairs = [
+            [first, manual], [manual, first],
+            [first, displayRow("different", 0, 1_000, ["B"])],
+            [first, displayRow("other", 0, 1_000, ["A"], source: "other")],
+            [first, displayRow("longer", 0, 2_000, ["A"])],
+            [first, displayRow("overlap", 500, 1_500, ["A"])],
+            [displayRow("zero1", 0, 0, ["A"]), displayRow("zero2", 0, 0, ["A"])]
+        ]
+        for rows in pairs {
+            let display = MeetingSpeakerContinuity.project(rows)
+            #expect(rows.map { display[$0.id]?.startsTurn } == [true, true])
+            #expect(MeetingConversationTimeline.groupTurns(rows, presentation: display).count == 2)
+            #expect(rows.allSatisfy { display[$0.id]?.isInherited == false })
+        }
     }
 
     private func displayRow(_ id: String, _ start: Int64, _ end: Int64, _ speakers: [String],

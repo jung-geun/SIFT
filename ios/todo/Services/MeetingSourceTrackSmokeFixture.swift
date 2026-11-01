@@ -3,7 +3,7 @@ import AVFoundation
 import Foundation
 import SwiftData
 
-/// QA-only generated audio and locally extracted task evidence, never a transcription fallback.
+/// QA-only generated audio and explicit review drafts, never an extraction or transcription fallback.
 @MainActor
 enum MeetingSourceTrackSmokeFixture {
     static let groupID = "b53c91da-05f8-4a76-978c-22bd87411802"
@@ -55,17 +55,26 @@ enum MeetingSourceTrackSmokeFixture {
                 let label = track.audioTrackDisplayName
                 // Reused speaker IDs and aliases must resolve within each source, not across the group.
                 let name = track.meetingID == microphoneID ? "김민수" : "이서연"
+                let includeTaskDrafts = !ProcessInfo.processInfo.arguments.contains("-ui-test-no-extracted-tasks")
                 var segments = [
                     MeetingSegment(id: "intro", startMs: 0, endMs: 1_000, speakerIDs: ["speaker-1"], text: "저는 \(name)입니다. 미노라고 불러주세요."),
                     MeetingSegment(id: "done", startMs: 1_000, endMs: 3_000, speakerIDs: ["speaker-1"], text: "제가 \(label) 자료를 검토했습니다."),
                     MeetingSegment(id: "future", startMs: 3_000, endMs: 5_000, speakerIDs: ["speaker-1"], text: "제가 \(label) 보고서를 공유하겠습니다."),
                     MeetingSegment(id: "request", startMs: 5_000, endMs: 8_000, speakerIDs: ["speaker-2"], text: "미노님, \(label) 요약을 보내주세요.")
                 ]
-                if ProcessInfo.processInfo.arguments.contains("-ui-test-no-extracted-tasks") {
+                if !includeTaskDrafts {
                     segments = Array(segments.prefix(1))
                 }
-                let result = MeetingTranscriptAnalysisService().analyze(meetingID: track.meetingID,
-                    result: MeetingResult(title: label, segments: segments), language: .korean)
+                let drafts: [MeetingActionDraft] = includeTaskDrafts ? [
+                    MeetingActionDraft(title: "제가 \(label) 보고서를 공유하겠습니다.",
+                        notes: "Synthetic QA review candidate, not an AI extraction.",
+                        sourceSegmentIDs: ["future"], confidence: 1, requiresReview: true, meetingID: track.meetingID),
+                    MeetingActionDraft(title: "미노님, \(label) 요약을 보내주세요.",
+                        notes: "Synthetic QA review candidate, not an AI extraction.",
+                        sourceSegmentIDs: ["request"], confidence: 1, requiresReview: true, meetingID: track.meetingID)
+                ] : []
+                let result = MeetingActionAttribution.applying(to:
+                    MeetingResult(title: label, segments: segments, actionDrafts: drafts), meetingID: track.meetingID)
                 try track.replaceTranscriptionBase(result, status: .ready)
                 try track.update(diarization: MeetingDiarizationPayload(status: .completed, generation: UUID(),
                     manifestDigest: try MeetingDiarizationFingerprint.manifest(artifact.audioManifest),
@@ -83,25 +92,83 @@ enum MeetingSourceTrackSmokeFixture {
             if ProcessInfo.processInfo.arguments.contains("-ui-test-task-provenance"),
                !ProcessInfo.processInfo.arguments.contains("-ui-test-no-extracted-tasks") {
                 let tracks = try MeetingAudioTrackStore.tracks(for: parent, in: context)
-                let conversation = MeetingConversationTimeline.saved(tracks, groupID: groupID)
-                let contextSegments = conversation.rows.map { row in
-                    MeetingSegment(id: "\(row.id.trackID)-\(row.id.localID)",
-                        startMs: row.startSample! / 16, endMs: row.endSample! / 16, text: row.text)
-                }
-                let extracted = MeetingTranscriptAnalysisService().analyze(meetingID: groupID,
-                    result: MeetingResult(segments: contextSegments), language: .english)
-                // A group owns context-wide candidates, never a concatenated transcript or speaker namespace.
-                // Do not persist temporary projection IDs as if they were parent transcript evidence.
-                groupResult.actionDrafts = extracted.actionDrafts.map { draft in
-                    MeetingActionDraft(title: draft.title, notes: draft.notes, sourceSegmentIDs: [],
-                        confidence: draft.confidence, requiresReview: true, meetingID: groupID)
+                // Explicit context-level fixture candidates have no parent transcript or speaker namespace.
+                // This exercises review/provenance UI, not whole-conversation extraction quality.
+                groupResult.actionDrafts = tracks.flatMap { track in
+                    let label = track.audioTrackDisplayName
+                    return [
+                        MeetingActionDraft(title: "제가 \(label) 보고서를 공유하겠습니다.",
+                            notes: "Synthetic QA whole-conversation review candidate, not an AI extraction.",
+                            sourceSegmentIDs: [], confidence: 1, requiresReview: true, meetingID: groupID),
+                        MeetingActionDraft(title: "미노님, \(label) 요약을 보내주세요.",
+                            notes: "Synthetic QA whole-conversation review candidate, not an AI extraction.",
+                            sourceSegmentIDs: [], confidence: 1, requiresReview: true, meetingID: groupID)
+                    ]
                 }
             }
             try parent.update(result: groupResult, status: .ready)
+            if ProcessInfo.processInfo.arguments.contains("-ui-test-cited-summary") {
+                try seedCitedSummary(parent: parent, in: context)
+            }
             try context.save()
         } catch {
             print("Source-track QA fixture failed: \((error as NSError).domain) \((error as NSError).code)")
         }
+    }
+
+    /// Clearly synthetic document-navigation evidence; no provider or recognition-quality claim.
+    private static func seedCitedSummary(parent: MeetingRecord, in context: ModelContext) throws {
+        let tracks = try MeetingAudioTrackStore.tracks(for: parent, in: context)
+        let taskProvenance = ProcessInfo.processInfo.arguments.contains("-ui-test-task-provenance")
+        let includeTasks = taskProvenance && !ProcessInfo.processInfo.arguments.contains("-ui-test-no-extracted-tasks")
+        var groupTaskCitations: [MeetingSummaryCitation] = []
+        var groupItems: [MeetingSummaryItem] = []
+        for track in tracks {
+            guard var result = track.result, let segment = result.segments.first else { continue }
+            if ProcessInfo.processInfo.arguments.contains("-ui-test-unaligned-source"), track.meetingID == applicationID {
+                track.audioTrackKindRaw = MeetingAudioTrackKind.legacyMixed.rawValue
+            }
+            let citation = MeetingSummaryCitation(trackID: track.meetingID, segmentID: segment.id,
+                transcriptRevision: result.transcriptRevision)
+            let item = MeetingSummaryItem(id: "synthetic-\(track.meetingID)",
+                text: "Synthetic QA summary for \(track.audioTrackDisplayName). This is generated fixture content, not an AI analysis.",
+                citations: [citation], isTask: taskProvenance ? false : nil)
+            var sourceItems = [item]
+            if includeTasks {
+                let taskSegmentID = track.meetingID == microphoneID ? "future" : "request"
+                if let taskSegment = result.segments.first(where: { $0.id == taskSegmentID }) {
+                    let taskCitation = MeetingSummaryCitation(trackID: track.meetingID, segmentID: taskSegment.id,
+                        transcriptRevision: result.transcriptRevision)
+                    sourceItems.append(MeetingSummaryItem(id: "synthetic-task-\(track.meetingID)",
+                        text: track.meetingID == microphoneID ? "Share the microphone report." : "Send the application summary.",
+                        citations: [taskCitation], isTask: true))
+                }
+                // Both sources reuse "future". Their track IDs must remain part of the citation identity.
+                if let future = result.segments.first(where: { $0.id == "future" }) {
+                    groupTaskCitations.append(MeetingSummaryCitation(trackID: track.meetingID, segmentID: future.id,
+                        transcriptRevision: result.transcriptRevision))
+                }
+            }
+            result.summary = sourceItems.map(\.text).joined(separator: "\n")
+            result.summarySections = [MeetingSummarySection(id: "synthetic-source", title: "Synthetic source notes", items: sourceItems)]
+            if taskProvenance {
+                result.summarySourceFingerprint = MeetingSummaryEvidence.sourceFingerprint(result)
+            }
+            try track.update(result: result, status: .ready)
+            track.summaryKindRaw = "generated"
+            groupItems.append(item)
+        }
+        if includeTasks, groupTaskCitations.count == tracks.count, !groupTaskCitations.isEmpty {
+            groupItems.append(MeetingSummaryItem(id: "synthetic-group-task", text: "Share the combined meeting report.",
+                citations: groupTaskCitations, isTask: true))
+        }
+        var result = parent.result ?? MeetingResult()
+        result.title = "Cited meeting document · synthetic"
+        result.summary = groupItems.map(\.text).joined(separator: "\n")
+        result.summarySections = [MeetingSummarySection(id: "synthetic-multiple-sources", title: "Synthetic meeting notes", items: groupItems)]
+        result.summarySourceFingerprint = try MeetingGroupSummaryService.sourceFingerprint(parent: parent, in: context)
+        try parent.update(result: result, status: .ready)
+        parent.summaryKindRaw = "generated"
     }
 
     /// Deterministic display QA, not an ASR or diarization quality claim.

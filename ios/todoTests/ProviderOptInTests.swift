@@ -62,10 +62,6 @@ private struct UncalledFoundationRuntime: FoundationModelsRuntime {
         instructions: String,
         userPrompt: String
     ) async throws -> FMBehaviorNarrativeOutput { fatalError("runtime must not be called") }
-    func analyzeMeeting(
-        instructions: String,
-        userPrompt: String
-    ) async throws -> FMMeetingExtractionOutput { fatalError("runtime must not be called") }
     func correctTranscript(
         instructions: String,
         userPrompt: String,

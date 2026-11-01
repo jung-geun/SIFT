@@ -34,6 +34,7 @@ final class FullCloudConnectionSync: ObservableObject {
     @Published private(set) var completedFamilyCount = 0
     private let operations: [Operation]
     private var authorizationTask: Task<Void, Never>?
+    private var authorizationRequested = false
     private var generation = 0
     private var reconciling = false
     var isAuthorizing: Bool { state == .authorizing }
@@ -45,7 +46,8 @@ final class FullCloudConnectionSync: ObservableObject {
     }
 
     func authorize() {
-        guard authorizationTask == nil, !reconciling, !isAuthorizing else { return }
+        guard authorizationTask == nil, !isAuthorizing else { return }
+        guard !reconciling else { authorizationRequested = true; return }
         state = .authorizing
         let attemptGeneration = generation
         authorizationTask = Task.detached { @MainActor [weak self] in
@@ -55,12 +57,16 @@ final class FullCloudConnectionSync: ObservableObject {
         }
     }
 
-    func cancelAuthorization() { authorizationTask?.cancel() }
+    func cancelAuthorization() {
+        authorizationRequested = false
+        authorizationTask?.cancel()
+    }
 
     func reset() {
         generation += 1
         authorizationTask?.cancel()
         authorizationTask = nil
+        authorizationRequested = false
         state = .notChecked
         currentFamily = nil
         pendingFamilies = Set(operations.map(\.family))
@@ -72,14 +78,26 @@ final class FullCloudConnectionSync: ObservableObject {
     func reconcile(userInitiated: Bool = false) async -> (any Error)? {
         guard !reconciling, userInitiated || !isAuthorizing else { return nil }
         reconciling = true
-        defer { reconciling = false }
+        defer {
+            reconciling = false
+            if authorizationRequested {
+                authorizationRequested = false
+                authorize()
+            }
+        }
         let attemptGeneration = generation
         let preserveCancellation = !userInitiated && state == .cancelled
         let waitingForExplicitRetry = userInitiated ? Set<Family>() : blockedFamilies.union(preserveCancellation ? pendingFamilies : [])
         let previousState = state
         let previousCompletedCount = completedFamilyCount
-        state = userInitiated ? .authorizing : .checking
-        completedFamilyCount = 0
+        // Polling for delayed Keychain delivery is background maintenance, not
+        // another user-visible operation. Keep the last actionable outcome.
+        let showsProgress = userInitiated || state == .notChecked
+        if showsProgress {
+            state = userInitiated ? .authorizing : .checking
+            completedFamilyCount = 0
+        }
+        var completed = 0
         var pending = Set(operations.map(\.family))
         var blocked = Set<Family>()
         var firstError: (any Error)?
@@ -91,7 +109,7 @@ final class FullCloudConnectionSync: ObservableObject {
             try KeychainStore.checkAuthenticationAttempt()
             guard attemptGeneration == generation else { throw CancellationError() }
             activeFamily = operation.family
-            currentFamily = operation.family
+            if showsProgress { currentFamily = operation.family }
             await Task.yield()
             try Task.checkCancellation()
             guard attemptGeneration == generation else { throw CancellationError() }
@@ -99,7 +117,8 @@ final class FullCloudConnectionSync: ObservableObject {
             try KeychainStore.checkAuthenticationAttempt()
             try Task.checkCancellation()
             pending.remove(operation.family)
-            completedFamilyCount += 1
+            completed += 1
+            if showsProgress { completedFamilyCount = completed }
         }
 
         if userInitiated {
@@ -143,6 +162,7 @@ final class FullCloudConnectionSync: ObservableObject {
         }
         guard attemptGeneration == generation else { return firstError }
         currentFamily = nil
+        completedFamilyCount = completed
         pendingFamilies = pending
         blockedFamilies = blocked
         if let firstError {
@@ -158,6 +178,51 @@ final class FullCloudConnectionSync: ObservableObject {
     private static func isAuthenticationIssue(_ error: any Error) -> Bool {
         guard let error = error as? KeychainStoreError else { return false }
         return error == .authenticationRequired || error == .authenticationCancelled
+    }
+}
+
+/// Only a success in the failed channel can resolve that channel's error.
+/// Details intentionally exclude descriptions, record identifiers and payloads.
+@MainActor
+struct FullCloudSyncFailureState {
+    enum Store: String, Hashable { case appData, legacy }
+    enum Event: String, Hashable { case setup, `import`, export }
+    enum Channel: Hashable {
+        case preparation, reconciliation
+        case transport(Store, Event)
+    }
+    struct Failure: Equatable {
+        let domain: String
+        let code: Int
+        let isIdentityConflict: Bool
+
+        init(_ error: any Error) {
+            let value = error as NSError
+            domain = value.domain
+            code = value.code
+            if let error = error as? CloudModelCodec.CodecError, case .duplicateIdentity = error {
+                isIdentityConflict = true
+            } else { isIdentityConflict = false }
+        }
+    }
+
+    private(set) var failures = [Channel: Failure]()
+
+    mutating func record(_ error: any Error, channel: Channel) {
+        guard !(error is CancellationError) else { return }
+        failures[channel] = Failure(error)
+    }
+
+    mutating func prepared() { failures.removeValue(forKey: .preparation) }
+
+    mutating func reconciledContent(completed: Bool) {
+        // Waiting for the initial import, a recording, or held conflicting rows
+        // is not evidence that a previous content failure has recovered.
+        if completed { failures.removeValue(forKey: .reconciliation) }
+    }
+
+    mutating func recoveredTransport(store: Store, event: Event) {
+        failures.removeValue(forKey: .transport(store, event))
     }
 }
 
@@ -177,6 +242,7 @@ final class FullCloudSyncService: ObservableObject {
     @Published private(set) var isRunning = false
     @Published private(set) var isQueuedForCloud = false
     @Published private(set) var errorMessage: String?
+    @Published private(set) var failureState = FullCloudSyncFailureState()
     @Published private(set) var lastCloudExport: Date?
     @Published private(set) var restoredItemCount = 0
     @Published private(set) var isRecordingDeferred = false
@@ -197,6 +263,7 @@ final class FullCloudSyncService: ObservableObject {
     private var modelDataDirty = true
     private var cachedModelRecords = [String: Data]()
     private var cachedModelDigests = [String: String]()
+    private var cachedModelConflicts = Set<String>()
     private var modelChangeVersion = 0
     private var rerunForLocalSave = false
     lazy var connectionSync = FullCloudConnectionSync(operations: [
@@ -208,13 +275,11 @@ final class FullCloudSyncService: ObservableObject {
         .openAI(.shared)
     ])
     private var accountGeneration = 0
-    private var synchronizing = false
+    @Published private(set) var synchronizing = false
     private var shadowStoreID: String?
     private var legacyStoreID: String?
     private var shadowImported = false
     private var legacyImported = false
-    private var reconciliationFailed = false
-    private var transportFailures = Set<String>()
     private var queuedSequence: UInt64 = 0
     private var lastEnqueueDate: Date?
     private var exportSequences = [UUID: UInt64]()
@@ -241,6 +306,7 @@ final class FullCloudSyncService: ObservableObject {
             return
         }
         guard !Self.usesSyntheticEnvironment else { throw CancellationError() }
+        var synchronizationStarted = false
         do {
             // Bind this explicit choice to the account visible now. If identity
             // cannot be established, do not enable an unbound future upload.
@@ -253,18 +319,25 @@ final class FullCloudSyncService: ObservableObject {
             UserCloudSyncPolicy.authorizeAccount(account)
             SettingsStore.shared.adoptFullCloudPolicy()
             start()
+            synchronizationStarted = true
             try await synchronizeNow()
         } catch {
-            report(error)
+            if !synchronizationStarted, requestedGeneration == accountGeneration {
+                report(error, channel: .preparation)
+            }
             throw error
         }
     }
 
     func start() {
         guard !Self.usesSyntheticEnvironment, UserCloudSyncPolicy.isRequested, worker == nil else { return }
+        let generation = accountGeneration
         eventSubscription = NotificationCenter.default.publisher(for: NSPersistentCloudKitContainer.eventChangedNotification)
             .receive(on: RunLoop.main)
-            .sink { [weak self] notification in self?.handleCloudEvent(notification) }
+            .sink { [weak self] notification in
+                guard let self, generation == self.accountGeneration else { return }
+                self.handleCloudEvent(notification)
+            }
         accountSubscription = NotificationCenter.default.publisher(for: .CKAccountChanged)
             .sink { [weak self] _ in
                 // Revoke the thread-safe gate at notification receipt, before
@@ -296,8 +369,8 @@ final class FullCloudSyncService: ObservableObject {
         isRunning = true
         worker = Task.detached { @MainActor [weak self] in
             while let self, !Task.isCancelled, UserCloudSyncPolicy.isRequested {
-                do { try await self.synchronizeNow() }
-                catch { self.report(error) }
+                // synchronizeNow publishes its failure once, with its actual phase.
+                try? await self.synchronizeNow()
                 do { try await Task.sleep(for: .seconds(20)) }
                 catch { break }
             }
@@ -342,9 +415,11 @@ final class FullCloudSyncService: ObservableObject {
         modelDataDirty = true
         cachedModelRecords = [:]
         cachedModelDigests = [:]
+        cachedModelConflicts = []
         connectionSync.reset()
         hasFinishedInitialRestore = false
-        transportFailures.removeAll()
+        failureState = FullCloudSyncFailureState()
+        errorMessage = nil
         exportSequences.removeAll()
         isQueuedForCloud = false
         lastCloudExport = nil
@@ -379,7 +454,7 @@ final class FullCloudSyncService: ObservableObject {
                 try Task.checkCancellation()
                 try await self?.synchronizeNow()
             }
-            catch { self?.report(error) }
+            catch { /* Cancellation, or a failure already published by synchronizeNow. */ }
         }
     }
 
@@ -395,12 +470,10 @@ final class FullCloudSyncService: ObservableObject {
     }
 
     func synchronizeNow() async throws {
-        try await KeychainStore.withoutAuthenticationUI { try await synchronizeWithoutAuthenticationUI() }
-    }
-
-    private func synchronizeWithoutAuthenticationUI() async throws {
         guard UserCloudSyncPolicy.isRequested, !synchronizing else { return }
         guard !Self.usesSyntheticEnvironment else { throw CancellationError() }
+        let generation = accountGeneration
+        var failureChannel = FullCloudSyncFailureState.Channel.preparation
         synchronizing = true
         defer {
             synchronizing = false
@@ -410,19 +483,29 @@ final class FullCloudSyncService: ObservableObject {
             }
         }
         do {
-            try await prepareCloudStore()
-            guard UserCloudSyncPolicy.isEnabled, !Task.isCancelled else { throw CancellationError() }
-            // Keychain failures are visible, but must not strand unrelated tasks,
-            // saved mail or recordings behind an unavailable credential item.
-            _ = await connectionSync.reconcile()
-            guard UserCloudSyncPolicy.isEnabled, !Task.isCancelled else { throw CancellationError() }
-            if shadowImported && legacyImported {
-                if try await reconcileContent() { hasFinishedInitialRestore = true }
+            try await KeychainStore.withoutAuthenticationUI {
+                try await prepareCloudStore()
+                guard generation == accountGeneration, UserCloudSyncPolicy.isEnabled,
+                      !Task.isCancelled else { throw CancellationError() }
+                failureState.prepared()
+                clearResolvedError()
+                failureChannel = .reconciliation
+                // Device approval remains independent from app-data synchronization.
+                _ = await connectionSync.reconcile()
+                guard generation == accountGeneration, UserCloudSyncPolicy.isEnabled,
+                      !Task.isCancelled else { throw CancellationError() }
+                if shadowImported && legacyImported {
+                    let completed = try await reconcileContent()
+                    guard generation == accountGeneration, UserCloudSyncPolicy.isEnabled,
+                          !Task.isCancelled else { throw CancellationError() }
+                    failureState.reconciledContent(completed: completed)
+                    if completed { hasFinishedInitialRestore = true }
+                }
+                clearResolvedError()
             }
-            reconciliationFailed = false
-            clearResolvedError()
         } catch {
-            report(error)
+            // A suspended old-account request must not resurrect a reset error.
+            if generation == accountGeneration { report(error, channel: failureChannel) }
             throw error
         }
     }
@@ -450,6 +533,8 @@ final class FullCloudSyncService: ObservableObject {
         let generation = accountGeneration
         let identifier = "iCloud.\(Bundle.main.bundleIdentifier ?? "pieroot.sift-todo")"
         let (container, account) = try await resolveAccount()
+        guard generation == accountGeneration, UserCloudSyncPolicy.isRequested,
+              !Task.isCancelled else { throw CancellationError() }
         guard UserDefaults.standard.string(forKey: UserCloudSyncPolicy.accountKey) == account else {
             UserDefaults.standard.set(false, forKey: UserCloudSyncPolicy.syncKey)
             stop()
@@ -524,21 +609,34 @@ final class FullCloudSyncService: ObservableObject {
             var snapshot = try CloudModelCodec.capture(app: app, email: email, meeting: meeting)
             if let legacyContainer {
                 let legacy = try CloudModelCodec.captureMain(ModelContext(legacyContainer))
-                for (key, payload) in legacy where snapshot[key] == nil && engine.journal.items[key] == nil {
+                for key in legacy.conflictingKeys where snapshot.records[key] == nil && engine.journal.items[key] == nil {
+                    snapshot.conflictingKeys.insert(key)
+                }
+                for (key, payload) in legacy.records where snapshot.records[key] == nil
+                    && !snapshot.conflictingKeys.contains(key) && engine.journal.items[key] == nil {
                     try CloudModelCodec.apply(key: key, payload: payload, app: app, email: email, meeting: meeting)
-                    snapshot[key] = payload
+                    snapshot.records[key] = payload
                 }
                 if app.hasChanges { try app.save() }
             }
-            cachedModelRecords = snapshot
-            cachedModelDigests = snapshot.mapValues(CloudFileStore.digest)
+            if snapshot.conflictingKeys != cachedModelConflicts, let key = snapshot.conflictingKeys.min() {
+                DiagnosticRecorder.shared.record(error: CloudModelCodec.CodecError.duplicateIdentity(key),
+                    component: "sync.fullData", operation: "captureConflict")
+            }
+            cachedModelRecords = snapshot.records
+            cachedModelDigests = snapshot.records.mapValues(CloudFileStore.digest)
+            cachedModelConflicts = snapshot.conflictingKeys
             modelDataDirty = false
         }
         var records = cachedModelRecords
         let preferences = try CloudPreferenceStore.capture()
         records.merge(preferences) { _, value in value }
         let routineStore = RoutineStore.shared
-        try routineStore.reconcileAcceptances(todos: app.fetch(FetchDescriptor<Todo>()))
+        // Routine acceptance must not choose an arbitrary local task version.
+        let canReconcileAcceptances = !cachedModelConflicts.contains { $0.hasPrefix("Todo/") }
+        if canReconcileAcceptances {
+            try routineStore.reconcileAcceptances(todos: app.fetch(FetchDescriptor<Todo>()))
+        }
         var routineRecords = try routineStore.captureCloudRecords()
         var routineGeneration = routineStore.changeGeneration
         let files = try await fileStore.capture(isAuthorized: isAuthorized)
@@ -557,8 +655,18 @@ final class FullCloudSyncService: ObservableObject {
                 NotificationCenter.default.post(name: UserCloudSyncPolicy.didRestoreNotification, object: nil)
             }
         }
+        let heldMeetingIDs = try Set(cachedModelConflicts.compactMap { key in
+            try CloudModelCodec.meetingID(for: key).map { Substring($0) }
+        })
+        let meetingFilePrefix = "file/Meetings/"
+        let meetingFilePrefixCount = meetingFilePrefix.count
         try await engine.reconcile(digests: digests,
-            temporarilyUnavailable: ["file/LocalRoutines/routines.json"], isValid: {
+            temporarilyUnavailable: cachedModelConflicts.union(["file/LocalRoutines/routines.json"]),
+            isTemporarilyUnavailable: { key in
+                guard !heldMeetingIDs.isEmpty, key.hasPrefix(meetingFilePrefix) else { return false }
+                let meetingID = key.dropFirst(meetingFilePrefixCount).prefix { $0 != "/" }
+                return heldMeetingIDs.contains(meetingID)
+            }, isValid: {
             UserCloudSyncPolicy.isEnabled && modelVersion == self.modelChangeVersion
                 && accountVersion == self.accountGeneration
                 && routineGeneration == routineStore.changeGeneration
@@ -608,8 +716,10 @@ final class FullCloudSyncService: ObservableObject {
             }
             restored += 1
         })
-        try routineStore.reconcileAcceptances(todos: app.fetch(FetchDescriptor<Todo>()))
-        return true
+        if canReconcileAcceptances {
+            try routineStore.reconcileAcceptances(todos: app.fetch(FetchDescriptor<Todo>()))
+        }
+        return cachedModelConflicts.isEmpty
     }
 
     func applyModelRecord(key: String, payload: Data?, app: ModelContext,
@@ -688,8 +798,7 @@ final class FullCloudSyncService: ObservableObject {
             do {
                 try await Task.sleep(for: .milliseconds(750))
                 try await self?.synchronizeNow()
-            } catch is CancellationError { }
-            catch { self?.report(error) }
+            } catch { /* Cancellation, or a failure already published by synchronizeNow. */ }
         }
     }
 
@@ -698,7 +807,14 @@ final class FullCloudSyncService: ObservableObject {
               let event = notification.userInfo?[NSPersistentCloudKitContainer.eventNotificationUserInfoKey]
                 as? NSPersistentCloudKitContainer.Event,
               event.storeIdentifier == shadowStoreID || event.storeIdentifier == legacyStoreID else { return }
-        let failureKey = event.storeIdentifier + "/" + String(event.type.rawValue)
+        let store: FullCloudSyncFailureState.Store = event.storeIdentifier == shadowStoreID ? .appData : .legacy
+        let eventType: FullCloudSyncFailureState.Event
+        switch event.type {
+        case .setup: eventType = .setup
+        case .import: eventType = .import
+        case .export: eventType = .export
+        @unknown default: return
+        }
         if event.endDate == nil {
             if event.type == .export, event.storeIdentifier == shadowStoreID {
                 exportSequences[event.identifier] = queuedSequence
@@ -707,11 +823,10 @@ final class FullCloudSyncService: ObservableObject {
         }
         guard event.succeeded else {
             exportSequences.removeValue(forKey: event.identifier)
-            transportFailures.insert(failureKey)
-            report(event.error ?? CKError(.internalError), reconciliation: false)
+            report(event.error ?? CKError(.internalError), channel: .transport(store, eventType))
             return
         }
-        transportFailures.remove(failureKey)
+        failureState.recoveredTransport(store: store, event: eventType)
         clearResolvedError()
         if event.type == .export, event.storeIdentifier == shadowStoreID {
             lastCloudExport = event.endDate
@@ -728,16 +843,32 @@ final class FullCloudSyncService: ObservableObject {
         }
     }
 
-    private func clearResolvedError() {
-        if !reconciliationFailed && transportFailures.isEmpty { errorMessage = nil }
+    private var modelConflictMessage: String {
+        AppLanguage.localized("settings.sync.full.identityConflict",
+            defaultValue: "내용이 서로 다른 중복 항목의 동기화만 보류했습니다. 원본은 보존하며 다른 데이터는 계속 동기화를 시도합니다. 기기 인증을 다시 승인해도 이 충돌은 해결되지 않습니다.",
+            language: .current, comment: "Conflicting identities are held, not deleted or treated as completed. No private record key is shown.")
     }
 
-    private func report(_ error: Error, reconciliation: Bool = true) {
+    private func clearResolvedError() {
+        if failureState.failures.values.contains(where: { !$0.isIdentityConflict }) {
+            errorMessage = AppLanguage.localized("settings.sync.full.error",
+                defaultValue: "전체 iCloud 동기화를 완료하지 못했습니다. 데이터는 기기에 보존됩니다. iCloud 로그인·저장공간·키체인 상태를 확인한 후 다시 시도하세요.",
+                language: .current, comment: "Full sync failure without private content or credentials.")
+        } else {
+            errorMessage = cachedModelConflicts.isEmpty && failureState.failures.isEmpty ? nil : modelConflictMessage
+        }
+    }
+
+    private func report(_ error: Error, channel: FullCloudSyncFailureState.Channel) {
         if error is CancellationError { return }
-        if reconciliation { reconciliationFailed = true }
-        errorMessage = AppLanguage.localized("settings.sync.full.error",
-            defaultValue: "전체 iCloud 동기화를 완료하지 못했습니다. 데이터는 기기에 보존됩니다. iCloud 로그인·저장공간·키체인 상태를 확인한 후 다시 시도하세요.",
-            language: .current, comment: "Full sync failure without private content or credentials.")
-        DiagnosticRecorder.shared.record(error: error, component: "sync.fullData", operation: "reconcile")
+        failureState.record(error, channel: channel)
+        clearResolvedError()
+        let operation: String
+        switch channel {
+        case .preparation: operation = "prepare"
+        case .reconciliation: operation = "reconcile"
+        case .transport(let store, let event): operation = "transport.\(store.rawValue).\(event.rawValue)"
+        }
+        DiagnosticRecorder.shared.record(error: error, component: "sync.fullData", operation: operation)
     }
 }

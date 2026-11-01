@@ -146,10 +146,8 @@ struct EmailDetailView: View {
                     .foregroundStyle(AppTheme.warning)
                 }
 
-                if !isGmailAuthenticated {
-                    if isValidatingGmail {
-                        storedCredentialValidationPanel()
-                    } else if hasGmailStoredCredential {
+                if !isGmailAuthenticated && !isValidatingGmail {
+                    if hasGmailStoredCredential {
                         storedCredentialRetryPanel(
                             provider: "Gmail",
                             isConnecting: isConnectingGmail,
@@ -214,10 +212,8 @@ struct EmailDetailView: View {
                     onSignOut: signOutOutlook
                 )
 
-                if !isOutlookAuthenticated {
-                    if isValidatingOutlook {
-                        storedCredentialValidationPanel()
-                    } else if hasOutlookStoredCredential {
+                if !isOutlookAuthenticated && !isValidatingOutlook {
+                    if hasOutlookStoredCredential {
                         storedCredentialRetryPanel(
                             provider: "Outlook",
                             isConnecting: isConnectingOutlook,
@@ -575,19 +571,6 @@ struct EmailDetailView: View {
         }
     }
 
-    private func storedCredentialValidationPanel() -> some View {
-        return HStack(spacing: 8) {
-            ProgressView().controlSize(.small)
-            Text(AppLanguage.localized(
-                "mail.authentication.checking",
-                defaultValue: "연결·메일 조회 확인 중…",
-                language: .current,
-                comment: "Checking the IMAP connection and inbox message access."
-            ))
-            .font(.caption)
-            .foregroundStyle(.secondary)
-        }
-    }
 
     private func saveSetting<T>(key: String, value: T, onChange: ((T) -> Void)? = nil) {
         SettingsStore.shared.set(key, value: value)

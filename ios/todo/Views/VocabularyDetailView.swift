@@ -14,6 +14,11 @@ struct VocabularyDetailView: View {
                 Button("추가") { addManual() }
                     .disabled(newCanonical.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || vocabulary == nil)
             }
+            if terms.isEmpty {
+                Section {
+                    Text("없음").foregroundStyle(.secondary)
+                }
+            }
             section("승격됨", terms.filter(\.isPromoted))
             section("검토 필요", terms.filter { !$0.isPromoted && !$0.isRejected })
             section("거절됨", terms.filter(\.isRejected))
@@ -32,41 +37,40 @@ struct VocabularyDetailView: View {
 
     @ViewBuilder
     private func section(_ title: String, _ values: [VocabularyTermSummary]) -> some View {
-        Section(title) {
-            if values.isEmpty {
-                Text("없음").foregroundStyle(.secondary)
-            }
-            ForEach(values, id: \.canonicalKey) { term in
-                VStack(alignment: .leading, spacing: AppTheme.Spacing.compact) {
-                    Text(term.canonical)
-                        .font(.body)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Text(term.category.rawValue)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    if !term.aliases.isEmpty || !term.variants.isEmpty {
-                        Text((term.aliases.map(\.value) + term.variants).joined(separator: ", "))
+        if !values.isEmpty {
+            Section(title) {
+                ForEach(values, id: \.canonicalKey) { term in
+                    VStack(alignment: .leading, spacing: AppTheme.Spacing.compact) {
+                        Text(term.canonical)
+                            .font(.body)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Text(term.category.rawValue)
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
-                    }
-                    VStack(alignment: .leading, spacing: AppTheme.Spacing.item) {
-                        if term.isRejected {
-                            Button("다시 학습 허용") { allowRelearning(term) }
-                            Button("제거", role: .destructive) { removeRejected(term) }
-                        } else if !term.isPromoted {
-                            Button("확인") { confirm(term) }
-                            Button("거절", role: .destructive) { reject(term) }
-                        } else {
-                            Button("거절", role: .destructive) { reject(term) }
+                        if !term.aliases.isEmpty || !term.variants.isEmpty {
+                            Text((term.aliases.map(\.value) + term.variants).joined(separator: ", "))
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
+                        VStack(alignment: .leading, spacing: AppTheme.Spacing.item) {
+                            if term.isRejected {
+                                Button("다시 학습 허용") { allowRelearning(term) }
+                                Button("제거", role: .destructive) { removeRejected(term) }
+                            } else if !term.isPromoted {
+                                Button("확인") { confirm(term) }
+                                Button("거절", role: .destructive) { reject(term) }
+                            } else {
+                                Button("거절", role: .destructive) { reject(term) }
+                            }
+                        }
+                        .buttonStyle(.borderless)
+                        .padding(.top, AppTheme.Spacing.compact)
                     }
-                    .buttonStyle(.borderless)
-                    .padding(.top, AppTheme.Spacing.compact)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, AppTheme.Spacing.compact)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.vertical, AppTheme.Spacing.compact)
             }
         }
     }

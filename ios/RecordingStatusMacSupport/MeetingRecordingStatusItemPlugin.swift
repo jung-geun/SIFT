@@ -109,6 +109,7 @@ final class MeetingRecordingStatusItemPlugin: NSObject, MeetingRecordingStatusIt
 @objc(SIFTMeetingAudioFilePickerPlugin)
 final class MeetingAudioFilePickerPlugin: NSObject, MeetingAudioFilePickerBridging {
     private var panel: NSOpenPanel?
+    private var savePanel: NSSavePanel?
 
     required override init() { super.init() }
 
@@ -132,5 +133,55 @@ final class MeetingAudioFilePickerPlugin: NSObject, MeetingAudioFilePickerBridgi
     }
 
     func cancelAudioFilePicker() { panel?.cancel(nil) }
+
+    func saveAudioFile(_ source: URL, completion: @escaping (URL?, NSError?) -> Void) {
+        guard savePanel == nil, let window = NSApplication.shared.keyWindow, window.isVisible else {
+            completion(nil, NSError(domain: NSCocoaErrorDomain, code: NSFeatureUnsupportedError))
+            return
+        }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = source.lastPathComponent
+        panel.allowedContentTypes = [source.pathExtension.lowercased() == "wav" ? .wav : .zip]
+        panel.canCreateDirectories = true
+        savePanel = panel
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK, let destination = panel.url else {
+                self?.savePanel = nil
+                completion(nil, nil)
+                return
+            }
+            Task { @MainActor [weak self] in
+                defer { self?.savePanel = nil }
+                let error = await Task.detached(priority: .userInitiated) { () -> NSError? in
+                    let access = destination.startAccessingSecurityScopedResource()
+                    defer { if access { destination.stopAccessingSecurityScopedResource() } }
+                    do {
+                        let manager = FileManager.default
+                        let staging = try manager.url(for: .itemReplacementDirectory, in: .userDomainMask,
+                            appropriateFor: destination, create: true)
+                        defer { try? manager.removeItem(at: staging) }
+                        let copy = staging.appendingPathComponent(source.lastPathComponent)
+                        try manager.copyItem(at: source, to: copy)
+                        if manager.fileExists(atPath: destination.path) {
+                            _ = try manager.replaceItemAt(destination, withItemAt: copy)
+                        } else {
+                            try manager.moveItem(at: copy, to: destination)
+                        }
+                        return nil
+                    } catch { return error as NSError }
+                }.value
+                completion(error == nil ? destination : nil, error)
+            }
+        }
+    }
+
+    func cancelAudioFileSave() { savePanel?.cancel(nil) }
+
+    // Read only after an explicit paste action. AppKit redeems Finder's file
+    // pasteboard grant; a copied path string never authorizes file access.
+    func copiedFileURLs() -> [URL] {
+        NSPasteboard.general.readObjects(forClasses: [NSURL.self],
+            options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+    }
 }
 #endif

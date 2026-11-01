@@ -95,6 +95,9 @@ nonisolated final class MeetingCaptureSourceGate: @unchecked Sendable {
     func activate(_ ticket: Int) {
         lock.withLock { if generation == ticket { active = true } }
     }
+    func suspend(_ ticket: Int) {
+        lock.withLock { if generation == ticket { active = false } }
+    }
     func deliver(_ ticket: Int, _ body: () -> Void) {
         lock.withLock { if generation == ticket && active { body() } }
     }

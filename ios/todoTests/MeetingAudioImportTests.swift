@@ -70,9 +70,10 @@ struct MeetingAudioImportTests {
         defer { fixture.remove() }
         try writeAudio(to: fixture.source)
         let original = try Data(contentsOf: fixture.source)
+        let selection = try MeetingAudioImportSelection(urls: [fixture.source])
         let store = try container()
         let record = try await MeetingAudioImportService.importFile(
-            at: fixture.source, languageTag: "en-US", in: store.mainContext, rootURL: fixture.root
+            at: selection.url, languageTag: "en-US", in: store.mainContext, rootURL: fixture.root
         )
         let manifest = try #require(record.audioManifest)
         #expect(manifest.sampleRate == 16_000)
@@ -276,6 +277,37 @@ struct MeetingAudioImportTests {
         #expect(persisted.result?.segments.first?.text == "Retried audio")
         #expect(persisted.offlineASRFailure == nil)
         #expect(try Data(contentsOf: audio.appendingPathComponent("part-00.flac")) == originalFLAC)
+    }
+
+    @Test("direct selection rejects multiple files, directories, web URLs and non-audio files", arguments: ["multiple", "directory", "web", "text", "missing"])
+    func directSelectionRejectsInvalidInput(kind: String) throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        try writeAudio(to: fixture.source)
+        let original = try Data(contentsOf: fixture.source)
+        let urls: [URL]
+        switch kind {
+        case "multiple": urls = [fixture.source, fixture.source]
+        case "directory": urls = [fixture.directory]
+        case "web": urls = [try #require(URL(string: "https://example.invalid/audio.wav"))]
+        case "text":
+            let text = fixture.directory.appendingPathComponent("Notes.txt")
+            try Data("not audio".utf8).write(to: text)
+            urls = [text]
+        default: urls = [fixture.directory.appendingPathComponent("Missing.wav")]
+        }
+        do {
+            _ = try MeetingAudioImportSelection(urls: urls)
+            Issue.record("Invalid selection was accepted")
+        } catch {
+            if kind == "multiple" {
+                #expect(error as? MeetingAudioImportSelection.Failure == .singleFileRequired)
+            } else {
+                #expect(error as? MeetingAudioImportService.Failure == (kind == "text" ? .unsupportedAudio : .unavailableInput))
+            }
+        }
+        try fixture.expectNoImportOutput()
+        #expect(try Data(contentsOf: fixture.source) == original)
     }
 }
 

@@ -62,7 +62,15 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterD
             input: ",",
             modifierFlags: .command
         )
-        let menu = UIMenu(title: "", identifier: .preferences, options: .displayInline, children: [command])
+        var commands: [UIMenuElement] = [command]
+        if MeetingDetectionCoordinator.shared.isSupported {
+            commands.append(UICommand(
+                title: AppLanguage.localized("meeting.detection.enabled", defaultValue: AppLanguage.current == .english ? "Suggest meeting recordings" : "회의 녹음 제안", language: .current),
+                action: #selector(toggleMeetingSuggestions(_:)),
+                state: MeetingDetectionCoordinator.shared.isEnabled ? .on : .off
+            ))
+        }
+        let menu = UIMenu(title: "", identifier: .preferences, options: .displayInline, children: commands)
         if builder.menu(for: .preferences) != nil {
             builder.replace(menu: .preferences, with: menu)
         } else {
@@ -74,8 +82,15 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterD
         NotificationCenter.default.post(name: .settingsRequested, object: nil)
     }
 
+    @objc private func toggleMeetingSuggestions(_ sender: UICommand) {
+        let detection = MeetingDetectionCoordinator.shared
+        detection.setEnabled(!detection.isEnabled)
+        UIMenuSystem.main.setNeedsRebuild()
+    }
+
     func applicationWillTerminate(_ application: UIApplication) {
         MeetingRecordingMacStatusItem.shared.invalidate()
+        MeetingDetectionCoordinator.shared.invalidate()
     }
     #endif
 
@@ -522,6 +537,7 @@ struct todoApp: App {
                     recordingActivity.clearNavigationIntent()
                     #if targetEnvironment(macCatalyst)
                     MeetingRecordingMacSceneRegistry.shared.clearNavigationIntent()
+                    MeetingDetectionCoordinator.shared.clearNavigationIntent()
                     #endif
                     let clamped = tabVisibility.clamped(newTab)
                     if tabVisibility.calendarVisible
@@ -568,6 +584,9 @@ struct todoApp: App {
                 #endif
             })
             #if targetEnvironment(macCatalyst)
+            .background(MeetingDetectionSceneAnchor {
+                selectedTab = AppTabID.meeting.rawValue
+            })
             .modifier(CatalystSettingsPresenter())
             #else
             .sheet(isPresented: $showSettings, onDismiss: {
@@ -599,6 +618,9 @@ struct todoApp: App {
                 await HealthRoutineStore.shared.refresh(context: appData.container.mainContext)
             }
             .onAppear {
+                #if targetEnvironment(macCatalyst)
+                MeetingDetectionCoordinator.shared.startIfEnabled()
+                #endif
                 OpenAIConnection.shared.refreshCredentials()
                 FullCloudSyncService.shared.enterForeground()
                 mailAccessPolicy = MailboxCachedProviderAccess.current()
@@ -613,7 +635,7 @@ struct todoApp: App {
                 unexpectedTerminationRecovery.enterForeground()
                 Task {
                     await refreshTabVisibility()
-                    if recordingActivity.navigationRequestID != nil {
+                    if recordingActivity.navigationRequestID != nil || hasPendingDetectedMeetingNavigation {
                         selectedTab = AppTabID.meeting.rawValue
                     } else if launchBehavior == "fixed" {
                         selectedTab = launchTab
@@ -750,7 +772,7 @@ struct todoApp: App {
                     Task {
                         await refreshTabVisibility()
                         #if targetEnvironment(macCatalyst)
-                        if MeetingRecordingMacSceneRegistry.shared.hasPendingRecordingNavigation {
+                        if MeetingRecordingMacSceneRegistry.shared.hasPendingRecordingNavigation || hasPendingDetectedMeetingNavigation {
                             selectedTab = AppTabID.meeting.rawValue
                         } else if launchBehavior == "fixed" {
                             selectedTab = launchTab
@@ -861,6 +883,14 @@ struct todoApp: App {
 
     }
 
+
+    private var hasPendingDetectedMeetingNavigation: Bool {
+        #if targetEnvironment(macCatalyst)
+        MeetingDetectionCoordinator.shared.hasPendingNavigation
+        #else
+        false
+        #endif
+    }
 
     @MainActor
     private func refreshTabVisibility() async {

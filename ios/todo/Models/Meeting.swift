@@ -95,6 +95,7 @@ struct ProviderMeetingExtraction: Codable, Hashable, Sendable {
     var decisions: [String]
     var unresolvedQuestions: [String]
     var actionDrafts: [ProviderActionDraftInput]
+    var summarySections: [ProviderMeetingSummarySection]? = nil
 }
 
 struct MeetingActionDraft: Codable, Hashable, Sendable, Identifiable {
@@ -125,17 +126,24 @@ struct MeetingActionDraft: Codable, Hashable, Sendable, Identifiable {
 }
 
 struct MeetingResult: nonisolated Codable, Hashable, Sendable {
-    var transcriptRevision: Int
+    var transcriptRevision: Int {
+        didSet { if oldValue != transcriptRevision { invalidateStructuredSummary() } }
+    }
     var title: String
     var summary: String
     var decisions: [String]
     var unresolvedQuestions: [String]
-    var segments: [MeetingSegment]
+    var segments: [MeetingSegment] {
+        didSet { if oldValue != segments { invalidateStructuredSummary() } }
+    }
     var actionDrafts: [MeetingActionDraft]
+    var summarySections: [MeetingSummarySection]?
+    var summarySourceFingerprint: String?
 
     nonisolated init(transcriptRevision: Int = 0, title: String = "", summary: String = "",
          decisions: [String] = [], unresolvedQuestions: [String] = [], segments: [MeetingSegment] = [],
-         actionDrafts: [MeetingActionDraft] = []) {
+         actionDrafts: [MeetingActionDraft] = [], summarySections: [MeetingSummarySection]? = nil,
+         summarySourceFingerprint: String? = nil) {
         self.transcriptRevision = transcriptRevision
         self.title = title
         self.summary = summary
@@ -143,6 +151,13 @@ struct MeetingResult: nonisolated Codable, Hashable, Sendable {
         self.unresolvedQuestions = unresolvedQuestions
         self.segments = segments
         self.actionDrafts = actionDrafts
+        self.summarySections = summarySections
+        self.summarySourceFingerprint = summarySourceFingerprint
+    }
+
+    mutating func invalidateStructuredSummary() {
+        summarySections = nil
+        summarySourceFingerprint = nil
     }
 
     func validated() throws -> MeetingResult {
@@ -485,6 +500,8 @@ final class MeetingRecord {
     var automaticLanguageDetection: Bool = false
     /// Empty on legacy records: summarize in the source language, not the UI language.
     var summaryLanguageTag: String = ""
+    var summaryFormatRaw: String = "minutes"
+    var summaryCustomInstructions: String = ""
     var summaryKindRaw: String?
     var summaryEngineLabel: String = ""
     var summaryFallbackReasonRaw: String?
@@ -538,6 +555,10 @@ final class MeetingRecord {
     }
 
     var mode: MeetingProcessingMode { MeetingProcessingMode(rawValue: modeRaw) ?? .onDevice }
+    var summaryFormat: MeetingSummaryFormat {
+        get { MeetingSummaryFormat(rawValue: summaryFormatRaw) ?? .minutes }
+        set { summaryFormatRaw = newValue.rawValue }
+    }
     var effectiveSummaryLanguageTag: String { summaryLanguageTag.isEmpty ? languageTag : summaryLanguageTag }
 
     /// Processing follows detected speech in automatic mode, never the saved
@@ -623,8 +644,12 @@ final class MeetingRecord {
     }
 
     func update(result: MeetingResult, status: MeetingStatus = .ready) throws {
-        resultData = try JSONEncoder().encode(result.validated())
-        transcriptRevision = result.transcriptRevision
+        var current = result
+        if let previous = self.result, !previous.hasSameTranscript(as: current) {
+            current.invalidateStructuredSummary()
+        }
+        resultData = try JSONEncoder().encode(current.validated())
+        transcriptRevision = current.transcriptRevision
         if result.summary.isEmpty {
             summaryKindRaw = nil
             summaryEngineLabel = ""
@@ -666,6 +691,8 @@ final class MeetingRecord {
         let languageTag: String
         let automaticLanguageDetection: Bool
         let summaryLanguageTag: String
+        let summaryFormatRaw: String
+        let summaryCustomInstructions: String
         let summaryKindRaw: String?
         let summaryEngineLabel: String
         let summaryFallbackReasonRaw: String?
@@ -697,6 +724,8 @@ final class MeetingRecord {
             languageTag: languageTag,
             automaticLanguageDetection: automaticLanguageDetection,
             summaryLanguageTag: summaryLanguageTag,
+            summaryFormatRaw: summaryFormatRaw,
+            summaryCustomInstructions: summaryCustomInstructions,
             summaryKindRaw: summaryKindRaw,
             summaryEngineLabel: summaryEngineLabel,
             summaryFallbackReasonRaw: summaryFallbackReasonRaw,
@@ -728,6 +757,8 @@ final class MeetingRecord {
         languageTag = snapshot.languageTag
         automaticLanguageDetection = snapshot.automaticLanguageDetection
         summaryLanguageTag = snapshot.summaryLanguageTag
+        summaryFormatRaw = snapshot.summaryFormatRaw
+        summaryCustomInstructions = snapshot.summaryCustomInstructions
         summaryKindRaw = snapshot.summaryKindRaw
         summaryEngineLabel = snapshot.summaryEngineLabel
         summaryFallbackReasonRaw = snapshot.summaryFallbackReasonRaw
