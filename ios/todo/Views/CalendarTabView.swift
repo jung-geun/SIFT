@@ -377,9 +377,22 @@ struct CalendarTabView: View {
                 if !showsYear { yearCursor = displayMonth }
                 showsYear.toggle()
             } label: {
-                Label(displayMonth.formatted(.dateTime.year().locale(AppLanguage.current.locale)),
-                    systemImage: showsYear ? "calendar" : "chevron.left")
+                HStack(spacing: 4) {
+                    Image(systemName: showsYear ? "calendar" : "chevron.left")
+                    Text(showsYear
+                        ? displayMonth.formatted(.dateTime.year().locale(AppLanguage.current.locale))
+                        : displayMonth.formatted(Date.FormatStyle(date: .omitted, time: .omitted,
+                            locale: AppLanguage.current.locale, calendar: calendar,
+                            timeZone: calendar.timeZone).year().month(.wide)))
+                }
+                .font(.subheadline.weight(.semibold))
+                .fixedSize(horizontal: true, vertical: false)
             }
+            .lineLimit(1)
+            .minimumScaleFactor(0.7)
+            .accessibilityValue(displayMonth.formatted(Date.FormatStyle(date: .omitted, time: .omitted,
+                locale: AppLanguage.current.locale, calendar: calendar,
+                timeZone: calendar.timeZone).year().month(.wide)))
             .accessibilityLabel(calendarCopy("calendar.view.year", "Year", "연도"))
             .accessibilityIdentifier("calendar.yearButton")
             .disabled(!authorized)
