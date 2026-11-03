@@ -59,16 +59,6 @@ private struct RecentMessageSyncSnapshot: Sendable {
     let lookbackCutoff: Date
 }
 
-/// 수동 등록 전용 이메일 할 일 초안 모델.
-/// - Sendable: 백그라운드 전달 시 값 전송 안정성 확보.
-struct EmailTodoDraft: Sendable {
-    let title: String
-    let notes: String
-    let dueDate: Date?
-    let isAllDay: Bool
-    let sender: String
-    let senderEmail: String
-}
 
 // MARK: - Gmail Message Model
 
@@ -134,11 +124,13 @@ protocol MailboxPagingProvider: AnyObject {
     func fetchMessageContent(messageID: String) async throws -> MailboxMessageContent
     func markAsRead(
         messageID: String,
-        expectedGlobalMessageID: String?
+        expectedGlobalMessageID: String?,
+        expectedAccountNamespace: String
     ) async throws
     func trashMessage(
         messageID: String,
-        expectedGlobalMessageID: String?
+        expectedGlobalMessageID: String?,
+        expectedAccountNamespace: String
     ) async throws
 }
 
@@ -506,18 +498,21 @@ final class EmailService: NSObject, MailboxPagingProvider {
         to context: ModelContext,
         existingRefs: Set<String>
     ) -> EmailIngestionResult {
-        var handledRefs = existingRefs
+        var handledActions = Set<String>()
         var insertedTodosByRef: [String: Todo] = [:]
+        var insertedTodos: [Todo] = []
         var todoCount = 0
-        for todo in newTodos where !handledRefs.contains(todo.sourceRef) {
+        for todo in newTodos where !existingRefs.contains(todo.sourceRef) {
+            let actionKey = "\(todo.sourceAccountNamespace)\u{0}\(todo.sourceRef)\u{0}\(todo.title)"
+            guard handledActions.insert(actionKey).inserted else { continue }
             context.insert(todo)
             TaskBehaviorRecorder.recordCreation(of: todo, actor: .emailIngestion, in: context)
-            handledRefs.insert(todo.sourceRef)
             insertedTodosByRef[todo.sourceRef] = todo
+            insertedTodos.append(todo)
             todoCount += 1
         }
         Task { @MainActor in
-            await TodoEligibilityReconciler.shared.reconcileAll(Array(insertedTodosByRef.values))
+            await TodoEligibilityReconciler.shared.reconcileAll(insertedTodos)
         }
 
         var eventCount = 0
@@ -628,19 +623,6 @@ final class EmailService: NSObject, MailboxPagingProvider {
         return (filteredTodos, events)
     }
 
-    /// 수동 등록용 메시지 요약 기반 할 일 초안을 생성합니다.
-    /// allowFoundationModels=false 이면 규칙 기반 폴백을 사용합니다.
-    func makeManualTodo(
-        from message: GmailMessage,
-        allowFoundationModels: Bool = true,
-        language: AppLanguage = .current
-    ) async -> Todo {
-        await EmailIngestionEngine().makeManualTodo(
-            from: message,
-            allowFoundationModels: allowFoundationModels,
-            language: language
-        )
-    }
 
     // MARK: - Gmail API
     func fetchInboxPage(after cursor: String?) async throws -> MailboxPage {
@@ -1404,15 +1386,34 @@ final class EmailService: NSObject, MailboxPagingProvider {
         }
     }
 
+    private func validateMutationAccount(_ expectedNamespace: String, generation: UUID) throws {
+        guard generation == credentialGeneration, !signedOut,
+              let expected = IMAPCredentialStore.canonicalAccount(expectedNamespace),
+              let token = try loadTokens().idToken,
+              let payloadPart = token.split(separator: ".").dropFirst().first
+        else { throw EmailError.notAuthenticated }
+        let base64 = String(payloadPart).replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let padding = String(repeating: "=", count: (4 - base64.count % 4) % 4)
+        guard let data = Data(base64Encoded: base64 + padding),
+              let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let email = payload["email"] as? String,
+              IMAPCredentialStore.canonicalAccount(email) == expected
+        else { throw EmailError.notAuthenticated }
+    }
+
     /// Gmail 서버에서 UNREAD 라벨을 제거하여 읽음 처리.
     /// `gmail.modify` 스코프 필요 — 이전 `gmail.readonly` 토큰이면 403으로 무음 실패.
     func markAsRead(
         messageID: String,
-        expectedGlobalMessageID: String? = nil
+        expectedGlobalMessageID: String? = nil,
+        expectedAccountNamespace: String
     ) async throws {
         try validateMutationIdentity(messageID: messageID, expectedGlobalMessageID: expectedGlobalMessageID)
         logger.info("Marking message as read: \(messageID)")
+        let generation = credentialGeneration
         let token = try await refreshTokenIfNeeded()
+        try validateMutationAccount(expectedAccountNamespace, generation: generation)
         let url = try messageURL(id: messageID, action: "modify")
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -1436,11 +1437,14 @@ final class EmailService: NSObject, MailboxPagingProvider {
 
     func trashMessage(
         messageID: String,
-        expectedGlobalMessageID: String? = nil
+        expectedGlobalMessageID: String? = nil,
+        expectedAccountNamespace: String
     ) async throws {
         try validateMutationIdentity(messageID: messageID, expectedGlobalMessageID: expectedGlobalMessageID)
         logger.info("Trashing message: \(messageID)")
+        let generation = credentialGeneration
         let token = try await refreshTokenIfNeeded()
+        try validateMutationAccount(expectedAccountNamespace, generation: generation)
 
         let url = try messageURL(id: messageID, action: "trash")
         var request = URLRequest(url: url)

@@ -38,8 +38,8 @@ struct EmailIngestionTests {
     }
 
 
-    @Test("applyExtractedItems skips existing and same-batch duplicate refs")
-    func applyExtractedItemsSkipsDuplicateSourceRefs() throws {
+    @Test("Existing mail stays handled while distinct new actions survive same-mail deduplication")
+    func applyExtractedItemsPreservesDistinctActions() throws {
         let (container, storeDirectory) = try makeContainer()
         defer { cleanupStore(at: storeDirectory) }
         let context = ModelContext(container)
@@ -49,10 +49,11 @@ struct EmailIngestionTests {
 
         let duplicateExisting = Todo(title: "중복 기존", source: .email, sourceRef: "msg-1")
         let fresh = Todo(title: "신규", source: .email, sourceRef: "msg-2")
-        let duplicateFresh = Todo(title: "신규 중복", source: .email, sourceRef: "msg-2")
+        let duplicateFresh = Todo(title: "신규", source: .email, sourceRef: "msg-2")
+        let secondAction = Todo(title: "두 번째 처리", source: .email, sourceRef: "msg-2")
 
         let result = EmailService.shared.applyExtractedItems(
-            todos: [duplicateExisting, fresh, duplicateFresh],
+            todos: [duplicateExisting, fresh, duplicateFresh, secondAction],
             events: [],
             to: context,
             existingRefs: ["msg-1"]
@@ -61,9 +62,9 @@ struct EmailIngestionTests {
         try context.save()
         let stored = try context.fetch(FetchDescriptor<Todo>())
 
-        #expect(result.todoCount == 1)
-        #expect(stored.count == 2)
-        #expect(stored.filter { $0.sourceRef == "msg-2" }.count == 1)
+        #expect(result.todoCount == 2)
+        #expect(stored.count == 3)
+        #expect(Set(stored.filter { $0.sourceRef == "msg-2" }.map(\.title)) == ["신규", "두 번째 처리"])
     }
 
     @Test("applyExtractedItems ignores invalid calendar event dates")

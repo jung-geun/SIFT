@@ -304,11 +304,13 @@ final class CalendarService {
     func registerOrUpdate(
         todo: Todo,
         preferredCalendarID: String? = nil,
-        language: AppLanguage = .current
+        language: AppLanguage = .current,
+        eventWindowOverride: (start: Date, end: Date, isAllDay: Bool)? = nil
     ) throws -> String? {
-        guard isAuthorized,
-              let window = Self.eventWindow(todoStart: todo.startDate, todoDue: todo.dueDate)
-        else { return nil }
+        guard isAuthorized else { return nil }
+        guard let window = eventWindowOverride.map({ (start: $0.start, end: $0.end) })
+            ?? Self.eventWindow(todoStart: todo.startDate, todoDue: todo.dueDate) else { return nil }
+        guard window.end > window.start else { throw CalendarError.invalidRange }
 
         guard todo.todoSource != .calendar else { throw CalendarError.ownershipNotVerified }
 
@@ -323,6 +325,7 @@ final class CalendarService {
                 : todo.title
             event.startDate = window.start
             event.endDate = window.end
+            if let eventWindowOverride { event.isAllDay = eventWindowOverride.isAllDay }
             event.notes = todo.notes
             Self.applySiftMarker(to: event, for: todo)
             try store.save(event, span: .thisEvent)
@@ -340,6 +343,7 @@ final class CalendarService {
             : todo.title
         event.startDate = window.start
         event.endDate = window.end
+        if let eventWindowOverride { event.isAllDay = eventWindowOverride.isAllDay }
         event.notes = todo.notes
         event.calendar = try destinationCalendar(preferredID: preferredCalendarID)
         Self.applySiftMarker(to: event, for: todo)
@@ -400,7 +404,7 @@ final class CalendarService {
             return true
         }
         // Email exports predating versioned markers embed the exact email ref.
-        return todo.todoSource == .email && !todo.sourceRef.isEmpty
+        return todo.todoSource == .email && todo.sourceItemID.isEmpty && !todo.sourceRef.isEmpty
             && eventURL?.scheme == "x-todoapp-email"
             && eventURL?.host?.removingPercentEncoding == todo.sourceRef
     }
@@ -441,7 +445,7 @@ final class CalendarService {
         if let id = todo.calendarEventID, let linked = event(withIdentifier: id) {
             candidates.append(linked)
         }
-        if todo.todoSource == .email, !todo.sourceRef.isEmpty {
+        if todo.todoSource == .email, todo.sourceItemID.isEmpty, !todo.sourceRef.isEmpty {
             if let id = emailEventMapping[todo.sourceRef], let mapped = event(withIdentifier: id) {
                 candidates.append(mapped)
             }
@@ -609,7 +613,7 @@ final class CalendarService {
     }
 
     private func clearEmailCalendarReferences(for todo: Todo) {
-        if !todo.sourceRef.isEmpty {
+        if todo.sourceItemID.isEmpty, !todo.sourceRef.isEmpty {
             var mapping = emailEventMapping
             mapping.removeValue(forKey: todo.sourceRef)
             emailEventMapping = mapping

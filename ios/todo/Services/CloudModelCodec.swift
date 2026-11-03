@@ -21,6 +21,8 @@ enum CloudModelCodec {
     struct Snapshot {
         var records = [String: Data]()
         var conflictingKeys = Set<String>()
+        var versions = [String: [Data]]()
+        var origins = [String: CloudSyncConflictVersion.Origin]()
 
         /// Strict export/migration consumers must reject a partial snapshot.
         func validatedRecords() throws -> [String: Data] {
@@ -34,13 +36,13 @@ enum CloudModelCodec {
         let entity: String
         let identity: String
         // Each property is independently typed by its explicit key path below.
-        // Optional.none is encoded as JSON null, never omitted or default-filled.
+        // Optional.none is JSON null. Only explicit additive legacy defaults may be omitted.
         let fields: [String: Data]
     }
 
     private struct Field<Model: PersistentModel> {
         let name: String
-        let encode: (Model, JSONEncoder) throws -> Data
+        let encode: (Model, JSONEncoder) throws -> Data?
         let decode: (Model, Data, JSONDecoder) throws -> Void
         let copy: (Model, Model) -> Void
         let decodeMissing: ((Model) -> Void)?
@@ -57,13 +59,30 @@ enum CloudModelCodec {
             preservesLocalValueOnRestore = false
         }
 
+        /// Keep unchanged records byte-compatible with older strict decoders.
+        init<Value: Codable & Equatable>(omittingDefault name: String,
+                                       _ path: ReferenceWritableKeyPath<Model, Value>, defaultValue: Value) {
+            self.name = name
+            encode = { model, encoder in
+                let value = model[keyPath: path]
+                return value == defaultValue ? nil : try encoder.encode(value)
+            }
+            decode = { model, data, decoder in
+                model[keyPath: path] = try decoder.decode(Value.self, from: data)
+            }
+            copy = { source, destination in destination[keyPath: path] = source[keyPath: path] }
+            decodeMissing = { model in model[keyPath: path] = defaultValue }
+            preservesLocalValueOnRestore = false
+        }
+
         /// Register a schema property while transferring only a neutral value.
         /// Local store migration still copies the observed value losslessly.
         init<Value: Codable>(deviceLocal name: String, _ path: ReferenceWritableKeyPath<Model, Value>,
-                             defaultValue: Value, preservesLocalValueOnRestore: Bool = false) {
+                             defaultValue: Value, preservesLocalValueOnRestore: Bool = false,
+                             omitFromEnvelope: Bool = false) {
             self.name = name
             self.preservesLocalValueOnRestore = preservesLocalValueOnRestore
-            encode = { _, encoder in try encoder.encode(defaultValue) }
+            encode = { _, encoder in omitFromEnvelope ? nil : try encoder.encode(defaultValue) }
             decode = { model, data, decoder in
                 _ = try decoder.decode(Value.self, from: data)
                 model[keyPath: path] = defaultValue
@@ -148,6 +167,24 @@ enum CloudModelCodec {
             return model
         }
 
+        private func copyRestoredFields(from decoded: Model, to existing: Model) {
+            // Compare before copying body fields. A remote metadata-only edit
+            // cannot invalidate a complete provider fetch on this device.
+            let localBodyVersion: Int?
+            if let incoming = decoded as? EmailMessage, let local = existing as? EmailMessage,
+               incoming.body == local.body, incoming.htmlBody == local.htmlBody {
+                localBodyVersion = local.bodyContentVersion
+            } else {
+                localBodyVersion = nil
+            }
+            for field in fields where !field.preservesLocalValueOnRestore {
+                field.copy(decoded, existing)
+            }
+            if let localBodyVersion, let local = existing as? EmailMessage {
+                local.bodyContentVersion = localBodyVersion
+            }
+        }
+
         func erased() -> AnyEntity {
             AnyEntity(name: name, validIdentity: validIdentity, validateSchema: validateSchema,
                 capture: { context, excludedTodoIDs, encoder in
@@ -157,19 +194,21 @@ enum CloudModelCodec {
                         if let audit = model as? TaskAuditEvent, excludedTodoIDs.contains(audit.todoID) { continue }
                         if let behavior = model as? TaskBehaviorEvent, excludedTodoIDs.contains(behavior.todoID) { continue }
                         let key = try key(model)
-                        guard !result.conflictingKeys.contains(key) else { continue }
                         let data = try encoder.encode(envelope(model, encoder: encoder))
-                        if let previous = result.records[key], previous != data {
-                            // Unavailable is not deleted: the sync engine must
-                            // retain this identity's revisions and recovery journal.
+                        if !result.versions[key, default: []].contains(data) {
+                            result.versions[key, default: []].append(data)
+                        }
+                        if result.versions[key, default: []].count > 1 {
+                            // Unavailable is not deleted. Retain every portable
+                            // version for explicit review, including a third copy.
                             result.records.removeValue(forKey: key)
                             result.conflictingKeys.insert(key)
-                        } else {
-                            result.records[key] = data
-                        }
+                        } else { result.records[key] = data }
                     }
                     return result
-                }, apply: { identity, envelope, context, app, decoder in
+                }, canonicalize: { envelope, encoder, decoder in
+                    try encoder.encode(self.envelope(decode(envelope, decoder: decoder), encoder: encoder))
+                }, apply: { identity, envelope, context, app, decoder, resolvingConflict in
                     let decoded = try envelope.map { try decode($0, decoder: decoder) }
                     if let todo = decoded as? Todo, todo.isHealthRelated {
                         throw CodecError.healthDataExcluded
@@ -197,7 +236,7 @@ enum CloudModelCodec {
                         for match in matches { context.delete(match) }
                         return
                     }
-                    if matches.count > 1, let first = matches.first {
+                    if !resolvingConflict, matches.count > 1, let first = matches.first {
                         let encoder = CloudModelCodec.encoder()
                         let previous = try encoder.encode(self.envelope(first, encoder: encoder))
                         // Validate the whole cohort before changing any row. A real
@@ -211,11 +250,22 @@ enum CloudModelCodec {
                     }
                     if matches.isEmpty {
                         context.insert(decoded)
+                    } else if resolvingConflict {
+                        // Only explicit review can collapse differing physical
+                        // duplicates. Prefer the row carrying the chosen portable
+                        // value so its restore-preserved device metadata survives.
+                        let encoder = CloudModelCodec.encoder()
+                        let selected = try encoder.encode(self.envelope(decoded, encoder: encoder))
+                        let keeper = try matches.first {
+                            try encoder.encode(self.envelope($0, encoder: encoder)) == selected
+                        } ?? matches[0]
+                        copyRestoredFields(from: decoded, to: keeper)
+                        for duplicate in matches where duplicate !== keeper { context.delete(duplicate) }
                     } else {
                         // Keep every physical row and its restore-preserved local fields.
                         // Updating just one would manufacture a conflict on the next capture.
                         for existing in matches {
-                            for field in fields where !field.preservesLocalValueOnRestore { field.copy(decoded, existing) }
+                            copyRestoredFields(from: decoded, to: existing)
                         }
                     }
                 })
@@ -227,7 +277,8 @@ enum CloudModelCodec {
         let validIdentity: (String) -> Bool
         let validateSchema: () throws -> Void
         let capture: (ModelContext, Set<UUID>, JSONEncoder) throws -> Snapshot
-        let apply: (String, Envelope?, ModelContext, ModelContext, JSONDecoder) throws -> Void
+        let canonicalize: (Envelope, JSONEncoder, JSONDecoder) throws -> Data
+        let apply: (String, Envelope?, ModelContext, ModelContext, JSONDecoder, Bool) throws -> Void
     }
 
     private static let payloadEncoder: JSONEncoder = {
@@ -292,6 +343,11 @@ enum CloudModelCodec {
     private static let meetingEntities = [meetings.erased(), glossary.erased(), metadata.erased(),
         sources.erased(), observations.erased()]
 
+    static func isModelKey(_ key: String) -> Bool {
+        let name = String(key.prefix { $0 != "/" })
+        return (mainEntities + emailEntities + meetingEntities).contains { $0.name == name }
+    }
+
     private static func validate(_ entities: [AnyEntity], in context: ModelContext) throws {
         // Additional transport/shadow entities are intentionally not serialized.
         // Every domain entity we own must still match its complete stored schema.
@@ -320,12 +376,14 @@ enum CloudModelCodec {
                 let snapshot = try entity.capture(context, healthIDs, encoder)
                 result.records.merge(snapshot.records) { _, value in value }
                 result.conflictingKeys.formUnion(snapshot.conflictingKeys)
+                result.versions.merge(snapshot.versions) { first, second in first + second }
             }
         }
         return result
     }
 
-    static func apply(key: String, payload: Data?, app: ModelContext, email: ModelContext, meeting: ModelContext) throws {
+    static func apply(key: String, payload: Data?, app: ModelContext, email: ModelContext, meeting: ModelContext,
+                      resolvingConflict: Bool = false) throws {
         let parts = key.split(separator: "/", omittingEmptySubsequences: false)
         guard parts.count == 2 else { throw CodecError.invalidKey(key) }
         let name = String(parts[0]), identity = String(parts[1])
@@ -341,7 +399,55 @@ enum CloudModelCodec {
         if let envelope {
             guard envelope.entity == name, envelope.identity == identity else { throw CodecError.identityMismatch(key) }
         }
-        try entity.apply(identity, envelope, context, app, decoder)
+        try entity.apply(identity, envelope, context, app, decoder, resolvingConflict)
+    }
+
+    /// Re-decode through the registered typed schema: old absent default fields,
+    /// dictionary ordering, and device-local neutral values are not user edits.
+    /// Dates, ordering of arrays and every actual domain value remain significant.
+    static func semanticDigest(key: String, payload: Data?) throws -> String? {
+        guard let payload else { return nil }
+        let envelope = try decoder().decode(Envelope.self, from: payload)
+        guard key == envelope.entity + "/" + envelope.identity,
+              let entity = (mainEntities + emailEntities + meetingEntities).first(where: { $0.name == envelope.entity }),
+              entity.validIdentity(envelope.identity) else { throw CodecError.identityMismatch(key) }
+        try entity.validateSchema()
+        return CloudFileStore.digest(try entity.canonicalize(envelope, encoder(), decoder()))
+    }
+
+    /// Every field remains present for comparison; no heuristic title/notes-only
+    /// equality is allowed to erase a different domain value.
+    static func reviewVersion(key: String, payload: Data?, origin: CloudSyncConflictVersion.Origin,
+                              source: String, revision: String = "") throws -> CloudSyncConflictVersion {
+        let digest = payload.map(CloudFileStore.digest) ?? "deleted"
+        guard let payload else {
+            return CloudSyncConflictVersion(id: "\(origin.rawValue):\(source):\(revision):\(digest)",
+                origin: origin, source: source, modifiedAt: nil, fields: [], payload: nil)
+        }
+        let envelope = try decoder().decode(Envelope.self, from: payload)
+        guard key == envelope.entity + "/" + envelope.identity else { throw CodecError.identityMismatch(key) }
+        let fields = try envelope.fields.keys.sorted().map { name in
+            let data = envelope.fields[name]!
+            let value = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
+            let readable: String
+            if name.hasSuffix("Data"), let bytes = try? decoder().decode(Data.self, from: data) {
+                if let json = try? JSONSerialization.jsonObject(with: bytes, options: [.fragmentsAllowed]) {
+                    readable = String(decoding: try JSONSerialization.data(withJSONObject: json,
+                        options: [.sortedKeys, .prettyPrinted, .fragmentsAllowed]), as: UTF8.self)
+                } else if let text = String(data: bytes, encoding: .utf8) { readable = text }
+                else { readable = "\(bytes.count) bytes · SHA-256 \(CloudFileStore.digest(bytes))" }
+            } else if let text = value as? String { readable = text }
+            else {
+                readable = String(decoding: try JSONSerialization.data(withJSONObject: value,
+                    options: [.sortedKeys, .prettyPrinted, .fragmentsAllowed]), as: UTF8.self)
+            }
+            return CloudSyncConflictField(id: name, name: name, value: readable)
+        }
+        let date = ["updatedAt", "createdAt", "receivedAt", "occurredAt", "observedAt"].compactMap {
+            envelope.fields[$0].flatMap { try? decoder().decode(Date.self, from: $0) }
+        }.first
+        return CloudSyncConflictVersion(id: "\(origin.rawValue):\(source):\(revision):\(digest)",
+            origin: origin, source: source, modifiedAt: date, fields: fields, payload: payload)
     }
 
     // MARK: Lossless local-only main-store merge
@@ -466,6 +572,7 @@ enum CloudModelCodec {
             .init("sourceRef", \.sourceRef), .init("sourceSender", \.sourceSender),
             .init("sourceMessageID", \.sourceMessageID), .init("sourceThreadID", \.sourceThreadID),
             .init("sourceSenderEmail", \.sourceSenderEmail), .init("sourceAccountNamespace", \.sourceAccountNamespace),
+            .init(omittingDefault: "sourceItemID", \.sourceItemID, defaultValue: ""),
             .init("triageStatus", \.triageStatus), .init("tags", \.tags),
             .init("calendarEventID", \.calendarEventID), .init("calendarEventExternalID", \.calendarEventExternalID),
             .init(deviceLocal: "calendarSourceID", \.calendarSourceID, defaultValue: ""),
@@ -528,8 +635,11 @@ enum CloudModelCodec {
         }, validIdentity: { validStringIdentity($0, count: 3) }, fields: [
             .init("id", \.id), .init("threadID", \.threadID), .init("subject", \.subject), .init("from", \.from),
             .init("snippet", \.snippet), .init("body", \.body), .init("htmlBody", \.htmlBody),
+            .init(deviceLocal: "bodyContentVersion", \.bodyContentVersion, defaultValue: 0, omitFromEnvelope: true),
             .init("receivedAt", \.receivedAt), .init("isRead", \.isRead), .init("providerRawValue", \.providerRawValue),
             .init(deviceLocal: "hasBeenViewedInApp", \.hasBeenViewedInApp, defaultValue: true,
+                  preservesLocalValueOnRestore: true),
+            .init(deviceLocal: "lastBodyFetchAttemptAt", \.lastBodyFetchAttemptAt, defaultValue: Date.distantPast,
                   preservesLocalValueOnRestore: true),
             .init("rawMessageID", \.rawMessageID), .init("providerGlobalMessageID", \.providerGlobalMessageID),
             .init("labelIDs", \.labelIDs), .init("isInInbox", \.isInInbox),

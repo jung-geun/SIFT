@@ -77,6 +77,7 @@ struct CloudModelCodecTests {
         todo.sourceThreadID = "thread"
         todo.sourceSenderEmail = "sender@example.com"
         todo.sourceAccountNamespace = "account"
+        todo.sourceItemID = "durable-action-identity"
         todo.triageStatus = "future-triage-value"
         todo.calendarEventID = "event"
         todo.calendarEventExternalID = "external"
@@ -140,6 +141,7 @@ struct CloudModelCodecTests {
             labelIDs: ["INBOX", "CATEGORY_PERSONAL"], isInInbox: true,
             outlookInferenceClassificationRawValue: "other", providerCategoryNames: ["Red", "Blue"],
             providerFolderID: "folder/id", sourceAccountNamespace: "account:a/b")
+        email.bodyContentVersion = 1
         email.analysisStateRaw = "future-analysis-state"
         email.analysisSummary = "Summary"
         email.analysisDetail = "Detail"
@@ -289,6 +291,74 @@ struct CloudModelCodecTests {
         #expect(task.calendarSourceID == "device-a-calendar")
     }
 
+    @Test("Pre-action-identity Todos restore without losing their source or blocking updates", arguments: [false, true])
+    func legacyTodoSourceItemIdentityCompatibility(updating: Bool) throws {
+        let source = try Stores(), destination = try Stores()
+        let rows = seed(source)
+        let payloads = try source.capture()
+        let key = "Todo/" + rows.todo.id.uuidString.lowercased()
+        let payload = try #require(payloads[key])
+        if updating {
+            try destination.apply(key, payload)
+            try destination.save()
+        }
+        let legacy = try editPayload(payload) { object in
+            var fields = try #require(object["fields"] as? [String: String])
+            fields.removeValue(forKey: "sourceItemID")
+            object["fields"] = fields
+        }
+        try destination.apply(key, legacy)
+        try destination.save()
+        let context = ModelContext(destination.app.container)
+        let saved = try context.fetch(FetchDescriptor<Todo>())
+        #expect(saved.count == 1)
+        let restored = try #require(saved.first)
+        #expect(restored.id == rows.todo.id)
+        #expect(restored.title == rows.todo.title && restored.notes == rows.todo.notes)
+        #expect(restored.sourceRef == rows.todo.sourceRef)
+        #expect(restored.sourceMessageID == rows.todo.sourceMessageID)
+        #expect(restored.sourceItemID.isEmpty)
+    }
+
+    @Test("Legacy-default tasks and fetched mail retain the published 1.0.14 wire field contract", arguments: [0, 1])
+    func legacyDefaultEnvelopeCompatibility(bodyVersion: Int) throws {
+        let stores = try Stores()
+        let rows = seed(stores)
+        rows.todo.sourceItemID = ""
+        rows.email.bodyContentVersion = bodyVersion
+        let payloads = try stores.capture()
+        let publishedFields: [String: Set<String>] = [
+            "Todo": [
+                "id", "title", "notes", "createdAt", "updatedAt", "dueDate", "startDate",
+                "isCompleted", "completedAt", "manualPriority", "computedPriorityScore", "priorityReason",
+                "reminderOffsets", "estimatedDurationMinutes", "source", "sourceRef", "sourceSender",
+                "sourceMessageID", "sourceThreadID", "sourceSenderEmail", "sourceAccountNamespace",
+                "triageStatus", "tags", "calendarEventID", "calendarEventExternalID", "calendarSourceID",
+                "calendarEventOrigin", "calendarSyncedTitle", "memoryNotes", "aiRecommendedTime",
+                "aiNeedsNotification", "aiPersonaFit", "aiDetail", "aiEngine", "aiRequestedProvider",
+                "aiFallbackReason", "isFixedSchedule"
+            ],
+            "EmailMessage": [
+                "id", "threadID", "subject", "from", "snippet", "body", "htmlBody", "receivedAt",
+                "isRead", "providerRawValue", "rawMessageID", "providerGlobalMessageID", "labelIDs",
+                "isInInbox", "outlookInferenceClassificationRawValue", "providerCategoryNames",
+                "providerFolderID", "sourceAccountNamespace", "analysisStateRaw", "analysisSummary",
+                "analysisDetail", "analysisKeyPoints", "analysisActionItems", "analysisError",
+                "analysisFailureReasonRaw", "analyzedBodyFingerprint", "analyzedAt", "analysisVersion",
+                "analysisTodoCandidate", "analysisTodoCandidateFingerprint"
+            ]
+        ]
+        for (entity, expected) in publishedFields {
+            let payload = try #require(payloads.first { $0.key.hasPrefix(entity + "/") }?.value)
+            let object = try #require(JSONSerialization.jsonObject(with: payload) as? [String: Any])
+            let fields = try #require(object["fields"] as? [String: String])
+            #expect(Set(fields.keys) == expected)
+        }
+        let restored = try Stores()
+        try restored.apply(payloads)
+        #expect(try restored.capture() == payloads)
+    }
+
     @Test("Every domain property roundtrips deterministically, including opaque metadata and raw blobs")
     func completeRoundtrip() throws {
         let source = try Stores(), destination = try Stores()
@@ -336,6 +406,84 @@ struct CloudModelCodecTests {
         try destination.apply(source.capture())
         #expect(restored.subject == "Remote subject update")
         #expect(!restored.hasBeenViewedInApp)
+    }
+
+    @Test("Cloud metadata keeps identical local complete-body evidence, but changed bodies invalidate it", arguments: [false, true])
+    func completeBodyProvenanceCompatibility(resolvingConflict: Bool) throws {
+        let source = try Stores(), destination = try Stores()
+        let rows = seed(source)
+        #expect(rows.email.hasCompleteBody)
+        let payloads = try source.capture()
+        let key = try #require(payloads.keys.first { $0.hasPrefix("EmailMessage/") })
+        let payload = try #require(payloads[key])
+        try destination.apply(key, payload)
+        let restored = try #require(destination.email.fetch(FetchDescriptor<EmailMessage>()).first)
+        #expect(!restored.hasCompleteBody)
+        #expect(restored.body == rows.email.body)
+        restored.bodyContentVersion = 1
+        #expect(restored.hasCompleteBody)
+        rows.email.isRead.toggle()
+        let metadataPayload = try #require(source.capture()[key])
+        try CloudModelCodec.apply(key: key, payload: metadataPayload, app: destination.app,
+            email: destination.email, meeting: destination.meeting, resolvingConflict: resolvingConflict)
+        #expect(restored.hasCompleteBody)
+        #expect(restored.isRead == rows.email.isRead)
+        rows.email.body = "Changed cloud body without this device's fetch"
+        let updatedPayload = try #require(source.capture()[key])
+        try CloudModelCodec.apply(key: key, payload: updatedPayload, app: destination.app,
+            email: destination.email, meeting: destination.meeting, resolvingConflict: resolvingConflict)
+        #expect(!restored.hasCompleteBody)
+        #expect(restored.body == rows.email.body)
+        #expect(rows.email.hasCompleteBody)
+    }
+
+    @Test("A device without a provider fetch reuses synced complete-body analysis without publishing a failure")
+    func verifiedSyncedAnalysisSurvivesUnavailableProvider() async throws {
+        let source = try Stores(), destination = try Stores()
+        let rows = seed(source)
+        rows.email.analysisState = .analyzed
+        rows.email.analysisVersion = EmailAnalysisContract.summaryContractVersion
+        rows.email.analysisFailureReasonRaw = nil
+        rows.email.analyzedBodyFingerprint = EmailAnalysisContract.fingerprint(
+            subject: rows.email.subject, body: rows.email.body)
+        rows.email.analysisSummary = "Synced complete-body summary"
+        rows.email.analysisActionItems = ["Review the complete message"]
+        let payloads = try source.capture()
+        let key = try #require(payloads.keys.first { $0.hasPrefix("EmailMessage/") })
+        let payload = try #require(payloads[key])
+        try destination.apply(key, payload)
+        try destination.save()
+        let restored = try #require(destination.email.fetch(FetchDescriptor<EmailMessage>()).first)
+        #expect(!restored.hasCompleteBody)
+        #expect(EmailAnalysisContract.currentActionItems(for: restored) == ["Review the complete message"])
+        #expect(mailboxAnalysisCandidates(from: [restored], lookbackDays: 7,
+            now: restored.receivedAt).isEmpty)
+        let before = try destination.capture()
+        let unavailable = EmailMessageAnalysisService(
+            foundationModelsSummaryProvider: { _, _, _, _ in throw URLError(.notConnectedToInternet) },
+            foundationModelsEnabledProvider: { true }, foundationModelsAvailabilityProvider: { true })
+        try await unavailable.analyze(restored, context: destination.email)
+        #expect(try destination.capture() == before)
+        #expect(restored.analysisState == .analyzed)
+        #expect(restored.analysisSummary == "Synced complete-body summary")
+        #expect(EmailAnalysisContract.todoCandidate(for: restored) == true)
+    }
+
+    @Test("body-attempt rotation remains device-local and survives remote mail updates")
+    func bodyAttemptRotationIsDeviceLocal() throws {
+        let source = try Stores(), destination = try Stores()
+        let rows = seed(source)
+        let before = try source.capture()
+        rows.email.lastBodyFetchAttemptAt = Date(timeIntervalSince1970: 1234)
+        #expect(try source.capture() == before)
+        try destination.apply(before)
+        let restored = try #require(destination.email.fetch(FetchDescriptor<EmailMessage>()).first)
+        #expect(restored.lastBodyFetchAttemptAt == .distantPast)
+        let localAttempt = Date(timeIntervalSince1970: 5678)
+        restored.lastBodyFetchAttemptAt = localAttempt
+        rows.email.subject = "Updated mail metadata"
+        try destination.apply(source.capture())
+        #expect(restored.lastBodyFetchAttemptAt == localAttempt)
     }
 
     @Test("Upsert clears optional values and arrays instead of keeping stale destination values")

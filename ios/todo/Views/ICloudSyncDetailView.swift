@@ -51,6 +51,23 @@ struct ICloudSyncDetailView: View {
                 }
             }
 
+            if enabled || !sync.retainedConflicts.isEmpty {
+                Section {
+                    NavigationLink {
+                        ICloudConflictReviewView(sync: sync)
+                    } label: {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(CloudConflictCopy.text("title", "Sync conflicts", "동기화 충돌"))
+                            if !sync.conflicts.isEmpty {
+                                Text(CloudConflictCopy.text("needsReview", "Compare versions and choose what to keep", "버전을 비교하고 사용할 내용을 선택하세요"))
+                                    .font(.footnote).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    .accessibilityIdentifier("settings.sync.conflicts")
+                }
+            }
+
             if enabled {
                 AccountConnectionSyncSection(sync: sync.connectionSync,
                     canAuthorize: UserCloudSyncPolicy.isEnabled && !changingPolicy,

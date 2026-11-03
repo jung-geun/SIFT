@@ -278,8 +278,8 @@ struct OutlookIMAPServiceTests {
             try await service.authenticate(email: email, backgroundEnabled: false)
 
             // Successful markAsRead & trashMessage
-            try await service.markAsRead(messageID: "15", expectedGlobalMessageID: "target-msg-id")
-            try await service.trashMessage(messageID: "15", expectedGlobalMessageID: "target-msg-id")
+            try await service.markAsRead(messageID: "15", expectedGlobalMessageID: "target-msg-id", expectedAccountNamespace: email)
+            try await service.trashMessage(messageID: "15", expectedGlobalMessageID: "target-msg-id", expectedAccountNamespace: email)
 
             #expect(transport.commands.contains("UID STORE 15 +FLAGS.SILENT (\\Seen)"))
             #expect(transport.commands.contains("UID MOVE 15 \"Deleted Items\""))
@@ -291,7 +291,7 @@ struct OutlookIMAPServiceTests {
             ])
 
             await #expect(throws: OutlookIMAPError.mailboxReset) {
-                try await service.trashMessage(messageID: "20", expectedGlobalMessageID: "expected-msg-id")
+                try await service.trashMessage(messageID: "20", expectedGlobalMessageID: "expected-msg-id", expectedAccountNamespace: email)
             }
         }
     }
@@ -350,10 +350,7 @@ struct OutlookIMAPServiceTests {
                 mutations,
                 now: Date()
             ) { mutation in
-                try await service.trashMessage(
-                    messageID: mutation.providerMessageID,
-                    expectedGlobalMessageID: mutation.expectedGlobalMessageID
-                )
+                try await service.trashMessage(messageID: mutation.providerMessageID, expectedGlobalMessageID: mutation.expectedGlobalMessageID, expectedAccountNamespace: mutation.sourceAccountNamespace)
             }
 
             #expect(flushed == 1)
@@ -362,8 +359,8 @@ struct OutlookIMAPServiceTests {
         }
     }
 
-    @Test("hydrates a partial BODY[TEXT] literal without MIME framing bytes")
-    func fetchMessageContentParsesPartialTextLiteral() async throws {
+    @Test("hydrates a complete selected text literal without MIME framing bytes")
+    func fetchMessageContentParsesCompleteTextLiteral() async throws {
         try await AIProviderTestIsolation.shared.withLock {
             try setupCredentials()
             defer { cleanupCredentials() }
@@ -371,14 +368,20 @@ struct OutlookIMAPServiceTests {
             let transport = ScriptedIMAPTransport()
             setupAuth(transport: transport)
             transport.addRoute(matching: "UID FETCH 42 (BODYSTRUCTURE)", response: [
-                "* 42 FETCH (UID 42 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" (\"CHARSET\" \"UTF-8\") NIL NIL \"7BIT\" 21 1 NIL NIL NIL NIL))",
+                "* 42 FETCH (UID 42 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" (\"CHARSET\" \"UTF-8\") NIL NIL \"7BIT\" \("Agenda: review at 3pm".utf8.count) 1 NIL NIL NIL NIL))",
                 "A0002 OK FETCH"
             ])
-            transport.addRoute(matching: "BODY.PEEK[TEXT]<0.500000>", response: [
-                "* 42 FETCH (UID 42 FLAGS (\\Seen) INTERNALDATE \"1-Jan-2026 12:00:00 +0000\" BODY[HEADER] {77}Subject: Outlook note\r\nFrom: sender@example.com\r\nMessage-ID: <outlook-42>\r\n\r\n",
-                " BODY[TEXT]<0> {21}\r\nAgenda: review at 3pm)",
-                "A0003 OK FETCH"
-            ])
+            let header = "Subject: Outlook note\r\nFrom: sender@example.com\r\nMessage-ID: <outlook-42>\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n"
+            let body = "Agenda: review at 3pm"
+            let mime = "Content-Type: text/plain; charset=utf-8\r\n\r\n"
+            let unrelatedHeader = "Subject: Wrong message\r\nMessage-ID: <outlook-99>\r\n\r\n"
+            let unrelatedBody = "Do not cache this other UID."
+            let wire = "* 99 FETCH (UID 99 BODY[HEADER] {\(unrelatedHeader.utf8.count)}\r\n\(unrelatedHeader) BODY[1.MIME] {\(mime.utf8.count)}\r\n\(mime) BODY[1] {\(unrelatedBody.utf8.count)}\r\n\(unrelatedBody))\r\n"
+                + "* 42 FETCH (UID 42 FLAGS (\\Seen) INTERNALDATE \"1-Jan-2026 12:00:00 +0000\" BODY[HEADER] {\(header.utf8.count)}\r\n\(header) BODY[1.MIME] {\(mime.utf8.count)}\r\n\(mime) BODY[1] {\(body.utf8.count)}\r\n\(body))\r\nA0003 OK FETCH\r\n"
+            var decoder = IMAPResponseDecoder()
+            let framedLines = try decoder.append(Data(wire.utf8))
+            try decoder.finish()
+            transport.addRoute(matching: "BODY.PEEK[1.MIME]", response: framedLines)
 
             let service = OutlookIMAPService(transport: transport)
             try await service.authenticate(email: email, backgroundEnabled: false)
@@ -390,6 +393,63 @@ struct OutlookIMAPServiceTests {
             #expect(content.body == "Agenda: review at 3pm")
             #expect(!content.body.hasPrefix("\r\n"))
             #expect(!content.body.hasSuffix(")"))
+            #expect(content.metadata.subject == "Outlook note")
+            #expect(content.metadata.isRead)
+            #expect(transport.commands.allSatisfy { !$0.contains("<0.") })
+        }
+    }
+    @Test("small Outlook text opens without fetching large binary or text attachments")
+    func readableBodyExcludesLargeAttachments() async throws {
+        try await AIProviderTestIsolation.shared.withLock {
+            try setupCredentials()
+            defer { cleanupCredentials() }
+            let transport = ScriptedIMAPTransport()
+            setupAuth(transport: transport)
+            let body = "Please review the small agenda. The earlier upload request is withdrawn."
+            let mime = "Content-Type: text/plain; charset=utf-8\r\n\r\n"
+            let header = "Subject: Small readable body\r\nMessage-ID: <outlook-43>\r\n\r\n"
+            transport.addRoute(matching: "UID FETCH 43 (BODYSTRUCTURE)", response: [
+                "* 43 FETCH (UID 43 BODYSTRUCTURE ((\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" \(body.utf8.count) 1 NIL NIL) (\"APPLICATION\" \"PDF\" (\"NAME\" \"large.pdf\") NIL NIL \"BASE64\" 24000000 NIL (\"ATTACHMENT\" (\"FILENAME\" \"large.pdf\"))) (\"TEXT\" \"PLAIN\" (\"NAME\" \"large.txt\") NIL NIL \"7BIT\" 9000000 1 NIL (\"ATTACHMENT\" (\"FILENAME\" \"large.txt\"))) \"MIXED\"))",
+                "A0002 OK FETCH"
+            ])
+            let wire = "* 43 FETCH (UID 43 BODY[HEADER] {\(header.utf8.count)}\r\n\(header) BODY[1.MIME] {\(mime.utf8.count)}\r\n\(mime) BODY[1] {\(body.utf8.count)}\r\n\(body))\r\nA0003 OK FETCH\r\n"
+            var decoder = IMAPResponseDecoder()
+            let frames = try decoder.append(Data(wire.utf8))
+            try decoder.finish()
+            transport.addRoute(matching: "BODY.PEEK[1.MIME]", response: frames)
+            let service = OutlookIMAPService(transport: transport)
+            try await service.authenticate(email: email, backgroundEnabled: false)
+            let content = try await service.fetchMessageContent(messageID: "43")
+            #expect(content.body == body)
+            #expect(content.metadata.providerGlobalMessageID == "outlook-43")
+            #expect(transport.commands.allSatisfy {
+                !$0.contains("BODY.PEEK[TEXT]") && !$0.contains("BODY.PEEK[2") && !$0.contains("BODY.PEEK[3")
+            })
+        }
+    }
+
+}
+
+@MainActor
+extension OutlookIMAPServiceTests {
+    @Test("disposed command session reconnects with the saved credential before the next inbox request")
+    func disposedSessionReadinessRecovery() async throws {
+        try await AIProviderTestIsolation.shared.withLock {
+            try setupCredentials()
+            defer { cleanupCredentials() }
+            let transport = ScriptedIMAPTransport()
+            setupAuth(transport: transport)
+            let service = OutlookIMAPService(transport: transport)
+            try await service.ensureAuthenticated(email: email, backgroundEnabled: false)
+            transport.addRoute(matching: "UID SEARCH ALL", error: OutlookIMAPError.transport("Synthetic failure"), once: true)
+            await #expect(throws: OutlookIMAPError.transport("Synthetic failure")) {
+                _ = try await service.fetchInboxPage(after: nil)
+            }
+            #expect(!(await service.isAuthenticated))
+            #expect(await service.authenticatedAccount == nil)
+            try await service.ensureAuthenticated(email: email, backgroundEnabled: false)
+            #expect(try await service.fetchInboxPage(after: nil).messages.isEmpty)
+            #expect(transport.commands.filter { $0 == "CONNECT_PREAUTH" }.count == 2)
         }
     }
 }

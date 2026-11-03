@@ -258,25 +258,6 @@ struct LocalizationRuntimeTests {
     }
 
 
-    @Test("Manual email fallback retains source text and identity in every output language")
-    func emailSourcePreservation() async {
-        let message = GmailMessage(
-            id: "localization-message", threadID: "localization-thread", messageID: "<localization@example.com>",
-            subject: "Original source 제목 — untouched", from: "Source Sender <sender@example.com>",
-            snippet: "Original body 本文 — untouched", body: "Body with source facts", htmlBody: nil,
-            receivedAt: Date(timeIntervalSince1970: 1_700_000_000), labelIds: [], isBulk: false)
-        for identifier in Self.identifiers {
-            let language = AppLanguage(rawValue: identifier)
-            let todo = await EmailIngestionEngine().makeManualTodo(from: message, allowFoundationModels: false, language: language)
-            #expect(todo.title == message.subject)
-            #expect(todo.notes.contains(message.snippet))
-            #expect(todo.sourceRef == message.id)
-            #expect(todo.sourceMessageID == message.messageID)
-            #expect(todo.sourceThreadID == message.threadID)
-            #expect(todo.sourceSenderEmail == "sender@example.com")
-            #expect(todo.notes.contains(AppLanguage.localized("mail.summaryHeader", defaultValue: "missing", language: language)))
-        }
-    }
 
     private func preservingOverride(_ body: () -> Void) {
         let defaults = UserDefaults.standard

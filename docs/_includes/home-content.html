@@ -1,0 +1,185 @@
+{% include site-context.html %}
+{% include site-header.html %}
+
+<main id="content">
+  <section class="hero" aria-labelledby="hero-title">
+    <div class="container hero-grid">
+      <div class="hero-copy">
+        <h1 id="hero-title">{{ l10n.home.hero_title | escape }}<br><span>{{ l10n.home.hero_highlight | escape }}</span></h1>
+        <p class="hero-description">{{ l10n.home.hero_description | escape }}<br>{{ l10n.home.hero_focus | escape }}</p>
+        <div class="hero-actions">
+          <a class="store-link" href="{{ site.app_store_url }}">
+            <img src="{{ '/assets/images/app-store-' | append: locale_code | append: '.svg' | relative_url }}" width="{{ current_language.badge_width }}" height="{{ current_language.badge_height }}" alt="{{ l10n.home.store_download | escape }}">
+          </a>
+          <a class="text-link" href="#screens">{{ l10n.home.screens_link | escape }} <span aria-hidden="true">→</span></a>
+        </div>
+        <p class="download-meta">{{ l10n.home.device_list | escape }}<br>{{ l10n.home.start_without_accounts | escape }}</p>
+      </div>
+      <div class="hero-visual" aria-label="{{ l10n.home.hero_visual_label | escape }}">
+        <figure class="hero-device hero-device-secondary device">
+          <img src="{{ '/assets/images/app-1-0-11-calendar.webp' | relative_url }}" width="640" height="1391" alt="{{ l10n.home.calendar_hero_alt | escape }}" decoding="async">
+        </figure>
+        <figure class="hero-device hero-device-primary device">
+          <img src="{{ '/assets/images/app-1-0-11-tasks.webp' | relative_url }}" width="640" height="1391" alt="{{ l10n.home.tasks_hero_alt | escape }}" fetchpriority="high" decoding="async">
+        </figure>
+      </div>
+    </div>
+  </section>
+
+  <section class="section screenshots-section" id="screens" aria-labelledby="screens-title">
+    <div class="container">
+      <div class="section-heading reveal">
+        <h2 id="screens-title">{{ l10n.home.screens_title | escape }}<br>{{ l10n.home.screens_highlight | escape }}</h2>
+        <p>{{ l10n.home.screens_intro | escape }}</p>
+      </div>
+      <div class="screen-tour reveal">
+        <div class="tour-copy">
+          <div class="screen-tabs" data-screen-tabs aria-label="{{ l10n.home.screens_selector | escape }}">
+            <a class="screen-tab" id="tab-tasks" href="#screen-tasks" data-screen-target="screen-tasks">
+              <span class="tab-name">{{ l10n.home.tasks_tab | escape }} <span class="tab-arrow" aria-hidden="true">↗</span></span>
+              <span class="tab-detail">{{ l10n.home.tasks_detail | escape }}</span>
+            </a>
+            <a class="screen-tab" id="tab-add" href="#screen-add" data-screen-target="screen-add">
+              <span class="tab-name">{{ l10n.home.add_tab | escape }} <span class="tab-arrow" aria-hidden="true">↗</span></span>
+              <span class="tab-detail">{{ l10n.home.add_detail | escape }}</span>
+            </a>
+            <a class="screen-tab" id="tab-calendar" href="#screen-calendar" data-screen-target="screen-calendar">
+              <span class="tab-name">{{ l10n.home.calendar_tab | escape }} <span class="tab-arrow" aria-hidden="true">↗</span></span>
+              <span class="tab-detail">{{ l10n.home.calendar_detail | escape }}</span>
+            </a>
+            <a class="screen-tab" id="tab-settings" href="#screen-settings" data-screen-target="screen-settings">
+              <span class="tab-name">{{ l10n.home.settings_tab | escape }} <span class="tab-arrow" aria-hidden="true">↗</span></span>
+              <span class="tab-detail">{{ l10n.home.settings_detail | escape }}</span>
+            </a>
+          </div>
+          <p class="screens-source">{{ l10n.home.screens_source | escape }}<br>{{ l10n.home.screens_disclaimer | escape }}<br>{{ l10n.home.screens_expand | escape }}</p>
+        </div>
+        <div class="tour-viewer">
+          <div class="screen-panels">
+            <article class="screen-panel" id="screen-tasks" data-screen-label="{{ l10n.home.tasks_tab | escape }}">
+              <figure>
+                <a class="device-link" href="{{ '/assets/images/app-1-0-11-tasks.webp' | relative_url }}" target="_blank" rel="noopener" aria-label="{{ l10n.home.tasks_expand | escape }}">
+                  <span class="device tour-device"><img src="{{ '/assets/images/app-1-0-11-tasks.webp' | relative_url }}" width="640" height="1391" alt="{{ l10n.home.tasks_alt | escape }}" loading="lazy" decoding="async"></span>
+                </a>
+                <figcaption><h3>{{ l10n.home.tasks_caption | escape }}</h3><p>{{ l10n.home.tasks_description | escape }}</p></figcaption>
+              </figure>
+            </article>
+            <article class="screen-panel" id="screen-add" data-screen-label="{{ l10n.home.add_tab | escape }}">
+              <figure>
+                <a class="device-link" href="{{ '/assets/images/app-1-0-11-capture.webp' | relative_url }}" target="_blank" rel="noopener" aria-label="{{ l10n.home.add_expand | escape }}">
+                  <span class="device tour-device"><img src="{{ '/assets/images/app-1-0-11-capture.webp' | relative_url }}" width="640" height="1391" alt="{{ l10n.home.add_alt | escape }}" loading="lazy" decoding="async"></span>
+                </a>
+                <figcaption><h3>{{ l10n.home.add_caption | escape }}</h3><p>{{ l10n.home.add_description | escape }}</p></figcaption>
+              </figure>
+            </article>
+            <article class="screen-panel" id="screen-calendar" data-screen-label="{{ l10n.home.calendar_tab | escape }}">
+              <figure>
+                <a class="device-link" href="{{ '/assets/images/app-1-0-11-calendar.webp' | relative_url }}" target="_blank" rel="noopener" aria-label="{{ l10n.home.calendar_expand | escape }}">
+                  <span class="device tour-device"><img src="{{ '/assets/images/app-1-0-11-calendar.webp' | relative_url }}" width="640" height="1391" alt="{{ l10n.home.calendar_alt | escape }}" loading="lazy" decoding="async"></span>
+                </a>
+                <figcaption><h3>{{ l10n.home.calendar_caption | escape }}</h3><p>{{ l10n.home.calendar_description | escape }}</p></figcaption>
+              </figure>
+            </article>
+            <article class="screen-panel" id="screen-settings" data-screen-label="{{ l10n.home.settings_tab | escape }}">
+              <figure>
+                <a class="device-link" href="{{ '/assets/images/app-1-0-11-settings.webp' | relative_url }}" target="_blank" rel="noopener" aria-label="{{ l10n.home.settings_expand | escape }}">
+                  <span class="device tour-device"><img src="{{ '/assets/images/app-1-0-11-settings.webp' | relative_url }}" width="640" height="1391" alt="{{ l10n.home.settings_alt | escape }}" loading="lazy" decoding="async"></span>
+                </a>
+                <figcaption><h3>{{ l10n.home.settings_caption | escape }}</h3><p>{{ l10n.home.settings_description | escape }}</p></figcaption>
+              </figure>
+            </article>
+          </div>
+          <div class="tour-controls">
+            <button class="round-button" type="button" data-screen-previous aria-label="{{ l10n.home.previous_screen | escape }}" hidden>←</button>
+            <span class="screen-count" data-screen-count aria-hidden="true">1 / 4</span>
+            <button class="round-button" type="button" data-screen-next aria-label="{{ l10n.home.next_screen | escape }}" hidden>→</button>
+          </div>
+          <p class="sr-only" data-screen-status role="status" aria-live="polite" aria-atomic="true"></p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section how-to-section" id="how-to" aria-labelledby="how-to-title">
+    <div class="container">
+      <div class="section-heading reveal">
+        <h2 id="how-to-title">{{ l10n.home.flow_title | escape }}<br>{{ l10n.home.flow_highlight | escape }}</h2>
+        <p>{{ l10n.home.flow_intro | escape }}</p>
+      </div>
+      <ol class="flow-diagram" aria-label="{{ l10n.home.flow_label | escape }}">
+        <li class="flow-node">
+          <div class="flow-icon"><span class="icon icon-mail" aria-hidden="true"></span></div>
+          <span class="step-number">1</span>
+          <h3>{{ l10n.home.flow_check | escape }}</h3>
+          <p>{{ l10n.home.flow_connected | escape }}<br>{{ l10n.home.flow_sender | escape }}</p>
+          <span class="flow-connector" aria-hidden="true"><span>→</span></span>
+        </li>
+        <li class="flow-node">
+          <div class="flow-icon"><span class="icon icon-edit" aria-hidden="true"></span></div>
+          <span class="step-number">2</span>
+          <h3>{{ l10n.home.flow_review | escape }}</h3>
+          <p>{{ l10n.home.flow_save_action | escape }}<br>{{ l10n.home.flow_edit | escape }}</p>
+          <span class="flow-connector" aria-hidden="true"><span>→</span></span>
+        </li>
+        <li class="flow-node">
+          <div class="flow-icon"><span class="icon icon-check" aria-hidden="true"></span></div>
+          <span class="step-number">3</span>
+          <h3>{{ l10n.home.flow_execute | escape }}</h3>
+          <p>{{ l10n.home.flow_active | escape }}<br>{{ l10n.home.flow_deadline | escape }}</p>
+        </li>
+      </ol>
+      <div class="flow-bottom">
+        <p class="flow-note">{{ l10n.home.flow_no_deadline | escape }}</p>
+        <div class="flow-actions">
+          <button class="text-button" type="button" data-flow-replay hidden>{{ l10n.home.flow_replay | escape }} <span aria-hidden="true">↻</span></button>
+          <button class="text-button" type="button" data-motion-toggle data-play-label="{{ l10n.common.motion_play | escape }}" data-pause-label="{{ l10n.home.motion_pause | escape }}" aria-pressed="false" hidden>{{ l10n.home.motion_pause | escape }}</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section connections-section" aria-labelledby="connections-title">
+    <div class="container connections-grid">
+      <div class="connection-visual reveal" aria-label="{{ l10n.home.connections_label | escape }}">
+        <div class="connection-node"><span class="icon icon-device" aria-hidden="true"></span><span>{{ l10n.home.device_storage | escape }}</span></div>
+        <div class="connection-choice"><span>{{ l10n.home.my_choice | escape }}</span><span aria-hidden="true">→</span></div>
+        <div class="connection-node connection-cloud"><span class="icon icon-cloud" aria-hidden="true"></span><span>{{ l10n.home.cloud_sync | escape }}</span></div>
+      </div>
+      <div class="connections-copy reveal">
+        <h2 id="connections-title">{{ l10n.home.connections_title | escape }}<br>{{ l10n.home.connections_highlight | escape }}</h2>
+        <p>{{ l10n.home.connections_description | escape }}</p>
+        <p class="privacy-note">{{ l10n.home.ai_notice | escape }}</p>
+        <a class="text-link" href="{{ locale_prefix | append: '/privacy-policy.html' | relative_url }}">{{ l10n.home.privacy_link | escape }} <span aria-hidden="true">↗</span></a>
+      </div>
+    </div>
+  </section>
+
+  <section class="section resources-section" aria-labelledby="resources-title">
+    <div class="container">
+      <div class="section-heading">
+        <h2 id="resources-title">{{ l10n.home.resources_title | escape }}<br>{{ l10n.home.resources_highlight | escape }}</h2>
+        <p>{{ l10n.home.resources_intro | escape }}</p>
+      </div>
+      <div class="resource-links">
+        <a href="{{ locale_prefix | append: '/changes.html' | relative_url }}#version-1-0-11-10"><strong>{{ l10n.home.release_title | escape }} <span aria-hidden="true">↗</span></strong><span>{{ l10n.home.release_description | escape }}</span></a>
+        <a href="{{ locale_prefix | append: '/workflows.html' | relative_url }}"><strong>{{ l10n.home.guide_title | escape }} <span aria-hidden="true">↗</span></strong><span>{{ l10n.home.guide_description | escape }}</span></a>
+        <a href="{{ locale_prefix | append: '/email-setup.html' | relative_url }}"><strong>{{ l10n.home.email_title | escape }} <span aria-hidden="true">↗</span></strong><span>{{ l10n.home.email_description | escape }}</span></a>
+      </div>
+      <p class="resources-note"><a class="text-link" href="{{ locale_prefix | append: '/changes.html' | relative_url }}">{{ l10n.home.changes_link | escape }} <span aria-hidden="true">↗</span></a></p>
+    </div>
+  </section>
+
+  <section class="download-section" id="download" aria-labelledby="download-title">
+    <div class="container download-inner reveal">
+      <img class="download-icon" src="{{ '/assets/images/app-icon.webp' | relative_url }}" width="96" height="96" alt="{{ l10n.home.app_icon_alt | escape }}" loading="lazy" decoding="async">
+      <h2 id="download-title">{{ l10n.home.download_title | escape }}<br>{{ l10n.home.download_highlight | escape }}</h2>
+      <p>{{ l10n.home.download_description | escape }}</p>
+      <a class="store-link" href="{{ site.app_store_url }}">
+        {{ l10n.home.store_download | escape }} <span aria-hidden="true">↗</span>
+      </a>
+      <p class="download-meta">{{ l10n.home.download_requirements | escape }}<br>{{ l10n.home.download_note | escape }}</p>
+    </div>
+  </section>
+</main>
+
+{% include site-footer.html %}

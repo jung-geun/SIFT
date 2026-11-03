@@ -12,6 +12,11 @@ final class ScriptedIMAPTransport: IMAPPreAuthCapabilityProbing, @unchecked Send
     private var _commands: [String] = []
     private var routes: [Route] = []
     private var defaultResponses: [[String]] = []
+    private var connected = false
+
+    var isConnected: Bool {
+        get async { lock.withLock { connected } }
+    }
 
     var commands: [String] {
         lock.withLock { _commands }
@@ -67,8 +72,10 @@ final class ScriptedIMAPTransport: IMAPPreAuthCapabilityProbing, @unchecked Send
         await Task.yield()
 
         if let matchedOutcome {
+            lock.withLock { connected = true }
             return try matchedOutcome.get()
         }
+        lock.withLock { connected = true }
         return fallbackResponse ?? ["* OK [CAPABILITY IMAP4rev1 MOVE] Server Ready"]
     }
 
@@ -119,14 +126,20 @@ final class ScriptedIMAPTransport: IMAPPreAuthCapabilityProbing, @unchecked Send
 
         await Task.yield()
 
-        if let matchedOutcome {
-            return try matchedOutcome.get()
+        do {
+            if let matchedOutcome {
+                return try matchedOutcome.get()
+            }
+            return fallbackResponse ?? ["A0000 OK"]
+        } catch {
+            lock.withLock { connected = false }
+            throw error
         }
-        return fallbackResponse ?? ["A0000 OK"]
     }
 
     func close() async {
         lock.withLock {
+            connected = false
             _commands.append("CLOSE")
         }
         await Task.yield()

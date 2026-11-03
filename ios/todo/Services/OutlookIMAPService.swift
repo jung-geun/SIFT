@@ -74,9 +74,17 @@ actor OutlookIMAPService: MailboxPagingProvider {
         self.transport = transport
     }
 
-    var authenticatedAccount: String? { account }
+    var authenticatedAccount: String? {
+        get async {
+            let generation = generationToken
+            guard await transport.isConnected, generation == generationToken else { return nil }
+            return account
+        }
+    }
     var sessionGeneration: Int { generationToken }
-    var isAuthenticated: Bool { account != nil }
+    var isAuthenticated: Bool {
+        get async { await authenticatedAccount != nil }
+    }
 
     // MARK: - Command serialization
 
@@ -102,6 +110,16 @@ actor OutlookIMAPService: MailboxPagingProvider {
         await acquireCommandTurn()
         defer { releaseCommandTurn() }
         try Task.checkCancellation()
+        try await performAuthenticate(email: email, backgroundEnabled: backgroundEnabled)
+    }
+
+    func ensureAuthenticated(email: String, backgroundEnabled: Bool) async throws {
+        await acquireCommandTurn()
+        defer { releaseCommandTurn() }
+        try Task.checkCancellation()
+        let connected = await transport.isConnected
+        try Task.checkCancellation()
+        if account == OutlookIMAPCredentialStore.canonicalAccount(email) && connected { return }
         try await performAuthenticate(email: email, backgroundEnabled: backgroundEnabled)
     }
 
@@ -172,11 +190,16 @@ actor OutlookIMAPService: MailboxPagingProvider {
 
     func markAsRead(
         messageID: String,
-        expectedGlobalMessageID: String?
+        expectedGlobalMessageID: String?,
+        expectedAccountNamespace: String
     ) async throws {
         await acquireCommandTurn()
         defer { releaseCommandTurn() }
         try Task.checkCancellation()
+        guard let expected = OutlookIMAPCredentialStore.canonicalAccount(expectedAccountNamespace) else {
+            throw OutlookIMAPError.messageIdentityUnavailable
+        }
+        guard account == expected else { throw OutlookIMAPError.authenticationFailed }
         try await performMarkAsRead(
             messageID: messageID,
             expectedGlobalMessageID: expectedGlobalMessageID
@@ -185,11 +208,16 @@ actor OutlookIMAPService: MailboxPagingProvider {
 
     func trashMessage(
         messageID: String,
-        expectedGlobalMessageID: String?
+        expectedGlobalMessageID: String?,
+        expectedAccountNamespace: String
     ) async throws {
         await acquireCommandTurn()
         defer { releaseCommandTurn() }
         try Task.checkCancellation()
+        guard let expected = OutlookIMAPCredentialStore.canonicalAccount(expectedAccountNamespace) else {
+            throw OutlookIMAPError.messageIdentityUnavailable
+        }
+        guard account == expected else { throw OutlookIMAPError.authenticationFailed }
         try await performTrashMessage(
             messageID: messageID,
             expectedGlobalMessageID: expectedGlobalMessageID
@@ -577,25 +605,15 @@ actor OutlookIMAPService: MailboxPagingProvider {
         guard account != nil else { throw OutlookIMAPError.missingCredential }
         let uid = try Self.uid(from: messageID)
         let structure = try await transport.execute("UID FETCH \(uid) (BODYSTRUCTURE)")
-        guard Self.supportsTextBody(structure) else { throw OutlookIMAPError.invalidResponse }
-
-        let lines = try await transport.execute(
-            "UID FETCH \(uid) (UID FLAGS INTERNALDATE BODY.PEEK[HEADER] BODY.PEEK[TEXT]<0.500000>)"
+        let parts = try IMAPTextBody.select(from: structure, uid: uid)
+        let responseLines = try await transport.execute(
+            "UID FETCH \(uid) (UID FLAGS INTERNALDATE BODY.PEEK[HEADER] \(IMAPTextBody.fetchAttributes(parts)))"
         )
-        let bodyLine = lines.first(where: { $0.uppercased().contains("BODY[TEXT") })
-        guard let body = bodyLine.flatMap({ Self.captureLiteral(in: $0) }) else {
-            throw OutlookIMAPError.invalidResponse
-        }
-        let header = lines
-            .first(where: { $0.uppercased().contains("BODY[HEADER]") })
-            .flatMap { Self.captureLiteral(in: $0) }
-        let rawMessage: String
-        if let header {
-            let separator = header.hasSuffix("\r\n\r\n") || header.hasSuffix("\n\n") ? "" : "\r\n\r\n"
-            rawMessage = header + separator + body
-        } else {
-            rawMessage = body
-        }
+        let lines = IMAPTextBody.ownedResponses(responseLines, uid: uid)
+        let decoded = try IMAPTextBody.decode(parts, from: lines)
+        let header = lines.compactMap {
+            IMAPWireSyntax.literal($0, attribute: "BODY[HEADER]")?.text
+        }.first
 
         let records = Self.parseRecords(lines)
         guard let fallbackRecord = records.first(where: { $0.uid == uid }) else {
@@ -614,9 +632,8 @@ actor OutlookIMAPService: MailboxPagingProvider {
             receivedAt: headerFields["date"].flatMap(Self.parseDate)
                 ?? fallbackRecord.receivedAt,
             isRead: fallbackRecord.isRead,
-            body: rawMessage
+            body: decoded.text
         )
-        let decoded = MIMETextDecoder.decode(rawMessage)
         let metadata = metadata(record, snippet: String(decoded.text.prefix(200)))
         return MailboxMessageContent(metadata: metadata, body: decoded.text, htmlBody: decoded.html)
     }
@@ -669,12 +686,6 @@ actor OutlookIMAPService: MailboxPagingProvider {
         )
     }
 
-    private nonisolated static func supportsTextBody(_ lines: [String]) -> Bool {
-        lines.contains { line in
-            let upper = line.uppercased()
-            return upper.contains("TEXT") && (upper.contains("PLAIN") || upper.contains("HTML"))
-        }
-    }
 
     private nonisolated static func parseUIDs(_ lines: [String]) -> [UInt32] {
         IMAPWireSyntax.searchUIDs(lines)

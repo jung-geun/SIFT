@@ -31,6 +31,14 @@ jobs:
           ref: main
           fetch-depth: 0
           persist-credentials: false
+      - name: Validate public translations before creating a release
+        env:
+          REQUESTED_TAG: ${{ inputs.tag || github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/release_notes.py validate --tag "$REQUESTED_TAG"
+          python3 scripts/validate_site_locales.py --source docs --release-note "release-notes/$REQUESTED_TAG.json"
       - name: Validate notes and publish one release
         id: publish
         env:

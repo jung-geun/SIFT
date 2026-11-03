@@ -1,0 +1,28 @@
+{
+  "languages": [
+    {"code": "ko", "name": "한국어", "prefix": "", "badge_locale": "ko-kr", "badge_width": 130, "badge_height": 40, "badge_source": "https://toolbox.marketingtools.apple.com/api/badges/download-on-the-app-store/black/ko-kr?size=250x83"},
+    {"code": "en", "name": "English", "prefix": "/en", "badge_locale": "en-us", "badge_width": 120, "badge_height": 40, "badge_source": "https://toolbox.marketingtools.apple.com/api/badges/download-on-the-app-store/black/en-us?size=250x83"},
+    {"code": "es", "name": "Español", "prefix": "/es", "badge_locale": "es-es", "badge_width": 120, "badge_height": 40, "badge_source": "https://toolbox.marketingtools.apple.com/api/badges/download-on-the-app-store/black/es-es?size=250x83"},
+    {"code": "ja", "name": "日本語", "prefix": "/ja", "badge_locale": "ja-jp", "badge_width": 109, "badge_height": 40, "badge_source": "https://toolbox.marketingtools.apple.com/api/badges/download-on-the-app-store/black/ja-jp?size=250x83"},
+    {"code": "zh-Hans", "name": "简体中文", "prefix": "/zh-Hans", "badge_locale": "zh-cn", "badge_width": 109, "badge_height": 40, "badge_source": "https://toolbox.marketingtools.apple.com/api/badges/download-on-the-app-store/black/zh-cn?size=250x83"},
+    {"code": "fr", "name": "Français", "prefix": "/fr", "badge_locale": "fr-fr", "badge_width": 127, "badge_height": 40, "badge_source": "https://toolbox.marketingtools.apple.com/api/badges/download-on-the-app-store/black/fr-fr?size=250x83"},
+    {"code": "it", "name": "Italiano", "prefix": "/it", "badge_locale": "it-it", "badge_width": 120, "badge_height": 40, "badge_source": "https://toolbox.marketingtools.apple.com/api/badges/download-on-the-app-store/black/it-it?size=250x83"},
+    {"code": "de", "name": "Deutsch", "prefix": "/de", "badge_locale": "de-de", "badge_width": 120, "badge_height": 40, "badge_source": "https://toolbox.marketingtools.apple.com/api/badges/download-on-the-app-store/black/de-de?size=250x83"}
+  ],
+  "pages": {
+    "home": "/",
+    "privacy": "/privacy-policy.html",
+    "terms": "/terms-of-service.html",
+    "workflows": "/workflows.html",
+    "email": "/email-setup.html",
+    "changes": "/changes.html",
+    "outlook": "/outlook-imap-setup.html"
+  },
+  "navigation": [
+    {"key": "workflows", "label": "guide"},
+    {"key": "email", "label": "email"},
+    {"key": "changes", "label": "changes"},
+    {"key": "privacy", "label": "privacy"},
+    {"key": "terms", "label": "terms"}
+  ]
+}

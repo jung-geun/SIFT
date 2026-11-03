@@ -1,0 +1,6 @@
+{%- assign locale_code = page.locale | default: 'ko' -%}
+{%- assign current_language = site.data.site_i18n.languages | where: 'code', locale_code | first -%}
+{%- assign locale_prefix = current_language.prefix -%}
+{%- assign l10n = site.data.locales[locale_code] -%}
+{%- assign current_page_key = page.page_key | default: 'home' -%}
+{%- assign locale_home = locale_prefix | append: '/' | relative_url -%}

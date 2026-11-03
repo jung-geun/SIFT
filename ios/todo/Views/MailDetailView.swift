@@ -68,15 +68,35 @@ struct MailDetailSelectionView: View {
 
 // MARK: - MailDetailView
 
+private enum MailTaskRegistration: Identifiable {
+    case manual
+    case action(String)
+
+    var id: String {
+        switch self {
+        case .manual: "manual"
+        case .action(let text): "action:\(text)"
+        }
+    }
+
+    var selectedAction: String? {
+        switch self {
+        case .manual: nil
+        case .action(let text): text
+        }
+    }
+}
+
 struct MailDetailView: View {
     let email: EmailMessage
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @ObservedObject private var regionalAvailability = OpenAIRegionalAvailability.shared
     @ObservedObject private var openAIConnection = OpenAIConnection.shared
     @AppStorage(SettingsStore.betaOpenAIEnabledKey) private var openAIEnabled = false
     @State private var webViewHeight: CGFloat = 300
-    @State private var showRegisterSheet = false
+    @State private var taskRegistration: MailTaskRegistration?
     @State private var isLoadingBody = false
     @State private var isSyncingRead = false
     @State private var isTrashing = false
@@ -139,36 +159,29 @@ struct MailDetailView: View {
                         }
                     }
                     .padding(AppTheme.Spacing.section)
-                    if let candidate = email.analysisTodoCandidate {
-                        Label(
-                            AppLanguage.localized(
-                                candidate ? "mail.analysis.layaCandidate" : "mail.analysis.layaNotCandidate",
-                                defaultValue: candidate
-                                    ? "할 일 후보 · Laya"
-                                    : "Laya: 할 일 후보 아님 · 직접 저장 가능",
-                                language: .current,
-                                comment: "Laya email-to-do suggestion; user may override."
-                            ),
-                            systemImage: candidate ? "checkmark.circle" : "info.circle"
-                        )
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(candidate ? AppTheme.success : Color.secondary)
-                        .padding(.horizontal, AppTheme.Spacing.section)
-                        .padding(.bottom, 12)
-                        .accessibilityIdentifier("mail.detail.layaDecision")
-                    }
 
                     Divider()
 
-                    if email.analysisState == .analyzed,
-                       !email.analysisSummary.isEmpty {
+                    if email.analysisState == .analyzed {
+                        let actionItems = EmailAnalysisContract.currentActionItems(for: email)
                         VStack(alignment: .leading, spacing: AppTheme.Spacing.item) {
-                            HStack {
-                                Label(analysisCardTitle, systemImage: "sparkles")
-                                    .font(.headline)
-                                    .foregroundStyle(.primary)
-                                Spacer()
-                                reanalyzeButton
+                            if dynamicTypeSize.isAccessibilitySize {
+                                VStack(alignment: .leading, spacing: AppTheme.Spacing.item) {
+                                    Text(analysisCardTitle)
+                                        .font(.headline)
+                                        .foregroundStyle(.primary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                    reanalyzeButton
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            } else {
+                                HStack {
+                                    Label(analysisCardTitle, systemImage: "sparkles")
+                                        .font(.headline)
+                                        .foregroundStyle(.primary)
+                                    Spacer()
+                                    reanalyzeButton
+                                }
                             }
                             Text(email.analysisSummary)
                                 .font(.body)
@@ -192,13 +205,22 @@ struct MailDetailView: View {
                                         .foregroundStyle(.secondary)
                                 }
                             }
-                            if !email.analysisActionItems.isEmpty {
+                            if !actionItems.isEmpty {
                                 Divider()
                                 Text("확인/처리 필요")
                                     .font(.subheadline.weight(.semibold))
-                                ForEach(email.analysisActionItems, id: \.self) { item in
-                                    Label(item, systemImage: "square")
-                                        .font(.subheadline)
+                                ForEach(actionItems, id: \.self) { item in
+                                    Button {
+                                        taskRegistration = .action(item)
+                                    } label: {
+                                        Label(item, systemImage: "plus.circle")
+                                            .font(.subheadline)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                            .padding(.vertical, AppTheme.Spacing.compact)
+                                            .contentShape(Rectangle())
+                                    }
+                                    .buttonStyle(.plain)
+                                    .accessibilityIdentifier("mail.detail.action.\(item)")
                                 }
                             }
                         }
@@ -208,7 +230,7 @@ struct MailDetailView: View {
                             in: RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous)
                         )
                         .padding(.horizontal, AppTheme.Spacing.section)
-                        .padding(.top, AppTheme.Spacing.section)
+                        .padding(.vertical, AppTheme.Spacing.section)
                     } else if email.analysisState == .failed {
                         VStack(alignment: .leading, spacing: AppTheme.Spacing.item) {
                             Label("AI 정리 실패", systemImage: "exclamationmark.triangle")
@@ -227,7 +249,7 @@ struct MailDetailView: View {
                             in: RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous)
                         )
                         .padding(.horizontal, AppTheme.Spacing.section)
-                        .padding(.top, AppTheme.Spacing.section)
+                        .padding(.vertical, AppTheme.Spacing.section)
                     } else if isReanalyzing || email.analysisState == .analyzing {
                         HStack(spacing: 8) {
                             ProgressView().controlSize(.small)
@@ -242,7 +264,7 @@ struct MailDetailView: View {
                             in: RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous)
                         )
                         .padding(.horizontal, AppTheme.Spacing.section)
-                        .padding(.top, AppTheme.Spacing.section)
+                        .padding(.vertical, AppTheme.Spacing.section)
                     } else {
                         reanalyzeButton
                             .padding(AppTheme.Spacing.section)
@@ -279,7 +301,8 @@ struct MailDetailView: View {
                             Text(bodyText)
                                 .font(.body)
                                 .textSelection(.enabled)
-                                .padding(AppTheme.Spacing.section)
+                                .padding(.horizontal, AppTheme.Spacing.section)
+                                .padding(.bottom, AppTheme.Spacing.section)
                         }
                         if isLoadingBody && !bodyText.isEmpty {
                             HStack(spacing: 6) {
@@ -301,7 +324,7 @@ struct MailDetailView: View {
             .navigationBarTitleDisplayMode(.inline)
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 Button {
-                    showRegisterSheet = true
+                    taskRegistration = .manual
                 } label: {
                     Label(MailRegisterSheet.saveActionTitle, systemImage: "checkmark.circle")
                         .font(.body.weight(.semibold))
@@ -330,8 +353,8 @@ struct MailDetailView: View {
                     Button("닫기") { dismiss() }
                 }
             }
-            .sheet(isPresented: $showRegisterSheet) {
-                MailRegisterSheet(email: email)
+            .sheet(item: $taskRegistration) { registration in
+                MailRegisterSheet(email: email, initialAction: registration.selectedAction)
             }
             .sheet(isPresented: $showOpenAIAnalysis) {
                 OpenAIEmailAnalysisView(selection: MailDetailSelection(email), tier: openAITier)
@@ -394,6 +417,8 @@ struct MailDetailView: View {
         } label: {
             if isReanalyzing || email.analysisState == .analyzing {
                 ProgressView().controlSize(.mini)
+            } else if dynamicTypeSize.isAccessibilitySize {
+                Text("다시 요약")
             } else {
                 Label("다시 요약", systemImage: "arrow.triangle.2.circlepath")
             }
@@ -423,19 +448,58 @@ struct MailDetailView: View {
         }
         let key = EmailMessageKey(email)
         let provider = MailboxProviderRegistry.provider(for: email.provider)
-        if !email.isRead {
-            let messageID = email.providerMessageID
-            let expectedGlobalMessageID = mutationIdentity(for: email)
+
+        // Load independently of read synchronization. A stale session must not
+        // make a failed read mutation prevent the original body from appearing.
+        if !email.hasCompleteBody && !EmailAnalysisContract.isCurrentAnalysis(email) {
+            isLoadingBody = true
+            do {
+                try await MailboxProviderRegistry.ensureReady(
+                    for: email.provider,
+                    namespace: email.sourceAccountNamespace,
+                    backgroundOnly: false
+                )
+                let content = try await provider.fetchMessageContent(messageID: email.providerMessageID)
+                guard !Task.isCancelled, let currentEmail = resolvedEmail(matching: key) else {
+                    isLoadingBody = false
+                    return
+                }
+                try MailboxLocalStore.live.updateContent(content, for: currentEmail, in: modelContext)
+            } catch is CancellationError {
+                isLoadingBody = false
+                return
+            } catch {
+                isLoadingBody = false
+                guard !Task.isCancelled else { return }
+                alert = MailDetailAlert(
+                    title: AppLanguage.localized("mail.alert.bodyLoadError", defaultValue: "메일 본문 로드 오류", language: .current),
+                    message: mailErrorMessage(error)
+                )
+                return
+            }
+            isLoadingBody = false
+        }
+
+        guard !Task.isCancelled, let currentEmail = resolvedEmail(matching: key) else { return }
+        if !currentEmail.isRead {
+            let messageID = currentEmail.providerMessageID
+            let expectedGlobalMessageID = mutationIdentity(for: currentEmail)
             isSyncingRead = true
             defer { isSyncingRead = false }
             do {
+                try await MailboxProviderRegistry.ensureReady(
+                    for: currentEmail.provider,
+                    namespace: currentEmail.sourceAccountNamespace,
+                    backgroundOnly: false
+                )
                 try await MailboxLocalStore.live.markAsRead(
-                    email,
+                    currentEmail,
                     in: modelContext,
                     remote: {
                         try await provider.markAsRead(
                             messageID: messageID,
-                            expectedGlobalMessageID: expectedGlobalMessageID
+                            expectedGlobalMessageID: expectedGlobalMessageID,
+                            expectedAccountNamespace: currentEmail.sourceAccountNamespace
                         )
                     }
                 )
@@ -446,56 +510,9 @@ struct MailDetailView: View {
                 alert = mailDetailAlert(action: .markAsRead, error: error)
             }
         }
-
-        guard !Task.isCancelled, let currentEmail = resolvedEmail(matching: key) else {
-            return
-        }
-        guard currentEmail.body.isEmpty, (currentEmail.htmlBody ?? "").isEmpty else {
-            try? await EmailMessageAnalysisService.shared.analyze(
-                currentEmail,
-                context: modelContext
-            )
-            return
-        }
-
-        let messageID = currentEmail.providerMessageID
-        isLoadingBody = true
-        defer { isLoadingBody = false }
-        do {
-            let content = try await provider.fetchMessageContent(messageID: messageID)
-            guard !Task.isCancelled, let currentEmail = resolvedEmail(matching: key) else {
-                return
-            }
-            try MailboxLocalStore.live.updateContent(
-                content,
-                for: currentEmail,
-                in: modelContext
-            )
-        } catch is CancellationError {
-            return
-        } catch {
-            guard !Task.isCancelled else { return }
-            if alert == nil {
-                alert = MailDetailAlert(
-                    title: AppLanguage.localized(
-                        "mail.alert.bodyLoadError",
-                        defaultValue: "메일 본문 로드 오류",
-                        language: .current,
-                        comment: "Mail body load alert title."
-                    ),
-                    message: mailErrorMessage(error)
-                )
-            }
-            return
-        }
-
-        guard !Task.isCancelled, let currentEmail = resolvedEmail(matching: key) else {
-            return
-        }
-        try? await EmailMessageAnalysisService.shared.analyze(
-            currentEmail,
-            context: modelContext
-        )
+        // Reading the original body must not wait for lengthy on-device analysis.
+        guard !Task.isCancelled, let currentEmail = resolvedEmail(matching: key) else { return }
+        try? await EmailMessageAnalysisService.shared.analyze(currentEmail, context: modelContext)
     }
 
     @MainActor
@@ -507,12 +524,17 @@ struct MailDetailView: View {
         isReanalyzing = true
         defer { isReanalyzing = false }
 
-        if currentEmail.body.isEmpty && currentEmail.htmlBody == nil {
+        if !currentEmail.hasCompleteBody {
             let provider = MailboxProviderRegistry.provider(for: currentEmail.provider)
             let messageID = currentEmail.providerMessageID
             isLoadingBody = true
             defer { isLoadingBody = false }
             do {
+                try await MailboxProviderRegistry.ensureReady(
+                    for: currentEmail.provider,
+                    namespace: currentEmail.sourceAccountNamespace,
+                    backgroundOnly: false
+                )
                 let content = try await provider.fetchMessageContent(messageID: messageID)
                 guard !Task.isCancelled, let currentEmail = resolvedEmail(matching: key) else {
                     return
@@ -606,15 +628,22 @@ struct MailDetailView: View {
                 in: modelContext
             )
             let provider = MailboxProviderRegistry.provider(for: currentEmail.provider)
+            let providerKind = currentEmail.provider
             dismiss()
             Task { @MainActor in
                 _ = await MailboxLocalStore.live.flushStagedTrash(
                     mutations,
                     now: .distantFuture
                 ) { mutation in
+                    try await MailboxProviderRegistry.ensureReady(
+                        for: providerKind,
+                        namespace: mutation.sourceAccountNamespace,
+                        backgroundOnly: false
+                    )
                     try await provider.trashMessage(
                         messageID: mutation.providerMessageID,
-                        expectedGlobalMessageID: mutation.expectedGlobalMessageID
+                        expectedGlobalMessageID: mutation.expectedGlobalMessageID,
+                        expectedAccountNamespace: mutation.sourceAccountNamespace
                     )
                 }
             }

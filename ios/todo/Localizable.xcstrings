@@ -1,6 +1,2328 @@
 {
   "sourceLanguage" : "ko",
   "strings" : {
+  "settings.sync.conflict.entity.other": {
+    "comment": "Localized fallback for app records without a human-readable source title; do not expose Swift type names.",
+    "extractionState": "manual",
+    "localizations": {
+      "ko": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "기타 앱 데이터"
+        }
+      },
+      "en": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Other app data"
+        }
+      },
+      "es": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Otros datos de la app"
+        }
+      },
+      "ja": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "その他のアプリデータ"
+        }
+      },
+      "zh-Hans": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "其他应用数据"
+        }
+      },
+      "fr": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Autres données de l’app"
+        }
+      },
+      "it": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Altri dati dell’app"
+        }
+      },
+      "de": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Andere App-Daten"
+        }
+      }
+    }
+  },
+  "settings.sync.conflict.historyRecord": {
+  "extractionState": "manual",
+    "comment": "Ordinal identifier for a saved comparison; followed by a localized stable history number, newest first. Not a save date.",
+    "localizations": {
+      "ko": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "보관 기록"
+        }
+      },
+      "en": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Saved comparison"
+        }
+      },
+      "es": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Comparación guardada"
+        }
+      },
+      "ja": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "保存した比較"
+        }
+      },
+      "zh-Hans": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "保留的比较记录"
+        }
+      },
+      "fr": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Comparaison enregistrée"
+        }
+      },
+      "it": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Confronto salvato"
+        }
+      },
+      "de": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Gespeicherter Vergleich"
+        }
+      }
+    }
+  },
+  "settings.sync.conflict.error.dependentContent": {
+  "extractionState": "manual",
+    "comment": "Do not apply meeting tombstones from a metadata-only conflict archive; original audio must be preserved.",
+    "localizations": {
+      "en": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "A deleted meeting version cannot be applied here because its original audio cannot be restored from this record alone. Choose a version that keeps the meeting; use the meeting list to delete it explicitly."
+        }
+      },
+      "ko": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "삭제된 회의 버전은 이 기록만으로 원음을 복원할 수 없어 여기서 적용하지 않습니다. 회의를 보존할 버전을 선택하세요. 회의 삭제는 회의 목록에서 직접 할 수 있습니다."
+        }
+      },
+      "es": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "La versión eliminada de una reunión no puede aplicarse aquí, ya que este registro no permite restaurar su audio original. Elija una versión que conserve la reunión; para eliminarla, use la lista de reuniones."
+        }
+      },
+      "ja": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "削除された会議のバージョンは、この記録だけでは元の音声を復元できないため、ここでは適用できません。会議を保持するバージョンを選択してください。削除は会議一覧で行えます。"
+        }
+      },
+      "zh-Hans": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "此记录无法恢复会议原始音频，因此不能在此应用已删除的会议版本。请选择保留会议的版本；如需删除，请在会议列表中操作。"
+        }
+      },
+      "fr": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Une version supprimée d’une réunion ne peut pas être appliquée ici, car ce seul enregistrement ne permet pas de restaurer l’audio original. Choisissez une version qui conserve la réunion ; utilisez la liste des réunions pour la supprimer."
+        }
+      },
+      "it": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Non puoi applicare qui una versione eliminata della riunione: questo solo record non permette di ripristinare l’audio originale. Scegli una versione che conservi la riunione; per eliminarla, usa l’elenco delle riunioni."
+        }
+      },
+      "de": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Eine gelöschte Besprechungsversion kann hier nicht angewendet werden, da dieser Datensatz allein die Originalaufnahme nicht wiederherstellen kann. Wähle eine Version, die die Besprechung erhält; zum Löschen nutze die Besprechungsliste."
+        }
+      }
+    }
+  },
+"settings.sync.conflict.intro" : {
+  "extractionState": "manual",
+  "comment": "Review and explicitly resolve iCloud data conflicts; saved versions stay on this device.",
+  "localizations": {
+    "en": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Compare the versions and select the one to use. Other items continue syncing. All compared versions are saved on this device before a change is applied."
+      }
+    },
+    "ko": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "버전을 비교하고 사용할 내용을 선택하세요. 다른 항목은 계속 동기화됩니다. 변경을 적용하기 전에 비교한 모든 버전을 이 기기에 보관합니다."
+      }
+    },
+    "es": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Compare las versiones y elija cuál usar. Los demás elementos siguen sincronizándose. Todas las versiones comparadas se guardan en este dispositivo antes de aplicar un cambio."
+      }
+    },
+    "ja": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "バージョンを比較し、使用する内容を選択してください。他の項目の同期は続行します。変更前に、比較したすべてのバージョンをこのデバイスに保存します。"
+      }
+    },
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "比较版本并选择要使用的内容。其他项目会继续同步。应用更改前，会在此设备上保存所有参与比较的版本。"
+      }
+    },
+    "fr": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Comparez les versions et choisissez celle à utiliser. Les autres éléments continuent à se synchroniser. Toutes les versions comparées sont enregistrées sur cet appareil avant toute modification."
+      }
+    },
+    "it": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Confronta le versioni e scegli quale usare. Gli altri elementi continuano a sincronizzarsi. Tutte le versioni confrontate vengono salvate su questo dispositivo prima di applicare modifiche."
+      }
+    },
+    "de": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Vergleiche die Versionen und wähle die gewünschte aus. Andere Einträge werden weiter synchronisiert. Alle verglichenen Versionen werden vor einer Änderung auf diesem Gerät gespeichert."
+      }
+    }
+  }
+},
+"settings.sync.conflict.empty" : {
+  "extractionState": "manual",
+  "comment": "Review and explicitly resolve iCloud data conflicts; saved versions stay on this device.",
+  "localizations": {
+    "en": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "No unresolved conflicts"
+      }
+    },
+    "ko": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "해결되지 않은 충돌이 없습니다"
+      }
+    },
+    "es": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "No hay conflictos sin resolver"
+      }
+    },
+    "ja": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "未解決の競合はありません"
+      }
+    },
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "没有未解决的冲突"
+      }
+    },
+    "fr": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Aucun conflit non résolu"
+      }
+    },
+    "it": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Nessun conflitto irrisolto"
+      }
+    },
+    "de": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Keine ungelösten Konflikte"
+      }
+    }
+  }
+},
+"settings.sync.conflict.pending" : {
+  "extractionState": "manual",
+  "comment": "Review and explicitly resolve iCloud data conflicts; saved versions stay on this device.",
+  "localizations": {
+    "en": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Needs your choice"
+      }
+    },
+    "ko": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "선택이 필요한 항목"
+      }
+    },
+    "es": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Requieren su elección"
+      }
+    },
+    "ja": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "選択が必要な項目"
+      }
+    },
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "需要您选择的项目"
+      }
+    },
+    "fr": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Votre choix est requis"
+      }
+    },
+    "it": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Richiede una scelta"
+      }
+    },
+    "de": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Auswahl erforderlich"
+      }
+    }
+  }
+},
+"settings.sync.conflict.retained" : {
+  "extractionState": "manual",
+  "comment": "Review and explicitly resolve iCloud data conflicts; saved versions stay on this device.",
+  "localizations": {
+    "en": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Saved versions"
+      }
+    },
+    "ko": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "보관한 버전"
+      }
+    },
+    "es": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Versiones guardadas"
+      }
+    },
+    "ja": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "保存したバージョン"
+      }
+    },
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "保留的版本"
+      }
+    },
+    "fr": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Versions enregistrées"
+      }
+    },
+    "it": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Versioni salvate"
+      }
+    },
+    "de": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Gespeicherte Versionen"
+      }
+    }
+  }
+},
+"settings.sync.conflict.retainedHelp" : {
+  "extractionState": "manual",
+  "comment": "Review and explicitly resolve iCloud data conflicts; saved versions stay on this device.",
+  "localizations": {
+    "en": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Review saved versions against the current item to restore a different version. This history is kept on this device, not confirmed as an iCloud backup."
+      }
+    },
+    "ko": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "보관한 버전과 현재 항목을 비교하여 다른 버전으로 복원할 수 있습니다. 이 기록은 이 기기에 보관되며 iCloud 백업 완료를 의미하지 않습니다."
+      }
+    },
+    "es": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Compare las versiones guardadas con el elemento actual para restaurar otra versión. Este historial se conserva en este dispositivo; no confirma una copia de seguridad en iCloud."
+      }
+    },
+    "ja": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "保存したバージョンと現在の項目を比較して、別のバージョンに復元できます。この履歴はこのデバイスに保存され、iCloudへのバックアップ完了を示すものではありません。"
+      }
+    },
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "可将保留的版本与当前项目比较，以恢复其他版本。此历史记录保存在此设备上，并不表示已完成 iCloud 备份。"
+      }
+    },
+    "fr": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Comparez les versions enregistrées à l’élément actuel pour restaurer une autre version. Cet historique reste sur cet appareil et ne confirme pas une sauvegarde iCloud."
+      }
+    },
+    "it": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Confronta le versioni salvate con l’elemento attuale per ripristinarne un’altra. Questa cronologia resta su questo dispositivo e non conferma un backup iCloud."
+      }
+    },
+    "de": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Vergleiche gespeicherte Versionen mit dem aktuellen Eintrag, um eine andere Version wiederherzustellen. Der Verlauf bleibt auf diesem Gerät und bestätigt kein iCloud-Backup."
+      }
+    }
+  }
+},
+"settings.sync.conflict.title" : {
+  "extractionState": "manual",
+  "comment": "Review and explicitly resolve iCloud data conflicts; saved versions stay on this device.",
+  "localizations": {
+    "en": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Sync conflicts"
+      }
+    },
+    "ko": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "동기화 충돌"
+      }
+    },
+    "es": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Conflictos de sincronización"
+      }
+    },
+    "ja": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "同期の競合"
+      }
+    },
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "同步冲突"
+      }
+    },
+    "fr": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Conflits de synchronisation"
+      }
+    },
+    "it": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Conflitti di sincronizzazione"
+      }
+    },
+    "de": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Synchronisierungskonflikte"
+      }
+    }
+  }
+},
+"settings.sync.conflict.refresh" : {
+  "extractionState": "manual",
+  "comment": "Review and explicitly resolve iCloud data conflicts; saved versions stay on this device.",
+  "localizations": {
+    "en": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Refresh"
+      }
+    },
+    "ko": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "새로 고침"
+      }
+    },
+    "es": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Actualizar"
+      }
+    },
+    "ja": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "更新"
+      }
+    },
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "刷新"
+      }
+    },
+    "fr": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Actualiser"
+      }
+    },
+    "it": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Aggiorna"
+      }
+    },
+    "de": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Aktualisieren"
+      }
+    }
+  }
+},
+"settings.sync.conflict.chooseHelp" : {
+  "extractionState": "manual",
+  "comment": "Review and explicitly resolve iCloud data conflicts; saved versions stay on this device.",
+  "localizations": {
+    "en": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Select one complete version. Only that version becomes the synced item; all compared versions remain available in Saved versions. Nothing changes until you apply your choice."
+      }
+    },
+    "ko": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "항목 전체에 적용할 버전 하나를 선택하세요. 선택한 버전으로 동기화하고 비교한 버전은 모두 ‘보관한 버전’에 남깁니다. 선택을 적용하기 전까지는 변경하지 않습니다."
+      }
+    },
+    "es": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Elija una versión completa. Solo esa versión se sincronizará; todas las versiones comparadas seguirán en Versiones guardadas. Nada cambia hasta que aplique su elección."
+      }
+    },
+    "ja": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "項目全体に適用するバージョンを1つ選択してください。選択した内容を同期し、比較したバージョンはすべて「保存したバージョン」に残ります。適用するまでは変更しません。"
+      }
+    },
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "请选择一个完整版本。仅该版本会成为同步的项目；所有参与比较的版本仍会保留在“保留的版本”中。应用选择前不会进行更改。"
+      }
+    },
+    "fr": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Choisissez une version complète. Seule celle-ci sera synchronisée ; toutes les versions comparées resteront dans Versions enregistrées. Rien ne change avant l’application de votre choix."
+      }
+    },
+    "it": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Scegli una versione completa. Solo quella verrà sincronizzata; tutte le versioni confrontate resteranno in Versioni salvate. Nulla cambia finché non applichi la scelta."
+      }
+    },
+    "de": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Wähle eine vollständige Version aus. Nur diese wird synchronisiert; alle verglichenen Versionen bleiben unter Gespeicherte Versionen verfügbar. Vor dem Anwenden ändert sich nichts."
+      }
+    }
+  }
+},
+"settings.sync.conflict.allFields" : {
+  "extractionState": "manual",
+  "comment": "Review and explicitly resolve iCloud data conflicts; saved versions stay on this device.",
+  "localizations": {
+    "en": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Show all fields"
+      }
+    },
+    "ko": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "모든 필드 보기"
+      }
+    },
+    "es": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Mostrar todos los campos"
+      }
+    },
+    "ja": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "すべてのフィールドを表示"
+      }
+    },
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "显示所有字段"
+      }
+    },
+    "fr": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Afficher tous les champs"
+      }
+    },
+    "it": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Mostra tutti i campi"
+      }
+    },
+    "de": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Alle Felder anzeigen"
+      }
+    }
+  }
+},
+"settings.sync.conflict.version" : {
+  "extractionState": "manual",
+  "comment": "Review and explicitly resolve iCloud data conflicts; saved versions stay on this device.",
+  "localizations": {
+    "en": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Version"
+      }
+    },
+    "ko": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "버전"
+      }
+    },
+    "es": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Versión"
+      }
+    },
+    "ja": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "バージョン"
+      }
+    },
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "版本"
+      }
+    },
+    "fr": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Version"
+      }
+    },
+    "it": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Versione"
+      }
+    },
+    "de": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Version"
+      }
+    }
+  }
+},
+"settings.sync.conflict.deleted" : {
+  "extractionState": "manual",
+  "comment": "Review and explicitly resolve iCloud data conflicts; saved versions stay on this device.",
+  "localizations": {
+    "en": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Deleted version — applying this removes the current item"
+      }
+    },
+    "ko": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "삭제된 버전 — 적용하면 현재 항목을 삭제합니다"
+      }
+    },
+    "es": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Versión eliminada: al aplicarla se elimina el elemento actual"
+      }
+    },
+    "ja": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "削除されたバージョン — 適用すると現在の項目を削除します"
+      }
+    },
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "已删除的版本 — 应用后会删除当前项目"
+      }
+    },
+    "fr": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Version supprimée — son application supprime l’élément actuel"
+      }
+    },
+    "it": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Versione eliminata — applicandola si elimina l’elemento attuale"
+      }
+    },
+    "de": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Gelöschte Version – Anwenden entfernt den aktuellen Eintrag"
+      }
+    }
+  }
+},
+"settings.sync.conflict.apply" : {
+  "extractionState": "manual",
+  "comment": "Review and explicitly resolve iCloud data conflicts; saved versions stay on this device.",
+  "localizations": {
+    "en": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Apply selected version"
+      }
+    },
+    "ko": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "선택한 버전 적용"
+      }
+    },
+    "es": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Aplicar versión seleccionada"
+      }
+    },
+    "ja": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "選択したバージョンを適用"
+      }
+    },
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "应用所选版本"
+      }
+    },
+    "fr": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Appliquer la version choisie"
+      }
+    },
+    "it": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Applica la versione selezionata"
+      }
+    },
+    "de": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Ausgewählte Version anwenden"
+      }
+    }
+  }
+},
+"settings.sync.conflict.staleHelp" : {
+  "extractionState": "manual",
+  "comment": "Review and explicitly resolve iCloud data conflicts; saved versions stay on this device.",
+  "localizations": {
+    "en": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "If this item changes while you review it, applying stops so you can compare the latest versions again."
+      }
+    },
+    "ko": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "비교 중 항목이 바뀌면 적용을 중지합니다. 최신 버전을 다시 확인하고 선택해 주세요."
+      }
+    },
+    "es": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Si el elemento cambia durante la revisión, se detendrá la aplicación para que pueda volver a comparar las versiones más recientes."
+      }
+    },
+    "ja": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "比較中に項目が変わった場合は適用を中止します。最新のバージョンを再度確認して選択してください。"
+      }
+    },
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "如果项目在比较期间发生变化，将停止应用，以便您重新比较最新版本。"
+      }
+    },
+    "fr": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Si l’élément change pendant la comparaison, l’application est interrompue pour vous permettre de comparer les dernières versions."
+      }
+    },
+    "it": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Se l’elemento cambia durante il confronto, l’applicazione si interrompe per consentirti di confrontare le versioni aggiornate."
+      }
+    },
+    "de": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Ändert sich der Eintrag während des Vergleichs, wird das Anwenden gestoppt, damit du die neuesten Versionen erneut vergleichen kannst."
+      }
+    }
+  }
+},
+"settings.sync.conflict.compare" : {
+  "extractionState": "manual",
+  "comment": "Review and explicitly resolve iCloud data conflicts; saved versions stay on this device.",
+  "localizations": {
+    "en": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Compare versions"
+      }
+    },
+    "ko": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "버전 비교"
+      }
+    },
+    "es": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Comparar versiones"
+      }
+    },
+    "ja": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "バージョンを比較"
+      }
+    },
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "比较版本"
+      }
+    },
+    "fr": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Comparer les versions"
+      }
+    },
+    "it": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Confronta versioni"
+      }
+    },
+    "de": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Versionen vergleichen"
+      }
+    }
+  }
+},
+"settings.sync.conflict.confirm" : {
+  "extractionState": "manual",
+  "comment": "Review and explicitly resolve iCloud data conflicts; saved versions stay on this device.",
+  "localizations": {
+    "en": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Use the selected version?"
+      }
+    },
+    "ko": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "선택한 버전을 사용할까요?"
+      }
+    },
+    "es": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "¿Usar la versión seleccionada?"
+      }
+    },
+    "ja": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "選択したバージョンを使用しますか？"
+      }
+    },
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "使用所选版本？"
+      }
+    },
+    "fr": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Utiliser la version choisie ?"
+      }
+    },
+    "it": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Usare la versione selezionata?"
+      }
+    },
+    "de": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Ausgewählte Version verwenden?"
+      }
+    }
+  }
+},
+"settings.sync.conflict.cancel" : {
+  "extractionState": "manual",
+  "comment": "Review and explicitly resolve iCloud data conflicts; saved versions stay on this device.",
+  "localizations": {
+    "en": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Cancel"
+      }
+    },
+    "ko": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "취소"
+      }
+    },
+    "es": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Cancelar"
+      }
+    },
+    "ja": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "キャンセル"
+      }
+    },
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "取消"
+      }
+    },
+    "fr": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Annuler"
+      }
+    },
+    "it": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Annulla"
+      }
+    },
+    "de": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Abbrechen"
+      }
+    }
+  }
+},
+"settings.sync.conflict.confirmHelp" : {
+  "extractionState": "manual",
+  "comment": "Review and explicitly resolve iCloud data conflicts; saved versions stay on this device.",
+  "localizations": {
+    "en": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "The selected version will be used for this item on synced devices. All compared versions are saved on this device first."
+      }
+    },
+    "ko": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "동기화하는 기기에서 이 항목에 선택한 버전을 사용합니다. 먼저 비교한 모든 버전을 이 기기에 보관합니다."
+      }
+    },
+    "es": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "La versión seleccionada se usará para este elemento en los dispositivos sincronizados. Todas las versiones comparadas se guardan primero en este dispositivo."
+      }
+    },
+    "ja": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "同期するデバイスでは、この項目に選択したバージョンを使用します。先に比較したすべてのバージョンをこのデバイスに保存します。"
+      }
+    },
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "同步设备将为此项目使用所选版本。所有参与比较的版本会先保存在此设备上。"
+      }
+    },
+    "fr": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "La version choisie sera utilisée pour cet élément sur les appareils synchronisés. Toutes les versions comparées sont d’abord enregistrées sur cet appareil."
+      }
+    },
+    "it": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "La versione selezionata verrà usata per questo elemento sui dispositivi sincronizzati. Tutte le versioni confrontate vengono prima salvate su questo dispositivo."
+      }
+    },
+    "de": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Die ausgewählte Version wird für diesen Eintrag auf synchronisierten Geräten verwendet. Alle verglichenen Versionen werden zuerst auf diesem Gerät gespeichert."
+      }
+    }
+  }
+},
+"settings.sync.conflict.origin.local" : {
+  "extractionState": "manual",
+  "comment": "Review and explicitly resolve iCloud data conflicts; saved versions stay on this device.",
+  "localizations": {
+    "en": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "This device"
+      }
+    },
+    "ko": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "이 기기"
+      }
+    },
+    "es": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Este dispositivo"
+      }
+    },
+    "ja": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "このデバイス"
+      }
+    },
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "此设备"
+      }
+    },
+    "fr": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Cet appareil"
+      }
+    },
+    "it": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Questo dispositivo"
+      }
+    },
+    "de": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Dieses Gerät"
+      }
+    }
+  }
+},
+"settings.sync.conflict.origin.legacy" : {
+  "extractionState": "manual",
+  "comment": "Review and explicitly resolve iCloud data conflicts; saved versions stay on this device.",
+  "localizations": {
+    "en": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Earlier iCloud data"
+      }
+    },
+    "ko": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "이전 iCloud 데이터"
+      }
+    },
+    "es": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Datos anteriores de iCloud"
+      }
+    },
+    "ja": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "以前のiCloudデータ"
+      }
+    },
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "旧版 iCloud 数据"
+      }
+    },
+    "fr": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Anciennes données iCloud"
+      }
+    },
+    "it": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Dati iCloud precedenti"
+      }
+    },
+    "de": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Frühere iCloud-Daten"
+      }
+    }
+  }
+},
+"settings.sync.conflict.origin.cloud" : {
+  "extractionState": "manual",
+  "comment": "Review and explicitly resolve iCloud data conflicts; saved versions stay on this device.",
+  "localizations": {
+    "en": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "iCloud version"
+      }
+    },
+    "ko": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "iCloud 버전"
+      }
+    },
+    "es": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Versión de iCloud"
+      }
+    },
+    "ja": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "iCloudのバージョン"
+      }
+    },
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "iCloud 版本"
+      }
+    },
+    "fr": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Version iCloud"
+      }
+    },
+    "it": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Versione iCloud"
+      }
+    },
+    "de": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "iCloud-Version"
+      }
+    }
+  }
+},
+"settings.sync.conflict.origin.retained" : {
+  "extractionState": "manual",
+  "comment": "Review and explicitly resolve iCloud data conflicts; saved versions stay on this device.",
+  "localizations": {
+    "en": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Saved version"
+      }
+    },
+    "ko": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "보관한 버전"
+      }
+    },
+    "es": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Versión guardada"
+      }
+    },
+    "ja": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "保存したバージョン"
+      }
+    },
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "保留的版本"
+      }
+    },
+    "fr": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Version enregistrée"
+      }
+    },
+    "it": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Versione salvata"
+      }
+    },
+    "de": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Gespeicherte Version"
+      }
+    }
+  }
+},
+"settings.sync.conflict.entity.todo" : {
+  "extractionState": "manual",
+  "comment": "Review and explicitly resolve iCloud data conflicts; saved versions stay on this device.",
+  "localizations": {
+    "en": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Task"
+      }
+    },
+    "ko": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "할 일"
+      }
+    },
+    "es": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Tarea"
+      }
+    },
+    "ja": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "タスク"
+      }
+    },
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "任务"
+      }
+    },
+    "fr": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Tâche"
+      }
+    },
+    "it": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Attività"
+      }
+    },
+    "de": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Aufgabe"
+      }
+    }
+  }
+},
+"settings.sync.conflict.entity.email" : {
+  "extractionState": "manual",
+  "comment": "Review and explicitly resolve iCloud data conflicts; saved versions stay on this device.",
+  "localizations": {
+    "en": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Email"
+      }
+    },
+    "ko": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "메일"
+      }
+    },
+    "es": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Correo"
+      }
+    },
+    "ja": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "メール"
+      }
+    },
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "邮件"
+      }
+    },
+    "fr": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "E-mail"
+      }
+    },
+    "it": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Email"
+      }
+    },
+    "de": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "E-Mail"
+      }
+    }
+  }
+},
+"settings.sync.conflict.entity.meeting" : {
+  "extractionState": "manual",
+  "comment": "Review and explicitly resolve iCloud data conflicts; saved versions stay on this device.",
+  "localizations": {
+    "en": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Meeting"
+      }
+    },
+    "ko": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "회의"
+      }
+    },
+    "es": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Reunión"
+      }
+    },
+    "ja": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "会議"
+      }
+    },
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "会议"
+      }
+    },
+    "fr": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Réunion"
+      }
+    },
+    "it": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Riunione"
+      }
+    },
+    "de": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Besprechung"
+      }
+    }
+  }
+},
+"settings.sync.conflict.field.title" : {
+  "extractionState": "manual",
+  "comment": "Review and explicitly resolve iCloud data conflicts; saved versions stay on this device.",
+  "localizations": {
+    "en": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Title"
+      }
+    },
+    "ko": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "제목"
+      }
+    },
+    "es": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Título"
+      }
+    },
+    "ja": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "タイトル"
+      }
+    },
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "标题"
+      }
+    },
+    "fr": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Titre"
+      }
+    },
+    "it": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Titolo"
+      }
+    },
+    "de": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Titel"
+      }
+    }
+  }
+},
+"settings.sync.conflict.field.content" : {
+  "extractionState": "manual",
+  "comment": "Review and explicitly resolve iCloud data conflicts; saved versions stay on this device.",
+  "localizations": {
+    "en": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Content"
+      }
+    },
+    "ko": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "내용"
+      }
+    },
+    "es": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Contenido"
+      }
+    },
+    "ja": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "内容"
+      }
+    },
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "内容"
+      }
+    },
+    "fr": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Contenu"
+      }
+    },
+    "it": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Contenuto"
+      }
+    },
+    "de": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Inhalt"
+      }
+    }
+  }
+},
+"settings.sync.conflict.field.notes" : {
+  "extractionState": "manual",
+  "comment": "Review and explicitly resolve iCloud data conflicts; saved versions stay on this device.",
+  "localizations": {
+    "en": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Notes"
+      }
+    },
+    "ko": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "메모"
+      }
+    },
+    "es": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Notas"
+      }
+    },
+    "ja": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "メモ"
+      }
+    },
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "备注"
+      }
+    },
+    "fr": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Notes"
+      }
+    },
+    "it": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Note"
+      }
+    },
+    "de": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Notizen"
+      }
+    }
+  }
+},
+"settings.sync.conflict.field.status" : {
+  "extractionState": "manual",
+  "comment": "Review and explicitly resolve iCloud data conflicts; saved versions stay on this device.",
+  "localizations": {
+    "en": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Status"
+      }
+    },
+    "ko": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "상태"
+      }
+    },
+    "es": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Estado"
+      }
+    },
+    "ja": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "状態"
+      }
+    },
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "状态"
+      }
+    },
+    "fr": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "État"
+      }
+    },
+    "it": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Stato"
+      }
+    },
+    "de": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Status"
+      }
+    }
+  }
+},
+"settings.sync.conflict.field.dueDate" : {
+  "extractionState": "manual",
+  "comment": "Review and explicitly resolve iCloud data conflicts; saved versions stay on this device.",
+  "localizations": {
+    "en": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Due date"
+      }
+    },
+    "ko": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "마감일"
+      }
+    },
+    "es": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Fecha límite"
+      }
+    },
+    "ja": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "期限"
+      }
+    },
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "截止日期"
+      }
+    },
+    "fr": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Échéance"
+      }
+    },
+    "it": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Scadenza"
+      }
+    },
+    "de": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Fälligkeitsdatum"
+      }
+    }
+  }
+},
+"settings.sync.conflict.field.createdAt" : {
+  "extractionState": "manual",
+  "comment": "Review and explicitly resolve iCloud data conflicts; saved versions stay on this device.",
+  "localizations": {
+    "en": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Created"
+      }
+    },
+    "ko": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "생성 일시"
+      }
+    },
+    "es": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Creado"
+      }
+    },
+    "ja": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "作成日時"
+      }
+    },
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "创建时间"
+      }
+    },
+    "fr": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Création"
+      }
+    },
+    "it": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Creazione"
+      }
+    },
+    "de": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Erstellt"
+      }
+    }
+  }
+},
+"settings.sync.conflict.field.updatedAt" : {
+  "extractionState": "manual",
+  "comment": "Review and explicitly resolve iCloud data conflicts; saved versions stay on this device.",
+  "localizations": {
+    "en": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Updated"
+      }
+    },
+    "ko": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "수정 일시"
+      }
+    },
+    "es": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Actualizado"
+      }
+    },
+    "ja": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "更新日時"
+      }
+    },
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "修改时间"
+      }
+    },
+    "fr": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Modification"
+      }
+    },
+    "it": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Modifica"
+      }
+    },
+    "de": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Geändert"
+      }
+    }
+  }
+},
+"settings.sync.conflict.error.save" : {
+  "extractionState": "manual",
+  "comment": "Review and explicitly resolve iCloud data conflicts; saved versions stay on this device.",
+  "localizations": {
+    "en": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Could not apply the selection. Saved originals are retained. Return to the list, refresh, and try again."
+      }
+    },
+    "ko": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "선택을 적용하지 못했습니다. 보관한 원본은 유지됩니다. 목록으로 돌아가 새로 고친 후 다시 시도하세요."
+      }
+    },
+    "es": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "No se pudo aplicar la selección. Los originales guardados se conservan. Vuelva a la lista, actualice e inténtelo de nuevo."
+      }
+    },
+    "ja": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "選択を適用できませんでした。保存した原本は保持されています。一覧に戻って更新し、再度お試しください。"
+      }
+    },
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "无法应用选择。保留的原始版本仍然存在。请返回列表，刷新后重试。"
+      }
+    },
+    "fr": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Impossible d’appliquer la sélection. Les originaux enregistrés sont conservés. Revenez à la liste, actualisez et réessayez."
+      }
+    },
+    "it": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Impossibile applicare la scelta. Gli originali salvati vengono conservati. Torna all’elenco, aggiorna e riprova."
+      }
+    },
+    "de": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Die Auswahl konnte nicht angewendet werden. Gespeicherte Originale bleiben erhalten. Kehre zur Liste zurück, aktualisiere sie und versuche es erneut."
+      }
+    }
+  }
+},
+"settings.sync.conflict.error.stale" : {
+  "extractionState": "manual",
+  "comment": "Review and explicitly resolve iCloud data conflicts; saved versions stay on this device.",
+  "localizations": {
+    "en": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "The item changed or this version is no longer available. Return to the list and refresh before selecting again."
+      }
+    },
+    "ko": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "항목이 변경되었거나 해당 버전을 사용할 수 없습니다. 목록으로 돌아가 새로 고친 후 다시 선택하세요."
+      }
+    },
+    "es": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "El elemento ha cambiado o esta versión ya no está disponible. Vuelva a la lista y actualice antes de elegir de nuevo."
+      }
+    },
+    "ja": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "項目が変更されたか、このバージョンを利用できません。一覧に戻って更新し、再度選択してください。"
+      }
+    },
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "项目已更改或此版本已不可用。请返回列表并刷新，然后重新选择。"
+      }
+    },
+    "fr": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "L’élément a changé ou cette version n’est plus disponible. Revenez à la liste et actualisez avant de choisir à nouveau."
+      }
+    },
+    "it": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "L’elemento è cambiato o questa versione non è più disponibile. Torna all’elenco e aggiorna prima di scegliere di nuovo."
+      }
+    },
+    "de": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Der Eintrag wurde geändert oder diese Version ist nicht mehr verfügbar. Kehre zur Liste zurück und aktualisiere sie vor einer erneuten Auswahl."
+      }
+    }
+  }
+},
+"settings.sync.conflict.error.busy" : {
+  "extractionState": "manual",
+  "comment": "Review and explicitly resolve iCloud data conflicts; saved versions stay on this device.",
+  "localizations": {
+    "en": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Sync is in progress. Wait for it to finish, then try again."
+      }
+    },
+    "ko": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "동기화 중입니다. 완료된 후 다시 시도하세요."
+      }
+    },
+    "es": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "La sincronización está en curso. Espere a que termine e inténtelo de nuevo."
+      }
+    },
+    "ja": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "同期中です。完了してから再度お試しください。"
+      }
+    },
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "正在同步。请等待完成后重试。"
+      }
+    },
+    "fr": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "La synchronisation est en cours. Attendez sa fin, puis réessayez."
+      }
+    },
+    "it": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Sincronizzazione in corso. Attendi il completamento e riprova."
+      }
+    },
+    "de": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Die Synchronisierung läuft. Warte bis zum Abschluss und versuche es erneut."
+      }
+    }
+  }
+},
+"settings.sync.conflict.error.recording" : {
+  "extractionState": "manual",
+  "comment": "Review and explicitly resolve iCloud data conflicts; saved versions stay on this device.",
+  "localizations": {
+    "en": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Stop the recording before resolving conflicts. The original data is retained."
+      }
+    },
+    "ko": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "녹음을 끝낸 후 충돌을 해결하세요. 원본 데이터는 유지됩니다."
+      }
+    },
+    "es": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Detenga la grabación antes de resolver conflictos. Los datos originales se conservan."
+      }
+    },
+    "ja": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "録音を終了してから競合を解決してください。元のデータは保持されます。"
+      }
+    },
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "请先结束录音再解决冲突。原始数据会保留。"
+      }
+    },
+    "fr": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Arrêtez l’enregistrement avant de résoudre les conflits. Les données originales sont conservées."
+      }
+    },
+    "it": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Termina la registrazione prima di risolvere i conflitti. I dati originali vengono conservati."
+      }
+    },
+    "de": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Beende die Aufnahme vor dem Lösen von Konflikten. Die Originaldaten bleiben erhalten."
+      }
+    }
+  }
+},
+"settings.sync.conflict.error.unavailable" : {
+  "extractionState": "manual",
+  "comment": "Review and explicitly resolve iCloud data conflicts; saved versions stay on this device.",
+  "localizations": {
+    "en": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "iCloud sync is not ready. Check the sync status and try again; local data is retained."
+      }
+    },
+    "ko": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "iCloud 동기화가 준비되지 않았습니다. 동기화 상태를 확인한 후 다시 시도하세요. 기기 데이터는 유지됩니다."
+      }
+    },
+    "es": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "La sincronización de iCloud no está lista. Compruebe su estado e inténtelo de nuevo; los datos locales se conservan."
+      }
+    },
+    "ja": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "iCloud同期の準備ができていません。同期状態を確認して再度お試しください。デバイスのデータは保持されます。"
+      }
+    },
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "iCloud 同步尚未就绪。请检查同步状态后重试；本地数据会保留。"
+      }
+    },
+    "fr": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "La synchronisation iCloud n’est pas prête. Vérifiez son état et réessayez ; les données locales sont conservées."
+      }
+    },
+    "it": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "La sincronizzazione iCloud non è pronta. Verifica lo stato e riprova; i dati locali vengono conservati."
+      }
+    },
+    "de": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Die iCloud-Synchronisierung ist nicht bereit. Prüfe den Status und versuche es erneut; lokale Daten bleiben erhalten."
+      }
+    }
+  }
+},
+"settings.sync.conflict.needsReview" : {
+  "extractionState": "manual",
+  "comment": "Review and explicitly resolve iCloud data conflicts; saved versions stay on this device.",
+  "localizations": {
+    "en": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Compare versions and choose what to keep"
+      }
+    },
+    "ko": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "버전을 비교하고 사용할 내용을 선택하세요"
+      }
+    },
+    "es": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Compare las versiones y elija cuál conservar"
+      }
+    },
+    "ja": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "バージョンを比較し、使用する内容を選択してください"
+      }
+    },
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "比较版本并选择要保留的内容"
+      }
+    },
+    "fr": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Comparez les versions et choisissez celle à conserver"
+      }
+    },
+    "it": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Confronta le versioni e scegli quale conservare"
+      }
+    },
+    "de": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Versionen vergleichen und gewünschte auswählen"
+      }
+    }
+  }
+},
+"ads.privacy.error.configuration" : {
+  "extractionState": "manual",
+  "comment": "Google UMP reports an invalid app ID or publisher configuration error. Operator action is needed; never imply that network retries fix it or assert today's publishing state.",
+  "localizations": {
+    "ko": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Google에서 앱의 광고 동의 설정에 문제가 있다고 안내했습니다. 앱 운영자가 AdMob의 앱 ID와 개인정보 보호 메시지 설정·게시 상태를 확인해야 합니다. 네트워크 재시도로 해결되는 문제가 아닙니다."
+      }
+    },
+    "en": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Google reports a problem with this app’s ad consent configuration. The app operator needs to check the AdMob app ID and privacy message setup and publishing status. Retrying the network connection will not resolve this problem."
+      }
+    },
+    "es": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Google informa de un problema con la configuración del consentimiento publicitario de esta app. El responsable de la app debe comprobar el ID de la app y la configuración y publicación de los mensajes de privacidad en AdMob. Reintentar la conexión no resolverá este problema."
+      }
+    },
+    "ja": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Googleから、このアプリの広告同意設定に問題があるとの通知がありました。アプリ運営者がAdMobのアプリIDとプライバシーメッセージの設定・公開状況を確認する必要があります。ネットワークへの再接続では解決しません。"
+      }
+    },
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Google报告此App的广告同意配置存在问题。App运营者需要检查AdMob应用ID以及隐私消息的设置和发布状态。重试网络连接无法解决此问题。"
+      }
+    },
+    "fr": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Google signale un problème de configuration du consentement publicitaire de cette app. Le responsable de l’app doit vérifier l’identifiant AdMob ainsi que la configuration et la publication des messages de confidentialité. Réessayer la connexion ne résoudra pas ce problème."
+      }
+    },
+    "it": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Google segnala un problema con la configurazione del consenso pubblicitario di questa app. Il gestore dell’app deve controllare l’ID app AdMob e la configurazione e pubblicazione dei messaggi sulla privacy. Riprovare la connessione non risolverà il problema."
+      }
+    },
+    "de": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Google meldet ein Problem mit der Werbeeinwilligungskonfiguration dieser App. Der App-Betreiber muss die App-ID sowie die Einrichtung und Veröffentlichung der Datenschutzmitteilungen in AdMob prüfen. Erneute Netzwerkversuche beheben dieses Problem nicht."
+      }
+    }
+  }
+},
+"ads.privacy.error.network" : {
+  "extractionState": "manual",
+  "comment": "Google UMP reports a consent-info network error or form-load timeout. Only this failure suggests checking connectivity and retrying.",
+  "localizations": {
+    "ko": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Google 광고 개인정보 양식을 불러오는 중 연결에 실패했거나 시간이 초과되었습니다. 인터넷 연결을 확인한 후 다시 시도하세요."
+      }
+    },
+    "en": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "The connection failed or timed out while loading Google’s ad privacy form. Check your internet connection and try again."
+      }
+    },
+    "es": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "La conexión falló o agotó el tiempo de espera al cargar el formulario de privacidad publicitaria de Google. Comprueba tu conexión a internet y vuelve a intentarlo."
+      }
+    },
+    "ja": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Googleの広告プライバシーフォームの読み込み中に、接続に失敗したかタイムアウトしました。インターネット接続を確認して、もう一度お試しください。"
+      }
+    },
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "加载Google广告隐私表单时连接失败或超时。请检查互联网连接后重试。"
+      }
+    },
+    "fr": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "La connexion a échoué ou a expiré lors du chargement du formulaire Google de confidentialité publicitaire. Vérifiez votre connexion Internet et réessayez."
+      }
+    },
+    "it": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "La connessione non è riuscita o è scaduta durante il caricamento del modulo Google sulla privacy degli annunci. Controlla la connessione internet e riprova."
+      }
+    },
+    "de": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Beim Laden des Google-Formulars für den Werbedatenschutz ist die Verbindung fehlgeschlagen oder die Zeit abgelaufen. Prüfe deine Internetverbindung und versuche es erneut."
+      }
+    }
+  }
+},
+"ads.privacy.error.formUnavailable" : {
+  "extractionState": "manual",
+  "comment": "Google UMP form error 7 means the form is unavailable, not that consent is accepted or no form is required. Do not claim a specific publisher configuration cause.",
+  "localizations": {
+    "ko": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Google에서 광고 개인정보 양식을 제공하지 못했습니다. 문제가 계속되면 앱 운영자가 AdMob 메시지 설정을 확인해야 합니다."
+      }
+    },
+    "en": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Google could not provide the ad privacy form. If the problem continues, the app operator needs to check the AdMob message settings."
+      }
+    },
+    "es": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Google no ha podido proporcionar el formulario de privacidad publicitaria. Si el problema continúa, el responsable de la app debe comprobar la configuración de mensajes de AdMob."
+      }
+    },
+    "ja": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Googleが広告プライバシーフォームを提供できませんでした。問題が続く場合は、アプリ運営者がAdMobのメッセージ設定を確認する必要があります。"
+      }
+    },
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Google未能提供广告隐私表单。如果问题持续，App运营者需要检查AdMob消息设置。"
+      }
+    },
+    "fr": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Google n’a pas pu fournir le formulaire de confidentialité publicitaire. Si le problème persiste, le responsable de l’app doit vérifier les paramètres des messages AdMob."
+      }
+    },
+    "it": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Google non ha potuto fornire il modulo sulla privacy degli annunci. Se il problema persiste, il gestore dell’app deve controllare le impostazioni dei messaggi AdMob."
+      }
+    },
+    "de": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Google konnte das Formular für den Werbedatenschutz nicht bereitstellen. Wenn das Problem bestehen bleibt, muss der App-Betreiber die Mitteilungseinstellungen in AdMob prüfen."
+      }
+    }
+  }
+},
   "meeting.document.title": {
     "localizations": {
       "de": {
@@ -6066,60 +8388,60 @@
         }
       }
     },
-    "ads.privacy.error.message" : {
-      "comment" : "Recovery message when Google's advertising privacy-options form cannot load; ask the user to retry later.",
-      "extractionState" : "manual",
-      "localizations" : {
-        "de" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Die Datenschutzoptionen für Werbung konnten nicht geladen werden. Bitte versuche es später erneut."
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ad privacy options could not be loaded. Please try again later."
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "No se han podido cargar las opciones de privacidad de anuncios. Inténtalo más tarde."
-          }
-        },
-        "fr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Les options de confidentialité publicitaire n’ont pas pu être chargées. Réessayez plus tard."
-          }
-        },
-        "it" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Impossibile caricare le opzioni privacy degli annunci. Riprova più tardi."
-          }
-        },
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "広告のプライバシー設定を読み込めませんでした。しばらくしてからもう一度お試しください。"
-          }
-        },
-        "ko" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "광고 개인정보 옵션을 불러오지 못했습니다. 잠시 후 다시 시도하세요."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "未能加载广告隐私选项。请稍后重试。"
-          }
-        }
+"ads.privacy.error.message" : {
+  "extractionState": "manual",
+  "comment": "Fallback for an unavailable presenter or unclassified Google UMP failure. Do not diagnose network or publisher configuration without a matching documented SDK error.",
+  "localizations": {
+    "ko": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "현재 광고 개인정보 설정을 열 수 없습니다. 설정 화면을 닫았다가 다시 열어 보세요. 문제가 계속되면 앱 지원에 문의하세요."
       }
     },
+    "en": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Ad privacy settings cannot be opened right now. Close and reopen Settings. If the problem continues, contact app support."
+      }
+    },
+    "es": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "No se pueden abrir los ajustes de privacidad publicitaria en este momento. Cierra y vuelve a abrir Ajustes. Si el problema continúa, contacta con el soporte de la app."
+      }
+    },
+    "ja": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "現在、広告プライバシー設定を開けません。設定画面を閉じてから開き直してください。問題が続く場合は、アプリのサポートにお問い合わせください。"
+      }
+    },
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "目前无法打开广告隐私设置。请关闭并重新打开设置。如果问题持续，请联系App支持。"
+      }
+    },
+    "fr": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Les réglages de confidentialité publicitaire ne peuvent pas être ouverts pour le moment. Fermez puis rouvrez les réglages. Si le problème persiste, contactez l’assistance de l’app."
+      }
+    },
+    "it": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Al momento non è possibile aprire le impostazioni sulla privacy degli annunci. Chiudi e riapri Impostazioni. Se il problema persiste, contatta l’assistenza dell’app."
+      }
+    },
+    "de": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "Die Einstellungen für den Werbedatenschutz können derzeit nicht geöffnet werden. Schließe die Einstellungen und öffne sie erneut. Wenn das Problem bestehen bleibt, wende dich an den App-Support."
+      }
+    }
+  }
+},
     "ads.privacy.error.title" : {
       "comment" : "Alert title when Google's advertising privacy-options form cannot be opened.",
       "extractionState" : "manual",
@@ -36651,6 +38973,60 @@
         }
       }
     },
+    "legal.privacy.revisionNotice" : {
+      "comment" : "November 4 additional privacy notice, manual release hold and correction of the earlier public release date.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Zusätzliche Änderung angekündigt am 4. November 2026, geplant ab 12. November: regelmäßige Speicherung vollständiger E-Mails, Hintergrundabrufe erlaubter Konten, Aufgaben nur aus vollständigen Texten sowie lokale Originalversionen und ausdrücklich gewählte Wiederherstellung bei Konflikten. Bestehende Einwilligungen werden nicht erweitert. 1.0.14 wurde entgegen der früheren Zusage bereits am 2. statt ab 9. November veröffentlicht. 1.0.15 wird manuell freigegeben und nicht vor dem 12. November um 00:00 KST veröffentlicht."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Additional revision announced November 4, 2026, effective November 12: periodic complete-email caching, background fetching for permitted accounts, proposals grounded in complete bodies, and local original versions and user-selected conflict recovery. Existing separate consent is not expanded. Contrary to the earlier November 9 notice, 1.0.14 was released November 2. Version 1.0.15 will use manual release and will not be released before November 12 at 00:00 KST."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Revisión adicional anunciada el 4 de noviembre de 2026, prevista para el 12: caché periódica de correos completos, recopilación en segundo plano de cuentas autorizadas, propuestas basadas en cuerpos completos y originales locales con restauración elegida en los conflictos. No se amplían los consentimientos existentes. La versión 1.0.14 se publicó el 2 de noviembre, en contra del aviso que prometía hacerlo a partir del 9. La 1.0.15 tendrá publicación manual y no se publicará antes del 12 de noviembre a las 00:00 KST."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Révision supplémentaire annoncée le 4 novembre 2026, prévue le 12 : cache périodique des e-mails complets, collecte en arrière-plan des comptes autorisés, propositions fondées sur les corps complets et conservation locale des originaux avec restauration choisie en cas de conflit. Les consentements existants ne sont pas élargis. Contrairement à l’avis du 9 novembre, la version 1.0.14 a été publiée le 2 novembre. La version 1.0.15 sera publiée manuellement, pas avant le 12 novembre à 00:00 KST."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Revisione aggiuntiva annunciata il 4 novembre 2026, prevista per il 12: cache periodica delle email complete, raccolta in background degli account autorizzati, proposte basate su corpi completi e originali locali con ripristino scelto nei conflitti. I consensi esistenti non vengono estesi. La versione 1.0.14 è stata pubblicata il 2 novembre, contrariamente all’avviso che prometteva il rilascio dal 9. La 1.0.15 avrà pubblicazione manuale e non sarà pubblicata prima del 12 novembre alle 00:00 KST."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "2026年11月4日追加改定告知、11月12日施行予定：メール一覧・本文全体の定期保存、許可アカウントのバックグラウンド収集、本文全体に基づくタスク提案、競合原本の端末内保管と選択した復元を説明します。既存の個別同意は拡大しません。1.0.14は従来の11月9日以降という告知と異なり11月2日に公開されました。1.0.15は手動リリースとし、11月12日00:00 KSTより前には公開しません。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "2026년 11월 4일 추가 개정 공고, 11월 12일 시행 예정: 주기적 메일 목록·전체 본문 저장, 허용 계정의 백그라운드 수집, 전체 본문 처리 항목에 근거한 제안과 충돌 원본의 기기 내 보관·선택 복원을 안내합니다. 기존 개별 동의는 확대하지 않습니다. 1.0.14는 종전 11월 9일 이후 공개 안내와 달리 11월 2일 공개됐습니다. 1.0.15는 수동 출시로 제출하고 11월 12일 00:00 KST 전에는 공개하지 않습니다."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "2026年11月4日新增修订公告，拟于11月12日生效：定期缓存邮件列表及完整正文、后台收集获准账户、仅依据完整正文提出待办、在设备保留冲突原始版本并按用户选择恢复。不扩大现有单独同意。1.0.14 已于11月2日发布，与先前承诺11月9日以后发布的公告不符。1.0.15 将采用手动发布，不会早于11月12日00:00 KST公开。"
+          }
+        }
+      }
+    },
     "legal.privacy.effectiveDate" : {
       "comment" : "Effective date for the privacy policy.",
       "extractionState" : "manual",
@@ -36658,49 +39034,49 @@
         "de" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Gültig ab: 9. November 2026 · Bekanntmachung: 1. November 2026"
+            "value" : "Gültig ab: 12. November 2026 · Bekanntmachung: 4. November 2026"
           }
         },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Effective: November 9, 2026 · Announced: November 1, 2026"
+            "value" : "Effective: November 12, 2026 · Announced: November 4, 2026"
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Vigente desde: 9 de noviembre de 2026 · Anunciada: 1 de noviembre de 2026"
+            "value" : "Vigente desde: 12 de noviembre de 2026 · Anunciada: 4 de noviembre de 2026"
           }
         },
         "fr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Entrée en vigueur : 9 novembre 2026 · Annonce : 1er novembre 2026"
+            "value" : "Entrée en vigueur : 12 novembre 2026 · Annonce : 4 novembre 2026"
           }
         },
         "it" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "In vigore dal: 9 novembre 2026 · Annuncio: 1 novembre 2026"
+            "value" : "In vigore dal: 12 novembre 2026 · Annuncio: 4 novembre 2026"
           }
         },
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "施行日：2026年11月9日 · 公告日：2026年11月1日"
+            "value" : "施行日：2026年11月12日 · 公告日：2026年11月4日"
           }
         },
         "ko" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "시행일: 2026년 11월 9일 · 공고일: 2026년 11월 1일"
+            "value" : "시행일: 2026년 11월 12일 · 공고일: 2026년 11월 4일"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "生效日期：2026年11月9日 · 公告日期：2026年11月1日"
+            "value" : "生效日期：2026年11月12日 · 公告日期：2026年11月4日"
           }
         }
       }
@@ -36766,49 +39142,49 @@
         "de" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Nachrichten werden zuerst lokal gespeichert. Mit ausdrücklicher Zustimmung zur vollständigen iCloud-Speicherung werden auch E-Mail-Inhalte und Analysen unter demselben Apple Account gespeichert und wiederhergestellt. Dies erlaubt keine Übermittlung an externe KI."
+            "value" : "Nachrichten werden zuerst lokal gespeichert. Listen und vollständige Texte werden unabhängig von der KI-Analyse regelmäßig gespeichert. Hintergrundabrufe gelten nur für auf diesem Gerät erlaubte Konten; iOS bestimmt den Zeitpunkt. Mit ausdrücklicher Zustimmung zur vollständigen iCloud-Speicherung werden auch Inhalte und Analysen unter demselben Apple Account gespeichert und wiederhergestellt. Externe KI erfordert eine separate Einwilligung."
           }
         },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Messages are stored locally first. With explicit consent to full iCloud storage, email content and analysis are also stored and restored under the same Apple account. This does not authorize sending data to external AI."
+            "value" : "Messages are stored locally first. Lists and complete bodies are cached periodically, independently of AI analysis. Background collection applies only to accounts permitted on this device, and iOS determines its timing. With explicit consent to full iCloud storage, content and analysis are also stored and restored under the same Apple account. External AI transmission requires separate consent."
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Los mensajes se guardan primero en el dispositivo. Con tu consentimiento explícito para el almacenamiento completo en iCloud, el contenido y los análisis de correo también se guardan y restauran con la misma cuenta de Apple. Esto no autoriza el envío de datos a IA externas."
+            "value" : "Los mensajes se guardan primero en el dispositivo. Las listas y cuerpos completos se almacenan periódicamente, independientemente del análisis IA. La recopilación en segundo plano solo se aplica a cuentas autorizadas en este dispositivo; iOS decide cuándo se ejecuta. Con consentimiento explícito para el almacenamiento completo en iCloud, también se guardan y restauran el contenido y los análisis con la misma cuenta de Apple. El envío a IA externa requiere consentimiento separado."
           }
         },
         "fr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Les messages sont d’abord stockés localement. Avec votre consentement explicite au stockage complet dans iCloud, le contenu et les analyses des e-mails sont aussi stockés et restaurés sous le même compte Apple. Cela n’autorise pas l’envoi de données à une IA externe."
+            "value" : "Les messages sont d’abord stockés localement. Les listes et corps complets sont régulièrement conservés, indépendamment de l’analyse IA. La collecte en arrière-plan concerne uniquement les comptes autorisés sur cet appareil ; iOS en détermine le moment. Avec votre consentement explicite au stockage intégral dans iCloud, contenus et analyses sont aussi stockés et restaurés sous le même compte Apple. L’envoi à une IA externe exige un consentement distinct."
           }
         },
         "it" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "I messaggi vengono prima salvati localmente. Con il consenso esplicito all’archiviazione completa in iCloud, anche il contenuto e le analisi delle email vengono archiviati e ripristinati con lo stesso account Apple. Questo non autorizza l’invio di dati a IA esterne."
+            "value" : "I messaggi vengono prima salvati localmente. Elenchi e corpi completi vengono conservati periodicamente, indipendentemente dall’analisi IA. La raccolta in background riguarda solo gli account autorizzati su questo dispositivo; iOS ne decide il momento. Con consenso esplicito al salvataggio completo su iCloud, contenuti e analisi vengono anche salvati e ripristinati con lo stesso account Apple. L’invio a IA esterna richiede un consenso separato."
           }
         },
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "メールはまずデバイス内に保存されます。iCloudへの全体保存に明示的に同意すると、メール本文や分析結果も同じApple Accountに保存・復元されます。これは外部AIへのデータ送信を許可するものではありません。"
+            "value" : "メールはまず端末内に保存します。AI分析の設定とは別に一覧・本文全体を定期保存します。バックグラウンド収集はこの端末で許可したアカウントだけを対象とし、実行時刻はiOSが決定します。iCloud全体保存に明示的に同意すると、本文・分析も同じApple Accountで保存・復元します。外部AIへの送信同意は別です。"
           }
         },
         "ko" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "메시지는 우선 기기에 저장합니다. 전체 iCloud 저장에 명시적으로 동의하면 메일 본문과 분석 결과도 같은 Apple 계정에서 저장·복원합니다. 이는 외부 AI로 데이터를 전송하는 동의가 아닙니다."
+            "value" : "메시지는 우선 기기에 저장합니다. AI 분석 설정과 별개로 목록·전체 본문을 주기적으로 저장하며 백그라운드 수집은 이 기기에서 허용한 계정에만 적용하고 실제 시각은 iOS가 결정합니다. 전체 iCloud 저장에 명시적으로 동의하면 본문·분석도 같은 Apple 계정에서 저장·복원합니다. 외부 AI 전송 동의는 별개입니다."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "邮件首先保存在本地。明确同意完整 iCloud 存储后，邮件内容和分析结果也会存储在同一 Apple 账户下并可恢复。这并不代表授权向外部 AI 发送数据。"
+            "value" : "邮件首先保存在本地。邮件列表和完整正文独立于 AI 分析设置定期保存。后台收集只针对这台设备上获准的账户，具体时间由 iOS 决定。明确同意完整 iCloud 存储后，正文和分析也会在同一 Apple 账户下保存和恢复。向外部 AI 传输需要单独同意。"
           }
         }
       }
@@ -40917,56 +43293,56 @@
         }
       }
     },
-    "legal.text.목적: 마감·일정 관련 이메일에서 할 일 자동 추출" : {
-      "comment" : "English legal translation preserving the Korean source structure and meaning.",
+    "legal.privacy.email.processing" : {
+      "comment" : "Email tasks require complete-body action evidence; incomplete or failed analysis does not authorize invented tasks.",
       "extractionState" : "manual",
       "localizations" : {
         "de" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Zweck: Aufgaben automatisch aus E-Mails zu Fristen und Terminen extrahieren"
+            "value" : "Zweck: vollständige E-Mail-Texte auf dem Gerät zusammenfassen und Aufgaben nur aus bestätigten erforderlichen Aktionen vorschlagen. Unvollständige oder ältere Teiltexte und fehlgeschlagene Analysen rechtfertigen keine aus Titel oder Zusammenfassung erfundenen Aufgaben."
           }
         },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Purpose: automatically extract to-dos from deadline and schedule-related email"
+            "value" : "Purpose: summarize complete bodies on the device and propose tasks only from identified required actions. Incomplete or older partial bodies and failed analysis do not authorize tasks invented from the subject or summary."
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Finalidad: extraer automáticamente tareas de correos relacionados con plazos y eventos"
+            "value" : "Finalidad: resumir cuerpos completos en el dispositivo y proponer tareas solo a partir de acciones necesarias identificadas. Los cuerpos incompletos o parciales anteriores y los análisis fallidos no permiten inventar tareas a partir del asunto o resumen."
           }
         },
         "fr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Finalité : extraire automatiquement des tâches des e-mails liés aux échéances et aux événements"
+            "value" : "Finalité : résumer les corps complets sur l’appareil et proposer des tâches uniquement à partir d’actions nécessaires identifiées. Les corps incomplets ou anciens extraits et les analyses échouées ne permettent pas d’inventer des tâches à partir du sujet ou du résumé."
           }
         },
         "it" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Finalità: estrarre automaticamente attività dalle email relative a scadenze e impegni"
+            "value" : "Finalità: riassumere i corpi completi sul dispositivo e proporre attività solo dalle azioni necessarie identificate. Corpi incompleti o precedenti testi parziali e analisi fallite non autorizzano attività inventate dall’oggetto o dal riepilogo."
           }
         },
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "目的：締め切りや予定に関するメールからTo-Doを自動抽出"
+            "value" : "目的：本文全体を端末内で要約し、確認した対応が必要な項目だけからタスクを提案します。不完全・以前の部分本文や分析失敗を、件名や要約から独自に作るタスクの根拠にはしません。"
           }
         },
         "ko" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "목적: 마감·일정 관련 이메일에서 할 일 자동 추출"
+            "value" : "목적: 전체 본문을 기기 내에서 요약하고 확인/처리 필요 항목에만 근거해 할 일을 제안합니다. 미완료·이전 부분 본문이나 분석 실패를 제목·요약에서 임의로 만든 할 일의 근거로 사용하지 않습니다."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "目的：从与截止日期和日程相关的邮件中自动提取待办事项"
+            "value" : "目的：在设备上摘要完整正文，仅依据确认的必要处理事项提出待办。不完整或先前的部分正文及失败分析，不能作为从主题或摘要虚构待办的依据。"
           }
         }
       }
@@ -42645,7 +45021,7 @@
         }
       }
     },
-    "legal.text.앱은 비보안 암호화를 사용하지 않음 (ITSAppUsesNonExemptEncryption = NO)" : {
+    "legal.text.앱은 수출 규제상 비면제 암호화를 사용하지 않음 (ITSAppUsesNonExemptEncryption = NO)" : {
       "comment" : "English legal translation preserving the Korean source structure and meaning.",
       "extractionState" : "manual",
       "localizations" : {
@@ -42688,7 +45064,7 @@
         "ko" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "앱은 비보안 암호화를 사용하지 않음 (ITSAppUsesNonExemptEncryption = NO)"
+            "value" : "앱은 수출 규제상 비면제 암호화를 사용하지 않음 (ITSAppUsesNonExemptEncryption = NO)"
           }
         },
         "zh-Hans" : {
@@ -47060,110 +49436,55 @@
         }
       }
     },
-    "mail.analysis.layaCandidate" : {
-      "comment" : "A Laya recommendation to review an email as a to-do; never automatically confirmed.",
+    "mail.analysis.actionCandidate" : {
       "extractionState" : "manual",
       "localizations" : {
         "de" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Aufgabenvorschlag · Laya"
+            "value" : "Erforderliche Aktionen gefunden"
           }
         },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "To-Do Suggestion · Laya"
+            "value" : "Required actions found"
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Sugerencia de tarea · Laya"
+            "value" : "Hay acciones necesarias"
           }
         },
         "fr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Suggestion de tâche · Laya"
+            "value" : "Actions nécessaires identifiées"
           }
         },
         "it" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Attività suggerita · Laya"
+            "value" : "Azioni necessarie individuate"
           }
         },
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "To-Doの候補 · Laya"
+            "value" : "対応が必要な項目あり"
           }
         },
         "ko" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "할 일 후보 · Laya"
+            "value" : "처리할 항목 있음"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "待办事项建议 · Laya"
-          }
-        }
-      }
-    },
-    "mail.analysis.layaNotCandidate" : {
-      "comment" : "Laya did not recommend this email; manual saving remains possible.",
-      "extractionState" : "manual",
-      "localizations" : {
-        "de" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Laya: Nicht vorgeschlagen · Speichern dennoch möglich"
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Laya: Not Suggested · You Can Still Save"
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Laya: no sugerida · Aún puedes guardarla"
-          }
-        },
-        "fr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Laya : non suggéré · Enregistrement manuel possible"
-          }
-        },
-        "it" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Laya: non suggerita · Puoi comunque salvarla"
-          }
-        },
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Laya：候補ではありません · 手動で保存できます"
-          }
-        },
-        "ko" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Laya: 할 일 후보 아님 · 직접 저장 가능"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Laya：未建议 · 仍可手动保存"
+            "value" : "有需要处理的事项"
           }
         }
       }
@@ -51511,56 +53832,480 @@
         }
       }
     },
-    "mail.register.bodyLoadFailed" : {
-      "comment" : "Full message unavailable; reviewing the cached preview remains possible.",
+    "mail.background.analysisHour" : {
       "extractionState" : "manual",
       "localizations" : {
         "de" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Die vollständige E-Mail konnte nicht geladen werden. Der Entwurf verwendet daher die Vorschau."
+            "value" : "Uhrzeit der täglichen Analyse"
           }
         },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "The full email couldn't be loaded, so the draft uses the preview."
+            "value" : "Daily analysis time"
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "No se ha podido cargar el correo completo, así que el borrador utiliza la vista previa."
+            "value" : "Hora del análisis diario"
           }
         },
         "fr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "L’e-mail complet n’a pas pu être chargé. Le brouillon utilise donc l’aperçu."
+            "value" : "Heure de l’analyse quotidienne"
           }
         },
         "it" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Impossibile caricare l'email completa, quindi la bozza usa l'anteprima."
+            "value" : "Orario dell’analisi giornaliera"
           }
         },
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "メール全体を読み込めなかったため、プレビューを使って下書きを作成しました。"
+            "value" : "毎日の自動分析時刻"
           }
         },
         "ko" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "메일 전체 본문을 불러오지 못해 미리보기로 초안을 만들었어요."
+            "value" : "자동 분석 시각"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "无法加载完整邮件，草稿使用的是预览内容。"
+            "value" : "每日自动分析时间"
+          }
+        }
+      }
+    },
+    "mail.background.cacheExplanation" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Die Liste und vollständigen Nachrichtentexte werden regelmäßig unabhängig von der KI-Analyse zwischengespeichert. Der Hintergrundabruf gilt nur für erlaubte Konten; iOS bestimmt den Ausführungszeitpunkt. Die automatische Analyse wird einmal täglich nach der gewählten Uhrzeit versucht."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The inbox list and complete bodies are cached periodically, independently of AI analysis. Background fetching applies only to accounts you have allowed; iOS decides when it runs. Automatic analysis is attempted once a day after the selected time."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "La lista y los cuerpos completos se guardan periódicamente, independientemente del análisis con IA. La descarga en segundo plano solo se aplica a las cuentas autorizadas; iOS decide cuándo se ejecuta. El análisis automático se intenta una vez al día después de la hora seleccionada."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "La liste et le texte complet des messages sont mis en cache régulièrement, indépendamment de l’analyse IA. La récupération en arrière-plan concerne uniquement les comptes autorisés ; iOS décide de son exécution. L’analyse automatique est tentée une fois par jour après l’heure choisie."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "L’elenco e i testi completi vengono salvati periodicamente, indipendentemente dall’analisi IA. Il recupero in background riguarda solo gli account autorizzati; iOS ne decide l’esecuzione. L’analisi automatica viene tentata una volta al giorno dopo l’orario scelto."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "一覧と本文全体はAI分析とは別に定期保存されます。バックグラウンド取得は許可したアカウントのみが対象で、実行時刻はiOSが決定します。自動分析は設定時刻以降に1日1回試行します。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "목록과 전체 본문은 분석 설정과 별개로 주기적으로 저장합니다. 백그라운드 수집은 허용한 계정에만 적용되며 iOS가 실행 시각을 결정합니다. 자동 분석은 설정한 시각 이후 하루 한 번 시도합니다."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "收件箱列表和完整正文会定期缓存，与AI分析设置无关。后台收取仅适用于您已允许的账户，运行时间由iOS决定。自动分析每天在所选时间之后尝试一次。"
+          }
+        }
+      }
+    },
+    "mail.register.sourceChanged" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Die E-Mail oder die erforderlichen Aktionen haben sich geändert. Öffne die Prüfung vor dem Speichern erneut."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The email or its required actions changed. Reopen the review before saving."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "El correo o sus acciones necesarias han cambiado. Abre de nuevo la revisión antes de guardar."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Le message ou les actions nécessaires ont changé. Rouvrez la vérification avant d’enregistrer."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "L’email o le azioni necessarie sono cambiate. Riapri la revisione prima di salvare."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "メールまたは必要な対応が変更されました。確認画面を開き直してから保存してください。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "메일 또는 처리 필요 항목이 변경되었습니다. 검토 화면을 다시 열어 확인한 뒤 저장해 주세요."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "邮件或所需操作已更改。请重新打开审核页面，确认后再保存。"
+          }
+        }
+      }
+    },
+    "mail.register.actionDuplicate" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Diese Aktion aus dieser E-Mail ist bereits gespeichert."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This action from this email is already saved."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Esta acción de este correo ya está guardada."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Cette action de ce message est déjà enregistrée."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Questa azione di questa email è già salvata."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このメールの同じ対応項目はすでに保存されています。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "이 메일의 같은 처리 항목이 이미 저장되어 있습니다."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此邮件中的同一操作已保存。"
+          }
+        }
+      }
+    },
+    "mail.register.titleRequired" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Gib einen Aufgabentitel ein."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Enter a to-do title."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Introduce un título para la tarea."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Saisissez un titre pour la tâche."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Inserisci un titolo per l’attività."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "To-Doのタイトルを入力してください。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "할 일 제목을 입력해 주세요."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "请输入待办事项标题。"
+          }
+        }
+      }
+    },
+    "mail.register.chooseAction" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Aktion auswählen"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Choose an action"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Elige una acción"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Choisir une action"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Scegli un’azione"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "対応項目を選択"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "항목 선택"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "选择操作"
+          }
+        }
+      }
+    },
+    "mail.register.noActions" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Es gibt keine Aufgabenvorschläge mit erforderlichen Aktionen. Du kannst einen Titel eingeben und eine Aufgabe manuell speichern."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "There are no required-action task suggestions. You can enter a title to save a to-do manually."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No hay sugerencias de tareas que requieran acción. Puedes introducir un título para guardar una tarea manualmente."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Aucune tâche nécessitant une action n’est suggérée. Vous pouvez saisir un titre pour enregistrer une tâche manuellement."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Non ci sono attività suggerite che richiedono un’azione. Puoi inserire un titolo per salvare un’attività manualmente."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "対応が必要な項目がないため、To-Doの自動提案はありません。タイトルを入力して手動で保存できます。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "확인/처리 필요 항목이 없어 자동으로 제안하는 할 일은 없습니다. 직접 제목을 입력해 저장할 수 있습니다."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "没有需要处理的事项，因此不会自动建议待办事项。您可以输入标题手动保存。"
+          }
+        }
+      }
+    },
+    "mail.register.actionsUnavailable" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Erforderliche Aktionen konnten im vollständigen Nachrichtentext nicht geprüft werden. Gib einen Titel ein oder analysiere den Text erneut."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Required actions could not be verified from the full body. Enter a title manually or analyze the body again."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No se pudieron verificar las acciones necesarias en el cuerpo completo. Introduce un título manualmente o vuelve a analizar el cuerpo."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Les actions nécessaires n’ont pas pu être vérifiées dans le texte complet. Saisissez un titre ou analysez de nouveau le texte."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Non è stato possibile verificare le azioni necessarie nel testo completo. Inserisci un titolo manualmente o analizza di nuovo il testo."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "本文全体から必要な対応を確認できませんでした。タイトルを手動で入力するか、本文を再分析してください。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "전체 본문의 처리 필요 항목을 확인하지 못했습니다. 직접 입력하거나 본문을 다시 분석해 주세요."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未能从完整正文中核实所需操作。请手动输入标题或重新分析正文。"
+          }
+        }
+      }
+    },
+    "mail.register.bodyLoadFailed" : {
+      "comment" : "A full body was unavailable; do not create task suggestions from a preview.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Der vollständige Nachrichtentext konnte nicht geladen werden. Daher werden keine Aufgaben vorgeschlagen. Gib einen Titel ein oder versuche es später erneut."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The full body could not be loaded, so no tasks are suggested. Enter a title manually or try again later."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No se pudo cargar el cuerpo completo, por lo que no se sugieren tareas. Introduce un título manualmente o inténtalo más tarde."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Le texte complet n’a pas pu être chargé : aucune tâche n’est suggérée. Saisissez un titre ou réessayez plus tard."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Impossibile caricare il testo completo, quindi non vengono suggerite attività. Inserisci un titolo manualmente o riprova più tardi."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "本文全体を読み込めなかったため、To-Doを提案しません。タイトルを手動で入力するか、後でもう一度お試しください。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "전체 본문을 불러오지 못해 할 일을 제안하지 않습니다. 직접 입력하거나 나중에 다시 시도해 주세요."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法加载完整正文，因此不会建议待办事项。请手动输入标题或稍后重试。"
           }
         }
       }
@@ -91994,55 +94739,55 @@
       }
     },
     "settings.sync.full.identityConflict" : {
-      "comment" : "Conflicting duplicate cloud identities; credentials and private record identifiers are never displayed.",
+      "comment" : "Held identities direct users to the version comparison below; originals and unrelated synchronization are preserved.",
       "extractionState" : "manual",
       "localizations" : {
         "de" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Nur die Synchronisierung widersprüchlicher doppelter Einträge ist angehalten. Die Originale bleiben erhalten; andere Daten werden weiter synchronisiert. Eine erneute Gerätefreigabe löst diesen Konflikt nicht."
+            "value" : "Die Synchronisierung doppelter Einträge mit unterschiedlichem Inhalt ist angehalten. Vergleiche unten unter „Synchronisierungskonflikte“ die Versionen und wähle die gewünschte aus. Originale bleiben erhalten; andere Daten werden weiter synchronisiert."
           }
         },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Only conflicting duplicate records are on hold. Originals are preserved while other data continues to sync. Authorizing device access again will not resolve this conflict."
+            "value" : "Sync is paused for duplicate items with different contents. Open Sync conflicts below to compare versions and choose which to use. Originals are preserved while other data continues to sync."
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Solo se retiene la sincronización de registros duplicados en conflicto. Se conservan los originales y los demás datos siguen sincronizándose. Autorizar de nuevo el dispositivo no resolverá este conflicto."
+            "value" : "Se ha pausado la sincronización de elementos duplicados con distinto contenido. Abra Conflictos de sincronización más abajo para comparar las versiones y elegir cuál usar. Los originales se conservan y los demás datos siguen sincronizándose."
           }
         },
         "fr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Seuls les enregistrements en double contradictoires sont en attente. Les originaux sont conservés et les autres données continuent de se synchroniser. Autoriser à nouveau l’appareil ne résoudra pas ce conflit."
+            "value" : "La synchronisation des doublons au contenu différent est suspendue. Ouvrez Conflits de synchronisation ci-dessous pour comparer les versions et choisir celle à utiliser. Les originaux sont conservés et les autres données continuent à se synchroniser."
           }
         },
         "it" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Sono sospesi solo i record duplicati in conflitto. Gli originali sono conservati e gli altri dati continuano a sincronizzarsi. Autorizzare di nuovo il dispositivo non risolverà questo conflitto."
+            "value" : "La sincronizzazione dei duplicati con contenuti diversi è sospesa. Apri Conflitti di sincronizzazione qui sotto per confrontare le versioni e scegliere quale usare. Gli originali sono conservati e gli altri dati continuano a sincronizzarsi."
           }
         },
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "内容が異なる重複項目の同期だけを保留しました。元のデータを保持し、ほかのデータの同期は続行します。端末認証を再承認しても、この競合は解消しません。"
+            "value" : "内容が異なる重複項目の同期を保留しました。下の「同期の競合」でバージョンを比較し、使用する内容を選択してください。元のデータは保持し、ほかのデータの同期は続行します。"
           }
         },
         "ko" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "내용이 서로 다른 중복 항목의 동기화만 보류했습니다. 원본은 보존하며 다른 데이터는 계속 동기화를 시도합니다. 기기 인증을 다시 승인해도 이 충돌은 해결되지 않습니다."
+            "value" : "내용이 다른 중복 항목의 동기화를 보류했습니다. 아래 ‘동기화 충돌’에서 버전을 비교해 사용할 내용을 선택하세요. 원본은 보존하며 다른 데이터는 계속 동기화를 시도합니다."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "仅暂停同步内容冲突的重复记录。保留原始数据，其他数据继续同步。再次批准设备访问也无法解决此冲突。"
+            "value" : "已暂停同步内容不同的重复项目。请打开下方的“同步冲突”，比较版本并选择要使用的内容。原始数据会保留，其他数据继续同步。"
           }
         }
       }

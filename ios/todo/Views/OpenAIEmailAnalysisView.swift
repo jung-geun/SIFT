@@ -21,6 +21,10 @@ struct OpenAIEmailAnalysisView: View {
 
     private var email: EmailMessage? { MailDetailSelection.resolve(candidates, matching: selection.key) }
 
+    private func hasVerifiedBody(_ email: EmailMessage) -> Bool {
+        !email.body.isEmpty && (email.hasCompleteBody || EmailAnalysisContract.isCurrentAnalysis(email))
+    }
+
     var body: some View {
         NavigationStack {
             Group {
@@ -43,13 +47,14 @@ struct OpenAIEmailAnalysisView: View {
     }
 
     private var availableContent: some View {
-        Form {
+        let bodyIsVerified = email.map(hasVerifiedBody) ?? false
+        return Form {
             Section {
                 if let email {
                     Text(email.subject).font(.headline)
                     Text(AppLanguage.localized("mail.openai.sharingNotice", defaultValue: "Sends only this email's subject and locally stored plain-text body to OpenAI. The inbox, attachments, and meeting content are not sent. The original and local summary remain unchanged.", language: .current))
                         .font(.caption).foregroundStyle(.secondary)
-                    if email.body.isEmpty {
+                    if !bodyIsVerified {
                         Text(AppLanguage.localized("mail.openai.noBody", defaultValue: "No plain-text body is available. Finish loading the body in email detail before requesting analysis.", language: .current))
                             .font(.caption).foregroundStyle(.orange)
                     }
@@ -60,7 +65,7 @@ struct OpenAIEmailAnalysisView: View {
             OpenAIConsentSection(scope: .email)
             Section(AppLanguage.localized("mail.openai.explicitRequest", defaultValue: "Explicit request", language: .current)) {
                 Button(AppLanguage.localized("mail.openai.sendRequest", defaultValue: "Send and analyze with this model", language: .current)) { request(initialTier) }
-                    .disabled(email?.body.isEmpty != false || isRequesting)
+                    .disabled(!bodyIsVerified || isRequesting)
                     .accessibilityIdentifier("mail.openai.request")
                 if result != nil, initialTier == .basic {
                     Button(AppLanguage.localized("mail.openai.advancedRequest", defaultValue: "Re-request important content · gpt-6.1-sol", language: .current)) { confirmAdvanced = true }
@@ -96,7 +101,8 @@ struct OpenAIEmailAnalysisView: View {
     }
 
     private func request(_ tier: OpenAIAnalysisTier) {
-        guard regionalAvailability.isAvailable, !isRequesting, let email, !email.body.isEmpty else { return }
+        guard regionalAvailability.isAvailable, !isRequesting, let email,
+              hasVerifiedBody(email) else { return }
         let subject = email.subject
         let body = email.body
         requestTask?.cancel()

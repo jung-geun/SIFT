@@ -1,18 +1,16 @@
-{% if page.layout == 'landing' %}
-  {% assign home_url = '' %}
-{% else %}
-  {% assign home_url = '/' | relative_url %}
-{% endif %}
+{% include site-context.html %}
+{% if current_page_key == 'home' %}{% assign home_anchor = '' %}{% else %}{% assign home_anchor = locale_home %}{% endif %}
 <header class="site-header">
   <div class="container header-inner">
-    <a class="brand" href="{{ '/' | relative_url }}" aria-label="SIFT 홈">
+    <a class="brand" href="{{ locale_home }}" aria-label="{{ l10n.common.home | escape }}">
       <img src="{{ '/assets/images/app-icon.webp' | relative_url }}" width="40" height="40" alt="">
       <span>SIFT</span>
     </a>
-    <nav class="site-nav" aria-label="주요 메뉴">
-      <a href="{{ home_url }}#screens">앱 화면</a>
-      <a href="{{ '/workflows.html' | relative_url }}">사용 안내</a>
-      <a href="{{ home_url }}#download">다운로드 <span aria-hidden="true">↗</span></a>
+    <nav class="site-nav" aria-label="{{ l10n.common.primary_navigation | escape }}">
+      <a href="{{ home_anchor }}#screens">{{ l10n.common.screens | escape }}</a>
+      <a href="{{ locale_prefix | append: '/workflows.html' | relative_url }}">{{ l10n.common.guide | escape }}</a>
+      <a href="{{ home_anchor }}#download">{{ l10n.common.download | escape }} <span aria-hidden="true">↗</span></a>
     </nav>
+    {% include language-switcher.html %}
   </div>
 </header>

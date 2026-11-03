@@ -55,6 +55,8 @@ jobs:
         with:
           source: ./docs
           destination: ./_site
+      - name: Validate all public language editions and rendered links
+        run: python3 scripts/validate_site_locales.py --source docs --site _site
       - name: Upload public site only
         uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
         with:

@@ -35,10 +35,36 @@ final class AdMobConsentManager: ObservableObject {
     var isPrivacyOptionsRequired: Bool { state.isPrivacyOptionsRequired }
     var isBusy: Bool { state.isBusy }
 
-    enum PrivacyOptionsError: LocalizedError {
+    nonisolated enum PrivacyOptionsError: String, LocalizedError, Sendable {
+        case configuration
+        case network
+        case formUnavailable
         case unavailable
 
-        var errorDescription: String? { AdMobCopy.errorMessage }
+        /// UMPError.h defines distinct request (1–4) and form (5–9) codes in this domain.
+        /// Never infer publisher configuration from arbitrary SDK text or an unrelated code.
+        static func classify(_ error: Error) -> Self {
+            if let failure = error as? Self { return failure }
+            let error = error as NSError
+            guard error.domain == "com.google.user_messaging_platform" else {
+                return .unavailable
+            }
+            switch error.code {
+            case 2, 4: return .configuration // Invalid app ID or publisher configuration.
+            case 3, 8: return .network // Request network failure or form load timeout.
+            case 7: return .formUnavailable
+            default: return .unavailable
+            }
+        }
+
+        var errorDescription: String? {
+            switch self {
+            case .configuration: AdMobCopy.configurationError
+            case .network: AdMobCopy.networkError
+            case .formUnavailable: AdMobCopy.formUnavailableError
+            case .unavailable: AdMobCopy.errorMessage
+            }
+        }
     }
 
     private enum InformationPhase {
@@ -118,21 +144,21 @@ final class AdMobConsentManager: ObservableObject {
         publishState()
         ConsentInformation.shared.requestConsentInfoUpdate(with: RequestParameters()) {
             [weak self] error in
-            // Do not move an SDK NSError across isolation boundaries or expose it to users.
-            let failed = error != nil
+            // Classify before crossing isolation; never retain/expose raw SDK error details.
+            let failure = error.map(PrivacyOptionsError.classify)
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 #if DEBUG || SIFT_QA
-                if failed {
-                    Self.logger.debug("Consent information update failed.")
+                if let failure {
+                    Self.logger.debug("Consent information update failed: \(failure.rawValue, privacy: .public).")
                 } else {
                     Self.logger.debug("Consent information update completed.")
                 }
                 #endif
                 self.informationPhase = .finished
-                self.informationUpdateFailed = failed
+                self.informationUpdateFailed = failure != nil
                 if self.startupPhase == .updating {
-                    self.startupPhase = failed ? .finished : .needsForm
+                    self.startupPhase = failure != nil ? .finished : .needsForm
                 }
                 self.publishState()
             }
@@ -163,15 +189,16 @@ final class AdMobConsentManager: ObservableObject {
         do {
             // Explicit user action may retry a previous failed configuration/network update.
             // Keep the privacy gate closed for the entire update + presentation operation.
-            let failed: Bool = await withCheckedContinuation { continuation in
+            let failure: PrivacyOptionsError? = await withCheckedContinuation { continuation in
                 ConsentInformation.shared.requestConsentInfoUpdate(with: RequestParameters()) { error in
-                    continuation.resume(returning: error != nil)
+                    continuation.resume(returning: error.map(PrivacyOptionsError.classify))
                 }
             }
             informationPhase = .finished
-            informationUpdateFailed = failed
+            informationUpdateFailed = failure != nil
             try Task.checkCancellation()
-            guard !failed, AdMobPresentation.isReady(presenter) else {
+            if let failure { throw failure }
+            guard AdMobPresentation.isReady(presenter) else {
                 throw PrivacyOptionsError.unavailable
             }
             if ConsentInformation.shared.consentStatus == .required {
@@ -185,7 +212,11 @@ final class AdMobConsentManager: ObservableObject {
             return true
         } catch {
             if Task.isCancelled { throw CancellationError() }
-            throw PrivacyOptionsError.unavailable
+            let failure = PrivacyOptionsError.classify(error)
+            #if DEBUG || SIFT_QA
+            Self.logger.debug("Explicit privacy-options flow failed: \(failure.rawValue, privacy: .public).")
+            #endif
+            throw failure
         }
     }
 
@@ -254,7 +285,10 @@ nonisolated enum AdMobCopy {
 
     static var privacyTitle: String { localized("ads.consent.title", "광고 동의 및 개인정보") }
     static var errorTitle: String { localized("ads.privacy.error.title", "광고 개인정보 설정") }
-    static var errorMessage: String { localized("ads.privacy.error.message", "현재 광고 개인정보 설정을 열 수 없습니다. 잠시 후 다시 시도하세요.") }
+    static var errorMessage: String { localized("ads.privacy.error.message", "현재 광고 개인정보 설정을 열 수 없습니다. 설정 화면을 닫았다가 다시 열어 보세요. 문제가 계속되면 앱 지원에 문의하세요.") }
+    static var configurationError: String { localized("ads.privacy.error.configuration", "Google에서 앱의 광고 동의 설정에 문제가 있다고 안내했습니다. 앱 운영자가 AdMob의 앱 ID와 개인정보 보호 메시지 설정·게시 상태를 확인해야 합니다. 네트워크 재시도로 해결되는 문제가 아닙니다.") }
+    static var networkError: String { localized("ads.privacy.error.network", "Google 광고 개인정보 양식을 불러오는 중 연결에 실패했거나 시간이 초과되었습니다. 인터넷 연결을 확인한 후 다시 시도하세요.") }
+    static var formUnavailableError: String { localized("ads.privacy.error.formUnavailable", "Google에서 광고 개인정보 양식을 제공하지 못했습니다. 문제가 계속되면 앱 운영자가 AdMob 메시지 설정을 확인해야 합니다.") }
     static var explanation: String { localized("ads.consent.explanation", "Google에서 필요한 광고 동의와 개인정보 선택을 확인합니다. 선택은 Google 양식에서 변경할 수 있습니다.") }
     static var notRequired: String { localized("ads.consent.notRequired", "현재 Google에서 표시할 동의 양식이나 변경할 개인정보 옵션이 없다고 안내했습니다.") }
     static var okayTitle: String { localized("action.close", "닫기") }

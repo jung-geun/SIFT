@@ -1,0 +1,9 @@
+{% assign language_page_path = site.data.site_i18n.pages[current_page_key] %}
+<details class="language-menu">
+  <summary aria-label="{{ l10n.common.language_menu | escape }}">{{ current_language.name | escape }}</summary>
+  <ul aria-label="{{ l10n.common.language_menu | escape }}">
+    {% for language in site.data.site_i18n.languages %}
+    <li><a href="{{ language.prefix | append: language_page_path | relative_url }}" lang="{{ language.code }}" hreflang="{{ language.code }}"{% if language.code == locale_code %} aria-current="page"{% endif %}>{{ language.name | escape }}</a></li>
+    {% endfor %}
+  </ul>
+</details>

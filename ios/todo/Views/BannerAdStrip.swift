@@ -49,6 +49,7 @@ struct AdMobPrivacyOptionsRow: View {
     @State private var presentationTask: Task<Void, Never>?
     @State private var showsError = false
     @State private var noFormRequired = false
+    @State private var privacyError = AdMobConsentManager.PrivacyOptionsError.unavailable
 
     init() {}
 
@@ -63,6 +64,8 @@ struct AdMobPrivacyOptionsRow: View {
                     Spacer()
                     if presentationTask != nil { ProgressView() }
                 }
+                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                .contentShape(Rectangle())
             }
             .disabled(consent.isBusy || presentationTask != nil)
             .accessibilityIdentifier("settings.adPrivacyOptions")
@@ -70,7 +73,7 @@ struct AdMobPrivacyOptionsRow: View {
             .alert(noFormRequired ? AdMobCopy.privacyTitle : AdMobCopy.errorTitle, isPresented: $showsError) {
                 Button(AdMobCopy.okayTitle, role: .cancel) {}
             } message: {
-                Text(noFormRequired ? AdMobCopy.notRequired : AdMobCopy.errorMessage)
+                Text(noFormRequired ? AdMobCopy.notRequired : (privacyError.errorDescription ?? AdMobCopy.errorMessage))
             }
         } footer: {
             Text(AdMobCopy.explanation)
@@ -87,6 +90,7 @@ struct AdMobPrivacyOptionsRow: View {
     private func presentOptions() {
         guard presentationTask == nil else { return }
         noFormRequired = false
+        privacyError = .unavailable
         guard let controller = presenter.controller else {
             showsError = true
             return
@@ -104,6 +108,7 @@ struct AdMobPrivacyOptionsRow: View {
                 // Navigation/background cancellation is not a user-facing SDK error.
             } catch {
                 guard !Task.isCancelled, presenter.controller?.viewIfLoaded?.window != nil else { return }
+                privacyError = AdMobConsentManager.PrivacyOptionsError.classify(error)
                 showsError = true
             }
         }

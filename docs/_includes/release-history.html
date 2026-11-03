@@ -1,0 +1,26 @@
+{% include site-context.html %}
+{% assign releases = site.data.published_releases %}
+{% if releases and releases.size > 0 %}
+{% for release in releases %}
+{% if locale_code == "ko" %}
+{% assign release_copy = release %}
+{% else %}
+{% assign release_copy = l10n.releases[release.tag] %}
+{% endif %}
+<section aria-labelledby="release-{{ release.tag | escape }}">
+  <h2 id="release-{{ release.tag | escape }}">{{ release.tag | escape }}</h2>
+  <p><time datetime="{{ release.date | escape }}">{{ release.date | escape }}</time></p>
+  <p>{{ release_copy.summary | escape }}</p>
+  {% if release_copy.details.size > 0 %}
+  <details>
+    <summary>{{ l10n.common.release_details | escape }}</summary>
+    <ul>
+      {% for detail in release_copy.details %}
+      <li>{{ detail | escape }}</li>
+      {% endfor %}
+    </ul>
+  </details>
+  {% endif %}
+</section>
+{% endfor %}
+{% endif %}

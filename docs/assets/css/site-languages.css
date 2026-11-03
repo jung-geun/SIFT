@@ -1,0 +1,73 @@
+/* Shared by every locale; page content and navigation remain usable without JS. */
+.header-inner {
+  height: auto;
+  min-height: 76px;
+  padding-block: 10px;
+  flex-wrap: wrap;
+  row-gap: 4px;
+}
+.site-nav { margin-left: auto; }
+.language-menu { position: relative; flex-shrink: 0; font-size: 14px; }
+.language-menu summary {
+  min-height: 44px;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  cursor: pointer;
+  font-weight: 600;
+}
+.language-menu summary:hover { color: var(--accent-strong); border-color: var(--accent); }
+.language-menu ul {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 8px);
+  right: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+  width: min(280px, calc(100vw - 40px));
+  max-height: 65vh;
+  overflow-y: auto;
+  margin: 0;
+  padding: 8px;
+  list-style: none;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: 0 10px 24px rgb(23 23 37 / .12);
+}
+.language-menu a {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 10px 12px;
+  border-radius: 6px;
+}
+.language-menu a:hover, .language-menu a[aria-current="page"] {
+  color: var(--accent-strong);
+  background: var(--surface-soft);
+}
+html:not([lang="ko"]) body { word-break: normal; hyphens: auto; }
+@media (max-width: 768px) {
+  .header-inner {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 4px 16px;
+    padding-block: 8px;
+    min-height: 64px;
+  }
+  .brand { grid-column: 1; grid-row: 1; }
+  .language-menu { grid-column: 2; grid-row: 1; }
+  .site-nav {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 0 16px;
+    margin-left: 0;
+  }
+  .site-nav a { white-space: normal; line-height: 1.4; }
+  section[id], .document-content[id], .document-content [id] { scroll-margin-top: 180px; }
+}
+@media print { .language-menu { display: none; } }

@@ -1,4 +1,5 @@
 import Foundation
+import SwiftData
 import Testing
 @testable import todo
 
@@ -202,8 +203,8 @@ struct GmailIMAPServiceTests {
 
             let service = GmailIMAPService(transport: transport)
             try await service.authenticate(email: email, backgroundEnabled: false)
-            try await service.markAsRead(messageID: "7", expectedGlobalMessageID: "900")
-            try await service.trashMessage(messageID: "7", expectedGlobalMessageID: "900")
+            try await service.markAsRead(messageID: "7", expectedGlobalMessageID: "900", expectedAccountNamespace: email)
+            try await service.trashMessage(messageID: "7", expectedGlobalMessageID: "900", expectedAccountNamespace: email)
 
             #expect(transport.commands.contains("UID STORE 7 +FLAGS.SILENT (\\Seen)"))
             #expect(transport.commands.contains("LIST \"\" \"*\""))
@@ -243,7 +244,7 @@ struct GmailIMAPServiceTests {
             let service = GmailIMAPService(transport: transport)
             try await service.authenticate(email: email, backgroundEnabled: false)
             await #expect(throws: GmailIMAPError.mailboxReset) {
-                try await service.trashMessage(messageID: "7", expectedGlobalMessageID: "900")
+                try await service.trashMessage(messageID: "7", expectedGlobalMessageID: "900", expectedAccountNamespace: email)
             }
             #expect(transport.commands.contains("UID SEARCH X-GM-MSGID 900"))
             #expect(transport.commands.contains("UID FETCH 12 (UID X-GM-MSGID)"))
@@ -294,7 +295,7 @@ struct GmailIMAPServiceTests {
 
             let service = GmailIMAPService(transport: transport)
             try await service.authenticate(email: email, backgroundEnabled: false)
-            try await service.trashMessage(messageID: "7", expectedGlobalMessageID: "900")
+            try await service.trashMessage(messageID: "7", expectedGlobalMessageID: "900", expectedAccountNamespace: email)
 
             #expect(transport.commands.contains("SELECT \"[Gmail]/All Mail\""))
             #expect(transport.commands.contains("UID MOVE 12 \"[Gmail]/Trash\""))
@@ -352,7 +353,7 @@ struct GmailIMAPServiceTests {
 
             let service = GmailIMAPService(transport: transport)
             try await service.authenticate(email: email, backgroundEnabled: false)
-            try await service.trashMessage(messageID: "7", expectedGlobalMessageID: "900")
+            try await service.trashMessage(messageID: "7", expectedGlobalMessageID: "900", expectedAccountNamespace: email)
 
             #expect(transport.commands.contains("SELECT \"[Gmail]/Trash\""))
             #expect(!transport.commands.contains { $0.contains("UID MOVE") })
@@ -406,7 +407,7 @@ struct GmailIMAPServiceTests {
 
             let service = GmailIMAPService(transport: transport)
             try await service.authenticate(email: email, backgroundEnabled: false)
-            try await service.trashMessage(messageID: "7", expectedGlobalMessageID: "900")
+            try await service.trashMessage(messageID: "7", expectedGlobalMessageID: "900", expectedAccountNamespace: email)
 
             #expect(transport.commands.contains("SELECT \"[Gmail]/All Mail\""))
             #expect(transport.commands.contains("SELECT \"[Gmail]/Trash\""))
@@ -448,7 +449,7 @@ struct GmailIMAPServiceTests {
 
             let service = GmailIMAPService(transport: transport)
             try await service.authenticate(email: email, backgroundEnabled: false)
-            try await service.trashMessage(messageID: "7", expectedGlobalMessageID: "900")
+            try await service.trashMessage(messageID: "7", expectedGlobalMessageID: "900", expectedAccountNamespace: email)
 
             #expect(transport.commands.contains("UID SEARCH X-GM-MSGID 900"))
             #expect(transport.commands.contains("UID MOVE 12 \"[Gmail]/Trash\""))
@@ -472,7 +473,7 @@ struct GmailIMAPServiceTests {
             try await service.authenticate(email: email, backgroundEnabled: false)
 
             await #expect(throws: GmailIMAPError.mailboxReset) {
-                try await service.markAsRead(messageID: "7", expectedGlobalMessageID: "900")
+                try await service.markAsRead(messageID: "7", expectedGlobalMessageID: "900", expectedAccountNamespace: email)
             }
             #expect(!transport.commands.contains("UID STORE 7 +FLAGS.SILENT (\\Seen)"))
         }
@@ -488,14 +489,14 @@ struct GmailIMAPServiceTests {
             setupAuth(transport: transport)
 
             transport.addRoute(matching: "UID FETCH 7 (BODYSTRUCTURE)", response: [
-                "* 1 FETCH (UID 7 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" (\"CHARSET\" \"UTF-8\") NIL NIL \"QUOTED-PRINTABLE\" 100 5 NIL NIL NIL NIL))",
+                "* 1 FETCH (UID 7 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" (\"CHARSET\" \"UTF-8\") NIL NIL \"QUOTED-PRINTABLE\" \("Hello=20world=21".utf8.count) 5 NIL NIL NIL NIL))",
                 "A0002 OK FETCH"
             ])
             transport.addRoute(matching: "BODY.PEEK[1.MIME]", response: [
                 "* 1 FETCH (UID 7 X-GM-MSGID 900 X-GM-THRID 901 BODY[HEADER] "
                     + literal("Subject: =?UTF-8?B?67O07JWIIA==?= =?UTF-8?B?7JWM66a8?=\r\nFrom: sender@example.com\r\n\r\n")
                     + " BODY[1.MIME] " + literal("Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n")
-                    + " BODY[1]<0> " + literal("Hello=20world=21") + ")",
+                    + " BODY[1] " + literal("Hello=20world=21") + ")",
                 "A0003 OK FETCH"
             ])
 
@@ -506,39 +507,42 @@ struct GmailIMAPServiceTests {
             #expect(content.metadata.subject == "보안 알림")
             #expect(content.metadata.snippet == "Hello world!")
             #expect(content.body == "Hello world!")
-            #expect(transport.commands.contains { $0.contains("BODY.PEEK[1.MIME]") && $0.contains("BODY.PEEK[1]<0.500000>)") })
+            #expect(transport.commands.contains { $0.contains("BODY.PEEK[1.MIME]") && $0.contains("BODY.PEEK[1])") && !$0.contains("<0.") })
             #expect(transport.commands.allSatisfy { !$0.contains("STORE") && !$0.contains("EXPUNGE") && !$0.contains("DELETE") })
         }
     }
 
-    @Test("body fetch prefers HTML over plain text in multipart alternative")
-    func bodyFetchPrefersHTML() async throws {
+    @Test("body fetch preserves the complete plain multipart alternative")
+    func bodyFetchPrefersCompletePlainAlternative() async throws {
         try await AIProviderTestIsolation.shared.withLock {
             try setupCredentials()
             defer { cleanupCredentials() }
 
             let transport = ScriptedIMAPTransport()
             setupAuth(transport: transport)
+            let html = "<p>Hello <b>plain</b>. Withdraw the earlier request.</p>"
 
             transport.addRoute(matching: "UID FETCH 8 (BODYSTRUCTURE)", response: [
-                "* 1 FETCH (UID 8 BODYSTRUCTURE ((\"TEXT\" \"PLAIN\" (\"CHARSET\" \"UTF-8\") NIL NIL \"7BIT\" 20 2 NIL NIL NIL NIL) (\"TEXT\" \"HTML\" (\"CHARSET\" \"UTF-8\") NIL NIL \"7BIT\" 40 4 NIL NIL NIL NIL) \"ALTERNATIVE\"))",
+                "* 1 FETCH (UID 8 BODYSTRUCTURE ((\"TEXT\" \"PLAIN\" (\"CHARSET\" \"UTF-8\") NIL NIL \"7BIT\" \("Hello plain. Withdraw the earlier request.".utf8.count) 2 NIL NIL NIL NIL) (\"TEXT\" \"HTML\" (\"CHARSET\" \"UTF-8\") NIL NIL \"7BIT\" \(html.utf8.count) 4 NIL NIL NIL NIL) \"ALTERNATIVE\"))",
                 "A0002 OK FETCH"
             ])
-            transport.addRoute(matching: "BODY.PEEK[2.MIME]", response: [
+            transport.addRoute(matching: "BODY.PEEK[1.MIME]", response: [
                 "* 1 FETCH (UID 8 X-GM-MSGID 901 X-GM-THRID 901 BODY[HEADER] "
                     + literal("Subject: HTML Test\r\nFrom: sender@example.com\r\n\r\n")
+                    + " BODY[1.MIME] " + literal("Content-Type: text/plain; charset=utf-8\r\n\r\n")
+                    + " BODY[1] " + literal("Hello plain. Withdraw the earlier request.")
                     + " BODY[2.MIME] " + literal("Content-Type: text/html; charset=utf-8\r\n\r\n")
-                    + " BODY[2]<0> " + literal("<p>Hello <b>HTML</b></p>") + ")",
+                    + " BODY[2] " + literal(html) + ")",
                 "A0003 OK FETCH"
             ])
 
             let service = GmailIMAPService(transport: transport)
             try await service.authenticate(email: email, backgroundEnabled: false)
             let content = try await service.fetchMessageContent(messageID: "8")
-            #expect(content.htmlBody == "<p>Hello <b>HTML</b></p>")
-            #expect(content.body == "Hello HTML")
-            #expect(!transport.commands.contains { $0.contains("BODY.PEEK[1]") })
-            #expect(transport.commands.contains { $0.contains("BODY.PEEK[2.MIME]") })
+            #expect(content.htmlBody == html)
+            #expect(content.body == "Hello plain. Withdraw the earlier request.")
+            #expect(transport.commands.contains { $0.contains("BODY.PEEK[2]") })
+            #expect(transport.commands.contains { $0.contains("BODY.PEEK[1.MIME]") })
         }
     }
 
@@ -552,14 +556,14 @@ struct GmailIMAPServiceTests {
             setupAuth(transport: transport)
 
             transport.addRoute(matching: "UID FETCH 9 (BODYSTRUCTURE)", response: [
-                "* 1 FETCH (UID 9 BODYSTRUCTURE ((\"APPLICATION\" \"PDF\" (\"NAME\" \"file.pdf\") NIL NIL \"BASE64\" 1000 NIL (\"ATTACHMENT\" (\"FILENAME\" \"file.pdf\")) NIL NIL) (\"TEXT\" \"HTML\" (\"CHARSET\" \"UTF-8\") NIL NIL \"7BIT\" 40 4 NIL NIL NIL NIL) \"MIXED\"))",
+                "* 1 FETCH (UID 9 BODYSTRUCTURE ((\"APPLICATION\" \"PDF\" (\"NAME\" \"file.pdf\") NIL NIL \"BASE64\" 1000 NIL (\"ATTACHMENT\" (\"FILENAME\" \"file.pdf\")) NIL NIL) (\"TEXT\" \"HTML\" (\"CHARSET\" \"UTF-8\") NIL NIL \"7BIT\" \("<h1>Main Body</h1>".utf8.count) 4 NIL NIL NIL NIL) \"MIXED\"))",
                 "A0002 OK FETCH"
             ])
             transport.addRoute(matching: "BODY.PEEK[2.MIME]", response: [
                 "* 1 FETCH (UID 9 X-GM-MSGID 902 X-GM-THRID 901 BODY[HEADER] "
                     + literal("Subject: Attach test\r\nFrom: sender@example.com\r\n\r\n")
                     + " BODY[2.MIME] " + literal("Content-Type: text/html; charset=utf-8\r\n\r\n")
-                    + " BODY[2]<0> " + literal("<h1>Main Body</h1>") + ")",
+                    + " BODY[2] " + literal("<h1>Main Body</h1>") + ")",
                 "A0003 OK FETCH"
             ])
 
@@ -582,14 +586,14 @@ struct GmailIMAPServiceTests {
             setupAuth(transport: transport)
 
             transport.addRoute(matching: "UID FETCH 10 (BODYSTRUCTURE)", response: [
-                "* 1 FETCH (UID 10 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" (\"CHARSET\" \"EUC-KR\") NIL NIL \"BASE64\" 20 2 NIL NIL NIL NIL))",
+                "* 1 FETCH (UID 10 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" (\"CHARSET\" \"EUC-KR\") NIL NIL \"BASE64\" \("vsiz58fPvLy/5A==".utf8.count) 2 NIL NIL NIL NIL))",
                 "A0002 OK FETCH"
             ])
             transport.addRoute(matching: "BODY.PEEK[1.MIME]", response: [
                 "* 1 FETCH (UID 10 X-GM-MSGID 903 X-GM-THRID 901 BODY[HEADER] "
                     + literal("Subject: Non UTF8\r\nFrom: sender@example.com\r\n\r\n")
                     + " BODY[1.MIME] " + literal("Content-Type: text/plain; charset=euc-kr\r\nContent-Transfer-Encoding: base64\r\n\r\n")
-                    + " BODY[1]<0> " + literal("vsiz58fPvLy/5A==") + ")",
+                    + " BODY[1] " + literal("vsiz58fPvLy/5A==") + ")",
                 "A0003 OK FETCH"
             ])
 
@@ -600,32 +604,33 @@ struct GmailIMAPServiceTests {
         }
     }
 
-    @Test("exact boundary truncation discards partial HTML and throws on unselectable attachment")
-    func bodyFetchTruncationAndUnselectablePart() async throws {
+    @Test("complete large bodies are preserved and unselectable attachments throw")
+    func completeLargeBodyAndUnselectablePart() async throws {
         try await AIProviderTestIsolation.shared.withLock {
             try setupCredentials()
             defer { cleanupCredentials() }
 
-            // 1. Truncated HTML payload discards partial HTML and attaches notice
+            // Complete HTML above the former partial-fetch boundary stays intact.
             let transportTruncated = ScriptedIMAPTransport()
             setupAuth(transport: transportTruncated)
+            let hugePayload = "<html><body>" + String(repeating: "A", count: 600000) + "</body></html>"
             transportTruncated.addRoute(matching: "UID FETCH 11 (BODYSTRUCTURE)", response: [
-                "* 1 FETCH (UID 11 BODYSTRUCTURE (\"TEXT\" \"HTML\" (\"CHARSET\" \"UTF-8\") NIL NIL \"7BIT\" 600000 1000 NIL NIL NIL NIL))",
+                "* 1 FETCH (UID 11 BODYSTRUCTURE (\"TEXT\" \"HTML\" (\"CHARSET\" \"UTF-8\") NIL NIL \"7BIT\" \(hugePayload.utf8.count) 1000 NIL NIL NIL NIL))",
                 "A0002 OK FETCH"
             ])
-            let hugePayload = String(repeating: "A", count: 500000)
             transportTruncated.addRoute(matching: "BODY.PEEK[1.MIME]", response: [
                 "* 1 FETCH (UID 11 X-GM-MSGID 904 X-GM-THRID 901 BODY[HEADER] "
                     + literal("Subject: Big Mail\r\nFrom: sender@example.com\r\n\r\n")
                     + " BODY[1.MIME] " + literal("Content-Type: text/html; charset=utf-8\r\n\r\n")
-                    + " BODY[1]<0> " + literal(hugePayload) + ")",
+                    + " BODY[1] " + literal(hugePayload) + ")",
                 "A0003 OK FETCH"
             ])
             let serviceTruncated = GmailIMAPService(transport: transportTruncated)
             try await serviceTruncated.authenticate(email: email, backgroundEnabled: false)
             let truncatedContent = try await serviceTruncated.fetchMessageContent(messageID: "11")
-            #expect(truncatedContent.htmlBody.isEmpty)
-            #expect(truncatedContent.body.contains("["))
+            #expect(truncatedContent.htmlBody == hugePayload)
+            #expect(truncatedContent.body.contains(String(repeating: "A", count: 600000)))
+            #expect(transportTruncated.commands.allSatisfy { !$0.contains("<0.") })
 
             // 2. Only attachment part throws noSelectableTextPart
             let transportAttachmentOnly = ScriptedIMAPTransport()
@@ -640,6 +645,249 @@ struct GmailIMAPServiceTests {
                 try await serviceAttachmentOnly.fetchMessageContent(messageID: "12")
             }
         }
+    }
+
+    @Test("composed inline text retains late actions and withdrawals around images", arguments: ["MIXED", "RELATED"])
+    func composedInlineTextIsComplete(subtype: String) async throws {
+        try await AIProviderTestIsolation.shared.withLock {
+            try setupCredentials()
+            defer { cleanupCredentials() }
+            let transport = ScriptedIMAPTransport()
+            setupAuth(transport: transport)
+            let first = "<p>Please publish the report.</p>" + String(repeating: "x", count: 500_100)
+            let later = "<p>Withdraw the earlier publish request. Send only the revised draft tomorrow.</p>"
+            let mime = "Content-Type: text/html; charset=utf-8\r\n\r\n"
+            let leaf: (String) -> String = { body in
+                "(\"TEXT\" \"HTML\" (\"CHARSET\" \"UTF-8\") NIL NIL \"7BIT\" \(body.utf8.count) 1 NIL NIL NIL NIL)"
+            }
+            transport.addRoute(matching: "UID FETCH 13 (BODYSTRUCTURE)", response: [
+                "* 1 FETCH (UID 99 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 1 1))",
+                "* 2 FETCH (UID 13 BODYSTRUCTURE (\(leaf(first)) (\"IMAGE\" \"PNG\" NIL NIL NIL \"BASE64\" 5000000 NIL (\"INLINE\" NIL)) \(leaf(later)) (\"TEXT\" \"PLAIN\" (\"NAME\" \"notes.txt\") NIL NIL \"7BIT\" 9000000 1 NIL (\"ATTACHMENT\" (\"FILENAME\" \"notes.txt\"))) \"\(subtype)\"))",
+                "A0002 OK FETCH"
+            ])
+            let header = "Subject: Composed message\r\nFrom: sender@example.com\r\n\r\n"
+            let wire = "* 2 FETCH (UID 13 X-GM-MSGID 913 BODY[HEADER] {\(header.utf8.count)}\r\n\(header)"
+                + " BODY[1.MIME] {\(mime.utf8.count)}\r\n\(mime) BODY[1] {\(first.utf8.count)}\r\n\(first)"
+                + " BODY[3.MIME] {\(mime.utf8.count)}\r\n\(mime) BODY[3] {\(later.utf8.count)}\r\n\(later))\r\nA0003 OK FETCH\r\n"
+            var decoder = IMAPResponseDecoder()
+            let frames = try decoder.append(Data(wire.utf8))
+            try decoder.finish()
+            transport.addRoute(matching: "BODY.PEEK[1.MIME]", response: frames)
+            let service = GmailIMAPService(transport: transport)
+            try await service.authenticate(email: email, backgroundEnabled: false)
+            let content = try await service.fetchMessageContent(messageID: "13")
+            #expect(content.body.hasPrefix("Please publish the report."))
+            #expect(content.body.hasSuffix("Withdraw the earlier publish request. Send only the revised draft tomorrow."))
+            #expect(content.htmlBody == first + "\n" + later)
+            #expect(content.metadata.providerMessageID == "13")
+            #expect(transport.commands.contains { $0.contains("BODY.PEEK[3]") })
+            #expect(transport.commands.allSatisfy { !$0.contains("BODY.PEEK[2") && !$0.contains("BODY.PEEK[4") && !$0.contains("BODY.PEEK[TEXT]") })
+        }
+    }
+
+    @Test("missing a composed inline sibling fails rather than returning the prefix")
+    func incompleteComposedBodyFailsClosed() async throws {
+        let structures = [
+            "* 1 FETCH (UID 1 BODYSTRUCTURE ((\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 5 1) (\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 8 1) \"MIXED\"))"
+        ]
+        let parts = try IMAPTextBody.select(from: structures, uid: 1)
+        let mime = "Content-Type: text/plain\r\n\r\n"
+        #expect(throws: IMAPTextBodyError.invalidResponse) {
+            try IMAPTextBody.decode(parts, from: [
+                "* 1 FETCH (UID 1 BODY[1.MIME] " + literal(mime) + " BODY[1] " + literal("First") + ")"
+            ])
+        }
+    }
+
+    @Test("mixed plain and HTML siblings keep every sentence without partial HTML")
+    func mixedReadableRepresentationsDoNotDropPlainSibling() throws {
+        let plain = "Withdraw the earlier request."
+        let html = "<p>Send the revised draft instead.</p>"
+        let parts = [
+            IMAPTextBody.Part(section: "1", subtype: "PLAIN", octets: plain.utf8.count),
+            IMAPTextBody.Part(section: "3", subtype: "HTML", octets: html.utf8.count)
+        ]
+        let decoded = try IMAPTextBody.decode(parts, from: [
+            "* 1 FETCH (UID 1 BODY[1.MIME] " + literal("Content-Type: text/plain\r\n\r\n")
+                + " BODY[1] " + literal(plain)
+                + " BODY[3.MIME] " + literal("Content-Type: text/html\r\n\r\n")
+                + " BODY[3] " + literal(html) + ")"
+        ])
+        #expect(decoded.text == "Withdraw the earlier request.\n\nSend the revised draft instead.")
+        #expect(decoded.html.isEmpty)
+    }
+
+    @Test("unsupported inline text does not make a mixed prefix authoritative")
+    func unsupportedInlineTextFailsClosed() throws {
+        #expect(throws: IMAPTextBodyError.noReadableText) {
+            try IMAPTextBody.select(from: [
+                "* 1 FETCH (UID 1 BODYSTRUCTURE ((\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 5 1) (\"TEXT\" \"RTF\" NIL NIL NIL \"7BIT\" 8 1) \"MIXED\"))"
+            ], uid: 1)
+        }
+    }
+
+    @Test("literal text cannot supply protocol UID or BODYSTRUCTURE", arguments: [false, true])
+    func structureIdentityIgnoresLiteralTokens(hasProtocolUID: Bool) {
+        let spoof = "UID 1 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 5 1)"
+        #expect(throws: IMAPTextBodyError.invalidResponse) {
+            try IMAPTextBody.select(from: [
+                "* 1 FETCH (" + (hasProtocolUID ? "UID 1 " : "") + "BODY[HEADER] " + literal(spoof) + ")"
+            ], uid: 1)
+        }
+    }
+
+    @Test("estimated structure sizes and default plain MIME headers preserve complete literal text", arguments: [false, true])
+    func estimatedSizeAndNonMIMEPlainText(nilHeader: Bool) throws {
+        let body = "Plain system notice.\nThe earlier request is withdrawn."
+        let parts = try IMAPTextBody.select(from: [
+            "* 1 FETCH (UID 1 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" \(body.utf8.count + 2) 2))"
+        ], uid: 1)
+        let wire = "* 1 FETCH (UID 1 BODY[1.MIME] "
+            + (nilHeader ? "NIL" : "{0}\r\n")
+            + " BODY[1] {\(body.utf8.count)}\r\n\(body))\r\nA0001 OK FETCH\r\n"
+        var decoder = IMAPResponseDecoder()
+        let frames = try decoder.append(Data(wire.utf8))
+        try decoder.finish()
+        let content = try IMAPTextBody.decode(parts, from: frames)
+        #expect(content.text == body)
+        #expect(content.html.isEmpty)
+    }
+
+    @Test("missing or malformed Content-Type never defaults an HTML or unknown leaf")
+    func plainDefaultDoesNotMaskDeclaredType() {
+        #expect(MIMETextDecoder.decodeTextPart("\r\n\r\n<p>Not declared HTML</p>", subtype: "HTML") == nil)
+        #expect(MIMETextDecoder.decodeTextPart("Content-Type: \r\n\r\nUnclear type", subtype: "PLAIN") == nil)
+        #expect(MIMETextDecoder.decodeTextPart("Content-Type: text/rtf\r\n\r\nUnknown type", subtype: "PLAIN") == nil)
+    }
+
+    @Test("a partial-origin response remains unconfirmed even with a valid literal frame")
+    func partialResponseDoesNotBecomeComplete() {
+        let body = "Only a prefix."
+        let part = IMAPTextBody.Part(section: "1", subtype: "PLAIN", octets: body.utf8.count + 500)
+        #expect(throws: IMAPTextBodyError.noReadableText) {
+            try IMAPTextBody.decode([part], from: [
+                "* 1 FETCH (UID 1 BODY[1.MIME] " + literal("Content-Type: text/plain\r\n\r\n")
+                    + " BODY[1]<0> " + literal(body) + ")"
+            ])
+        }
+    }
+
+    @Test("oversize duplicate HTML does not block a complete plain alternative")
+    func oversizeDisplayAlternativeKeepsPlain() throws {
+        let parts = try IMAPTextBody.select(from: [
+            "* 1 FETCH (UID 1 BODYSTRUCTURE ((\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 5 1) (\"TEXT\" \"HTML\" NIL NIL NIL \"7BIT\" \(MIMETextDecoder.maximumMessageBytes) 1) \"ALTERNATIVE\"))"
+        ], uid: 1)
+        #expect(parts.count == 1)
+        #expect(parts.first?.subtype == "PLAIN")
+        let content = try IMAPTextBody.decode(parts, from: [
+            "* 1 FETCH (UID 1 BODY[1.MIME] " + literal("Content-Type: text/plain\r\n\r\n") + " BODY[1] " + literal("Whole") + ")"
+        ])
+        #expect(content.text == "Whole")
+        #expect(content.html.isEmpty)
+    }
+
+    @Test("display-only HTML failures keep the complete plain alternative", arguments: ["missing", "nil", "invalid", "oversize", "partial"])
+    func optionalDisplayFailureKeepsPlain(failure: String) throws {
+        let plain = "Complete plain source. Withdraw the earlier request."
+        let html = failure == "oversize"
+            ? String(repeating: "x", count: MIMETextDecoder.maximumMessageBytes)
+            : "<p>Complete display source.</p>"
+        let parts = try IMAPTextBody.select(from: [
+            "* 1 FETCH (UID 1 BODYSTRUCTURE ((\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" \(plain.utf8.count) 1) (\"TEXT\" \"HTML\" NIL NIL NIL \"7BIT\" 1 1) \"ALTERNATIVE\"))"
+        ], uid: 1)
+        let wireLiteral: (String) -> String = { "{\($0.utf8.count)}\r\n\($0)" }
+        var response = "* 1 FETCH (UID 1 BODY[1.MIME] " + wireLiteral("Content-Type: text/plain\r\n\r\n")
+            + " BODY[1] " + wireLiteral(plain)
+        if failure != "missing" {
+            let mime = failure == "invalid" ? "Content-Type: text/rtf\r\n\r\n" : "Content-Type: text/html\r\n\r\n"
+            response += " BODY[2.MIME] " + (failure == "nil" ? "NIL" : wireLiteral(mime))
+            response += " BODY[2]" + (failure == "partial" ? "<0>" : "") + " " + wireLiteral(html)
+        }
+        response += ")\r\nA0001 OK FETCH\r\n"
+        var decoder = IMAPResponseDecoder()
+        let frames = try decoder.append(Data(response.utf8))
+        try decoder.finish()
+        let content = try IMAPTextBody.decode(parts, from: frames)
+        #expect(content.text == plain)
+        #expect(content.html.isEmpty)
+    }
+
+    @Test("optional HTML cannot consume the budget needed by a later required sibling")
+    func requiredTextBudgetPrecedesOptionalDisplay() throws {
+        let plain = String(repeating: "a", count: 600_000)
+        let later = String(repeating: "b", count: 200_000) + " Withdraw the earlier request."
+        let html = "<p>" + String(repeating: "c", count: 300_000) + "</p>"
+        let parts = [
+            IMAPTextBody.Part(section: "1.1", subtype: "PLAIN", octets: plain.utf8.count, representation: "alternative:1"),
+            IMAPTextBody.Part(section: "1.2", subtype: "HTML", octets: 1, contributesText: false, representation: "alternative:1"),
+            IMAPTextBody.Part(section: "2", subtype: "PLAIN", octets: later.utf8.count)
+        ]
+        let content = try IMAPTextBody.decode(parts, from: [
+            "* 1 FETCH (UID 1 BODY[1.1.MIME] " + literal("Content-Type: text/plain\r\n\r\n")
+                + " BODY[1.1] " + literal(plain)
+                + " BODY[1.2.MIME] " + literal("Content-Type: text/html\r\n\r\n")
+                + " BODY[1.2] " + literal(html)
+                + " BODY[2.MIME] " + literal("Content-Type: text/plain\r\n\r\n")
+                + " BODY[2] " + literal(later) + ")"
+        ])
+        #expect(content.text == plain + "\n\n" + later)
+        #expect(content.html.isEmpty)
+    }
+
+    @Test("single-part base64 Korean uses the root MIME header when section MIME is NIL or empty", arguments: ["PLAIN", "HTML"])
+    func rootMIMEFallbackPreservesEncodedKorean(subtype: String) throws {
+        let sentence = "이전 게시 요청을 철회합니다. 수정한 초안만 보내 주세요."
+        let source = subtype == "HTML" ? "<p>" + sentence + "</p>" : sentence
+        let encoded = Data(source.utf8).base64EncodedString()
+        let root = "Subject: Synthetic Korean message\r\nContent-Type: text/\(subtype.lowercased()); charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n\r\n"
+        let parts = try IMAPTextBody.select(from: [
+            "* 1 FETCH (UID 1 BODYSTRUCTURE (\"TEXT\" \"\(subtype)\" (\"CHARSET\" \"UTF-8\") NIL NIL \"BASE64\" \(encoded.utf8.count) 1))"
+        ], uid: 1)
+        let wireLiteral: (String) -> String = { "{\($0.utf8.count)}\r\n\($0)" }
+        for nilHeader in [true, false] {
+            let wire = "* 1 FETCH (UID 1 BODY[HEADER] " + wireLiteral(root)
+                + " BODY[1.MIME] " + (nilHeader ? "NIL" : wireLiteral(""))
+                + " BODY[1] " + wireLiteral(encoded) + ")\r\nA0001 OK FETCH\r\n"
+            var decoder = IMAPResponseDecoder()
+            let frames = try decoder.append(Data(wire.utf8))
+            try decoder.finish()
+            let content = try IMAPTextBody.decode(parts, from: frames)
+            #expect(content.text == sentence)
+            #expect(content.html == (subtype == "HTML" ? source : ""))
+        }
+    }
+
+    @Test("missing or contradictory required transfer metadata never confirms encoded source", arguments: ["BASE64", "QUOTED-PRINTABLE"])
+    func missingRequiredTransferMetadataFailsClosed(encoding: String) throws {
+        let encoded = encoding == "BASE64" ? "V2l0aGRyYXcgdGhlIHJlcXVlc3Qu" : "Withdraw=20the=20request."
+        let parts = try IMAPTextBody.select(from: [
+            "* 1 FETCH (UID 1 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" NIL NIL NIL \"\(encoding)\" \(encoded.utf8.count) 1))"
+        ], uid: 1)
+        for mime in ["", "Content-Type: text/plain\r\nContent-Transfer-Encoding: 7bit\r\n\r\n"] {
+            #expect(throws: IMAPTextBodyError.noReadableText) {
+                try IMAPTextBody.decode(parts, from: [
+                    "* 1 FETCH (UID 1 BODY[HEADER] " + literal("Subject: No transfer metadata\r\n\r\n")
+                        + " BODY[1.MIME] " + literal(mime) + " BODY[1] " + literal(encoded) + ")"
+                ])
+            }
+        }
+    }
+
+    @Test("multipart leaves cannot borrow root MIME metadata and charset conflicts fail closed")
+    func leafMIMEAndCharsetMustMatchStructure() throws {
+        let encoded = Data("요청을 철회합니다.".utf8).base64EncodedString()
+        let root = "Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n\r\n"
+        let parts = try IMAPTextBody.select(from: [
+            "* 1 FETCH (UID 1 BODYSTRUCTURE ((\"TEXT\" \"PLAIN\" (\"CHARSET\" \"UTF-8\") NIL NIL \"BASE64\" \(encoded.utf8.count) 1) \"MIXED\"))"
+        ], uid: 1)
+        #expect(throws: IMAPTextBodyError.noReadableText) {
+            try IMAPTextBody.decode(parts, from: [
+                "* 1 FETCH (UID 1 BODY[HEADER] " + literal(root) + " BODY[1.MIME] NIL BODY[1] " + literal(encoded) + ")"
+            ])
+        }
+        #expect(MIMETextDecoder.decodeTextPart(
+            root + encoded, subtype: "PLAIN", expectedEncoding: "BASE64", expectedCharset: "euc-kr"
+        ) == nil)
     }
 
     @Test("head index 1...205 fetches 106...205 and pages older mail to completion")
@@ -893,7 +1141,7 @@ struct GmailIMAPServiceTests {
                 "* 1 FETCH (UID 10 X-GM-MSGID 1010 X-GM-THRID 2000 BODY[HEADER] "
                     + literal("Subject: Test\r\nFrom: sender@example.com\r\n\r\n")
                     + " BODY[1.MIME] " + literal("Content-Type: text/plain; charset=utf-8\r\n\r\n")
-                    + " BODY[1]<0> " + literal("Hello world") + ")",
+                    + " BODY[1] " + literal("Hello world") + ")",
                 "A0011 OK FETCH"
             ])
 
@@ -1000,11 +1248,11 @@ struct GmailIMAPServiceTests {
 
             probe.armGate()
             let firstTrash = Task {
-                try await service.trashMessage(messageID: "7", expectedGlobalMessageID: "900")
+                try await service.trashMessage(messageID: "7", expectedGlobalMessageID: "900", expectedAccountNamespace: email)
             }
             await probe.waitForStarted()
             let secondTrash = Task {
-                try await service.trashMessage(messageID: "8", expectedGlobalMessageID: "901")
+                try await service.trashMessage(messageID: "8", expectedGlobalMessageID: "901", expectedAccountNamespace: email)
             }
             probe.releaseGate()
 
@@ -1154,6 +1402,10 @@ private final class ProbeIMAPTransport: IMAPCommandTransport, @unchecked Sendabl
         self.underlying = underlying
     }
 
+    var isConnected: Bool {
+        get async { await underlying.isConnected }
+    }
+
     func armGate() {
         lock.withLock {
             isArmed = true
@@ -1225,5 +1477,277 @@ private final class ProbeIMAPTransport: IMAPCommandTransport, @unchecked Sendabl
 
     func close() async {
         await underlying.close()
+    }
+}
+
+@MainActor
+extension GmailIMAPServiceTests {
+    @Test("production transport disposal invalidates readiness and the next operation reconnects once")
+    func disposedTransportRecoversThroughApprovedCredential() async throws {
+        try await AIProviderTestIsolation.shared.withLock {
+            try setupCredentials()
+            defer { cleanupCredentials() }
+            let first = RecoveryIMAPWire(failingCommand: "UID SEARCH ALL")
+            let second = RecoveryIMAPWire()
+            let factory = RecoveryIMAPWireFactory([first, second])
+            let transport = NetworkIMAPCommandTransport(timeout: 2, makeConnection: { try factory.make() })
+            let service = GmailIMAPService(transport: transport)
+            try await service.ensureAuthenticated(email: email, backgroundEnabled: false)
+            #expect(await service.isAuthenticated)
+            await #expect(throws: GmailIMAPError.transport("Synthetic receive failure")) {
+                _ = try await service.fetchInboxPage(after: nil)
+            }
+            #expect(first.wasCancelled)
+            #expect(!(await transport.isConnected))
+            #expect(!(await service.isAuthenticated))
+            #expect(await service.authenticatedAccount == nil)
+            async let readyOne: Void = service.ensureAuthenticated(email: email, backgroundEnabled: false)
+            async let readyTwo: Void = service.ensureAuthenticated(email: email, backgroundEnabled: false)
+            _ = try await (readyOne, readyTwo)
+            let page = try await service.fetchInboxPage(after: nil)
+            #expect(page.messages.isEmpty)
+            #expect(factory.connectionCount == 2)
+            #expect(await service.authenticatedAccount == email)
+            #expect(!IMAPCredentialStore.isCredentialRejected(for: email))
+        }
+    }
+
+    @Test("a failed read mutation is not replayed by readiness recovery")
+    func failedMutationIsNotAutomaticallyReplayed() async throws {
+        try await AIProviderTestIsolation.shared.withLock {
+            try setupCredentials()
+            defer { cleanupCredentials() }
+            let transport = ScriptedIMAPTransport()
+            setupAuth(transport: transport)
+            transport.addRoute(matching: "UID FETCH 7 (UID X-GM-MSGID)", response: [
+                "* 1 FETCH (UID 7 X-GM-MSGID 900)", "A0001 OK"
+            ])
+            transport.addRoute(matching: "UID STORE", error: GmailIMAPError.transport("Synthetic failure"), once: true)
+            let service = GmailIMAPService(transport: transport)
+            try await service.ensureAuthenticated(email: email, backgroundEnabled: false)
+            await #expect(throws: GmailIMAPError.transport("Synthetic failure")) {
+                try await service.markAsRead(messageID: "7", expectedGlobalMessageID: "900", expectedAccountNamespace: email)
+            }
+            #expect(!(await service.isAuthenticated))
+            try await service.ensureAuthenticated(email: email, backgroundEnabled: false)
+            #expect(transport.commands.filter { $0.hasPrefix("UID STORE") }.count == 1)
+            #expect(transport.commands.filter { $0 == "CONNECT_PREAUTH" }.count == 2)
+        }
+    }
+
+    @Test("over-budget MIME fails explicitly instead of caching an empty or partial success")
+    func oversizedMIMEFailsClosed() async throws {
+        try await AIProviderTestIsolation.shared.withLock {
+            try setupCredentials()
+            defer { cleanupCredentials() }
+            let transport = ScriptedIMAPTransport()
+            setupAuth(transport: transport)
+            transport.addRoute(matching: "BODYSTRUCTURE", response: [
+                "* 1 FETCH (UID 7 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" (\"CHARSET\" \"UTF-8\") NIL NIL \"7BIT\" 1100000 1 NIL NIL NIL NIL))",
+                "A0001 OK"
+            ])
+            let service = GmailIMAPService(transport: transport)
+            try await service.ensureAuthenticated(email: email, backgroundEnabled: false)
+            await #expect(throws: IMAPTextBodyError.tooLarge) {
+                _ = try await service.fetchMessageContent(messageID: "7")
+            }
+            #expect(transport.commands.allSatisfy { !$0.contains("BODY.PEEK[1") })
+        }
+    }
+}
+
+private final class RecoveryIMAPWireFactory: @unchecked Sendable {
+    private let lock = NSLock()
+    private var wires: [RecoveryIMAPWire]
+    private var count = 0
+
+    init(_ wires: [RecoveryIMAPWire]) { self.wires = wires }
+    var connectionCount: Int { lock.withLock { count } }
+
+    func make() throws -> any IMAPWireConnection {
+        try lock.withLock {
+            guard !wires.isEmpty else { throw GmailIMAPError.invalidResponse }
+            count += 1
+            return wires.removeFirst()
+        }
+    }
+}
+
+private final class RecoveryIMAPWire: IMAPWireConnection, @unchecked Sendable {
+    private let lock = NSLock()
+    private let failingCommand: String?
+    private var pending = Data("* OK synthetic IMAP ready\r\n".utf8)
+    private var cancelled = false
+    private var failReceive = false
+
+    init(failingCommand: String? = nil) { self.failingCommand = failingCommand }
+    var wasCancelled: Bool { lock.withLock { cancelled } }
+
+    func start(_ completion: @escaping @Sendable (Result<Void, Error>) -> Void) {
+        completion(.success(()))
+    }
+
+    func send(_ data: Data, completion: @escaping @Sendable (Result<Void, Error>) -> Void) {
+        let line = String(decoding: data, as: UTF8.self)
+        let tokens = line.split(separator: " ", maxSplits: 1)
+        let tag = tokens.first.map(String.init) ?? ""
+        lock.withLock {
+            if let failingCommand, line.contains(failingCommand) {
+                failReceive = true
+            } else {
+                let untagged: String
+                if line.contains(" CAPABILITY") {
+                    untagged = "* CAPABILITY IMAP4rev1 MOVE X-GM-EXT-1\r\n"
+                } else if line.contains(" SELECT INBOX") {
+                    untagged = "* 0 EXISTS\r\n* OK [UIDVALIDITY 42] selected\r\n"
+                } else if line.contains(" UID SEARCH ALL") {
+                    untagged = "* SEARCH\r\n"
+                } else {
+                    untagged = ""
+                }
+                pending = Data("\(untagged)\(tag) OK completed\r\n".utf8)
+            }
+        }
+        completion(.success(()))
+    }
+
+    func receive(_ completion: @escaping @Sendable (Result<IMAPWireChunk, Error>) -> Void) {
+        let result: Result<IMAPWireChunk, Error> = lock.withLock {
+            if failReceive { return .failure(GmailIMAPError.transport("Synthetic receive failure")) }
+            let data = pending
+            pending = Data()
+            return .success(IMAPWireChunk(data: data, isComplete: false))
+        }
+        completion(result)
+    }
+
+    func cancel() { lock.withLock { cancelled = true } }
+}
+
+@MainActor
+extension GmailIMAPServiceTests {
+    @Test("queued mutations cannot cross an account switch even when UID and immutable message identity match",
+          arguments: [MailProvider.gmail, .outlook], [MailboxMutationAction.markAsRead, .trash])
+    func queuedMutationAccountFence(providerKind: MailProvider, action: MailboxMutationAction) async throws {
+        try await AIProviderTestIsolation.shared.withLock {
+            let accountA = "queued-a@example.com"
+            let accountB = "queued-b@example.com"
+            for account in [accountA, accountB] {
+                switch providerKind {
+                case .gmail:
+                    try IMAPCredentialStore.save(appPassword: "synthetic-password", for: account, backgroundEnabled: false)
+                case .outlook:
+                    try OutlookIMAPCredentialStore.save(appPassword: "synthetic-password", for: account, backgroundEnabled: false)
+                }
+            }
+            defer {
+                for account in [accountA, accountB] {
+                    switch providerKind {
+                    case .gmail: try? IMAPCredentialStore.delete(for: account)
+                    case .outlook: try? OutlookIMAPCredentialStore.delete(for: account)
+                    }
+                }
+            }
+            let raw = ScriptedIMAPTransport()
+            setupAuth(transport: raw)
+            raw.addRoute(matching: "UID FETCH 7 ", response: [
+                "* 7 FETCH (UID 7 X-GM-MSGID 900 BODY[HEADER.FIELDS (MESSAGE-ID)] "
+                    + literal("Message-ID: <shared-message-id>\r\n\r\n") + ")",
+                "A0001 OK FETCH"
+            ])
+            raw.addRoute(matching: "LIST \"\" \"*\"", response: [
+                "* LIST (\\HasNoChildren \\Trash) \"/\" \"Trash\"", "A0002 OK LIST"
+            ])
+            let probe = ProbeIMAPTransport(underlying: raw)
+            let gmail = GmailIMAPService(transport: probe)
+            let outlook = OutlookIMAPService(transport: probe)
+            let mailbox: any MailboxPagingProvider
+            switch providerKind {
+            case .gmail: mailbox = gmail
+            case .outlook: mailbox = outlook
+            }
+            func authenticate(_ namespace: String) async throws {
+                switch providerKind {
+                case .gmail: try await gmail.authenticate(email: namespace, backgroundEnabled: false)
+                case .outlook: try await outlook.authenticate(email: namespace, backgroundEnabled: false)
+                }
+            }
+            let globalID = providerKind == .gmail ? "900" : "shared-message-id"
+            func mutate(expectedAccount: String) async throws {
+                switch action {
+                case .markAsRead:
+                    try await mailbox.markAsRead(messageID: "7", expectedGlobalMessageID: globalID, expectedAccountNamespace: expectedAccount)
+                case .trash:
+                    try await mailbox.trashMessage(messageID: "7", expectedGlobalMessageID: globalID, expectedAccountNamespace: expectedAccount)
+                }
+            }
+            try await authenticate(accountA)
+            let schema = Schema([EmailMessage.self])
+            let configuration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)
+            let container = try ModelContainer(for: schema, configurations: [configuration])
+            let context = ModelContext(container)
+            let email = EmailMessage(
+                id: "cached-a", body: "Account A original complete body",
+                provider: providerKind, rawMessageID: "7", providerGlobalMessageID: globalID,
+                labelIDs: ["INBOX", "UNREAD"], isInInbox: true, sourceAccountNamespace: accountA
+            )
+            email.bodyContentVersion = 1
+            context.insert(email)
+            try context.save()
+            let defaults = UserDefaults(suiteName: "MutationAccountFence.\(UUID().uuidString)")!
+            let store = MailboxLocalStore(defaults: defaults, saveContext: { try $0.save() })
+
+            // Hold B's authentication inside the existing service command turn.
+            // A's already-approved mutation must check its account only after
+            // obtaining that same turn, not before waiting for it.
+            probe.armGate()
+            let switchAccount = Task { try await authenticate(accountB) }
+            await probe.waitForStarted()
+            var mutationStarted = false
+            let staleMutation = Task {
+                mutationStarted = true
+                switch action {
+                case .markAsRead:
+                    try await store.markAsRead(email, in: context) { try await mutate(expectedAccount: accountA) }
+                case .trash:
+                    try await store.trash(email, in: context) { try await mutate(expectedAccount: accountA) }
+                }
+            }
+            while !mutationStarted { await Task.yield() }
+            probe.releaseGate()
+            try await switchAccount.value
+            do {
+                try await staleMutation.value
+                Issue.record("A mutation must not execute on B's authenticated connection")
+            } catch {
+                switch providerKind {
+                case .gmail: #expect(error as? GmailIMAPError == .authenticationFailed)
+                case .outlook: #expect(error as? OutlookIMAPError == .authenticationFailed)
+                }
+            }
+            #expect(raw.commands.allSatisfy { !$0.hasPrefix("UID STORE") && !$0.hasPrefix("UID MOVE") && !$0.hasPrefix("UID COPY") })
+            #expect(!email.isRead && email.isInInbox)
+            #expect(email.body == "Account A original complete body" && email.hasCompleteBody)
+            #expect(email.sourceAccountNamespace == accountA)
+            let persisted = try #require(ModelContext(container).fetch(FetchDescriptor<EmailMessage>()).first)
+            #expect(!persisted.isRead && persisted.isInInbox && persisted.body == email.body)
+
+            // An unhydrated legacy account must fail before even resolving a UID.
+            let beforeLegacyAttempt = raw.commands.count
+            do {
+                try await mutate(expectedAccount: "")
+                Issue.record("An empty legacy namespace must require mailbox refresh")
+            } catch {
+                switch providerKind {
+                case .gmail: #expect(error as? GmailIMAPError == .messageIdentityUnavailable)
+                case .outlook: #expect(error as? OutlookIMAPError == .messageIdentityUnavailable)
+                }
+            }
+            #expect(raw.commands.count == beforeLegacyAttempt)
+            // Positive control: B has the same immutable identity and UID. Only
+            // an explicitly B-scoped operation may reach its mutation command.
+            try await mutate(expectedAccount: accountB)
+            #expect(raw.commands.contains { $0.hasPrefix(action == .markAsRead ? "UID STORE" : "UID MOVE") })
+        }
     }
 }

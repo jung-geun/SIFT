@@ -6,8 +6,8 @@ nonisolated struct MIMETextDecoder: Sendable {
         let html: String
     }
 
-    // The services fetch at most 500,000 body bytes. Allow room for MIME headers,
-    // but reject oversized input before normalization, regexes, or part copies.
+    // Reject oversized MIME input before normalization, regexes, or part copies.
+    // Complete selected text parts share this budget; no partial body is accepted as full.
     static let maximumMessageBytes = 1_048_576
     static let maximumHeaderBytes = 65_536
     static let maximumParts = 256
@@ -31,6 +31,41 @@ nonisolated struct MIMETextDecoder: Sendable {
             return Result(text: normalizeText(sanitizeHTML(html)), html: html)
         }
         return Result(text: "", html: "")
+    }
+
+    /// Full IMAP leaf hydration must agree with BODYSTRUCTURE. Never run the
+    /// first-leaf multipart preview decoder on a supposedly complete text leaf.
+    static func decodeTextPart(
+        _ raw: String,
+        subtype: String,
+        expectedEncoding: String = "7BIT",
+        expectedCharset: String? = nil
+    ) -> Result? {
+        guard raw.utf8.count <= maximumMessageBytes,
+              let part = headersAndBody(raw.replacingOccurrences(of: "\r\n", with: "\n")),
+              mediaType(part.headers["content-type"] ?? "text/plain") == "text/" + subtype.lowercased(),
+              !isAttachment(part.headers)
+        else { return nil }
+        let encoding = part.headers["content-transfer-encoding"]?.lowercased() ?? "7bit"
+        guard encoding.uppercased() == expectedEncoding.uppercased(),
+              ["7bit", "8bit", "binary", "base64", "quoted-printable"].contains(encoding)
+        else { return nil }
+        if let expectedCharset {
+            let expected = CFStringConvertIANACharSetNameToEncoding(expectedCharset as CFString)
+            guard expected != kCFStringEncodingInvalidId else { return nil }
+            if let declaredCharset = parameter("charset", in: part.headers["content-type"] ?? "") {
+                guard CFStringConvertIANACharSetNameToEncoding(declaredCharset as CFString) == expected else { return nil }
+            } else {
+                // Missing charset has the RFC default, not a guessed decoding.
+                guard expected == CFStringConvertIANACharSetNameToEncoding("us-ascii" as CFString) else { return nil }
+            }
+        }
+        if encoding == "base64",
+           Data(base64Encoded: part.body.filter { !$0.isWhitespace }) == nil { return nil }
+        let content = decodePart(part)
+        return subtype == "HTML"
+            ? Result(text: normalizeText(sanitizeHTML(content)), html: content)
+            : Result(text: normalizeText(content), html: "")
     }
 
     private struct MultipartFind {

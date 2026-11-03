@@ -183,36 +183,40 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterD
             completion.finish(success: false)
         }
 
-        guard let ctx = modelContext else {
-            completion.finish(success: false)
-            return
-        }
-
-        let success = await fetchEmailTodos(context: ctx)
+        let success = await refreshBackgroundMail()
         completion.finish(success: success && !Task.isCancelled)
     }
 
 
 
-    // MARK: - 이메일 fetch + todo 삽입 (공통)
+    // MARK: - 주기적 메일 캐시 및 일일 분석
 
     @MainActor @discardableResult
-    private func fetchEmailTodos(context: ModelContext) async -> Bool {
-        let metadataOK = await MailboxIncrementalSyncCoordinator.shared.syncAvailableProviders(backgroundOnly: true)
+    private func refreshBackgroundMail() async -> Bool {
+        // Local metadata + bounded complete-body caching runs independently of AI.
+        let mailboxCacheOK = await MailboxIncrementalSyncCoordinator.shared.syncAvailableProviders(backgroundOnly: true)
         guard !Task.isCancelled else { return false }
 
         // 메일 자동 분석 토글 — 배경(BGTask) 경로 독립 게이트 (마스터 onDeviceLLMEnabled와 무관)
         // register(defaults:)로 기본값 true 보장 → 기존 사용자 동작 그대로 유지
-        guard UserDefaults.standard.bool(forKey: "pieroot.todo.emailAutoAnalysisEnabled") else { return metadataOK }
+        guard UserDefaults.standard.bool(forKey: "pieroot.todo.emailAutoAnalysisEnabled") else { return mailboxCacheOK }
 
-        let imapAccount = UserDefaults.standard.string(forKey: "pieroot.todo.imap.account") ?? ""
+        let rawAccount = UserDefaults.standard.string(forKey: "pieroot.todo.imap.account") ?? ""
         let imapBackgroundEnabled = UserDefaults.standard.bool(forKey: "pieroot.todo.imap.backgroundEnabled")
         guard !Task.isCancelled else { return false }
-        guard !imapAccount.isEmpty,
+        guard let imapAccount = IMAPCredentialStore.canonicalAccount(rawAccount),
               imapBackgroundEnabled,
               IMAPCredentialStore.hasCredential(for: imapAccount),
               !IMAPCredentialStore.isCredentialRejected(for: imapAccount)
-        else { return metadataOK }
+        else { return mailboxCacheOK }
+        let attemptKey = "pieroot.todo.email.backgroundAnalysisAttempt.\(imapAccount)"
+        guard MailboxPagingPolicy.backgroundAnalysisIsDue(
+            hour: UserDefaults.standard.integer(forKey: "pieroot.todo.emailRefreshHour"),
+            lastAttempt: UserDefaults.standard.object(forKey: attemptKey) as? Date
+        ) else { return mailboxCacheOK }
+        // The previous daily scheduler also made one attempt per day. Preserve
+        // that energy/analysis policy while allowing frequent body-only refreshes.
+        UserDefaults.standard.set(Date(), forKey: attemptKey)
 
         var didSucceed = false
         var failures: [String] = []
@@ -238,7 +242,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterD
         }
 
         if didSucceed { return true }
-        return (failures.isEmpty == false ? false : didSucceed) || metadataOK
+        return (failures.isEmpty == false ? false : didSucceed) || mailboxCacheOK
     }
 
     // MARK: - Foreground 알림 표시
@@ -254,9 +258,8 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterD
 
 // MARK: - BGTask 스케줄링
 
-/// 다음 이메일 폴링을 BGTaskScheduler에 예약.
-/// OS best-effort: `earliestBeginDate`를 다음 설정 시각으로 지정하지만
-/// 실제 실행 시각은 OS가 배터리·네트워크 상황에 따라 결정.
+/// 목록·본문 캐시는 15분 이후 다시 실행할 기회를 요청한다.
+/// 실제 백그라운드 실행 시각은 iOS가 결정하며, 일일 분석 시각과는 별개다.
 @MainActor
 func scheduleEmailRefresh() {
 #if targetEnvironment(simulator)
@@ -267,9 +270,17 @@ func scheduleEmailRefresh() {
         backgroundTaskLogger.debug("Skipping email refresh BGTask scheduling because background refresh is unavailable")
         return
     }
+    let defaults = UserDefaults.standard
+    let gmailAllowed = defaults.bool(forKey: "pieroot.todo.imap.backgroundEnabled")
+        && IMAPCredentialStore.canonicalAccount(defaults.string(forKey: "pieroot.todo.imap.account") ?? "") != nil
+    let outlookAllowed = defaults.bool(forKey: "pieroot.todo.outlook.backgroundEnabled")
+        && OutlookIMAPCredentialStore.canonicalAccount(defaults.string(forKey: "pieroot.todo.outlook.account") ?? "") != nil
+    guard gmailAllowed || outlookAllowed else {
+        BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: kEmailRefreshTaskID)
+        return
+    }
 
-    let hour = UserDefaults.standard.integer(forKey: "pieroot.todo.emailRefreshHour")
-    let earliestBeginDate = nextEmailRefreshDate(hour: hour > 0 ? hour : 7)
+    let earliestBeginDate = Date().addingTimeInterval(MailboxPagingPolicy.backgroundRefreshInterval)
     DispatchQueue.global(qos: .utility).async {
         let request = BGAppRefreshTaskRequest(identifier: kEmailRefreshTaskID)
         request.earliestBeginDate = earliestBeginDate
@@ -287,18 +298,6 @@ func scheduleEmailRefresh() {
 #endif
 }
 
-/// 설정된 시(hour)의 다음 발생 시각을 반환.
-/// 오늘 해당 시각이 아직 남아 있으면 오늘, 이미 지났으면 내일 반환.
-func nextEmailRefreshDate(hour: Int) -> Date {
-    let cal = Calendar.current
-    var comps = cal.dateComponents([.year, .month, .day], from: Date())
-    comps.hour = max(0, min(23, hour))
-    comps.minute = 0
-    comps.second = 0
-    let todayTarget = cal.date(from: comps) ?? Date(timeIntervalSinceNow: 3600)
-    if todayTarget > Date() { return todayTarget }
-    return cal.date(byAdding: .day, value: 1, to: todayTarget) ?? Date(timeIntervalSinceNow: 86400)
-}
 
 
 // MARK: - App Entry Point
@@ -349,12 +348,15 @@ struct todoApp: App {
         ProcessInfo.processInfo.arguments.contains("-pieroot.todo.uiTestShowAllTabs")
     }
 
-    /// True only under the DEBUG mail UI-test fixture. Suppresses every live
-    /// IMAP/Graph auth attempt (foreground poll + background automation) so the
-    /// fixture's seeded rows render deterministically without network access.
+    /// Synthetic and unit-test runs must never start live mailbox polling.
     private var uiTestSkipsLiveMailSync: Bool {
         #if DEBUG
-        MailUITestFixture.isEnabled
+        let environment = ProcessInfo.processInfo.environment
+        return MailUITestFixture.isEnabled
+            || environment["XCTestConfigurationFilePath"] != nil
+            || environment["SIFT_UI_TESTING"] == "1"
+            || ProcessInfo.processInfo.arguments.contains("-ui-test-in-memory-store")
+            || NSClassFromString("XCTestCase") != nil
         #else
         false
         #endif
@@ -814,6 +816,7 @@ struct todoApp: App {
                     DiagnosticEnvironment.setAppState("background")
                     OnDeviceLLMService.shared.unloadModel(reason: .background)
                     MailboxIncrementalSyncCoordinator.shared.stopPolling()
+                    if !uiTestSkipsLiveMailSync { scheduleEmailRefresh() }
                 case .inactive:
                     // Inactive is a normal user or system interruption, not
                     // evidence of an active-session crash.

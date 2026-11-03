@@ -467,7 +467,7 @@ struct CalendarMobileMonthGrid: UIViewRepresentable {
                 cell.contentConfiguration = UIHostingConfiguration {
                     Text(month.month.formatted(Date.FormatStyle(date: .omitted, time: .omitted,
                         locale: AppLanguage.current.locale, calendar: window.calendar,
-                        timeZone: window.calendar.timeZone).month(.wide)))
+                        timeZone: window.calendar.timeZone).year().month(.wide)))
                         .font(.system(size: 24, weight: .bold)).foregroundStyle(.primary)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
                         .padding(.horizontal, 14)

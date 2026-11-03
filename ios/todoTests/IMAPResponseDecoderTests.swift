@@ -40,8 +40,19 @@ struct IMAPResponseDecoderTests {
     @Test("rejects literals over the hard transfer cap")
     func rejectsOversizedLiteral() {
         var decoder = IMAPResponseDecoder()
-        #expect(throws: IMAPResponseDecoderError.literalTooLarge(500_001)) {
-            _ = try decoder.append(Data("* 1 FETCH (BODY[] {500001}\r\n".utf8))
+        let length = IMAPResponseDecoder.maximumLiteralBytes + 1
+        #expect(throws: IMAPResponseDecoderError.literalTooLarge(length)) {
+            _ = try decoder.append(Data("* 1 FETCH (BODY[] {\(length)}\r\n".utf8))
         }
+    }
+
+    @Test("frames a complete body larger than the former partial-fetch cap")
+    func completeLargeLiteral() throws {
+        var decoder = IMAPResponseDecoder()
+        let body = String(repeating: "A", count: 600_000)
+        let wire = Data("* 1 FETCH (BODY[TEXT] {600000}\r\n\(body))\r\nA0001 OK\r\n".utf8)
+        let lines = try decoder.append(wire)
+        try decoder.finish()
+        #expect(lines.first == "* 1 FETCH (BODY[TEXT] {600000}\(body))")
     }
 }

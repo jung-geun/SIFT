@@ -1,0 +1,16 @@
+{% include site-context.html %}
+{% assign redirect_path = locale_prefix | append: '/email-setup.html' %}
+<!doctype html>
+<html lang="{{ locale_code }}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <meta http-equiv="refresh" content="0; url={{ redirect_path | relative_url }}#outlook">
+  <link rel="canonical" href="{{ redirect_path | absolute_url }}#outlook">
+  <title>{{ l10n.common.redirect_title | escape }}</title>
+</head>
+<body>
+  <p>{{ l10n.common.redirect_message | escape }} <a href="{{ redirect_path | relative_url }}#outlook">{{ l10n.common.redirect_link | escape }}</a></p>
+</body>
+</html>

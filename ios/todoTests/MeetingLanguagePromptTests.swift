@@ -69,9 +69,6 @@ private final class CapturingMeetingLanguageRuntime: FoundationModelsRuntime, @u
     func rankTodos(instructions: String, userPrompt: String, options: GenerationOptions) async throws -> FMPriorityRankingList {
         fatalError("unexpected non-meeting runtime call")
     }
-    func analyzeEmail(instructions: String, userPrompt: String) async throws -> FMEmailOutput {
-        fatalError("unexpected non-meeting runtime call")
-    }
     func summarizeEmail(instructions: String, userPrompt: String) async throws -> FMEmailSummaryOutput {
         fatalError("unexpected non-meeting runtime call")
     }
@@ -79,9 +76,6 @@ private final class CapturingMeetingLanguageRuntime: FoundationModelsRuntime, @u
         fatalError("unexpected non-meeting runtime call")
     }
     func narrateBehavior(instructions: String, userPrompt: String) async throws -> FMBehaviorNarrativeOutput {
-        fatalError("unexpected non-meeting runtime call")
-    }
-    func draftTodoFromEmail(instructions: String, userPrompt: String) async throws -> FMEmailTodoDraftOutput {
         fatalError("unexpected non-meeting runtime call")
     }
 }

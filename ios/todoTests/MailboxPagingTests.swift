@@ -53,6 +53,35 @@ struct MailboxPagingTests {
         )
     }
 
+    @Test("Mailbox head refresh retains verified synced analysis without local fetch provenance")
+    func verifiedSyncedAnalysisSurvivesMetadataRefresh() throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let header = metadata(provider: .gmail, id: "synced-analysis", namespace: "fixture@example.com")
+        let email = EmailMessage(id: header.providerMessageID, subject: header.subject, from: header.from,
+            body: "The complete request is to review settings.", receivedAt: header.receivedAt,
+            provider: .gmail, rawMessageID: header.providerMessageID, isInInbox: true,
+            sourceAccountNamespace: header.sourceAccountNamespace)
+        email.analysisState = .analyzed
+        email.analysisVersion = EmailAnalysisContract.summaryContractVersion
+        email.analyzedBodyFingerprint = EmailAnalysisContract.fingerprint(subject: email.subject, body: email.body)
+        email.analysisSummary = "Verified complete request"
+        email.analysisActionItems = ["Review settings"]
+        context.insert(email)
+        try context.save()
+        let store = MailboxLocalStore(defaults: try makeDefaults(), saveContext: { try $0.save() })
+        try store.upsert(MailboxPage(messages: [header], nextCursor: nil), into: context)
+        #expect(!email.hasCompleteBody)
+        #expect(email.analysisState == .analyzed)
+        #expect(email.analysisSummary == "Verified complete request")
+        #expect(EmailAnalysisContract.currentActionItems(for: email) == ["Review settings"])
+        try store.updateContent(MailboxMessageContent(metadata: header,
+            body: "The previous request has been withdrawn.", htmlBody: ""), for: email, in: context)
+        #expect(email.analysisState == .unanalyzed)
+        #expect(email.analysisSummary.isEmpty)
+        #expect(EmailAnalysisContract.currentActionItems(for: email).isEmpty)
+    }
+
     @Test("Only genuine inserts become app-unseen, independently of provider unread")
     func testInsertedKeysAndLocalAttentionState() throws {
         let container = try makeContainer()
@@ -239,6 +268,7 @@ struct MailboxPagingTests {
             labelIDs: ["INBOX"],
             isInInbox: true
         )
+        rich.bodyContentVersion = 1
         rich.analysisState = .analyzed
         rich.analysisSummary = "preserved summary"
         rich.analysisKeyPoints = ["retained key point"]
@@ -414,6 +444,7 @@ struct MailboxPagingTests {
             rawMessageID: "outlook-legacy",
             isInInbox: true
         )
+        legacy.bodyContentVersion = 1
         legacy.analysisState = .analyzed
         legacy.analysisSummary = "legacy summary"
         legacy.analyzedBodyFingerprint = EmailAnalysisContract.fingerprint(
@@ -670,5 +701,88 @@ struct MailboxPagingTests {
         )
 
         #expect(email.id == "gmail-imap:900")
+    }
+}
+
+@MainActor
+extension MailboxPagingTests {
+    @Test("only a committed full fetch marks content complete; failed saves retain the offline legacy body")
+    func completeBodyProvenanceCommitAndRollback() throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let defaults = try makeDefaults()
+        let store = MailboxLocalStore(defaults: defaults, saveContext: { try $0.save() })
+        let metadata = metadata(provider: .gmail, id: "7", globalID: "900", namespace: "user@gmail.com")
+        try store.upsert(MailboxPage(messages: [metadata], nextCursor: nil), into: context)
+        let email = try #require(context.fetch(FetchDescriptor<EmailMessage>()).first)
+        email.body = "Previously cached prefix"
+        try context.save()
+        #expect(!email.hasCompleteBody)
+        let content = MailboxMessageContent(metadata: metadata, body: "Complete provider body", htmlBody: "")
+        let failingStore = MailboxLocalStore(defaults: defaults, saveContext: { _ in
+            throw GmailIMAPError.transport("Synthetic local save failure")
+        })
+        #expect(throws: GmailIMAPError.transport("Synthetic local save failure")) {
+            try failingStore.updateContent(content, for: email, in: context)
+        }
+        #expect(email.body == "Previously cached prefix")
+        #expect(!email.hasCompleteBody)
+        try store.updateContent(content, for: email, in: context)
+        #expect(email.hasCompleteBody)
+        #expect(try ModelContext(container).fetch(FetchDescriptor<EmailMessage>()).first?.hasCompleteBody == true)
+    }
+
+    @Test("identity replacement invalidates complete-body provenance")
+    func identityReplacementClearsBodyProvenance() throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let store = MailboxLocalStore(defaults: try makeDefaults(), saveContext: { try $0.save() })
+        let first = metadata(provider: .outlook, id: "7", globalID: "<old>", namespace: "user@outlook.com")
+        try store.upsert(MailboxPage(messages: [first], nextCursor: nil), into: context)
+        let email = try #require(context.fetch(FetchDescriptor<EmailMessage>()).first)
+        try store.updateContent(MailboxMessageContent(metadata: first, body: "Old full body", htmlBody: ""), for: email, in: context)
+        #expect(email.hasCompleteBody)
+        email.lastBodyFetchAttemptAt = Date(timeIntervalSince1970: 1234)
+        try context.save()
+        let replacement = metadata(provider: .outlook, id: "7", globalID: "<new>", namespace: "user@outlook.com")
+        try store.upsert(MailboxPage(messages: [replacement], nextCursor: nil), into: context)
+        #expect(!email.hasCompleteBody)
+        #expect(email.body.isEmpty)
+        #expect(email.lastBodyFetchAttemptAt == .distantPast)
+    }
+
+    @Test("missing or changed immutable body identity never certifies cached content",
+          arguments: ["", "different"])
+    func incompleteBodyIdentityFailsClosed(returnedID: String) throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let store = MailboxLocalStore(defaults: try makeDefaults(), saveContext: { try $0.save() })
+        let original = metadata(provider: .gmail, id: "7", globalID: "900", namespace: "user@gmail.com")
+        try store.upsert(MailboxPage(messages: [original], nextCursor: nil), into: context)
+        let email = try #require(context.fetch(FetchDescriptor<EmailMessage>()).first)
+        let returned = metadata(provider: .gmail, id: "7", globalID: returnedID, namespace: "user@gmail.com")
+        #expect(throws: MailboxLocalStoreError.contentIdentityMismatch) {
+            try store.updateContent(MailboxMessageContent(metadata: returned, body: "Wrong body", htmlBody: ""), for: email, in: context)
+        }
+        #expect(email.body.isEmpty)
+        #expect(!email.hasCompleteBody)
+    }
+
+    @Test("a failed attempt-state commit rolls back and cannot launch a body fetch")
+    func bodyAttemptCommitFailureRollsBack() throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let email = EmailMessage(id: "7", body: "Offline cached body", isInInbox: true)
+        context.insert(email)
+        try context.save()
+        let store = MailboxLocalStore(defaults: try makeDefaults(), saveContext: { _ in
+            throw GmailIMAPError.transport("Synthetic attempt save failure")
+        })
+        #expect(throws: GmailIMAPError.transport("Synthetic attempt save failure")) {
+            try store.recordBodyFetchAttempt(for: email, at: Date(), in: context)
+        }
+        #expect(email.lastBodyFetchAttemptAt == .distantPast)
+        #expect(email.body == "Offline cached body")
+        #expect(!email.hasCompleteBody)
     }
 }

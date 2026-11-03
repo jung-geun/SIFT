@@ -132,6 +132,8 @@ struct TodoBoardCardView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .navigationLinkIndicatorVisibility(.hidden)
+            .accessibilityIdentifier("todo.board.open.\(todo.id.uuidString)")
 
             Menu {
                 cardMenuActions
@@ -146,6 +148,12 @@ struct TodoBoardCardView: View {
             .menuIndicator(.hidden)
             .accessibilityLabel(AppLanguage.localized("todo.moreActions", defaultValue: "더 보기", language: .current, comment: "Secondary to-do toolbar menu accessibility label."))
             .padding(.trailing, 4)
+            #if targetEnvironment(macCatalyst)
+            .opacity(isHovered ? 1 : 0)
+            .allowsHitTesting(isHovered)
+            .accessibilityHidden(!isHovered)
+            #endif
+            .accessibilityIdentifier("todo.board.more.\(todo.id.uuidString)")
         }
         .frame(minHeight: 52)
         .background(
