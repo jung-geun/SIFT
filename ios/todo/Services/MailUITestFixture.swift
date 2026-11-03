@@ -85,24 +85,49 @@ enum MailUITestFixture {
                 isInInbox: true,
                 sourceAccountNamespace: namespace
             )
+            email.bodyContentVersion = 1
+            if index == 1 {
+                email.body = "The synthetic fixture token expired. Review required settings. Renew the fixture token if it is still needed."
+                email.htmlBody = """
+                    <html><body style="margin:0;padding:24px;background:#151515;color:#ffffff">
+                    <h2>Synthetic token notice</h2>
+                    <p>The synthetic fixture token expired. Review required settings.</p>
+                    <p>Renew the fixture token if it is still needed.</p>
+                    </body></html>
+                    """
+                email.analysisSummary = "The synthetic fixture token expired. Review its settings and renew it if still needed."
+                email.analysisActionItems = [
+                    "SIFT UI Test Fixture — Review required settings",
+                    "SIFT UI Test Fixture — Renew token if needed"
+                ]
+            } else if index == 3 {
+                let formatter = DateFormatter()
+                formatter.locale = Locale(identifier: "en_US_POSIX")
+                formatter.dateFormat = "yyyy-MM-dd"
+                let due = formatter.string(from: now)
+                email.body = "Please check the first fixture reservation and check the second fixture reservation. Both reviews are due by \(due)."
+                email.analysisSummary = "Both synthetic fixture reservations need review by \(due)."
+                email.analysisActionItems = [
+                    "SIFT UI Test Fixture — First reservation check",
+                    "SIFT UI Test Fixture — Second reservation check"
+                ]
+            } else {
+                email.body = "The synthetic fixture deployment completed successfully. No recipient action is required."
+                email.analysisSummary = "The synthetic fixture deployment completed successfully."
+            }
+            email.analysisState = .analyzed
+            email.analyzedBodyFingerprint = EmailAnalysisContract.fingerprint(
+                subject: email.subject, body: email.body
+            )
+            email.analysisVersion = EmailAnalysisContract.summaryContractVersion
+            email.analyzedAt = now
             if showsAttentionScenario {
                 // Row 1: provider-read but newly imported/unopened in SIFT.
                 // Row 2: provider-unread but already viewed in SIFT. Row 3: legacy cache.
                 email.hasBeenViewedInApp = index != 1
-                email.analysisState = .analyzed
-                email.analysisSummary = "Synthetic on-device summary for fixture row \(index)."
-                email.analyzedBodyFingerprint = EmailAnalysisContract.fingerprint(
-                    subject: email.subject, body: email.body
-                )
-                email.analysisVersion = EmailAnalysisContract.summaryContractVersion
-                email.analyzedAt = now
             }
-            if index == 1 {
-                email.analysisTodoCandidate = true
-                email.analysisTodoCandidateFingerprint = EmailAnalysisContract.fingerprint(
-                    subject: email.subject, body: email.body
-                )
-            }
+            email.analysisTodoCandidate = !email.analysisActionItems.isEmpty
+            email.analysisTodoCandidateFingerprint = email.analyzedBodyFingerprint
             context.insert(email)
         }
         try? context.save()

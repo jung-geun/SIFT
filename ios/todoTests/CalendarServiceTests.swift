@@ -327,6 +327,52 @@ struct CalendarServiceTests {
         #expect(todo.sourceRef == "message+42")
     }
 
+    @Test("Distinct actions from the same email cannot claim a legacy whole-email event or each other's event")
+    @MainActor
+    func actionTaskRequiresItsOwnCalendarMarker() throws {
+        let first = Todo(title: "First action", source: .email, sourceRef: "shared-message")
+        first.sourceItemID = EmailAnalysisContract.actionIdentifier("First action")
+        let second = Todo(title: "Second action", source: .email, sourceRef: "shared-message")
+        second.sourceItemID = EmailAnalysisContract.actionIdentifier("Second action")
+        first.sourceAccountNamespace = "first@example.com"
+        second.sourceAccountNamespace = first.sourceAccountNamespace
+        let legacyTask = Todo(title: "Legacy whole-email task", source: .email, sourceRef: first.sourceRef)
+        legacyTask.sourceAccountNamespace = first.sourceAccountNamespace
+        let store = EKEventStore()
+        let legacy = ownershipCandidate(in: store, url: URL(string: "x-todoapp-email://shared-message"))
+        let firstEvent = ownershipCandidate(in: store, url: CalendarEventMarker.url(
+            entity: .todo, identifier: first.id, origin: .siftEmail
+        ))
+        let secondEvent = ownershipCandidate(in: store, url: CalendarEventMarker.url(
+            entity: .todo, identifier: second.id, origin: .siftEmail
+        ))
+        // The deletion resolver must not fall back to the older whole-message
+        // event when an action has no export of its own.
+        #expect(try CalendarService.selectOwnedEvent(for: legacyTask, candidates: [legacy]) === legacy)
+        for (action, ownedEvent) in [(first, firstEvent), (second, secondEvent)] {
+            action.calendarEventID = "stale-action-event"
+            action.calendarEventExternalID = "synthetic-action-external-id"
+            #expect(throws: CalendarError.ownershipNotVerified) {
+                try CalendarService.selectOwnedEvent(for: action, candidates: [legacy])
+            }
+            // The action's exact marker still authorizes cleanup in isolation
+            // and with the older same-message event present, in either order.
+            #expect(try CalendarService.selectOwnedEvent(for: action, candidates: [ownedEvent]) === ownedEvent)
+            for candidates in [[legacy, ownedEvent], [ownedEvent, legacy]] {
+                #expect(try CalendarService.selectOwnedEvent(for: action, candidates: candidates) === ownedEvent)
+            }
+        }
+        #expect(!CalendarService.hasTodoOwnership(first, eventURL: legacy.url))
+        #expect(!CalendarService.hasTodoOwnership(second, eventURL: legacy.url))
+        #expect(CalendarService.completionAction(for: first, eventURL: legacy.url, requested: .remove) == .keep)
+        #expect(try CalendarService.selectOwnedEvent(for: first, candidates: [legacy, secondEvent, firstEvent]) === firstEvent)
+        #expect(try CalendarService.selectOwnedEvent(for: second, candidates: [firstEvent, legacy, secondEvent]) === secondEvent)
+        #expect(throws: CalendarError.ownershipNotVerified) {
+            try CalendarService.selectOwnedEvent(for: second, candidates: [legacy, firstEvent])
+        }
+        #expect(legacy.title == "Original" && legacy.notes == "Original notes")
+    }
+
     @Test("unresolvable email artifacts preserve the cross-device identifier")
     @MainActor
     func unresolvableEmailArtifactsPreserveExternalIdentifier() {

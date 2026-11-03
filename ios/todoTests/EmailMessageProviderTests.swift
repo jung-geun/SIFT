@@ -153,31 +153,25 @@ struct EmailMessageProviderTests {
             #expect(emails.filter(\.isInInbox).count == displayCount)
     }
 
-    @Test("Laya 설치 후 이미 요약된 메일도 한 번 분류하고 아니오 결과는 유지한다")
-    func analyzedInboxMailWithoutVerdictGetsClassifiedOnce() {
+    @Test("Unverified legacy bodies stay pending, while current source-matched synced analysis is reusable")
+    func legacyBodyAndVerifiedSyncedAnalysisCandidates() {
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         let email = EmailMessage(
-            id: "classified-later",
-            subject: "프로젝트 검토",
-            body: "검토 후 답장해 주세요.",
+            id: "legacy-body",
+            subject: "Review",
+            body: "A cached prefix that may omit a later requirement.",
             receivedAt: now,
             isInInbox: true
         )
         email.analysisState = .analyzed
         email.analysisVersion = EmailAnalysisContract.summaryContractVersion
-
-        #expect(mailboxAnalysisCandidates(from: [email], lookbackDays: 7, now: now).isEmpty)
-        #expect(mailboxAnalysisCandidates(
-            from: [email], lookbackDays: 7, now: now, includeUnclassified: true
-        ).count == 1)
         email.analysisTodoCandidate = false
-        #expect(mailboxAnalysisCandidates(
-            from: [email], lookbackDays: 7, now: now, includeUnclassified: true
-        ).isEmpty)
+        #expect(mailboxAnalysisCandidates(from: [email], lookbackDays: 7, now: now).map(\.id) == [email.id])
+        email.analyzedBodyFingerprint = EmailAnalysisContract.fingerprint(subject: email.subject, body: email.body)
+        #expect(!email.hasCompleteBody)
+        #expect(mailboxAnalysisCandidates(from: [email], lookbackDays: 7, now: now).isEmpty)
         email.analysisVersion -= 1
-        #expect(mailboxAnalysisCandidates(
-            from: [email], lookbackDays: 7, now: now
-        ).count == 1)
+        #expect(mailboxAnalysisCandidates(from: [email], lookbackDays: 7, now: now).map(\.id) == [email.id])
     }
 
 }

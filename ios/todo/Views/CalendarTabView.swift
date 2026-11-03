@@ -19,6 +19,7 @@ struct CalendarTabView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.verticalSizeClass) private var verticalSizeClass
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.appTutorialState) private var tutorial
     @Query private var allTodos: [Todo]
     @State private var calendar = Calendar.current
@@ -60,6 +61,10 @@ struct CalendarTabView: View {
         dayStyle == .list && (verticalSizeClass == .compact
             ? landscapeMode == "day" : showsMobileDay && !showsWeek)
     }
+    private var usesToolbarToday: Bool {
+        verticalSizeClass == .compact || dynamicTypeSize.isAccessibilitySize
+    }
+
 
     private var monthStyle: CalendarMonthDisplayStyle {
         CalendarMonthDisplayStyle(rawValue: monthStyleRaw) ?? .details
@@ -194,17 +199,19 @@ struct CalendarTabView: View {
         .onChange(of: verticalSizeClass) { previous, size in
             guard authorized else { return }
             if size == .compact {
-                landscapeMode = "day"
+                landscapeMode = showsMobileDay && showsWeek ? "week" : "day"
                 if !showsMobileDay {
                     focusedDate = selectedDate ?? (visibleDates.contains {
                         calendar.isDate($0, inSameDayAs: today)
                     } ? today : visibleDates.first ?? displayMonth)
                 }
             } else if previous == .compact {
-                if landscapeMode == "day" { showsMobileDay = true }
-                else if landscapeMode == "week" {
-                    focusedDate = CalendarMonthGeometry.weekStart(containing: focusedDate, calendar: calendar)
-                    navigateToMonth(containing: focusedDate)
+                if landscapeMode == "day" {
+                    showsWeek = false
+                    showsMobileDay = true
+                } else if landscapeMode == "week" {
+                    showsWeek = true
+                    showsMobileDay = true
                 }
             }
         }
@@ -255,7 +262,9 @@ struct CalendarTabView: View {
                     }
                 }
                 .overlay(alignment: .bottomLeading) {
-                    mobileTodayButton.padding(.leading, 16).padding(.bottom, 12)
+                    if !usesToolbarToday {
+                        mobileTodayButton.padding(.leading, 16).padding(.bottom, 12)
+                    }
                 }
             }
             .environment(\.calendar, calendar)
@@ -398,6 +407,11 @@ struct CalendarTabView: View {
             .disabled(!authorized)
         }
         ToolbarItemGroup(placement: .navigationBarTrailing) {
+            if usesToolbarToday && !showsMobileDay {
+                Button("오늘", action: goToToday)
+                    .accessibilityIdentifier("calendar.today")
+                    .disabled(!authorized)
+            }
             monthViewMenu
             addButton
         }
@@ -472,13 +486,20 @@ struct CalendarTabView: View {
             }
         }
         .overlay(alignment: .bottomLeading) {
-            mobileTodayButton.padding(.leading, 16).padding(.bottom, 12)
+            if !usesToolbarToday {
+                mobileTodayButton.padding(.leading, 16).padding(.bottom, 12)
+            }
         }
         .environment(\.calendar, calendar)
         .navigationTitle(focusedDate.formatted(.dateTime.year().month().day().locale(AppLanguage.current.locale)))
         .navigationBarTitleDisplayMode(.inline)
+        .background(CalendarScheduleBackSwipeGuard().allowsHitTesting(false))
         .toolbar {
             ToolbarItemGroup(placement: .navigationBarTrailing) {
+                if usesToolbarToday {
+                    Button("오늘", action: goToToday)
+                        .accessibilityIdentifier("calendar.today")
+                }
                 dayViewMenu
                 addButton
             }
@@ -496,7 +517,7 @@ struct CalendarTabView: View {
         VStack(spacing: 0) {
             if dayCount < 7 && !showsUpcomingAgenda {
                 CalendarMobileWeekStrip(date: focusedDate, today: today, calendar: calendar,
-                    onSelect: { focusedDate = $0 })
+                    onSelect: { focusedDate = $0; scheduleRevision += 1 })
                     .fixedSize(horizontal: false, vertical: true)
                     .simultaneousGesture(daySwipe(step: 7))
             }
@@ -509,23 +530,23 @@ struct CalendarTabView: View {
                 CalendarScheduleView(startDate: dayCount == 7
                     ? CalendarMonthGeometry.weekStart(containing: focusedDate, calendar: calendar) : focusedDate,
                     dayCount: dayCount, events: allEvents, todos: allTodos,
-                    calendar: calendar, today: today, onDataChanged: reloadAllEvents)
+                    calendar: calendar, today: today, onDataChanged: reloadAllEvents,
+                    scrollTargetDate: focusedDate, scrollTargetRevision: scheduleRevision,
+                    onVisibleDayChanged: { focusedDate = $0 })
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .simultaneousGesture(daySwipe(step: dayCount == 7 ? 7 : 1))
-                    .id(scheduleRevision)
+                    .simultaneousGesture(dayCount == 1 ? daySwipe(step: 1) : nil)
             }
         }
     }
 
     private func daySwipe(step: Int) -> some Gesture {
         DragGesture(minimumDistance: 30).onEnded { gesture in
-            // Leave the system's leading-edge back gesture uncontested.
-            guard gesture.startLocation.x > 24,
-                abs(gesture.translation.width) > 60,
+            guard abs(gesture.translation.width) > 60,
                 abs(gesture.translation.width) > abs(gesture.translation.height) * 2,
                 let date = calendar.date(byAdding: .day,
                     value: gesture.translation.width < 0 ? step : -step, to: focusedDate) else { return }
             focusedDate = date
+            scheduleRevision += 1
         }
     }
 

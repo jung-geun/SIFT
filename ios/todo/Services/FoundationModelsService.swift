@@ -139,31 +139,6 @@ struct FMPriorityRankingList {
 }
 
 
-/// 이메일 마감 추출 출력 (C: AFM 강제 메일 분석).
-/// OnDeviceLLMEmailEngine.parseExtraction의 EmailExtraction 필드와 1:1 대응.
-@Generable
-struct FMEmailOutput {
-    @Guide(description: "Due date as an ISO8601 string. Preserve the source absolute instant and offset when the source specifies Z, UTC, UTC+9, or GMT+09:00. If no timezone is present, use the current local offset. Return an empty string when no explicit due date exists; never infer.")
-    var dueDateISO: String
-
-    @Guide(description: "True when the date has no time component and represents an all-day deadline.")
-    var isAllDay: Bool
-
-    @Guide(description: "Sender display name, or an empty string when absent.")
-    var sender: String
-
-    @Guide(description: "Sender email address, or an empty string when absent.")
-    var senderEmail: String
-
-    @Guide(description: "Deadline keyword score: 1 when the source contains a due-date keyword such as deadline, due, or expires; otherwise 0.")
-    var keywordScore: Int
-
-    @Guide(description: "One or two concise deadline-related sentences in the requested output language, or empty.")
-    var deadlineSentence: String
-
-    @Guide(description: "One to three lines of key email content in the requested output language, or empty.")
-    var notes: String
-}
 
 /// 이메일 상세 화면의 구조화된 요약 출력.
 @Generable
@@ -174,8 +149,33 @@ struct FMEmailSummaryOutput {
     @Guide(description: "Zero to three distinct factual key points in the requested output language. Do not repeat the summary.")
     var keyPoints: [String]
 
-    @Guide(description: "Zero to three explicit actions required of the recipient in the requested output language. Return an empty array when none are explicitly requested.")
+    @Guide(description: "Every recipient action supported by the supplied body: required responses/checks/processing, including necessary checks or conditional remedies for an explicitly stated problem such as expired credentials. No arbitrary item limit. Preserve conditions; do not invent duties from optional offers or old quoted requests. Return an empty array for informational mail.")
     var actionItems: [String]
+}
+
+@Generable
+enum FMEmailActionDisposition {
+    case unaffected
+    case withdrawn
+    case unresolved
+}
+
+struct EmailActionReviewCandidate: Sendable {
+    let index: Int
+    let text: String
+}
+
+@Generable
+struct FMEmailActionReview {
+    @Guide(description: "Exact supplied candidate index. Return each supplied index once, no missing or additional indices.")
+    var actionIndex: Int
+    @Guide(description: "unaffected if the section preserves the exact action/conditions or is unrelated; withdrawn if it cancels/completes/supersedes it; unresolved if a possible withdrawal or changed condition cannot be safely resolved.")
+    var disposition: FMEmailActionDisposition
+}
+
+@Generable
+struct FMEmailActionReviewOutput {
+    var reviews: [FMEmailActionReview]
 }
 
 /// 페르소나 초안의 설명과 근거를 개선하는 출력. 분류와 신뢰도는 결정론적 분석값을 유지한다.
@@ -199,27 +199,6 @@ struct FMBehaviorNarrativeOutput {
 }
 
 
-/// 이메일 수동 등록용 요약/마감 초안 출력.
-@Generable
-struct FMEmailTodoDraftOutput {
-    @Guide(description: "A to-do title in a concise verb form of at most 40 characters in the requested output language. If absent, clean up the email subject.")
-    var title: String
-
-    @Guide(description: "One to three lines of key email content and action items in the requested output language. Exclude greetings.")
-    var notes: String
-
-    @Guide(description: "Explicit due date as an ISO8601 string. Preserve the source absolute instant and offset when the source specifies a timezone. If absent, return an empty string; never infer.")
-    var dueDateISO: String
-
-    @Guide(description: "True when the date has no time component and represents an all-day deadline.")
-    var isAllDay: Bool
-
-    @Guide(description: "Sender display name, or an empty string when absent.")
-    var sender: String
-
-    @Guide(description: "Sender email address, or an empty string when absent.")
-    var senderEmail: String
-}
 
 /// 전사 교정 결과의 단일 구간. 원문 구간 번호와 교정된 전체 텍스트를 담는다.
 @available(iOS 26.0, *)
@@ -372,117 +351,6 @@ struct FoundationModelsService {
         return allResults
     }
 
-    // MARK: - 이메일 마감 추출 (C: AFM 강제)
-
-    /// Apple Foundation Models로 이메일 마감일을 추출한다.
-    /// 본문 캡 ~1500자. 온디바이스/PCC 전용 — 외부 미전송 (프라이버시 불변식).
-    /// 포그라운드 전용. 백그라운드 BGTask는 OnDeviceDetectorEngine(NSDataDetector) 사용.
-    func analyzeEmail(
-        _ msg: GmailMessage,
-        now: Date,
-        language: AppLanguage = .current
-    ) async throws -> EmailExtraction? {
-        guard policy.authorizes(.foundationModels, for: .emailAnalysis) else {
-            throw IntelligenceRoutingError.backendUnavailable(
-                provider: .foundationModels,
-                reason: RuleFallbackReason.providerDisabled.rawValue
-            )
-        }
-        let bodyPreview = String(msg.body.prefix(1500))
-        guard !msg.subject.isEmpty else { return nil }
-
-        let instructions = Prompts.EmailFM.systemInstruction(language: language) + "\n" + outputLanguageInstruction(language)
-        let prompt = """
-현재 시각: \(AppDateFormat.llmString(from: now))
-발신자: \(msg.from)
-제목: \(msg.subject)
-\(bodyPreview.isEmpty ? "" : "본문:\n\(bodyPreview)")
-"""
-        LLMDebugLogger.request(
-            provider: "AFM",
-            operation: "analyzeEmail",
-            metadata: ["subject: \(msg.subject)", "bodyPreviewChars: \(bodyPreview.count)"],
-            systemPrompt: instructions,
-            userPrompt: prompt
-        )
-        let output = try await runtime.analyzeEmail(
-            instructions: instructions,
-            userPrompt: prompt
-        )
-        LLMDebugLogger.response(provider: "AFM", operation: "analyzeEmail", text: "dueDateISO=\(output.dueDateISO) isAllDay=\(output.isAllDay) sender=\(output.sender) senderEmail=\(output.senderEmail) keywordScore=\(output.keywordScore) deadlineSentence=\(output.deadlineSentence) notes=\(output.notes)")
-
-        // 마감일 파싱
-        guard !output.dueDateISO.isEmpty else { return nil }
-        guard let dueDate = AppDateFormat.parseMailDate(output.dueDateISO), dueDate > now else { return nil }
-
-        // 종일 보정
-        let sourceCalendar = AppDateFormat.sourceCalendar(for: output.dueDateISO)
-        let normalizedDeadline = AppDateFormat.normalizedAllDayDeadline(dueDate, calendar: sourceCalendar)
-        let finalDate = normalizedDeadline.date
-        let isAllDay = output.isAllDay || normalizedDeadline.isAllDay
-
-        let deadlineString = AppDateFormat.deadlineString(
-            from: finalDate,
-            isAllDay: isAllDay,
-            language: language
-        )
-        var notesLines: [String] = [
-            {
-                let defaultValue = language == .english
-                    ? "Due by \(deadlineString)"
-                    : "⏰ \(deadlineString)까지"
-                let localized = AppLanguage.localized(
-                    "mail.deadline",
-                    defaultValue: defaultValue,
-                    language: language,
-                    comment: "Detected email deadline"
-                )
-                return localized == defaultValue
-                    ? localized
-                    : String(format: localized, locale: language.locale, deadlineString)
-            }()
-        ]
-        if !output.notes.isEmpty {
-            notesLines += [
-                output.notes,
-                AppLanguage.localized(
-                    "mail.aiSummary",
-                    defaultValue: language == .english ? "(AI Summary)" : "(AI 요약)",
-                    language: language,
-                    comment: "AI-generated email summary marker"
-                )
-            ]
-        }
-        if !output.sender.isEmpty {
-            notesLines += [
-                "",
-                {
-                    let defaultValue = language == .english
-                        ? "[Sender] \(output.sender)"
-                        : "[발신자] \(output.sender)"
-                    let localized = AppLanguage.localized(
-                        "mail.sender",
-                        defaultValue: defaultValue,
-                        language: language,
-                        comment: "Email sender label"
-                    )
-                    return localized == defaultValue
-                        ? localized
-                        : String(format: localized, locale: language.locale, output.sender)
-                }()
-            ]
-        }
-
-        return EmailExtraction(
-            dueDate:          finalDate,
-            isAllDay:         isAllDay,
-            sender:           output.sender,
-            senderEmail:      output.senderEmail,
-            keywordScore:     output.keywordScore,
-            deadlineSentence: output.deadlineSentence,
-            notes:            notesLines.joined(separator: "\n")
-        )
-    }
 
     /// Generates the structured detail-card summary entirely through Apple Foundation Models.
     /// The caller falls back to deterministic rules if this foreground-only inference is unavailable.
@@ -499,49 +367,130 @@ struct FoundationModelsService {
             )
         }
 
-        let bodyPreview = String(body.prefix(1_500))
-        let instructions = Prompts.EmailSummaryFM.systemInstruction(language: language)
-        let prompt = """
-        Sender: \(sender)
-        Subject: \(subject)
-        <email>
-        \(bodyPreview)
-        </email>
-        """
-        LLMDebugLogger.request(
-            provider: "AFM",
-            operation: "summarizeEmail",
-            metadata: ["subject: \(subject)", "bodyPreviewChars: \(bodyPreview.count)"],
-            systemPrompt: instructions,
-            userPrompt: prompt
-        )
-        let output = try await runtime.summarizeEmail(
-            instructions: instructions,
-            userPrompt: prompt
-        )
-        let summary = output.summary.trimmingCharacters(in: .whitespacesAndNewlines)
-        let keyPoints = output.keyPoints
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-        let actionItems = output.actionItems
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-        guard !summary.isEmpty || !keyPoints.isEmpty || !actionItems.isEmpty else {
+        let source = EmailAnalysisContract.normalizedBody(body)
+        guard !source.isEmpty else {
             throw IntelligenceRoutingError.parseFailed(
                 provider: .foundationModels,
                 reason: RuleFallbackReason.invalidResponse.rawValue
             )
         }
-        LLMDebugLogger.response(
-            provider: "AFM",
-            operation: "summarizeEmail",
-            text: "summary=\(summary)\nkeyPoints=\(keyPoints)\nactionItems=\(actionItems)"
+        let instructions = Prompts.EmailSummaryFM.systemInstruction(language: language)
+        let chunks = EmailAnalysisContract.bodyChunks(source)
+        var summaries: [String] = []
+        var keyPoints: [String] = []
+        var actionItems: [String] = []
+        for (index, chunk) in chunks.enumerated() {
+            try Task.checkCancellation()
+            guard policy.authorizes(.foundationModels, for: .emailAnalysis) else {
+                throw IntelligenceRoutingError.backendUnavailable(
+                    provider: .foundationModels, reason: RuleFallbackReason.providerDisabled.rawValue
+                )
+            }
+            let prompt = """
+            Sender: \(sender)
+            Subject (context only, not action evidence): \(subject)
+            Body section \(index + 1) of \(chunks.count). Adjacent sections overlap.
+            Analyze only facts and actions established by this section. Do not fill missing context with guesses.
+            <email>
+            \(chunk)
+            </email>
+            """
+            LLMDebugLogger.request(
+                provider: "AFM", operation: "summarizeEmail",
+                metadata: ["section: \(index + 1)/\(chunks.count)", "bodyChars: \(chunk.count)"],
+                systemPrompt: instructions, userPrompt: prompt
+            )
+            let output = try await runtime.summarizeEmail(instructions: instructions, userPrompt: prompt)
+            try Task.checkCancellation()
+            let result = EmailSummaryResult(
+                summary: output.summary, keyPoints: output.keyPoints, actionItems: output.actionItems
+            ).normalized
+            summaries.append(result.summary)
+            keyPoints.append(contentsOf: result.keyPoints)
+            actionItems.append(contentsOf: result.actionItems)
+        }
+        let uniqueActions = EmailAnalysisContract.uniqueItems(actionItems)
+        let reconciledActions: [String]
+        if chunks.count > 1, !uniqueActions.isEmpty {
+            reconciledActions = try await reconcileEmailActions(uniqueActions, sourceSections: chunks)
+        } else {
+            reconciledActions = uniqueActions
+        }
+        let result = EmailSummaryResult(
+            summary: EmailAnalysisContract.uniqueItems(summaries).joined(separator: "\n"),
+            keyPoints: EmailAnalysisContract.uniqueItems(keyPoints),
+            actionItems: reconciledActions
         )
-        return EmailSummaryResult(
-            summary: summary,
-            keyPoints: keyPoints,
-            actionItems: actionItems
-        )
+        guard !result.summary.isEmpty || !result.keyPoints.isEmpty || !result.actionItems.isEmpty else {
+            throw IntelligenceRoutingError.parseFailed(
+                provider: .foundationModels, reason: RuleFallbackReason.invalidResponse.rawValue
+            )
+        }
+        // Publish only after every section succeeds. No prefix-only success and
+        // no synthesis/title-generation pass that could erase a late obligation.
+        return result
+    }
+
+    /// Cross-section extraction alone cannot establish whether an earlier request
+    /// survived a later withdrawal or changed condition. Check each exact candidate
+    /// against all source sections; uncertainty never becomes a current proposal.
+    private func reconcileEmailActions(_ actions: [String], sourceSections: [String]) async throws -> [String] {
+        // Batch bounded candidate data per section, rather than one model request
+        // per action. Every candidate is still checked against the complete source.
+        var batches: [[EmailActionReviewCandidate]] = []
+        var batch: [EmailActionReviewCandidate] = []
+        var characters = 0
+        for (index, action) in actions.enumerated() {
+            try Task.checkCancellation()
+            guard action.count <= 600 else {
+                throw IntelligenceRoutingError.parseFailed(
+                    provider: .foundationModels, reason: RuleFallbackReason.invalidResponse.rawValue
+                )
+            }
+            if !batch.isEmpty, characters + action.count > 600 || batch.count == 12 {
+                batches.append(batch)
+                batch = []
+                characters = 0
+            }
+            batch.append(EmailActionReviewCandidate(index: index, text: action))
+            characters += action.count
+        }
+        if !batch.isEmpty { batches.append(batch) }
+        var withdrawn = Set<Int>()
+        var unresolved = Set<Int>()
+        for section in sourceSections {
+            for batch in batches {
+                let candidates = batch.filter { !withdrawn.contains($0.index) }
+                if candidates.isEmpty { continue }
+                try Task.checkCancellation()
+                guard policy.authorizes(.foundationModels, for: .emailAnalysis) else {
+                    throw IntelligenceRoutingError.backendUnavailable(
+                        provider: .foundationModels, reason: RuleFallbackReason.providerDisabled.rawValue
+                    )
+                }
+                let output = try await runtime.reviewEmailActions(candidates: candidates, sourceSection: section)
+                try Task.checkCancellation()
+                guard output.reviews.count == candidates.count,
+                      Set(output.reviews.map(\.actionIndex)) == Set(candidates.map(\.index)) else {
+                    throw IntelligenceRoutingError.parseFailed(
+                        provider: .foundationModels, reason: RuleFallbackReason.invalidResponse.rawValue
+                    )
+                }
+                for review in output.reviews {
+                    switch review.disposition {
+                    case .unaffected: break
+                    case .withdrawn: withdrawn.insert(review.actionIndex)
+                    case .unresolved: unresolved.insert(review.actionIndex)
+                    }
+                }
+            }
+        }
+        guard unresolved.subtracting(withdrawn).isEmpty else {
+            throw IntelligenceRoutingError.parseFailed(
+                provider: .foundationModels, reason: RuleFallbackReason.invalidResponse.rawValue
+            )
+        }
+        return actions.enumerated().compactMap { withdrawn.contains($0.offset) ? nil : $0.element }
     }
 
     // MARK: - Persona and behavior narratives
@@ -842,134 +791,6 @@ struct FoundationModelsService {
         """
     }
 
-    /// 이메일에서 제목/메모/마감일 초안을 생성한다.
-    /// 본문 캡 ~1500자, AFM 전용(온디바이스) 처리.
-    /// 추론 실패 시 throws -> 상위 계층에서 결정적 폴백 수행.
-    func draftTodoFromEmail(
-        _ msg: GmailMessage,
-        now: Date,
-        language: AppLanguage = .current
-    ) async throws -> EmailTodoDraft {
-        guard policy.authorizes(.foundationModels, for: .emailAnalysis) else {
-            throw IntelligenceRoutingError.backendUnavailable(
-                provider: .foundationModels,
-                reason: RuleFallbackReason.providerDisabled.rawValue
-            )
-        }
-        let bodyPreview = String(msg.body.prefix(1500))
-
-        let instructions = Prompts.EmailFM.systemInstruction(language: language) + "\n" + outputLanguageInstruction(language)
-        let prompt = """
-        현재 시각: \(AppDateFormat.llmString(from: now))
-        발신자: \(msg.from)
-        제목: \(msg.subject)
-        본문: \(bodyPreview.isEmpty ? "(본문 없음)" : bodyPreview)
-
-        추가 출력 요구: title은 사용자가 수행할 일을 40자 이내 \(language.outputLanguageName) 동사형으로 작성하세요. notes는 인사말 없이 핵심 내용과 액션 아이템만 1-3줄로 작성하세요.
-        """
-
-        LLMDebugLogger.request(
-            provider: "AFM",
-            operation: "draftTodoFromEmail",
-            metadata: ["subject: \(msg.subject)", "bodyPreviewChars: \(bodyPreview.count)"],
-            systemPrompt: instructions,
-            userPrompt: prompt
-        )
-        let output = try await runtime.draftTodoFromEmail(
-            instructions: instructions,
-            userPrompt: prompt
-        )
-        LLMDebugLogger.response(provider: "AFM", operation: "draftTodoFromEmail", text: "title=\(output.title)\nnotes=\(output.notes)\ndueDateISO=\(output.dueDateISO) isAllDay=\(output.isAllDay) sender=\(output.sender) senderEmail=\(output.senderEmail)")
-
-        let normalizedTitle = output.title.trimmingCharacters(in: .whitespacesAndNewlines)
-        let title: String
-        if !normalizedTitle.isEmpty {
-            title = normalizedTitle
-        } else if !msg.subject.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            title = msg.subject.trimmingCharacters(in: .whitespacesAndNewlines)
-        } else {
-            title = AppLanguage.localized(
-                "mail.checkEmail",
-                defaultValue: language == .english ? "Check Email" : "메일 확인",
-                language: language,
-                comment: "Email fallback Todo title"
-            )
-        }
-
-        var dueDate: Date?
-        var isAllDay = false
-        if !output.dueDateISO.isEmpty, let parsed = AppDateFormat.parseMailDate(output.dueDateISO), parsed > now {
-            var finalDate = parsed
-            isAllDay = output.isAllDay
-            let sourceCalendar = AppDateFormat.sourceCalendar(for: output.dueDateISO)
-            let comps = sourceCalendar.dateComponents([.hour, .minute, .second], from: parsed)
-            if comps.hour == 0 && comps.minute == 0 && (comps.second ?? 0) == 0 {
-                isAllDay = true
-                var eod = sourceCalendar.dateComponents([.year, .month, .day], from: parsed)
-                eod.hour = 23
-                eod.minute = 59
-                finalDate = sourceCalendar.date(from: eod) ?? parsed
-            }
-            dueDate = finalDate
-        }
-
-        let cleanNotes = output.notes.trimmingCharacters(in: .whitespacesAndNewlines)
-        let sender = output.sender.trimmingCharacters(in: .whitespacesAndNewlines)
-        let parsedSender = sender.isEmpty
-            ? EmailContentAnalyzer().parseSender(from: msg.from)
-            : sender
-        let senderEmail = output.senderEmail.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        var notesLines = [
-            AppLanguage.localized(
-                "mail.summaryHeader",
-                defaultValue: language == .english ? "[Email Summary]" : "[메일 요약]",
-                language: language,
-                comment: "Email summary header"
-            )
-        ]
-        if !cleanNotes.isEmpty {
-            notesLines.append(cleanNotes)
-        } else if !msg.snippet.isEmpty {
-            notesLines.append(msg.snippet.trimmingCharacters(in: .whitespacesAndNewlines))
-        } else if !bodyPreview.isEmpty {
-            notesLines.append(String(bodyPreview.prefix(500)).trimmingCharacters(in: .whitespacesAndNewlines))
-        }
-        notesLines.append(
-            AppLanguage.localized(
-                "mail.aiSummary",
-                defaultValue: language == .english ? "(AI Summary)" : "(AI 요약)",
-                language: language,
-                comment: "AI-generated email summary marker"
-            )
-        )
-        notesLines.append("")
-        notesLines.append(
-            {
-                let defaultValue = language == .english
-                    ? "[Sender] \(parsedSender)"
-                    : "[발신자] \(parsedSender)"
-                let localized = AppLanguage.localized(
-                    "mail.sender",
-                    defaultValue: defaultValue,
-                    language: language,
-                    comment: "Email sender label"
-                )
-                return localized == defaultValue
-                    ? localized
-                    : String(format: localized, locale: language.locale, parsedSender)
-            }()
-        )
-
-        return EmailTodoDraft(
-            title: title,
-            notes: notesLines.joined(separator: "\n"),
-            dueDate: dueDate,
-            isAllDay: isAllDay,
-            sender: parsedSender,
-            senderEmail: senderEmail
-        )
-    }
 
 
     // MARK: - Prompt Builders (우선순위)

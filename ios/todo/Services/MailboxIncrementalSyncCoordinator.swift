@@ -7,9 +7,9 @@ import SwiftData
 /// This coordinator is deliberately separate from the UI's older-page continuation
 /// (`MailboxPagingState.nextCursor`, driven from `MailTabView`) and from Gmail's
 /// background-analysis ingestion cursor (`GmailIMAPIngestionCursorStore`, driven from
-/// `GmailIMAPIngestionService`). It only keeps the local mailbox list metadata (not
-/// bodies, not AI analysis) current: on a 5-minute foreground poll, on scroll-to-top,
-/// and on an OS-granted background refresh.
+/// `GmailIMAPIngestionService`). It keeps local mailbox metadata and a bounded
+/// backlog of complete bodies current independently of AI analysis: on a 5-minute
+/// foreground poll, on scroll-to-top, and on opportunistic OS background refresh.
 ///
 /// A durable per-provider cursor is only advanced after every local commit for that
 /// page succeeds, so a crash, save failure, or thrown provider error always leaves the
@@ -26,8 +26,10 @@ final class MailboxIncrementalSyncCoordinator {
     private let defaults: UserDefaults
     private let now: () -> Date
 
+    private let sessionGeneration: (MailProvider) async -> Int
+    private var lastBodyAttempt: [String: Date] = [:]
     private var inFlight: Set<MailProvider> = []
-    private var lastAttempt: [MailProvider: Date] = [:]
+    private var lastAttempt: [String: Date] = [:]
     private var pollTask: Task<Void, Never>?
     private var syncGeneration: [MailProvider: Int] = [:]
 
@@ -37,6 +39,7 @@ final class MailboxIncrementalSyncCoordinator {
         makeContext: (() -> ModelContext)? = nil,
         resolveProvider: ((MailProvider) -> any MailboxPagingProvider)? = nil,
         ensureReady: ((MailProvider, String, Bool) async -> Bool)? = nil,
+        sessionGeneration: ((MailProvider) async -> Int)? = nil,
         defaults: UserDefaults = .standard,
         now: @escaping () -> Date = Date.init
     ) {
@@ -45,6 +48,12 @@ final class MailboxIncrementalSyncCoordinator {
         self.makeContext = makeContext ?? { ModelContext(AppDataContainer.shared.emailContainer) }
         self.resolveProvider = resolveProvider ?? MailboxProviderRegistry.provider(for:)
         self.ensureReady = ensureReady ?? Self.liveReadiness
+        self.sessionGeneration = sessionGeneration ?? { provider in
+            switch provider {
+            case .gmail: return await GmailIMAPService.shared.sessionGeneration
+            case .outlook: return await OutlookIMAPService.shared.sessionGeneration
+            }
+        }
         self.defaults = defaults
         self.now = now
     }
@@ -57,9 +66,9 @@ final class MailboxIncrementalSyncCoordinator {
         pollTask = Task { @MainActor [weak self] in
             guard let self else { return }
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(MailboxPagingPolicy.pollInterval))
-                guard !Task.isCancelled else { break }
                 await self.syncAvailableProviders()
+                guard !Task.isCancelled else { break }
+                try? await Task.sleep(for: .seconds(MailboxPagingPolicy.pollInterval))
             }
         }
     }
@@ -74,8 +83,8 @@ final class MailboxIncrementalSyncCoordinator {
     @discardableResult
     func syncAvailableProviders(backgroundOnly: Bool = false) async -> Bool {
         guard !Task.isCancelled else { return false }
-        let gmailOK = await sync(provider: .gmail, backgroundOnly: backgroundOnly)
-        let outlookOK = await sync(provider: .outlook, backgroundOnly: backgroundOnly)
+        let gmailOK = await sync(provider: .gmail, minimumInterval: MailboxPagingPolicy.updatesMinimumInterval, backgroundOnly: backgroundOnly)
+        let outlookOK = await sync(provider: .outlook, minimumInterval: MailboxPagingPolicy.updatesMinimumInterval, backgroundOnly: backgroundOnly)
         return gmailOK || outlookOK
     }
 
@@ -87,14 +96,15 @@ final class MailboxIncrementalSyncCoordinator {
     ) async -> Bool {
         guard let namespace = namespace(for: provider) else { return false }
         guard !inFlight.contains(provider) else { return false }
+        let attemptKey = "\(provider.rawValue):\(namespace)"
         guard minimumInterval <= 0
-            || lastAttempt[provider] == nil
-            || now().timeIntervalSince(lastAttempt[provider]!) >= minimumInterval
+            || lastAttempt[attemptKey] == nil
+            || now().timeIntervalSince(lastAttempt[attemptKey]!) >= minimumInterval
         else { return false }
         let generation = syncGeneration[provider, default: 0]
 
         inFlight.insert(provider)
-        lastAttempt[provider] = now()
+        lastAttempt[attemptKey] = now()
         defer { inFlight.remove(provider) }
 
         guard await ensureReady(provider, namespace, backgroundOnly),
@@ -113,13 +123,17 @@ final class MailboxIncrementalSyncCoordinator {
                     }
                     try await mailboxProvider.trashMessage(
                         messageID: mutation.providerMessageID,
-                        expectedGlobalMessageID: mutation.expectedGlobalMessageID
+                        expectedGlobalMessageID: mutation.expectedGlobalMessageID,
+                        expectedAccountNamespace: mutation.sourceAccountNamespace
                     )
                 } catch GmailIMAPError.credentialRejected {
                     IMAPCredentialStore.markCredentialRejected(for: namespace)
                     throw GmailIMAPError.credentialRejected
             }
             }
+        guard await ensureReady(provider, namespace, backgroundOnly),
+              isCurrent(provider: provider, namespace: namespace, generation: generation)
+        else { return false }
         do {
             if provider == .gmail {
                 try GmailIMAPContentMigration.migrateIfNeeded(
@@ -143,9 +157,100 @@ final class MailboxIncrementalSyncCoordinator {
                     context: context
                 )
             }
+            try await prefetchBodyBatch(
+                provider: provider,
+                namespace: namespace,
+                generation: generation,
+                context: context,
+                backgroundOnly: backgroundOnly
+            )
             return isCurrent(provider: provider, namespace: namespace, generation: generation)
         } catch {
             return false
+        }
+    }
+
+    /// Also used after a UI head-page commit. Shares the provider's sync turn so
+    /// manual refresh and scheduled prefetch cannot start duplicate body batches.
+    @discardableResult
+    func prefetchBodies(provider: MailProvider, backgroundOnly: Bool = false) async -> Bool {
+        guard let namespace = namespace(for: provider), !inFlight.contains(provider) else { return false }
+        let generation = syncGeneration[provider, default: 0]
+        inFlight.insert(provider)
+        defer { inFlight.remove(provider) }
+        do {
+            guard await ensureReady(provider, namespace, backgroundOnly),
+                  isCurrent(provider: provider, namespace: namespace, generation: generation)
+            else { return false }
+            try await prefetchBodyBatch(
+                provider: provider,
+                namespace: namespace,
+                generation: generation,
+                context: makeContext(),
+                backgroundOnly: backgroundOnly
+            )
+            return isCurrent(provider: provider, namespace: namespace, generation: generation)
+        } catch {
+            return false
+        }
+    }
+
+    private func prefetchBodyBatch(
+        provider: MailProvider,
+        namespace: String,
+        generation: Int,
+        context: ModelContext,
+        backgroundOnly: Bool
+    ) async throws {
+        let attemptKey = "\(provider.rawValue):\(namespace)"
+        if let last = lastBodyAttempt[attemptKey],
+           now().timeIntervalSince(last) < MailboxPagingPolicy.updatesMinimumInterval { return }
+        lastBodyAttempt[attemptKey] = now()
+        let providerRaw = provider.rawValue
+        var descriptor = FetchDescriptor<EmailMessage>(
+            predicate: #Predicate {
+                $0.providerRawValue == providerRaw && $0.sourceAccountNamespace == namespace
+                    && $0.isInInbox && $0.bodyContentVersion != 1
+            },
+            // Unattempted rows first, then least recently attempted failures.
+            // The durable order progresses even when an entire batch is unreadable.
+            sortBy: [
+                SortDescriptor(\.lastBodyFetchAttemptAt),
+                SortDescriptor(\.receivedAt, order: .reverse),
+                SortDescriptor(\.rawMessageID)
+            ]
+        )
+        descriptor.fetchLimit = MailboxPagingPolicy.bodyPrefetchBatchSize
+        let candidates = try context.fetch(descriptor)
+        let mailbox = resolveProvider(provider)
+        let session = await sessionGeneration(provider)
+        for email in candidates {
+            guard isCurrent(provider: provider, namespace: namespace, generation: generation),
+                  await sessionGeneration(provider) == session,
+                  await ensureReady(provider, namespace, backgroundOnly),
+                  isCurrent(provider: provider, namespace: namespace, generation: generation),
+                  await sessionGeneration(provider) == session
+            else { throw CancellationError() }
+            guard !email.hasCompleteBody, email.isInInbox else { continue }
+            let key = EmailMessageKey(email)
+            try localStore.recordBodyFetchAttempt(for: email, at: now(), in: context)
+            do {
+                let content = try await mailbox.fetchMessageContent(messageID: key.providerMessageID)
+                guard isCurrent(provider: provider, namespace: namespace, generation: generation),
+                      await sessionGeneration(provider) == session,
+                      await ensureReady(provider, namespace, backgroundOnly),
+                      isCurrent(provider: provider, namespace: namespace, generation: generation),
+                      await sessionGeneration(provider) == session,
+                      EmailMessageKey(email) == key, email.isInInbox
+                else { throw CancellationError() }
+                try localStore.updateContent(content, for: email, in: context)
+            } catch GmailIMAPError.noSelectableTextPart {
+                // An attachment-only message must not block readable backlog rows.
+                continue
+            } catch GmailIMAPError.credentialRejected {
+                IMAPCredentialStore.markCredentialRejected(for: namespace)
+                throw GmailIMAPError.credentialRejected
+            }
         }
     }
 
@@ -284,6 +389,9 @@ final class MailboxIncrementalSyncCoordinator {
             namespace = OutlookIMAPCredentialStore.canonicalAccount(rawAccount) ?? rawAccount
         }
         cursorStore.clearCursor(for: provider, namespace: namespace)
+        let attemptKey = "\(provider.rawValue):\(namespace)"
+        lastAttempt.removeValue(forKey: attemptKey)
+        lastBodyAttempt.removeValue(forKey: attemptKey)
     }
 
 
@@ -316,32 +424,17 @@ final class MailboxIncrementalSyncCoordinator {
     /// Gmail: reject an out-of-app run unless the user opted into background access;
     /// otherwise authenticate if needed.
     nonisolated static let liveReadiness: (MailProvider, String, Bool) async -> Bool = { provider, namespace, backgroundOnly in
-        switch provider {
-        case .gmail:
-            let backgroundEnabled = UserDefaults.standard.bool(forKey: "pieroot.todo.imap.backgroundEnabled")
-            if backgroundOnly && !backgroundEnabled { return false }
-            if IMAPCredentialStore.isCredentialRejected(for: namespace) { return false }
-            if await GmailIMAPService.shared.isAuthenticated { return true }
-            do {
-                try await GmailIMAPService.shared.authenticate(
-                    email: namespace,
-                    backgroundEnabled: backgroundEnabled
+        do {
+            try await KeychainStore.withoutAuthenticationUI {
+                try await MailboxProviderRegistry.ensureReady(
+                    for: provider,
+                    namespace: namespace,
+                    backgroundOnly: backgroundOnly
                 )
-                return true
-            } catch GmailIMAPError.credentialRejected {
-                IMAPCredentialStore.markCredentialRejected(for: namespace)
-                return false
-            } catch {
-                return false
             }
-        case .outlook:
-            let backgroundEnabled = UserDefaults.standard.bool(forKey: "pieroot.todo.outlook.backgroundEnabled")
-            if backgroundOnly && !backgroundEnabled { return false }
-            if await OutlookIMAPService.shared.isAuthenticated { return true }
-            return (try? await OutlookIMAPService.shared.authenticate(
-                email: namespace,
-                backgroundEnabled: backgroundEnabled
-            )) != nil
+            return true
+        } catch {
+            return false
         }
     }
 }

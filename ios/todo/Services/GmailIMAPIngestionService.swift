@@ -247,7 +247,8 @@ final class GmailIMAPIngestionService {
                 let content = try await imapService.fetchMessageContent(messageID: metadata.providerMessageID)
                 try await ensureAccount(account, generation: generation)
                 guard content.metadata.sourceAccountNamespace == account,
-                      content.metadata.providerMessageID == metadata.providerMessageID
+                      content.metadata.providerMessageID == metadata.providerMessageID,
+                      content.metadata.providerGlobalMessageID == metadata.providerGlobalMessageID
                 else {
                     throw GmailIMAPError.authenticationFailed
                 }
@@ -294,6 +295,8 @@ final class GmailIMAPIngestionService {
                 emailContext.insert(email)
                 existingRowsByKey[key] = email
             }
+            email.providerGlobalMessageID = metadata.providerGlobalMessageID
+            email.bodyContentVersion = 1
             try emailContext.save()
             knownKeys.insert(key)
             try await analysisService.analyze(email, context: emailContext)
@@ -307,6 +310,16 @@ final class GmailIMAPIngestionService {
             analyzed += 1
             } catch {
                 try? ledgerStore.release(fingerprint)
+                // Content policy is per-message: leave it unhydrated/unclaimed,
+                // but do not let an attachment-only/oversize message starve
+                // every later message in this page. Session failures still fail.
+                if error as? IMAPTextBodyError == .tooLarge
+                    || error as? IMAPTextBodyError == .noReadableText
+                    || error as? GmailIMAPError == .noSelectableTextPart {
+                    try await ensureAccount(account, generation: generation)
+                    skipped += 1
+                    continue
+                }
                 throw error
             }
     }
@@ -326,6 +339,7 @@ final class GmailIMAPIngestionService {
         for row in rows where row.provider == .gmail && row.sourceAccountNamespace == account {
             row.body = ""
             row.htmlBody = nil
+            row.bodyContentVersion = 0
             row.isInInbox = false
             EmailAnalysisContract.resetAnalysis(row)
         }

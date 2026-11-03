@@ -320,7 +320,7 @@ struct EmailDetailView: View {
                     DisclosureGroup(isExpanded: $showEmailPeriod) {
 
                         VStack(alignment: .leading, spacing: 4) {
-                            Picker("자동 동기화 시각", selection: settingsBinding(key: "pieroot.todo.emailRefreshHour", defaultValue: 7) { _ in
+                            Picker(AppLanguage.localized("mail.background.analysisHour", defaultValue: "자동 분석 시각", language: .current), selection: settingsBinding(key: "pieroot.todo.emailRefreshHour", defaultValue: 7) { _ in
                                 scheduleEmailRefresh()
                             }) {
                                 ForEach(0..<24, id: \.self) { h in
@@ -328,6 +328,13 @@ struct EmailDetailView: View {
                                 }
                             }
                             .pickerStyle(.menu)
+                            Text(AppLanguage.localized(
+                                "mail.background.cacheExplanation",
+                                defaultValue: "목록과 전체 본문은 분석 설정과 별개로 주기적으로 저장합니다. 백그라운드 수집은 허용한 계정에만 적용되며 iOS가 실행 시각을 결정합니다. 자동 분석은 설정한 시각 이후 하루 한 번 시도합니다.",
+                                language: .current
+                            ))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                         }
 
                         VStack(alignment: .leading, spacing: 4) {

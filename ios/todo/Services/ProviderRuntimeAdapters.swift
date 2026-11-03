@@ -11,15 +11,13 @@ protocol FoundationModelsRuntime: Sendable {
         options: GenerationOptions
     ) async throws -> FMPriorityRankingList
 
-    func analyzeEmail(
-        instructions: String,
-        userPrompt: String
-    ) async throws -> FMEmailOutput
 
     func summarizeEmail(
         instructions: String,
         userPrompt: String
     ) async throws -> FMEmailSummaryOutput
+
+    func reviewEmailActions(candidates: [EmailActionReviewCandidate], sourceSection: String) async throws -> FMEmailActionReviewOutput
 
     func generatePersonaNarrative(
         instructions: String,
@@ -42,10 +40,6 @@ protocol FoundationModelsRuntime: Sendable {
         options: GenerationOptions
     ) async throws -> FMTranscriptCorrectionOutput
 
-    func draftTodoFromEmail(
-        instructions: String,
-        userPrompt: String
-    ) async throws -> FMEmailTodoDraftOutput
 }
 
 @available(iOS 26.0, *)
@@ -63,13 +57,6 @@ struct LiveFoundationModelsRuntime: FoundationModelsRuntime {
         ).content
     }
 
-    func analyzeEmail(
-        instructions: String,
-        userPrompt: String
-    ) async throws -> FMEmailOutput {
-        let session = LanguageModelSession(instructions: instructions)
-        return try await session.respond(to: userPrompt, generating: FMEmailOutput.self).content
-    }
 
     func summarizeEmail(
         instructions: String,
@@ -79,6 +66,17 @@ struct LiveFoundationModelsRuntime: FoundationModelsRuntime {
         return try await session.respond(
             to: userPrompt,
             generating: FMEmailSummaryOutput.self
+        ).content
+    }
+
+    func reviewEmailActions(candidates: [EmailActionReviewCandidate], sourceSection: String) async throws -> FMEmailActionReviewOutput {
+        let data = try JSONSerialization.data(withJSONObject: [
+            "candidates": candidates.map { ["index": $0.index, "text": $0.text] as [String: Any] },
+            "source_section": sourceSection
+        ])
+        let session = LanguageModelSession(instructions: Prompts.EmailSummaryFM.actionReviewInstruction)
+        return try await session.respond(
+            to: String(decoding: data, as: UTF8.self), generating: FMEmailActionReviewOutput.self
         ).content
     }
 
@@ -125,17 +123,15 @@ struct LiveFoundationModelsRuntime: FoundationModelsRuntime {
         ).content
     }
 
-    func draftTodoFromEmail(
-        instructions: String,
-        userPrompt: String
-    ) async throws -> FMEmailTodoDraftOutput {
-        let session = LanguageModelSession(instructions: instructions)
-        return try await session.respond(to: userPrompt, generating: FMEmailTodoDraftOutput.self).content
-    }
 }
 
 @available(iOS 26.0, *)
 extension FoundationModelsRuntime {
+    func reviewEmailActions(candidates: [EmailActionReviewCandidate], sourceSection: String) async throws -> FMEmailActionReviewOutput {
+        throw IntelligenceRoutingError.backendUnavailable(
+            provider: .foundationModels, reason: RuleFallbackReason.unavailable.rawValue)
+    }
+
     func respondText(instructions: String, userPrompt: String, maximumResponseTokens: Int) async throws -> String {
         throw IntelligenceRoutingError.backendUnavailable(
             provider: .foundationModels, reason: RuleFallbackReason.unavailable.rawValue)

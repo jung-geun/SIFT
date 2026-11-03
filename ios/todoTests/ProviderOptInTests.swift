@@ -46,10 +46,6 @@ private struct UncalledFoundationRuntime: FoundationModelsRuntime {
         userPrompt: String,
         options: GenerationOptions
     ) async throws -> FMPriorityRankingList { fatalError("runtime must not be called") }
-    func analyzeEmail(
-        instructions: String,
-        userPrompt: String
-    ) async throws -> FMEmailOutput { fatalError("runtime must not be called") }
     func summarizeEmail(
         instructions: String,
         userPrompt: String
@@ -67,10 +63,6 @@ private struct UncalledFoundationRuntime: FoundationModelsRuntime {
         userPrompt: String,
         options: GenerationOptions
     ) async throws -> FMTranscriptCorrectionOutput { fatalError("runtime must not be called") }
-    func draftTodoFromEmail(
-        instructions: String,
-        userPrompt: String
-    ) async throws -> FMEmailTodoDraftOutput { fatalError("runtime must not be called") }
 }
 #endif
 

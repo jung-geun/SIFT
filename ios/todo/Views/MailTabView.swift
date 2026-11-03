@@ -117,8 +117,7 @@ struct MailAnalysisSyncGate: Equatable {
 func mailboxAnalysisCandidates(
     from emails: [EmailMessage],
     lookbackDays: Int,
-    now: Date = Date(),
-    includeUnclassified: Bool = false
+    now: Date = Date()
 ) -> [EmailMessage] {
     let cutoff = EmailAnalysisLookbackPolicy.cutoff(
         now: now,
@@ -127,9 +126,7 @@ func mailboxAnalysisCandidates(
     return emails.filter {
         $0.isInInbox
             && $0.receivedAt >= cutoff
-            && ($0.analysisState != .analyzed
-                || $0.analysisVersion != EmailAnalysisContract.summaryContractVersion
-                || (includeUnclassified && $0.analysisTodoCandidate == nil))
+            && !EmailAnalysisContract.isCurrentAnalysis($0)
     }
 }
 
@@ -593,13 +590,9 @@ struct MailTabView: View {
     }
 
     var analysisCandidateEmails: [EmailMessage] {
-        let laya = LayaDecisionService.shared
-        let canClassify = BetaFeaturePolicy().authorizes(.laya, for: .layaModelManagement)
-            && laya.isCapable && laya.isModelInstalled
-        return mailboxAnalysisCandidates(
+        mailboxAnalysisCandidates(
             from: validCachedInboxEmails,
-            lookbackDays: EmailAnalysisLookbackPolicy.storedLookbackDays(),
-            includeUnclassified: canClassify
+            lookbackDays: EmailAnalysisLookbackPolicy.storedLookbackDays()
         )
     }
 
@@ -1017,14 +1010,12 @@ struct MailTabView: View {
         } else {
             List {
                 ForEach(selectedEmails, id: \.localListID) { email in
-                    Button {
-                        selectedEmail = MailDetailSelection(email)
-                    } label: {
-                        MailMessageRow(email: email)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
+                    MailMailboxRow(
+                        email: email,
+                        onOpen: { selectedEmail = MailDetailSelection(email) },
+                        onSaveTodo: { registeringEmail = MailDetailSelection(email) },
+                        onTrash: { Task { await trashEmails([email]) } }
+                    )
                     .swipeActions(edge: .leading, allowsFullSwipe: true) {
                         Button {
                             registeringEmail = MailDetailSelection(email)
@@ -1264,9 +1255,8 @@ struct MailTabView: View {
             showError = true
         }
 
-        async let pageLoad: Void = loadPage(for: provider, loadMore: false)
-        async let indexLoad: Void = reconcileInbox(for: provider)
-        _ = await (pageLoad, indexLoad)
+        await loadPage(for: provider, loadMore: false)
+        await reconcileInbox(for: provider)
 
     }
 
@@ -1275,11 +1265,16 @@ struct MailTabView: View {
         let previousState = viewState.pagingState(for: provider)
         let cursor = loadMore ? previousState.nextCursor : nil
         guard viewState.beginPage(for: provider, loadMore: loadMore) else { return }
+        let namespace = activeMailboxNamespace(for: provider)
         retryLoadMoreByProvider[provider] = nil
 
         do {
+            try await MailboxProviderRegistry.ensureReady(
+                for: provider, namespace: namespace, backgroundOnly: false
+            )
             let page = try await pagingProvider(for: provider)
                 .fetchInboxPage(after: cursor)
+            guard activeMailboxNamespace(for: provider) == namespace else { return }
             try MailboxLocalStore.live.upsert(page, into: modelContext)
             try MailboxLocalStore.live.replayPendingMutations(in: modelContext)
             if !loadMore {
@@ -1288,6 +1283,7 @@ struct MailTabView: View {
             viewState.completePage(for: provider, nextCursor: page.nextCursor)
             retryLoadMoreByProvider[provider] = nil
         } catch {
+            guard activeMailboxNamespace(for: provider) == namespace else { return }
             viewState.failPage(for: provider, message: mailErrorMessage(error))
             retryLoadMoreByProvider[provider] = loadMore
         }
@@ -1296,18 +1292,24 @@ struct MailTabView: View {
     @MainActor
     private func reconcileInbox(for provider: MailProvider) async {
         guard viewState.beginIndex(for: provider) else { return }
+        let namespace = activeMailboxNamespace(for: provider)
         do {
+            try await MailboxProviderRegistry.ensureReady(
+                for: provider, namespace: namespace, backgroundOnly: false
+            )
             let activeIDs = try await pagingProvider(for: provider)
                 .fetchInboxMessageIDs()
+            guard activeMailboxNamespace(for: provider) == namespace else { return }
             try MailboxLocalStore.live.reconcileInbox(
                 provider: provider,
-                sourceAccountNamespace: activeMailboxNamespace(for: provider),
+                sourceAccountNamespace: namespace,
                 activeMessageIDs: activeIDs,
                 in: modelContext
             )
             try MailboxLocalStore.live.replayPendingMutations(in: modelContext)
             viewState.completeIndex(for: provider, totalCount: activeIDs.count)
         } catch {
+            guard activeMailboxNamespace(for: provider) == namespace else { return }
             viewState.failIndex(
                 for: provider,
                 message: AppLanguage.localized("mail.inbox.reconcileFailed", defaultValue: "The full inbox state could not be checked.", language: .current, comment: "Inbox reconciliation failure.")
@@ -1355,8 +1357,13 @@ struct MailTabView: View {
 
     @MainActor
     private func analyzeEmail(_ email: EmailMessage) async {
-        if email.body.isEmpty && email.htmlBody == nil {
+        if !email.hasCompleteBody && !EmailAnalysisContract.isCurrentAnalysis(email) {
             do {
+                try await MailboxProviderRegistry.ensureReady(
+                    for: email.provider,
+                    namespace: email.sourceAccountNamespace,
+                    backgroundOnly: false
+                )
                 let content = try await pagingProvider(for: email.provider)
                     .fetchMessageContent(messageID: email.providerMessageID)
                 try MailboxLocalStore.live.updateContent(
@@ -1364,9 +1371,13 @@ struct MailTabView: View {
                     for: email,
                     in: modelContext
                 )
+            } catch is CancellationError {
+                return
             } catch {
-                email.analysisState = .failed
-                email.analysisError = AppLanguage.localized("mail.analysis.noBody", defaultValue: "The email body could not be loaded for analysis.", language: .current, comment: "Email analysis missing-body error.")
+                guard !Task.isCancelled else { return }
+                alertTitle = AppLanguage.localized("mail.analysis.title", defaultValue: "메일 정리", language: .current, comment: "Mail analysis title.")
+                errorMessage = AppLanguage.localized("mail.analysis.noBody", defaultValue: "The email body could not be loaded for analysis.", language: .current, comment: "Email analysis missing-body error.")
+                showError = true
                 return
             }
         }
@@ -1458,9 +1469,15 @@ struct MailTabView: View {
             let providerKind = MailProvider(rawValue: mutation.providerRawValue) ?? .gmail
             let provider = pagingProvider(for: providerKind)
             do {
+                try await MailboxProviderRegistry.ensureReady(
+                    for: providerKind,
+                    namespace: mutation.sourceAccountNamespace,
+                    backgroundOnly: false
+                )
                 try await provider.trashMessage(
                     messageID: mutation.providerMessageID,
-                    expectedGlobalMessageID: mutation.expectedGlobalMessageID
+                    expectedGlobalMessageID: mutation.expectedGlobalMessageID,
+                    expectedAccountNamespace: mutation.sourceAccountNamespace
                 )
             } catch GmailIMAPError.credentialRejected {
                 IMAPCredentialStore.markCredentialRejected(for: mutation.sourceAccountNamespace)
@@ -1470,38 +1487,20 @@ struct MailTabView: View {
         _ = pendingTrashQueue.remove(id: batch.id)
     }
 
-    private static func validateGmailSession(
-        account: String,
-        backgroundEnabled: Bool
+    private static func restoreSession(
+        for provider: MailProvider,
+        account: String
     ) async -> MailSessionValidation {
-        guard !account.isEmpty else {
+        let namespace = switch provider {
+        case .gmail: IMAPCredentialStore.canonicalAccount(account)
+        case .outlook: OutlookIMAPCredentialStore.canonicalAccount(account)
+        }
+        guard let namespace else {
             return MailSessionValidation(isAuthenticated: false, hasStoredCredential: false)
         }
         do {
-            try await GmailIMAPService.shared.validateConnection(
-                email: account,
-                backgroundEnabled: backgroundEnabled
-            )
-            return MailSessionValidation(isAuthenticated: true, hasStoredCredential: true)
-        } catch {
-            return MailSessionValidation(
-                isAuthenticated: false,
-                hasStoredCredential: MailCredentialFailurePolicy.hasStoredCredential(after: error)
-            )
-        }
-    }
-
-    private static func validateOutlookSession(
-        account: String,
-        backgroundEnabled: Bool
-    ) async -> MailSessionValidation {
-        guard !account.isEmpty else {
-            return MailSessionValidation(isAuthenticated: false, hasStoredCredential: false)
-        }
-        do {
-            try await OutlookIMAPService.shared.validateConnection(
-                email: account,
-                backgroundEnabled: backgroundEnabled
+            try await MailboxProviderRegistry.ensureReady(
+                for: provider, namespace: namespace, backgroundOnly: false
             )
             return MailSessionValidation(isAuthenticated: true, hasStoredCredential: true)
         } catch {
@@ -1527,8 +1526,7 @@ struct MailTabView: View {
         switch provider {
         case .gmail:
             let account = UserDefaults.standard.string(forKey: "pieroot.todo.imap.account") ?? ""
-            let bg = UserDefaults.standard.bool(forKey: "pieroot.todo.imap.backgroundEnabled")
-            let validation = await Self.validateGmailSession(account: account, backgroundEnabled: bg)
+            let validation = await Self.restoreSession(for: .gmail, account: account)
             isGmailAuthenticated = validation.isAuthenticated
             if validation.hasStoredCredential {
                 storedCredentialProviders.insert(.gmail)
@@ -1537,8 +1535,7 @@ struct MailTabView: View {
             }
         case .outlook:
             let account = UserDefaults.standard.string(forKey: "pieroot.todo.outlook.account") ?? ""
-            let bg = UserDefaults.standard.bool(forKey: "pieroot.todo.outlook.backgroundEnabled")
-            let validation = await Self.validateOutlookSession(account: account, backgroundEnabled: bg)
+            let validation = await Self.restoreSession(for: .outlook, account: account)
             isOutlookAuthenticated = validation.isAuthenticated
             if validation.hasStoredCredential {
                 storedCredentialProviders.insert(.outlook)
@@ -1621,6 +1618,93 @@ private struct MailCategoryGuideView: View {
 
 // MARK: - MailMessageRow
 
+private struct MailMailboxRow: View {
+    let email: EmailMessage
+    let onOpen: () -> Void
+    let onSaveTodo: () -> Void
+    let onTrash: () -> Void
+
+    #if targetEnvironment(macCatalyst)
+    @State private var isHovered = false
+    @FocusState private var isMenuFocused: Bool
+    @Environment(\.accessibilityVoiceOverEnabled) private var isVoiceOverEnabled
+
+    private var showsMenu: Bool {
+        isHovered || isMenuFocused || isVoiceOverEnabled
+    }
+    #endif
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Button(action: onOpen) {
+                MailMessageRow(email: email)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("mail.row.open.\(email.localListID)")
+
+            #if targetEnvironment(macCatalyst)
+            Menu {
+                rowMenuActions
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.body)
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .frame(width: 44, height: 44)
+            .contentShape(Rectangle())
+            .menuIndicator(.hidden)
+            .focused($isMenuFocused)
+            .accessibilityLabel(AppLanguage.localized(
+                "todo.moreActions",
+                defaultValue: "더 보기",
+                language: .current,
+                comment: "Secondary row actions menu accessibility label."
+            ))
+            .accessibilityIdentifier("mail.row.menu.\(email.localListID)")
+            .opacity(showsMenu ? 1 : 0)
+            .allowsHitTesting(showsMenu)
+            #endif
+        }
+        .contentShape(Rectangle())
+        #if targetEnvironment(macCatalyst)
+        .onHover { isHovered = $0 }
+        #endif
+        .contextMenu {
+            rowMenuActions
+        }
+    }
+
+    @ViewBuilder
+    private var rowMenuActions: some View {
+        Button(action: onOpen) {
+            Label(
+                AppLanguage.localized(
+                    "action.details",
+                    defaultValue: "상세",
+                    language: .current,
+                    comment: "Open details for viewing."
+                ),
+                systemImage: "info.circle"
+            )
+        }
+        .accessibilityIdentifier("mail.row.details")
+
+        Button(action: onSaveTodo) {
+            Label(MailRegisterSheet.saveActionTitle, systemImage: "checkmark.circle.fill")
+        }
+        .accessibilityIdentifier("mail.row.saveTodo")
+
+        Button(role: .destructive, action: onTrash) {
+            Label("휴지통", systemImage: "trash")
+        }
+        .accessibilityIdentifier("mail.row.trash")
+    }
+}
+
 /// Owns its animation locally so a blinking dot never invalidates the mailbox list.
 private struct NewlyImportedMailDot: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -1674,13 +1758,13 @@ struct MailMessageRow: View {
                 .font(.body)
                 .fontWeight(email.isRead ? .regular : .semibold)
                 .lineLimit(2)
-            if email.analysisTodoCandidate == true {
+            if EmailAnalysisContract.todoCandidate(for: email) == true {
                 Label(
                     AppLanguage.localized(
-                        "mail.analysis.layaCandidate",
-                        defaultValue: "할 일 후보 · Laya",
+                        "mail.analysis.actionCandidate",
+                        defaultValue: "처리할 항목 있음",
                         language: .current,
-                        comment: "Laya recommends reviewing this email as a to-do; no automatic save."
+                        comment: "The complete email analysis contains required actions."
                     ),
                     systemImage: "checkmark.circle"
                 )
@@ -1754,19 +1838,20 @@ struct MailRegisterSelectionView: View {
 }
 
 /// 메일을 확인한 뒤 할 일로 저장하는 검토 시트.
-/// - 제목·메모: 사용 가능한 Apple Intelligence로 초안을 만들고, 아니면 로컬 규칙으로 대체한다.
-/// - 기한: 메일 본문에서 규칙 기반으로 찾은 날짜만 제안하고, 사용자가 확인·수정한다.
-///   찾지 못하면 기한을 꺼 둔 채 기한 없는 할 일로 저장한다(임의 날짜를 만들지 않는다).
+/// - 제목: 현재 본문 분석의 확인/처리 필요 항목에서만 제안한다. 항목이 없으면 직접 입력한다.
+/// - 기한: 전체 본문에서 규칙 기반으로 찾은 날짜만 제안하고, 사용자가 확인·수정한다.
+///   찾지 못하면 기한을 꺼 둔 채 기한 없는 할 일로 저장한다.
 /// - 캘린더: 이 시트는 사용자가 켠 경우에만, 기한이 있고 캘린더 접근이 허용된 때 즉시 일정을 만든다.
 ///   (기한 있는 할 일을 나중에 자동 등록하는 전역 동기화 정책은 별개다.)
 ///   Todo를 먼저 저장하고 일정을 나중에 만들어 Todo 저장 실패 시 고아 일정이 생기지 않게 한다.
 ///
 /// ⚠️ 프라이버시 보장:
-/// - 메일 본문은 온디바이스 규칙 기반으로만 분석한다.
+/// - 메일 분석은 온디바이스에서 수행하며 외부 전송을 요청하지 않는다.
 /// - Todo는 AppDataContainer.shared.container(main)에 저장, 절대 emailContainer에 넣지 않음.
-/// - 초안은 `EmailService.makeManualTodo(from:)` 기반으로 동일한 메타데이터 경로 사용.
+/// - 동일 메일의 서로 다른 처리 항목을 각각 저장하며 원본 참조는 그대로 보존한다.
 struct MailRegisterSheet: View {
     let email: EmailMessage
+    var initialAction: String? = nil
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
@@ -1784,10 +1869,10 @@ struct MailRegisterSheet: View {
     @State private var calendarAccessDenied = false
     @State private var calendarID = ""
     @State private var calendarSources: [CalendarService.CalendarSourceGroup] = []
-    @State private var sourceMessageID = ""
-    @State private var sourceThreadID = ""
-    @State private var sourceSender = ""
-    @State private var sourceSenderEmail = ""
+    @State private var offeredActions: [String] = []
+    @State private var selectedAction = ""
+    @State private var captureSource: EmailTaskCapture.Source?
+    @State private var registeredItems = EmailTaskCapture.SavedItems(titles: [], sourceItemIDs: [])
     @State private var isAnalyzing = true
     @State private var isDuplicate = false
     @State private var errorMessage: String?
@@ -1813,6 +1898,7 @@ struct MailRegisterSheet: View {
 
     private var canSave: Bool {
         !isAnalyzing
+            && captureSource != nil
             && !isDuplicate
             && !isRequestingCalendarAccess
             && !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -1832,17 +1918,18 @@ struct MailRegisterSheet: View {
                                 .font(.subheadline)
                         }
                     }
-                } else if isDuplicate {
-                    Section {
-                        Label(
-                            Self.localized("mail.register.duplicate", ko: "이미 등록된 메일입니다.", en: "This email is already registered."),
-                            systemImage: "checkmark.circle"
-                        )
-                        .foregroundStyle(.secondary)
-                        .accessibilityIdentifier("mail.register.duplicate")
-                    }
                 } else {
                     taskSection
+                    if isDuplicate {
+                        Section {
+                            Label(
+                                Self.localized("mail.register.actionDuplicate", ko: "이 메일의 같은 처리 항목이 이미 저장되어 있습니다.", en: "This action from this email is already saved."),
+                                systemImage: "checkmark.circle"
+                            )
+                            .foregroundStyle(.secondary)
+                            .accessibilityIdentifier("mail.register.duplicate")
+                        }
+                    }
                     deadlineSection
                     if hasDueDate {
                         calendarSection
@@ -1880,6 +1967,16 @@ struct MailRegisterSheet: View {
             }
             .onChange(of: hasDueDate) { _, isOn in
                 if !isOn { addToCalendar = false }
+            }
+            .onChange(of: selectedAction) { _, action in
+                title = action
+                captureSource = EmailTaskCapture.source(for: email, action: action.isEmpty ? nil : action)
+                isDuplicate = registeredItems.contains(action: action.isEmpty ? nil : action, title: title)
+            }
+            .onChange(of: title) { _, value in
+                isDuplicate = registeredItems.contains(
+                    action: selectedAction.isEmpty ? nil : selectedAction, title: value
+                )
             }
             .alert(
                 Self.localized("mail.register.savedTitle", ko: "할 일을 저장했어요", en: "To-Do Saved"),
@@ -1922,7 +2019,7 @@ struct MailRegisterSheet: View {
 
     private var sourceLine: String {
         let analyzer = EmailContentAnalyzer()
-        let sender = sourceSender.isEmpty ? analyzer.parseSender(from: email.from) : sourceSender
+        let sender = analyzer.parseSender(from: email.from)
         let received = email.receivedAt.formatted(
             .dateTime.month(.abbreviated).day().hour().minute().locale(AppLanguage.current.locale)
         )
@@ -1933,6 +2030,44 @@ struct MailRegisterSheet: View {
 
     private var taskSection: some View {
         Section {
+            if !offeredActions.isEmpty {
+                Menu {
+                    Picker("확인/처리 필요", selection: $selectedAction) {
+                        ForEach(offeredActions, id: \.self) { action in
+                            Label(
+                                action,
+                                systemImage: registeredItems.containsAction(action)
+                                    ? "checkmark.circle" : "circle"
+                            )
+                            .tag(action)
+                        }
+                    }
+                    .pickerStyle(.inline)
+                } label: {
+                    VStack(alignment: .leading, spacing: AppTheme.Spacing.compact) {
+                        Text("확인/처리 필요")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        HStack(alignment: .firstTextBaseline) {
+                            Text(selectedAction.isEmpty
+                                 ? Self.localized("mail.register.chooseAction", ko: "항목 선택", en: "Choose an action")
+                                 : selectedAction)
+                                .multilineTextAlignment(.leading)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Spacer(minLength: AppTheme.Spacing.compact)
+                            Image(systemName: "chevron.up.chevron.down")
+                                .foregroundStyle(AppTheme.accent)
+                                .accessibilityHidden(true)
+                        }
+                        .font(.subheadline)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                    .padding(.vertical, AppTheme.Spacing.compact)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("mail.register.actionPicker")
+            }
             TextField(
                 Self.localized("mail.register.titlePlaceholder", ko: "할 일 제목", en: "To-do title"),
                 text: $title,
@@ -1942,6 +2077,22 @@ struct MailRegisterSheet: View {
             .accessibilityIdentifier("mail.register.title")
         } header: {
             Text(Self.localized("mail.register.taskHeader", ko: "할 일", en: "To-Do"))
+        } footer: {
+            if offeredActions.isEmpty {
+                if EmailAnalysisContract.todoCandidate(for: email) == false {
+                    Text(Self.localized(
+                        "mail.register.noActions",
+                        ko: "확인/처리 필요 항목이 없어 자동으로 제안하는 할 일은 없습니다. 직접 제목을 입력해 저장할 수 있습니다.",
+                        en: "There are no required-action task suggestions. You can enter a title to save a to-do manually."
+                    ))
+                } else {
+                    Text(Self.localized(
+                        "mail.register.actionsUnavailable",
+                        ko: "전체 본문의 처리 필요 항목을 확인하지 못했습니다. 직접 입력하거나 본문을 다시 분석해 주세요.",
+                        en: "Required actions could not be verified from the full body. Enter a title manually or analyze the body again."
+                    ))
+                }
+            }
         }
     }
 
@@ -2062,11 +2213,6 @@ struct MailRegisterSheet: View {
         isCalendarAuthorized = service.isAuthorized
         if isCalendarAuthorized { loadCalendars() }
 
-        if isAlreadyRegistered(in: ModelContext(AppDataContainer.shared.container)) {
-            isDuplicate = true
-            isAnalyzing = false
-            return
-        }
         await analyzeAndPrefill()
     }
 
@@ -2101,136 +2247,141 @@ struct MailRegisterSheet: View {
 
     @MainActor
     private func analyzeAndPrefill() async {
-        if email.body.isEmpty && email.htmlBody == nil {
+        defer { isAnalyzing = false }
+        if !email.hasCompleteBody {
             do {
-                let provider = MailboxProviderRegistry.provider(for: email.provider)
-                let content = try await provider.fetchMessageContent(messageID: email.providerMessageID)
-                try MailboxLocalStore.live.updateContent(
-                    content,
-                    for: email,
-                    in: modelContext
+                try await MailboxProviderRegistry.ensureReady(
+                    for: email.provider,
+                    namespace: email.sourceAccountNamespace,
+                    backgroundOnly: false
                 )
+                let content = try await MailboxProviderRegistry.provider(for: email.provider)
+                    .fetchMessageContent(messageID: email.providerMessageID)
+                try Task.checkCancellation()
+                try MailboxLocalStore.live.updateContent(content, for: email, in: modelContext)
+            } catch is CancellationError {
+                return
             } catch {
-                guard !Task.isCancelled else { return }
-                DiagnosticRecorder.shared.record(
-                    error: error,
-                    component: "mail.register",
-                    operation: "fetchMessageContent"
-                )
                 errorMessage = Self.localized(
                     "mail.register.bodyLoadFailed",
-                    ko: "메일 전체 본문을 불러오지 못해 미리보기로 초안을 만들었어요.",
-                    en: "The full email couldn't be loaded, so the draft uses the preview."
+                    ko: "전체 본문을 불러오지 못해 할 일을 제안하지 않습니다. 직접 입력하거나 나중에 다시 시도해 주세요.",
+                    en: "The full body could not be loaded, so no tasks are suggested. Enter a title manually or try again later."
                 )
             }
         }
+        guard !Task.isCancelled else { return }
+        if email.hasCompleteBody {
+            try? await EmailMessageAnalysisService.shared.analyze(email, context: modelContext)
+        }
+        guard !Task.isCancelled else { return }
 
-        let synthetic = GmailMessage(
-            id: sourceRef,
-            threadID: email.threadID,
-            messageID: "",
-            subject: email.subject,
-            from: email.from,
-            snippet: email.snippet,
-            body: email.body,
-            htmlBody: email.htmlBody,
-            receivedAt: email.receivedAt,
-            labelIds: [],
-            isBulk: false,
-            provider: email.provider,
+        do {
+            registeredItems = try EmailTaskCapture.savedItems(
+                for: email,
+                in: ModelContext(AppDataContainer.shared.container)
+            )
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+        offeredActions = EmailAnalysisContract.currentActionItems(for: email)
+        if let initialAction {
+            if offeredActions.contains(initialAction) {
+                selectedAction = initialAction
+            } else {
+                errorMessage = EmailTaskCapture.CaptureError.sourceChanged.localizedDescription
+                captureSource = nil
+                return
+            }
+        } else {
+            selectedAction = offeredActions.first {
+                !registeredItems.containsAction($0)
+            } ?? offeredActions.first ?? ""
+        }
+        title = selectedAction
+        captureSource = EmailTaskCapture.source(
+            for: email,
+            action: selectedAction.isEmpty ? nil : selectedAction
+        )
+        isDuplicate = registeredItems.contains(
+            action: selectedAction.isEmpty ? nil : selectedAction, title: title
+        )
+        let analyzer = EmailContentAnalyzer()
+        notes = [
+            EmailAnalysisContract.isCurrentAnalysis(email) ? email.analysisSummary : "",
+            analyzer.parseSender(from: email.from)
+        ].filter { !$0.isEmpty }.joined(separator: "\n\n")
+
+        let source = GmailMessage(
+            id: sourceRef, threadID: email.threadID, messageID: "",
+            subject: email.subject, from: email.from, snippet: "",
+            body: email.body, htmlBody: email.htmlBody, receivedAt: email.receivedAt,
+            labelIds: [], isBulk: false, provider: email.provider,
             providerMessageID: email.providerMessageID,
             sourceAccountNamespace: email.sourceAccountNamespace
         )
-
-        let draftTodo = await EmailService.shared.makeManualTodo(from: synthetic, allowFoundationModels: true)
-        guard !Task.isCancelled else { return }
-        let extracted = EmailContentAnalyzer().analyze(synthetic, now: Date())
-
-        title = draftTodo.title
-        notes = draftTodo.notes
-        sourceMessageID = draftTodo.sourceMessageID
-        sourceThreadID = draftTodo.sourceThreadID
-        let analyzer = EmailContentAnalyzer()
-        sourceSender = analyzer.parseSender(from: email.from)
-        sourceSenderEmail = analyzer.parseSenderEmail(from: email.from)
-
-        // 메일에서 실제로 찾은 날짜만 제안한다. 없으면 기한을 끈 채로 둔다.
-        if let extracted {
+        if !offeredActions.isEmpty, let extracted = analyzer.analyze(source, now: Date()) {
             dueDate = extracted.dueDate
             isAllDay = extracted.isAllDay
-            deadlineEvidence = extracted.deadlineSentence
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+            deadlineEvidence = extracted.deadlineSentence.trimmingCharacters(in: .whitespacesAndNewlines)
             isDueDateSuggested = true
         } else {
-            // 사용자가 직접 마감을 켤 때 보이는 시작값일 뿐, 저장 값으로 쓰지 않는다.
             dueDate = endOfDay(Date())
             isAllDay = true
             isDueDateSuggested = false
         }
         hasDueDate = isDueDateSuggested
-        isAnalyzing = false
     }
 
     // MARK: Saving
 
-    private func isAlreadyRegistered(in context: ModelContext) -> Bool {
-        let ref = sourceRef
-        let descriptor = FetchDescriptor<Todo>(
-            predicate: #Predicate { $0.sourceRef == ref }
-        )
-        return ((try? context.fetchCount(descriptor)) ?? 0) > 0
-    }
 
     /// 저장 순서: 중복 확인 → Todo 저장 → (선택 시) 일정 생성 → 일정 연결 저장.
     /// Todo 저장이 실패하면 일정은 만들지 않는다. 연결 저장이 실패해도 일정은 지우지 않는다:
-    /// Todo가 이미 저장됐으므로 캘린더 동기화가 메일 URL로 일정을 다시 연결한다.
+    /// Todo가 이미 저장됐으므로 캘린더 동기화가 할 일 UUID 소유권 표식으로 다시 연결한다.
     private func save() {
         let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanTitle.isEmpty else { return }
         errorMessage = nil
 
         let appContext = ModelContext(AppDataContainer.shared.container)
-        guard !isAlreadyRegistered(in: appContext) else {
-            isDuplicate = true
-            return
-        }
+        guard let captureSource else { return }
 
         let savedDueDate: Date? = hasDueDate
             ? (isAllDay ? endOfDay(dueDate) : dueDate)
             : nil
-        let ref = sourceRef
-        let analyzer = EmailContentAnalyzer()
-        let todo = Todo(
-            title: cleanTitle,
-            notes: notes,
-            dueDate: savedDueDate,
-            source: .email,
-            sourceRef: ref
-        )
-        todo.sourceAccountNamespace = email.sourceAccountNamespace
-        todo.sourceSender = sourceSender.isEmpty ? analyzer.parseSender(from: email.from) : sourceSender
-        todo.sourceSenderEmail = sourceSenderEmail.isEmpty ? analyzer.parseSenderEmail(from: email.from) : sourceSenderEmail
-        todo.sourceMessageID = sourceMessageID
-        todo.sourceThreadID = sourceThreadID
-
+        let todo: Todo
         do {
-            appContext.insert(todo)
-            TaskBehaviorRecorder.recordCreation(of: todo, actor: .user, in: appContext)
-            try appContext.save()
+            todo = try EmailTaskCapture.save(
+                source: captureSource,
+                email: email,
+                title: cleanTitle,
+                notes: notes,
+                dueDate: savedDueDate,
+                in: appContext
+            )
         } catch {
             DiagnosticRecorder.shared.record(
                 error: error,
                 component: "mail.register",
                 operation: "saveTodo"
             )
-            errorMessage = Self.localized(
-                "mail.todo.registerFailed",
-                ko: "할 일 등록 실패",
-                en: "To-Do Registration Failed"
-            )
+            if let captureError = error as? EmailTaskCapture.CaptureError {
+                errorMessage = captureError.localizedDescription
+                switch captureError {
+                case .sourceChanged: self.captureSource = nil
+                case .duplicate: isDuplicate = true
+                case .emptyTitle: break
+                }
+            } else {
+                errorMessage = Self.localized(
+                    "mail.todo.registerFailed",
+                    ko: "할 일 등록 실패",
+                    en: "To-Do Registration Failed"
+                )
+            }
             return
         }
-        EmailLearningStore.shared.recordAnalyzed(messageIDs: [ref])
+        EmailLearningStore.shared.recordAnalyzed(messageIDs: [sourceRef])
 
         let service = CalendarService.shared
         guard addToCalendar, let savedDueDate, isCalendarAuthorized, service.isAuthorized else {
@@ -2250,16 +2401,12 @@ struct MailRegisterSheet: View {
 
         let eventID: String
         do {
-            eventID = try service.createEventFromEmail(
-                title: cleanTitle,
-                start: eventStart,
-                end: eventEnd,
-                isAllDay: isAllDay,
-                location: "",
-                notes: notes,
-                sourceRef: ref,
-                calendarID: calendarID.isEmpty ? nil : calendarID
-            )
+            guard let createdID = try service.registerOrUpdate(
+                todo: todo,
+                preferredCalendarID: calendarID.isEmpty ? nil : calendarID,
+                eventWindowOverride: (start: eventStart, end: eventEnd, isAllDay: isAllDay)
+            ) else { throw CalendarError.notAuthorized }
+            eventID = createdID
         } catch {
             DiagnosticRecorder.shared.record(
                 error: error,

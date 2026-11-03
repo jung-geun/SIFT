@@ -39,7 +39,8 @@ enum TodoMutations {
 
         // SwiftData can invalidate a deleted model after save. Retain only the inputs
         // required by the existing cleanup APIs, without inserting this detached copy.
-        // Preserve both health provenance markers, plus sourceRef for email dismissal learning.
+        // Preserve health markers and email account/action identity: dropping the
+        // action ID would let cleanup claim a legacy whole-email calendar event.
         let cleanupTodo = Todo(
             id: todo.id,
             startDate: todo.startDate,
@@ -54,6 +55,8 @@ enum TodoMutations {
         cleanupTodo.calendarEventID = todo.calendarEventID
         cleanupTodo.calendarEventExternalID = todo.calendarEventExternalID
         cleanupTodo.sourceSenderEmail = todo.sourceSenderEmail
+        cleanupTodo.sourceAccountNamespace = todo.sourceAccountNamespace
+        cleanupTodo.sourceItemID = todo.sourceItemID
 
         // User deletion and eligible audit records form one durable transaction.
         // Health tasks still mutate and clean up normally, but emit neither record.

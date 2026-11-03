@@ -1,3 +1,13 @@
+---
+layout: default
+locale: ko
+lang: ko
+page_key: terms
+title: 서비스 약관
+description: SIFT의 이용 조건, 제3자 서비스, 라이선스와 책임 범위를 안내합니다.
+permalink: /terms-of-service.html
+---
+
 # 서비스 약관
 
 **앱 이름**: SIFT: To-Do List  

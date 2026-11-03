@@ -86,8 +86,12 @@ struct TodoDetailView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             #else
-            completionSection
-            deleteSection
+            Section {
+                completionButton
+                deleteButton
+                    .tint(.red)
+            }
+            .buttonStyle(.borderless)
             #endif
         }
         .appFormStyle()
@@ -496,25 +500,6 @@ struct TodoDetailView: View {
         }
     }
 
-    #if !targetEnvironment(macCatalyst)
-    private var completionSection: some View {
-        Section {
-            completionButton
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .buttonBorderShape(.roundedRectangle(radius: AppTheme.controlRadius))
-        }
-    }
-
-    private var deleteSection: some View {
-        Section {
-            deleteButton
-                .buttonStyle(.bordered)
-                .controlSize(.large)
-                .buttonBorderShape(.roundedRectangle(radius: AppTheme.controlRadius))
-        }
-    }
-    #endif
 
     private var completionButton: some View {
         Button { toggleCompletionAndDismiss() } label: {
@@ -530,8 +515,8 @@ struct TodoDetailView: View {
             #if targetEnvironment(macCatalyst)
             .fixedSize()
             #else
-            .font(.headline)
-            .frame(maxWidth: .infinity, minHeight: 44)
+            .font(.body)
+            .frame(maxWidth: .infinity, alignment: .leading)
             #endif
         }
         .disabled(draft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
@@ -544,10 +529,11 @@ struct TodoDetailView: View {
                 AppLanguage.localized("action.delete", defaultValue: "삭제", language: .current, comment: "Delete to-do action."),
                 systemImage: "trash"
             )
+            .foregroundStyle(.red)
             #if targetEnvironment(macCatalyst)
             .fixedSize()
             #else
-            .frame(maxWidth: .infinity, minHeight: 44)
+            .frame(maxWidth: .infinity, alignment: .leading)
             #endif
         }
         .accessibilityIdentifier("todo.detail.deleteButton")
@@ -796,9 +782,8 @@ struct TagEditorView: View {
                     .font(.body)
                     .onSubmit { addTag() }
                 Button("추가", action: addTag)
-                    .buttonStyle(.bordered)
-                    .controlSize(.large)
-                    .buttonBorderShape(.roundedRectangle(radius: AppTheme.controlRadius))
+                    .buttonStyle(.borderless)
+                    .controlSize(.regular)
                     .disabled(newTag.trimmingCharacters(in: .whitespaces).isEmpty)
             }
         }

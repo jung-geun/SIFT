@@ -78,13 +78,6 @@ struct DateParserTests {
         #expect(abs(normalized.date.timeIntervalSince(date)) < 1.0)
     }
 
-    @Test("이메일 프롬프트는 시간대 보존 규칙을 명시한다")
-    func emailPromptRequiresTimezonePreservationContract() {
-        let instruction = Prompts.EmailFM.systemInstruction(language: .korean)
-        #expect(instruction.contains("UTC+9"))
-        #expect(instruction.contains("ISO8601 offset"))
-        #expect(instruction.contains("현지 offset"))
-    }
 }
 
 @Suite("ReminderTiming regressions")

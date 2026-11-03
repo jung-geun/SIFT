@@ -35,12 +35,10 @@ private final class SuspendedEmailSummaryProvider {
 private final class EmailModelGateState {
     var enabled: Bool
     var available: Bool
-    var candidate: EmailCandidateOutcome?
 
-    init(enabled: Bool, available: Bool = false, candidate: EmailCandidateOutcome? = nil) {
+    init(enabled: Bool, available: Bool = false) {
         self.enabled = enabled
         self.available = available
-        self.candidate = candidate
     }
 }
 
@@ -70,6 +68,7 @@ struct EmailMessageAnalysisServiceTests {
         let container = try ModelContainer(for: schema, configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)])
         let context = ModelContext(container)
         let email = EmailMessage(id: "gates", subject: "Review", body: "Please review the plan by Friday.", provider: .gmail, rawMessageID: "gates", isInInbox: true)
+        email.bodyContentVersion = 1
         context.insert(email)
         let state = EmailModelGateState(enabled: initiallyEnabled)
         var calls = 0
@@ -79,8 +78,7 @@ struct EmailMessageAnalysisServiceTests {
                 return EmailSummaryResult(summary: "Apple summary", keyPoints: ["Friday"], actionItems: ["Review plan"])
             },
             foundationModelsEnabledProvider: { state.enabled },
-            foundationModelsAvailabilityProvider: { state.available },
-            todoCandidateProvider: { _, _, _ in nil }
+            foundationModelsAvailabilityProvider: { state.available }
         )
         try await service.analyze(email, context: context)
         let localSummary = EmailAnalysisContract.deterministicSummary(subject: email.subject, body: email.body).summary
@@ -99,208 +97,13 @@ struct EmailMessageAnalysisServiceTests {
         #expect(calls == 1)
     }
 
-    @Test("Laya classifies cached summaries without rerunning AFM")
-    func testCachedSummaryClassification() async throws {
-        let schema = Schema([EmailMessage.self])
-        let container = try ModelContainer(for: schema, configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)])
-        let context = ModelContext(container)
-        let email = EmailMessage(id: "decision", subject: "Review", body: "Please review the plan by Friday.", provider: .gmail, rawMessageID: "decision", isInInbox: true)
-        context.insert(email)
-        var summaries = 0
-        var decisions = 0
-        let state = EmailModelGateState(enabled: true, available: true)
-        let service = EmailMessageAnalysisService(
-            foundationModelsSummaryProvider: { _, _, _, _ in
-                summaries += 1
-                return EmailSummaryResult(summary: "Apple summary", keyPoints: [], actionItems: [])
-            },
-            foundationModelsEnabledProvider: { true },
-            foundationModelsAvailabilityProvider: { true },
-            todoCandidateProvider: { _, _, _ in
-                decisions += 1
-                return state.candidate
-            }
-        )
-        try await service.analyze(email, context: context)
-        #expect(email.analysisTodoCandidate == nil)
-        #expect(email.analysisState == .analyzed)
-        state.candidate = .notCandidate
-        try await service.analyze(email, context: context)
-        #expect(email.analysisTodoCandidate == false)
-        #expect(email.analysisTodoCandidateFingerprint == email.analyzedBodyFingerprint)
-        #expect(email.analysisSummary == "Apple summary")
-        #expect(summaries == 1)
-        #expect(decisions == 2)
-        try await service.analyze(email, context: context)
-        #expect(decisions == 2)
-    }
-    @Test("Uncertain and unavailable decisions persist nil without changing the summary baseline", arguments: [false, true])
-    func testUnresolvedDecisionPersistence(uncertain: Bool) async throws {
-        let schema = Schema([EmailMessage.self])
-        let container = try ModelContainer(for: schema, configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)])
-        let context = ModelContext(container)
-        let email = EmailMessage(id: "unresolved", subject: "Review", body: "Please review the plan by Friday.", provider: .gmail, rawMessageID: "unresolved", isInInbox: true)
-        context.insert(email)
-        let state = EmailModelGateState(enabled: true, candidate: uncertain ? .uncertain : nil)
-        var summaryCalls = 0
-        var decisionCalls = 0
-        let service = EmailMessageAnalysisService(
-            foundationModelsSummaryProvider: { _, _, _, _ in
-                summaryCalls += 1
-                return EmailSummaryResult(summary: "must not run", keyPoints: [], actionItems: [])
-            },
-            foundationModelsEnabledProvider: { state.enabled },
-            foundationModelsAvailabilityProvider: { state.available },
-            todoCandidateProvider: { _, _, _ in
-                decisionCalls += 1
-                return state.candidate
-            }
-        )
-        let baseline = EmailAnalysisContract.deterministicSummary(subject: email.subject, body: email.body)
-        try await service.analyze(email, context: context)
-        // A separate context proves the nil is stored, not just displayed on the live row.
-        let persistedContext = ModelContext(container)
-        let persisted = try #require(try persistedContext.fetch(FetchDescriptor<EmailMessage>()).first)
-        #expect(persisted.analysisTodoCandidate == nil)
-        #expect(persisted.analysisTodoCandidate != false)
-        #expect(persisted.analysisTodoCandidateFingerprint.isEmpty)
-        #expect(persisted.analysisState == .analyzed)
-        #expect(persisted.analysisSummary == baseline.summary)
-        #expect(persisted.analysisKeyPoints == baseline.keyPoints)
-        #expect(persisted.analysisActionItems == baseline.actionItems)
-        #expect(persisted.analysisFailureReasonRaw == RuleFallbackReason.unavailable.rawValue)
-        #expect(persisted.analysisError.isEmpty)
-        #expect(summaryCalls == 0)
-        #expect(!context.hasChanges)
-
-        // Neither absence nor uncertainty is cached as a definite negative.
-        state.candidate = .candidate
-        try await service.analyze(email, context: context)
-        let resolvedContext = ModelContext(container)
-        let resolved = try #require(try resolvedContext.fetch(FetchDescriptor<EmailMessage>()).first)
-        #expect(resolved.analysisTodoCandidate == true)
-        #expect(resolved.analysisTodoCandidateFingerprint == email.analyzedBodyFingerprint)
-        #expect(resolved.analysisSummary == baseline.summary)
-        #expect(resolved.analysisFailureReasonRaw == RuleFallbackReason.unavailable.rawValue)
-        #expect(decisionCalls == 2)
-        #expect(summaryCalls == 0)
-    }
-
-    @Test("Native classification receives original late and quoted text for new and cached summaries")
-    func testClassificationPreservesOriginalBody() async throws {
-        let schema = Schema([EmailMessage.self])
-        let container = try ModelContainer(for: schema, configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)])
-        let context = ModelContext(container)
-        let body = "<p>Project update.</p>\\n"
-            + String(repeating: "Status details.\n", count: 1_000)
-            + "-- Forwarded conversation\nPlease approve the revised plan by Friday.\n> Please send the signed agreement.\n"
-        let normalized = EmailAnalysisContract.normalizedBody(body)
-        #expect(!normalized.contains("Please approve"))
-        #expect(!normalized.contains("Please send"))
-        let email = EmailMessage(id: "original-text", subject: "Review", from: "alex@example.com", body: body, provider: .gmail, rawMessageID: "original-text", isInInbox: true)
-        context.insert(email)
-        var summaryCalls = 0
-        var decisionBodies: [String] = []
-        let service = EmailMessageAnalysisService(
-            foundationModelsSummaryProvider: { _, _, source, _ in
-                summaryCalls += 1
-                #expect(source == normalized)
-                return EmailSummaryResult(summary: "Apple summary", keyPoints: [], actionItems: [])
-            },
-            foundationModelsEnabledProvider: { true },
-            foundationModelsAvailabilityProvider: { true },
-            todoCandidateProvider: { subject, sender, source in
-                #expect(subject == email.subject)
-                #expect(sender == email.from)
-                decisionBodies.append(source)
-                return .uncertain
-            }
-        )
-        try await service.analyze(email, context: context)
-        try await service.analyze(email, context: context)
-        #expect(decisionBodies == [body, body])
-        #expect(summaryCalls == 1)
-        #expect(email.analysisSummary == "Apple summary")
-        #expect(email.analysisTodoCandidate == nil)
-        #expect(email.analysisTodoCandidateFingerprint.isEmpty)
-    }
-
-    @Test("Quoted-only changes invalidate a cached native recommendation")
-    func testQuotedBodyChangeInvalidatesCachedDecision() async throws {
-        let schema = Schema([EmailMessage.self])
-        let container = try ModelContainer(for: schema, configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)])
-        let context = ModelContext(container)
-        let body = "Project update.\n> Please approve the plan."
-        let updatedBody = "Project update.\n> No approval is needed."
-        #expect(EmailAnalysisContract.normalizedBody(body) == EmailAnalysisContract.normalizedBody(updatedBody))
-        let email = EmailMessage(id: "quoted-cache", subject: "Review", body: body, provider: .gmail, rawMessageID: "quoted-cache", isInInbox: true)
-        context.insert(email)
-        let state = EmailModelGateState(enabled: false, candidate: .candidate)
-        var decisionBodies: [String] = []
-        let service = EmailMessageAnalysisService(
-            foundationModelsEnabledProvider: { false },
-            todoCandidateProvider: { _, _, source in
-                decisionBodies.append(source)
-                return state.candidate
-            }
-        )
-        try await service.analyze(email, context: context)
-        let originalFingerprint = email.analysisTodoCandidateFingerprint
-        #expect(email.analysisTodoCandidate == true)
-        email.body = updatedBody
-        state.candidate = .notCandidate
-        try context.save()
-        try await service.analyze(email, context: context)
-        let persistedContext = ModelContext(container)
-        let persisted = try #require(try persistedContext.fetch(FetchDescriptor<EmailMessage>()).first)
-        #expect(decisionBodies == [body, updatedBody])
-        #expect(persisted.analysisTodoCandidate == false)
-        #expect(persisted.analysisTodoCandidateFingerprint != originalFingerprint)
-        #expect(persisted.analysisTodoCandidateFingerprint == EmailAnalysisContract.fingerprint(subject: email.subject, body: updatedBody))
-        #expect(persisted.analysisSummary == EmailAnalysisContract.deterministicSummary(subject: email.subject, body: updatedBody).summary)
-    }
-
-    @Test("Legacy Boolean recommendations are reclassified under the native predicate contract", arguments: [false, true])
-    func testLegacyCandidateCacheIsInvalidated(legacyCandidate: Bool) async throws {
-        let schema = Schema([EmailMessage.self])
-        let container = try ModelContainer(for: schema, configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)])
-        let context = ModelContext(container)
-        let email = EmailMessage(id: "legacy-decision", subject: "Review", body: "Please review the plan by Friday.", provider: .gmail, rawMessageID: "legacy-decision", isInInbox: true)
-        context.insert(email)
-        let legacyFingerprint = SHA256.hash(data: Data("\(email.subject)\u{0}\(EmailAnalysisContract.normalizedBody(email.body))".utf8))
-            .map { String(format: "%02x", $0) }
-            .joined()
-        email.analysisState = .analyzed
-        email.analysisSummary = "Legacy summary"
-        email.analyzedBodyFingerprint = legacyFingerprint
-        email.analysisTodoCandidate = legacyCandidate
-        email.analysisTodoCandidateFingerprint = legacyFingerprint
-        email.analysisVersion = 6
-        try context.save()
-        var decisions = 0
-        let service = EmailMessageAnalysisService(
-            foundationModelsEnabledProvider: { false },
-            todoCandidateProvider: { _, _, _ in
-                decisions += 1
-                return .uncertain
-            }
-        )
-        try await service.analyze(email, context: context)
-        let persistedContext = ModelContext(container)
-        let persisted = try #require(try persistedContext.fetch(FetchDescriptor<EmailMessage>()).first)
-        #expect(decisions == 1)
-        #expect(persisted.analysisTodoCandidate == nil)
-        #expect(persisted.analysisTodoCandidateFingerprint.isEmpty)
-        #expect(persisted.analyzedBodyFingerprint != legacyFingerprint)
-        #expect(persisted.analysisVersion == EmailAnalysisContract.summaryContractVersion)
-    }
-
     @Test("AFM execution errors retain deterministic analysis and reason")
     func testAFMErrorFallsBack() async throws {
         let schema = Schema([EmailMessage.self])
         let container = try ModelContainer(for: schema, configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)])
         let context = ModelContext(container)
         let email = EmailMessage(id: "error", subject: "Review", body: "Please review the plan by Friday.", provider: .gmail, rawMessageID: "error", isInInbox: true)
+        email.bodyContentVersion = 1
         context.insert(email)
         var summaryCalls = 0
         let service = EmailMessageAnalysisService(
@@ -309,161 +112,16 @@ struct EmailMessageAnalysisServiceTests {
                 throw NSError(domain: "test", code: 1)
             },
             foundationModelsEnabledProvider: { true },
-            foundationModelsAvailabilityProvider: { true },
-            todoCandidateProvider: { _, _, _ in .candidate }
+            foundationModelsAvailabilityProvider: { true }
         )
         try await service.analyze(email, context: context)
         #expect(email.analysisState == .analyzed)
         #expect(email.analysisSummary == EmailAnalysisContract.deterministicSummary(subject: email.subject, body: email.body).summary)
         #expect(email.analysisFailureReasonRaw == RuleFallbackReason.providerExecutionFailed.rawValue)
-        #expect(email.analysisTodoCandidate == true)
+        #expect(EmailAnalysisContract.todoCandidate(for: email) == nil)
         try await service.analyze(email, context: context)
         #expect(summaryCalls == 1)
         #expect(email.analysisFailureReasonRaw == RuleFallbackReason.providerExecutionFailed.rawValue)
-    }
-    @Test("Cancelling inbox classification keeps a completed summary")
-    func testDecisionCancellationKeepsSummary() async throws {
-        let schema = Schema([EmailMessage.self])
-        let container = try ModelContainer(for: schema, configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)])
-        let context = ModelContext(container)
-        let email = EmailMessage(id: "decision-cancel", subject: "Review", body: "Please review the plan by Friday.", provider: .gmail, rawMessageID: "decision-cancel", isInInbox: true)
-        context.insert(email)
-        let suspended = CancellableEmailSummaryProvider()
-        let service = EmailMessageAnalysisService(
-            foundationModelsEnabledProvider: { false },
-            todoCandidateProvider: { subject, sender, body in
-                _ = try await suspended.summarize(subject: subject, sender: sender, body: body, language: .english)
-                return .candidate
-            }
-        )
-        let task = Task { () -> Error? in
-            do { try await service.analyze(email, context: context); return nil }
-            catch { return error }
-        }
-        while !suspended.started { await Task.yield() }
-        task.cancel()
-        #expect(await task.value is CancellationError)
-        #expect(email.analysisState == .analyzed)
-        #expect(email.analysisSummary == EmailAnalysisContract.deterministicSummary(subject: email.subject, body: email.body).summary)
-        #expect(email.analysisTodoCandidate == nil)
-        #expect(email.analysisTodoCandidateFingerprint.isEmpty)
-        #expect(!context.hasChanges)
-    }
-
-
-    @Test("A decision for a changed source is discarded with its old summary", arguments: [false, true])
-    func testDecisionSourceRace(rawOnlyMutation: Bool) async throws {
-        let schema = Schema([EmailMessage.self])
-        let container = try ModelContainer(for: schema, configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)])
-        let context = ModelContext(container)
-        let email = EmailMessage(id: "decision-race", subject: "Review", body: "Please review the plan by Friday.\n> Please send the signed agreement.", provider: .gmail, rawMessageID: "decision-race", isInInbox: true)
-        context.insert(email)
-        let suspended = SuspendedEmailSummaryProvider()
-        let service = EmailMessageAnalysisService(
-            foundationModelsEnabledProvider: { false },
-            todoCandidateProvider: { subject, sender, body in
-                _ = try await suspended.summarize(subject: subject, sender: sender, body: body, language: .english)
-                return .candidate
-            }
-        )
-        let task = Task { try await service.analyze(email, context: context) }
-        await suspended.waitUntilSuspended()
-        #expect(email.analysisState == .analyzed)
-        let originalBody = email.body
-        let originalFingerprint = email.analyzedBodyFingerprint
-        email.body = rawOnlyMutation
-            ? "Please review the plan by Friday.\n> Please do not send the signed agreement."
-            : "This is a different message."
-        #expect(EmailAnalysisContract.fingerprint(subject: email.subject, body: email.body) != originalFingerprint)
-        #expect((EmailAnalysisContract.normalizedBody(email.body) == EmailAnalysisContract.normalizedBody(originalBody)) == rawOnlyMutation)
-        try context.save()
-        suspended.resume(with: EmailSummaryResult(summary: "ignored", keyPoints: [], actionItems: []))
-        try await task.value
-        #expect(email.analysisTodoCandidate == nil)
-        #expect(email.analysisTodoCandidateFingerprint.isEmpty)
-        #expect(email.analysisState == .unanalyzed)
-        #expect(email.analysisSummary.isEmpty)
-    }
-
-    @Test("Classification checks cancellation before and after suspension without persisting a negative", arguments: [false, true])
-    func testDecisionCancellationAroundSuspension(cancelBeforeStart: Bool) async throws {
-        let schema = Schema([EmailMessage.self])
-        let container = try ModelContainer(for: schema, configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)])
-        let context = ModelContext(container)
-        let email = EmailMessage(id: "cached-cancel", subject: "Review", body: "Please review the plan by Friday.", provider: .gmail, rawMessageID: "cached-cancel", isInInbox: true)
-        context.insert(email)
-        email.analysisState = .analyzed
-        email.analysisSummary = "Existing summary"
-        email.analyzedBodyFingerprint = EmailAnalysisContract.fingerprint(subject: email.subject, body: email.body)
-        email.analysisVersion = EmailAnalysisContract.summaryContractVersion
-        try context.save()
-        let suspended = SuspendedEmailSummaryProvider()
-        var decisionCalls = 0
-        let service = EmailMessageAnalysisService(
-            foundationModelsEnabledProvider: { false },
-            todoCandidateProvider: { subject, sender, body in
-                decisionCalls += 1
-                // This provider ignores cancellation; the service must recheck on return.
-                _ = try await suspended.summarize(subject: subject, sender: sender, body: body, language: .english)
-                return .notCandidate
-            }
-        )
-        let task = Task { () -> Error? in
-            if cancelBeforeStart {
-                withUnsafeCurrentTask { $0?.cancel() }
-            }
-            do { try await service.analyze(email, context: context); return nil }
-            catch { return error }
-        }
-        if !cancelBeforeStart {
-            await suspended.waitUntilSuspended()
-            task.cancel()
-            suspended.resume(with: EmailSummaryResult(summary: "ignored", keyPoints: [], actionItems: []))
-        }
-        #expect(await task.value is CancellationError)
-        #expect(decisionCalls == (cancelBeforeStart ? 0 : 1))
-        #expect(email.analysisState == .analyzed)
-        #expect(email.analysisSummary == "Existing summary")
-        #expect(email.analysisError.isEmpty)
-        #expect(email.analysisTodoCandidate == nil)
-        #expect(email.analysisTodoCandidateFingerprint.isEmpty)
-        #expect(!context.hasChanges)
-        let persistedContext = ModelContext(container)
-        let persisted = try #require(try persistedContext.fetch(FetchDescriptor<EmailMessage>()).first)
-        #expect(persisted.analysisTodoCandidate == nil)
-        #expect(persisted.analysisSummary == "Existing summary")
-    }
-
-    @Test("Classification does not access or recreate a deleted source row", arguments: [false, true])
-    func testDecisionAfterSourceDeletion(cancelled: Bool) async throws {
-        let schema = Schema([EmailMessage.self])
-        let container = try ModelContainer(for: schema, configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)])
-        let context = ModelContext(container)
-        let email = EmailMessage(id: "decision-deleted", subject: "Review", body: "Please review the plan by Friday.", provider: .gmail, rawMessageID: "decision-deleted", isInInbox: true)
-        context.insert(email)
-        let suspended = SuspendedEmailSummaryProvider()
-        let service = EmailMessageAnalysisService(
-            foundationModelsEnabledProvider: { false },
-            todoCandidateProvider: { subject, sender, body in
-                _ = try await suspended.summarize(subject: subject, sender: sender, body: body, language: .english)
-                return .candidate
-            }
-        )
-        let task = Task { () -> Error? in
-            do { try await service.analyze(email, context: context); return nil }
-            catch { return error }
-        }
-        await suspended.waitUntilSuspended()
-        context.delete(email)
-        try context.save()
-        if cancelled { task.cancel() }
-        suspended.resume(with: EmailSummaryResult(summary: "ignored", keyPoints: [], actionItems: []))
-        let error = await task.value
-        if cancelled { #expect(error is CancellationError) }
-        else { #expect(error == nil) }
-        let persistedContext = ModelContext(container)
-        #expect(try persistedContext.fetch(FetchDescriptor<EmailMessage>()).isEmpty)
-        #expect(!context.hasChanges)
     }
 
 
@@ -488,6 +146,7 @@ struct EmailMessageAnalysisServiceTests {
             rawMessageID: "analysis-race",
             isInInbox: true
         )
+        email.bodyContentVersion = 1
         context.insert(email)
         try context.save()
 
@@ -495,8 +154,7 @@ struct EmailMessageAnalysisServiceTests {
         let service = EmailMessageAnalysisService(
             foundationModelsSummaryProvider: provider.summarize,
             foundationModelsEnabledProvider: { true },
-            foundationModelsAvailabilityProvider: { true },
-            todoCandidateProvider: { _, _, _ in nil }
+            foundationModelsAvailabilityProvider: { true }
         )
         let analysisTask = Task {
             try? await service.analyze(email, context: context)
@@ -542,6 +200,7 @@ struct EmailMessageAnalysisServiceTests {
             rawMessageID: "analysis-cancel",
             isInInbox: true
         )
+        email.bodyContentVersion = 1
         context.insert(email)
         try context.save()
 
@@ -549,8 +208,7 @@ struct EmailMessageAnalysisServiceTests {
         let service = EmailMessageAnalysisService(
             foundationModelsSummaryProvider: provider.summarize,
             foundationModelsEnabledProvider: { true },
-            foundationModelsAvailabilityProvider: { true },
-            todoCandidateProvider: { _, _, _ in nil }
+            foundationModelsAvailabilityProvider: { true }
         )
         let analysisTask = Task { () -> Error? in
             do {
@@ -591,6 +249,7 @@ struct EmailMessageAnalysisServiceTests {
             rawMessageID: "analysis-deleted",
             isInInbox: true
         )
+        email.bodyContentVersion = 1
         context.insert(email)
         try context.save()
 
@@ -598,8 +257,7 @@ struct EmailMessageAnalysisServiceTests {
         let service = EmailMessageAnalysisService(
             foundationModelsSummaryProvider: provider.summarize,
             foundationModelsEnabledProvider: { true },
-            foundationModelsAvailabilityProvider: { true },
-            todoCandidateProvider: { _, _, _ in nil }
+            foundationModelsAvailabilityProvider: { true }
         )
         let analysisTask = Task { () -> Error? in
             do {
@@ -644,6 +302,7 @@ struct EmailMessageAnalysisServiceTests {
             rawMessageID: "analysis-afm",
             isInInbox: true
         )
+        email.bodyContentVersion = 1
         context.insert(email)
         try context.save()
 
@@ -660,8 +319,7 @@ struct EmailMessageAnalysisServiceTests {
                 )
             },
             foundationModelsEnabledProvider: { true },
-            foundationModelsAvailabilityProvider: { true },
-            todoCandidateProvider: { _, _, _ in nil }
+            foundationModelsAvailabilityProvider: { true }
         )
 
         try await service.analyze(email, context: context, language: .korean)
@@ -691,6 +349,7 @@ struct EmailMessageAnalysisServiceTests {
             rawMessageID: "analysis-afm-retry",
             isInInbox: true
         )
+        email.bodyContentVersion = 1
         context.insert(email)
         email.analysisState = .analyzed
         email.analysisSummary = "규칙 기반 기존 요약"
@@ -713,8 +372,7 @@ struct EmailMessageAnalysisServiceTests {
                 )
             },
             foundationModelsEnabledProvider: { true },
-            foundationModelsAvailabilityProvider: { true },
-            todoCandidateProvider: { _, _, _ in nil }
+            foundationModelsAvailabilityProvider: { true }
         )
 
         try await service.analyze(email, context: context, language: .korean)
@@ -742,6 +400,7 @@ struct EmailMessageAnalysisServiceTests {
             rawMessageID: "analysis-laya-to-afm",
             isInInbox: true
         )
+        email.bodyContentVersion = 1
         context.insert(email)
         email.analysisState = .analyzed
         email.analysisSummary = "Cached rules summary"
@@ -760,8 +419,7 @@ struct EmailMessageAnalysisServiceTests {
                 return EmailSummaryResult(summary: "AFM summary", keyPoints: [], actionItems: [])
             },
             foundationModelsEnabledProvider: { true },
-            foundationModelsAvailabilityProvider: { true },
-            todoCandidateProvider: { _, _, _ in nil }
+            foundationModelsAvailabilityProvider: { true }
         )
         try await service.analyze(email, context: context, language: .english)
 
@@ -836,6 +494,144 @@ struct EmailMessageAnalysisServiceTests {
 
         #expect(result.summary.contains("Engineering"))
         #expect(result.actionItems.isEmpty)
+    }
+
+    @Test("Current actions override every legacy Boolean recommendation", arguments: [false, true])
+    func testActionItemsAreCanonical(legacyCandidate: Bool) async throws {
+        let schema = Schema([EmailMessage.self])
+        let container = try ModelContainer(for: schema, configurations: [
+            ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)
+        ])
+        let context = ModelContext(container)
+        let email = EmailMessage(id: "actions", subject: "Please do something", body: "The report is available.")
+        email.bodyContentVersion = 1
+        email.analysisTodoCandidate = legacyCandidate
+        context.insert(email)
+        let service = EmailMessageAnalysisService(
+            foundationModelsSummaryProvider: { _, _, _, _ in
+                EmailSummaryResult(summary: "An imperative-sounding summary", keyPoints: ["Check the report"], actionItems: [])
+            },
+            foundationModelsEnabledProvider: { true },
+            foundationModelsAvailabilityProvider: { true }
+        )
+        try await service.analyze(email, context: context)
+        #expect(EmailAnalysisContract.currentActionItems(for: email).isEmpty)
+        #expect(EmailAnalysisContract.todoCandidate(for: email) == false)
+        email.analysisActionItems = [" Reply exactly. ", "", "Reply exactly.", "Check access if needed"]
+        #expect(EmailAnalysisContract.currentActionItems(for: email) == ["Reply exactly.", "Check access if needed"])
+        #expect(EmailAnalysisContract.todoCandidate(for: email) == true)
+    }
+
+    @Test("Old analysis contracts and changed source bodies cannot suggest stale actions")
+    func testStaleActionsCannotPropose() {
+        let email = EmailMessage(id: "stale", subject: "Request", body: "Please reply.")
+        email.bodyContentVersion = 1
+        email.analysisState = .analyzed
+        email.analysisVersion = EmailAnalysisContract.summaryContractVersion
+        email.analyzedBodyFingerprint = EmailAnalysisContract.fingerprint(subject: email.subject, body: email.body)
+        email.analysisActionItems = ["Reply"]
+        #expect(EmailAnalysisContract.currentActionItems(for: email) == ["Reply"])
+        email.analysisVersion -= 1
+        #expect(EmailAnalysisContract.currentActionItems(for: email).isEmpty)
+        #expect(EmailAnalysisContract.todoCandidate(for: email) == nil)
+        email.analysisVersion = EmailAnalysisContract.summaryContractVersion
+        email.body += "\nThe request is withdrawn."
+        #expect(EmailAnalysisContract.currentActionItems(for: email).isEmpty)
+    }
+
+    @Test("The structured provider receives obligations after old truncation boundaries")
+    func testCompleteSourceAnalysis() async throws {
+        let schema = Schema([EmailMessage.self])
+        let container = try ModelContainer(for: schema, configurations: [
+            ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)
+        ])
+        let context = ModelContext(container)
+        let body = String(repeating: "Status details.\n", count: 500)
+            + "--\nPlease check the token settings.\n> Prior token details.\nRenew it if this integration is still used."
+        let email = EmailMessage(id: "late", subject: "Token expired", body: body)
+        email.bodyContentVersion = 1
+        context.insert(email)
+        let actions = ["Check the token settings.", "Renew it if this integration is still used."]
+        var calls = 0
+        let service = EmailMessageAnalysisService(
+            foundationModelsSummaryProvider: { _, _, source, _ in
+                calls += 1
+                #expect(source == body)
+                return EmailSummaryResult(summary: "The token expired.", keyPoints: ["An integration is affected."], actionItems: actions)
+            },
+            foundationModelsEnabledProvider: { true },
+            foundationModelsAvailabilityProvider: { true }
+        )
+        try await service.analyze(email, context: context)
+        try await service.analyze(email, context: context)
+        #expect(calls == 1)
+        let stored = try #require(try ModelContext(container).fetch(FetchDescriptor<EmailMessage>()).first)
+        #expect(EmailAnalysisContract.currentActionItems(for: stored) == actions)
+    }
+
+    @Test("Snippets and unverified legacy body caches are not model source", arguments: [false, true])
+    func testNoPreviewAnalysis(nonemptyLegacyBody: Bool) async throws {
+        let schema = Schema([EmailMessage.self])
+        let container = try ModelContainer(for: schema, configurations: [
+            ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)
+        ])
+        let context = ModelContext(container)
+        let email = EmailMessage(id: "no-body", subject: "Please reply", snippet: "Please reply immediately.",
+                                 body: nonemptyLegacyBody ? "An old partial cache" : "")
+        context.insert(email)
+        var calls = 0
+        let service = EmailMessageAnalysisService(
+            foundationModelsSummaryProvider: { _, _, _, _ in
+                calls += 1
+                return EmailSummaryResult(summary: "not reached", keyPoints: [], actionItems: ["not reached"])
+            },
+            foundationModelsEnabledProvider: { true },
+            foundationModelsAvailabilityProvider: { true }
+        )
+        try await service.analyze(email, context: context)
+        #expect(calls == 0)
+        #expect(email.analysisState == .failed)
+        #expect(EmailAnalysisContract.todoCandidate(for: email) == nil)
+    }
+
+    @Test("Remote structured decoding preserves every action and explicit informational emptiness",
+          arguments: [[], ["Check access"], (1...12).map { "Process item \($0)" }])
+    func testRemoteStructuredActions(actions: [String]) throws {
+        let json = try JSONSerialization.data(withJSONObject: [
+            "summary": "A factual summary", "key_points": ["A fact"], "action_items": actions
+        ])
+        let result = try OpenAIAnalysisService.decodeEmail(String(decoding: json, as: UTF8.self), modelID: "test")
+        #expect(result.summary == "A factual summary")
+        #expect(result.keyPoints == ["A fact"])
+        #expect(result.actionItems == actions)
+    }
+
+    @Test("A missing or malformed remote action field is invalid, not informational",
+          arguments: [
+            #"{"summary":"Info","key_points":[]}"#,
+            #"{"summary":"Info","key_points":[],"action_items":"Reply"}"#,
+            #"{"summary":"Info","key_points":[],"action_items":[1]}"#,
+            #"{"summary":"Info","action_items":[]}"#
+          ])
+    func testMalformedRemoteActions(response: String) {
+        #expect(throws: (any Error).self) {
+            try OpenAIAnalysisService.decodeEmail(response, modelID: "test")
+        }
+    }
+
+    @Test("Bounded sections cover every source character without cutting off the tail")
+    func testBodyChunkCoverage() {
+        let body = String(repeating: "A factual paragraph with mixed 한국어 and العربية.\n", count: 200)
+            + "Please complete the final required check."
+        let chunks = EmailAnalysisContract.bodyChunks(body)
+        #expect(chunks.count > 1)
+        #expect(chunks.allSatisfy { $0.count <= 1_800 })
+        var reconstructed = chunks[0]
+        for chunk in chunks.dropFirst() {
+            #expect(reconstructed.suffix(200) == chunk.prefix(200))
+            reconstructed += chunk.dropFirst(200)
+        }
+        #expect(reconstructed == body)
     }
 
 }

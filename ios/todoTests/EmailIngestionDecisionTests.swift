@@ -2,269 +2,121 @@ import Foundation
 import Testing
 @testable import todo
 
-@Suite("Email to-do candidate decisions")
+@Suite("Email action-only ingestion")
 @MainActor
 struct EmailIngestionDecisionTests {
-    private func message(
-        id: String,
-        subject: String,
-        body: String,
-        labelIds: [String] = ["INBOX"],
-        isBulk: Bool = false
-    ) -> GmailMessage {
+    private func message(body: String = "Please review the plan and reply.") -> GmailMessage {
         GmailMessage(
-            id: id,
-            threadID: "thread-\(id)",
-            messageID: "<\(id)@example.com>",
-            subject: subject,
-            from: "프로젝트 팀 <projects@example.com>",
-            snippet: body,
-            body: body,
-            htmlBody: nil,
-            receivedAt: Date(),
-            labelIds: labelIds,
-            isBulk: isBulk,
+            id: "message", threadID: "thread", messageID: "<message@example.com>",
+            subject: "An interesting subject is not a task", from: "Project Team <projects@example.com>",
+            snippet: "Please do not analyze this preview instead of the body.", body: body,
+            htmlBody: nil, receivedAt: Date(), labelIds: ["INBOX"], isBulk: false,
             sourceAccountNamespace: "gmail:projects@example.com"
         )
     }
 
-    private func datedMessage(
-        id: String,
-        labelIds: [String] = ["INBOX"],
-        isBulk: Bool = false
-    ) -> GmailMessage {
-        let future = Date().addingTimeInterval(14 * 24 * 3_600)
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(secondsFromGMT: 9 * 3_600)
-        formatter.dateFormat = "yyyy-MM-dd"
-        return message(
-            id: id,
-            subject: "프로젝트 제출 요청",
-            body: "Deadline: \(formatter.string(from: future)) 17:30 UTC+9까지 제출",
-            labelIds: labelIds,
-            isBulk: isBulk
-        )
-    }
-
-    private func expectProvenance(_ todo: Todo, from email: GmailMessage) {
-        #expect(todo.source == TodoSource.email.rawValue)
-        #expect(todo.sourceRef == email.id)
-        #expect(todo.sourceMessageID == email.messageID)
-        #expect(todo.sourceThreadID == email.threadID)
-        #expect(todo.sourceAccountNamespace == email.sourceAccountNamespace)
-        #expect(todo.sourceSender == "프로젝트 팀")
-        #expect(todo.sourceSenderEmail == "projects@example.com")
-    }
-
-    @Test("Laya가 요청 메일로 추천하면 날짜가 없어도 검토 대기열에 기한 없이 보관한다")
-    func suggestedUndatedEmailNeedsReviewInsteadOfInventedDeadline() async throws {
-        let email = message(
-            id: "needs-reply",
-            subject: "프로젝트 검토 요청",
-            body: "검토 후 의견을 회신해 주세요."
-        )
-        let engine = EmailIngestionEngine(candidateDecision: { _ in .candidate })
-
-        let todos = try await engine.extractTodos(from: email, allowFoundationModels: false)
-
-        #expect(todos.count == 1)
-        let todo = try #require(todos.first)
-        #expect(todo.title == "프로젝트 검토 요청")
-        #expect(todo.dueDate == nil)
-        #expect(todo.triage == .review)
-        expectProvenance(todo, from: email)
-    }
-
-    @Test("Laya가 정보성 메일로 판단하면 날짜 문구가 있어도 자동 할 일을 만들지 않는다")
-    func rejectedEmailDoesNotAutoRegister() async throws {
-        let email = datedMessage(id: "status-newsletter")
-        let fallback = EmailIngestionEngine(candidateDecision: { _ in nil })
-        let datedTodos = try await fallback.extractTodos(from: email, allowFoundationModels: false)
-        #expect(datedTodos.count == 1)
-        #expect(datedTodos.first?.dueDate != nil)
-
-        let engine = EmailIngestionEngine(candidateDecision: { _ in .notCandidate })
-
-        #expect(try await engine.extractTodos(from: email, allowFoundationModels: false).isEmpty)
-    }
-
-    @Test("Positive dated mail still confirms a deterministically evidenced deadline")
-    func candidateDatedEmailKeepsAutomaticTriage() async throws {
-        let email = datedMessage(id: "candidate-dated")
-        let extraction = try #require(EmailContentAnalyzer().analyze(email, now: Date()))
-        #expect(extraction.keywordScore > 0)
-        let engine = EmailIngestionEngine(candidateDecision: { _ in .candidate })
-        let todos = try await engine.extractTodos(from: email, allowFoundationModels: false)
-        let todo = try #require(todos.first)
-
-        #expect(todos.count == 1)
-        #expect(todo.dueDate == extraction.dueDate)
-        #expect(todo.triage == .todo)
-        expectProvenance(todo, from: email)
-    }
-
-    @Test("Uncertain dated mail keeps the deterministic deadline but never auto-confirms")
-    func uncertainDatedEmailNeedsReview() async throws {
-        let email = datedMessage(id: "uncertain-dated")
-        let fallback = EmailIngestionEngine(candidateDecision: { _ in nil })
-        let baseline = try await fallback.extractTodos(from: email, allowFoundationModels: false)
-        let baselineTodo = try #require(baseline.first)
-        #expect(baseline.count == 1)
-        #expect(baselineTodo.dueDate != nil)
-        #expect(baselineTodo.triage == .todo)
-
-        let engine = EmailIngestionEngine(candidateDecision: { _ in .uncertain })
-        let todos = try await engine.extractTodos(from: email, allowFoundationModels: false)
-        let todo = try #require(todos.first)
-
-        #expect(todos.count == 1)
-        #expect(todo.dueDate == baselineTodo.dueDate)
-        #expect(todo.title == baselineTodo.title)
-        #expect(todo.notes == baselineTodo.notes)
-        #expect(todo.triage == .review)
-        expectProvenance(todo, from: email)
-    }
-
-    @Test("Uncertain undated mail uses the candidate manual review draft without a deadline")
-    func uncertainUndatedEmailNeedsManualReview() async throws {
-        let email = message(
-            id: "uncertain-undated",
-            subject: "프로젝트 검토 요청",
-            body: "검토 후 의견을 회신해 주세요."
-        )
-        #expect(EmailContentAnalyzer().analyze(email, now: Date()) == nil)
-        let candidate = EmailIngestionEngine(candidateDecision: { _ in .candidate })
-        let candidateTodos = try await candidate.extractTodos(from: email, allowFoundationModels: false)
-        let manualDraft = try #require(candidateTodos.first)
-        let engine = EmailIngestionEngine(candidateDecision: { _ in .uncertain })
-        let todos = try await engine.extractTodos(from: email, allowFoundationModels: false)
-        let todo = try #require(todos.first)
-
-        #expect(todos.count == 1)
-        #expect(todo.title == email.subject)
-        #expect(todo.title == manualDraft.title)
-        #expect(!todo.notes.isEmpty)
-        #expect(todo.notes == manualDraft.notes)
-        #expect(todo.dueDate == nil)
-        #expect(todo.triage == .review)
-        expectProvenance(todo, from: email)
-    }
-
-    @Test("Unavailable candidate decisions keep the dated deterministic baseline")
-    func unavailableDatedEmailKeepsBaseline() async throws {
-        let email = datedMessage(id: "unavailable-dated")
-        let extraction = try #require(EmailContentAnalyzer().analyze(email, now: Date()))
-        #expect(extraction.keywordScore > 0)
-        let engine = EmailIngestionEngine(candidateDecision: { _ in nil })
-        let todos = try await engine.extractTodos(from: email, allowFoundationModels: false)
-        let todo = try #require(todos.first)
-
-        #expect(todos.count == 1)
-        #expect(todo.title == email.subject)
-        #expect(todo.dueDate == extraction.dueDate)
-        #expect(todo.notes == extraction.notes)
-        #expect(todo.triage == .todo)
-        expectProvenance(todo, from: email)
-    }
-
-    @Test("Unavailable candidate decisions do not invent undated tasks")
-    func unavailableUndatedEmailKeepsBaseline() async throws {
-        let email = message(
-            id: "unavailable-undated",
-            subject: "프로젝트 검토 요청",
-            body: "검토 후 의견을 회신해 주세요."
-        )
-        #expect(EmailContentAnalyzer().analyze(email, now: Date()) == nil)
-        let engine = EmailIngestionEngine(candidateDecision: { _ in nil })
-
-        #expect(try await engine.extractTodos(from: email, allowFoundationModels: false).isEmpty)
-    }
-
-    @Test("Promotions and bulk mail stay in review for positive, uncertain, and unavailable decisions")
-    func promotionsCannotAutoConfirm() async throws {
-        let decisions: [EmailCandidateOutcome?] = [nil, .candidate, .uncertain]
-        for isBulk in [false, true] {
-            let email = datedMessage(
-                id: "promotion-\(isBulk)",
-                labelIds: isBulk ? ["INBOX"] : ["INBOX", "CATEGORY_PROMOTIONS"],
-                isBulk: isBulk
-            )
-            let extraction = try #require(EmailContentAnalyzer().analyze(email, now: Date()))
-            #expect(extraction.keywordScore > 0)
-            for decision in decisions {
-                let engine = EmailIngestionEngine(candidateDecision: { _ in decision })
-                let todos = try await engine.extractTodos(from: email, allowFoundationModels: false)
-                let todo = try #require(todos.first)
-
-                #expect(todos.count == 1)
-                #expect(todo.dueDate == extraction.dueDate)
-                #expect(todo.triage == .review)
-                expectProvenance(todo, from: email)
-            }
-        }
-    }
-
-    @Test("Already cancelled ingestion never calls the candidate provider or produces a draft")
-    func cancellationBeforeCandidateProvider() async throws {
-        let email = datedMessage(id: "cancel-before-provider")
-        var providerCalls = 0
-        let engine = EmailIngestionEngine(candidateDecision: { _ in
-            providerCalls += 1
-            return .uncertain
+    @Test("Required actions alone become exact, separate review titles", arguments: [
+        ["Review the plan"], ["Review the plan", "Reply with approval"], []
+    ])
+    func canonicalActions(actions: [String]) async throws {
+        let email = message()
+        var calls = 0
+        let engine = EmailIngestionEngine(summaryProvider: { source, _, _ in
+            calls += 1
+            #expect(source.body == email.body)
+            return EmailSummaryResult(summary: "Check the exciting launch!", keyPoints: ["Friday deadline"], actionItems: actions)
         })
-        // This suite is MainActor-isolated: the child cannot run until we yield below.
-        let task = Task {
-            _ = try await engine.extractTodos(from: email, allowFoundationModels: false)
+        let todos = try await engine.extractTodos(from: email)
+        #expect(calls == 1)
+        #expect(todos.map(\.title) == actions)
+        for todo in todos {
+            #expect(todo.triage == .review)
+            #expect(todo.dueDate == nil)
+            #expect(todo.source == TodoSource.email.rawValue)
+            #expect(todo.sourceRef == email.id)
+            #expect(todo.sourceMessageID == email.messageID)
+            #expect(todo.sourceThreadID == email.threadID)
+            #expect(todo.sourceAccountNamespace == email.sourceAccountNamespace)
+            #expect(todo.sourceSenderEmail == "projects@example.com")
         }
-        task.cancel()
-
-        await #expect(throws: CancellationError.self) { try await task.value }
-        #expect(providerCalls == 0)
     }
 
-    @Test("Cancellation after a suspended provider prevents dated and manual review results", arguments: [false, true])
-    func cancellationAfterCandidateProvider(dated: Bool) async throws {
-        let email = dated
-            ? datedMessage(id: "cancel-suspended-dated")
-            : message(id: "cancel-suspended-undated", subject: "검토 요청", body: "의견을 회신해 주세요.")
-        let decisions: [EmailCandidateOutcome?] = [nil, .candidate, .notCandidate, .uncertain]
-        for decision in decisions {
-            let provider = SuspendedIngestionCandidateProvider()
-            let engine = EmailIngestionEngine(candidateDecision: { _ in await provider.decide() })
-            let task = Task {
-                _ = try await engine.extractTodos(from: email, allowFoundationModels: false)
-            }
+    @Test("Late and quoted sections reach the single structured provider intact")
+    func lateBodyActions() async throws {
+        let body = String(repeating: "Status detail.\n", count: 1_000)
+            + "--\nThe token has expired. Check the integration and renew the token if it is still needed.\n> Earlier context."
+        let email = message(body: body)
+        let actions = ["Check the integration", "Renew the token if it is still needed"]
+        let engine = EmailIngestionEngine(summaryProvider: { source, _, _ in
+            #expect(source.body == body)
+            return EmailSummaryResult(summary: "The token expired.", keyPoints: [], actionItems: actions)
+        })
+        #expect(try await engine.extractTodos(from: email).map(\.title) == actions)
+    }
+
+    @Test("An absent body never promotes a preview or subject into analyzed evidence")
+    func noSnippetFallback() async throws {
+        var calls = 0
+        let engine = EmailIngestionEngine(summaryProvider: { _, _, _ in
+            calls += 1
+            return EmailSummaryResult(summary: "not reached", keyPoints: [], actionItems: ["not reached"])
+        })
+        #expect(try await engine.extractTodos(from: message(body: " \n")).isEmpty)
+        #expect(calls == 0)
+    }
+
+    @Test("Duplicate and empty action items do not create additional tasks")
+    func uniqueActions() async throws {
+        let engine = EmailIngestionEngine(summaryProvider: { _, _, _ in
+            EmailSummaryResult(summary: "A request", keyPoints: [], actionItems: [" Reply exactly. ", "", "Reply exactly."])
+        })
+        #expect(try await engine.extractTodos(from: message()).map(\.title) == ["Reply exactly."])
+    }
+
+    @Test("Disabled model use does not fall back to subject/date-based task creation")
+    func noActionlessFallback() async throws {
+        #expect(try await EmailIngestionEngine().extractTodos(
+            from: message(body: "The launch deadline is 2099-12-24. This is information only."),
+            allowFoundationModels: false
+        ).isEmpty)
+    }
+
+    @Test("Cancellation before and after provider suspension prevents task creation", arguments: [false, true])
+    func cancellationFence(beforeStart: Bool) async throws {
+        let provider = SuspendedIngestionSummaryProvider()
+        var calls = 0
+        let engine = EmailIngestionEngine(summaryProvider: { _, _, _ in
+            calls += 1
+            return await provider.summarize()
+        })
+        let email = message()
+        let task = Task { @MainActor in _ = try await engine.extractTodos(from: email) }
+        if beforeStart {
+            task.cancel()
+        } else {
             await provider.waitUntilSuspended()
             task.cancel()
-            // The provider deliberately ignores cancellation; the engine must reject its result.
-            provider.resume(with: decision)
-
-            await #expect(throws: CancellationError.self) { try await task.value }
+            provider.resume()
         }
+        await #expect(throws: CancellationError.self) { try await task.value }
+        #expect(calls == (beforeStart ? 0 : 1))
     }
 }
 
 @MainActor
-private final class SuspendedIngestionCandidateProvider {
-    private var continuation: CheckedContinuation<EmailCandidateOutcome?, Never>?
-    private var entered: CheckedContinuation<Void, Never>?
+private final class SuspendedIngestionSummaryProvider {
+    private var continuation: CheckedContinuation<EmailSummaryResult, Never>?
 
-    func decide() async -> EmailCandidateOutcome? {
-        await withCheckedContinuation { continuation in
-            self.continuation = continuation
-            entered?.resume()
-            entered = nil
-        }
+    func summarize() async -> EmailSummaryResult {
+        await withCheckedContinuation { continuation = $0 }
     }
 
     func waitUntilSuspended() async {
-        if continuation != nil { return }
-        await withCheckedContinuation { entered = $0 }
+        while continuation == nil { await Task.yield() }
     }
 
-    func resume(with outcome: EmailCandidateOutcome?) {
-        continuation?.resume(returning: outcome)
+    func resume() {
+        continuation?.resume(returning: EmailSummaryResult(summary: "A request", keyPoints: [], actionItems: ["Reply"]))
         continuation = nil
     }
 }

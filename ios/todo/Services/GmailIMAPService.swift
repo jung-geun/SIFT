@@ -2,6 +2,7 @@ import Foundation
 import Network
 
 nonisolated protocol IMAPCommandTransport: Sendable {
+    var isConnected: Bool { get async }
     func connect(username: String, password: String) async throws
     func execute(_ command: String) async throws -> [String]
     func close() async
@@ -259,6 +260,8 @@ actor NetworkIMAPCommandTransport: IMAPPreAuthCapabilityProbing {
         self.makeConnection = makeConnection
     }
 
+    var isConnected: Bool { connection != nil && !reachedEOF }
+
     func connect(username: String, password: String) async throws {
         let command = try Self.loginCommand(username: username, password: password)
         try await withTurn { transport, operation in
@@ -463,10 +466,18 @@ actor GmailIMAPService: MailboxPagingProvider {
     init(transport: IMAPCommandTransport = NetworkIMAPCommandTransport()) {
         self.transport = transport
     }
-    var authenticatedAccount: String? { account }
+    var authenticatedAccount: String? {
+        get async {
+            let generation = generationToken
+            guard await transport.isConnected, generation == generationToken else { return nil }
+            return account
+        }
+    }
     var sessionGeneration: Int { generationToken }
 
-    var isAuthenticated: Bool { account != nil }
+    var isAuthenticated: Bool {
+        get async { await authenticatedAccount != nil }
+    }
 
     // MARK: - Command serialization
     //
@@ -499,6 +510,20 @@ actor GmailIMAPService: MailboxPagingProvider {
         await acquireCommandTurn()
         defer { releaseCommandTurn() }
         try Task.checkCancellation()
+        try await performAuthenticate(email: email, backgroundEnabled: backgroundEnabled)
+    }
+
+    /// Coalesces readiness checks using the existing whole-sequence turn.
+    func ensureAuthenticated(email: String, backgroundEnabled: Bool) async throws {
+        await acquireCommandTurn()
+        defer { releaseCommandTurn() }
+        try Task.checkCancellation()
+        guard !IMAPCredentialStore.isCredentialRejected(for: email) else {
+            throw GmailIMAPError.credentialRejected
+        }
+        let connected = await transport.isConnected
+        try Task.checkCancellation()
+        if account == IMAPCredentialStore.canonicalAccount(email) && connected { return }
         try await performAuthenticate(email: email, backgroundEnabled: backgroundEnabled)
     }
 
@@ -567,11 +592,16 @@ actor GmailIMAPService: MailboxPagingProvider {
 
     func markAsRead(
         messageID: String,
-        expectedGlobalMessageID: String?
+        expectedGlobalMessageID: String?,
+        expectedAccountNamespace: String
     ) async throws {
         await acquireCommandTurn()
         defer { releaseCommandTurn() }
         try Task.checkCancellation()
+        guard let expected = IMAPCredentialStore.canonicalAccount(expectedAccountNamespace) else {
+            throw GmailIMAPError.messageIdentityUnavailable
+        }
+        guard account == expected else { throw GmailIMAPError.authenticationFailed }
         try await performMarkAsRead(
             messageID: messageID,
             expectedGlobalMessageID: expectedGlobalMessageID
@@ -580,11 +610,16 @@ actor GmailIMAPService: MailboxPagingProvider {
 
     func trashMessage(
         messageID: String,
-        expectedGlobalMessageID: String?
+        expectedGlobalMessageID: String?,
+        expectedAccountNamespace: String
     ) async throws {
         await acquireCommandTurn()
         defer { releaseCommandTurn() }
         try Task.checkCancellation()
+        guard let expected = IMAPCredentialStore.canonicalAccount(expectedAccountNamespace) else {
+            throw GmailIMAPError.messageIdentityUnavailable
+        }
+        guard account == expected else { throw GmailIMAPError.authenticationFailed }
         try await performTrashMessage(
             messageID: messageID,
             expectedGlobalMessageID: expectedGlobalMessageID
@@ -1029,100 +1064,19 @@ actor GmailIMAPService: MailboxPagingProvider {
         let uid = try Self.uid(from: messageID)
         let structureLines = try await transport.execute("UID FETCH \(uid) (BODYSTRUCTURE)")
 
-        var sectionToFetch: String?
-        if let bstructString = Self.extractBodyStructureString(from: structureLines),
-           let sexpr = Self.parseSExpr(bstructString) {
-            var leaves: [BodyPartLeaf] = []
-            Self.collectLeaves(expr: sexpr, prefix: "", into: &leaves)
-            if let preferred = Self.selectPreferredTextLeaf(from: leaves) {
-                sectionToFetch = preferred.sectionNumber
-            }
+        let parts: [IMAPTextBody.Part]
+        do {
+            parts = try IMAPTextBody.select(from: structureLines, uid: uid)
+        } catch IMAPTextBodyError.noReadableText {
+            throw GmailIMAPError.noSelectableTextPart
         }
-
-        if sectionToFetch == nil {
-            if Self.isSafeSinglePartFallback(structureLines) {
-                sectionToFetch = "1"
-            } else {
-                throw GmailIMAPError.noSelectableTextPart
-            }
-        }
-
-        let section = sectionToFetch ?? "1"
-        let fetchCmd = "UID FETCH \(uid) (UID FLAGS INTERNALDATE X-GM-MSGID X-GM-THRID BODY.PEEK[HEADER] BODY.PEEK[\(section).MIME] BODY.PEEK[\(section)]<0.500000>)"
+        let fetchCmd = "UID FETCH \(uid) (UID FLAGS INTERNALDATE X-GM-MSGID X-GM-THRID BODY.PEEK[HEADER] \(IMAPTextBody.fetchAttributes(parts)))"
         let responseLines = try await transport.execute(fetchCmd)
-        let lines = responseLines.filter { Self.captureToken("UID", in: $0).flatMap(UInt32.init) == uid }
-
-        let preferredBodyAttribute = "BODY[\(section)]"
-        let bodyAttribute: String
-        let bodyLine: String
-        if let preferredLine = lines.first(where: {
-            Self.captureLiteral(in: $0, afterAttribute: preferredBodyAttribute) != nil
-        }) {
-            bodyAttribute = preferredBodyAttribute
-            bodyLine = preferredLine
-        } else if let textLine = lines.first(where: { Self.captureLiteral(in: $0, afterAttribute: "BODY[TEXT]") != nil }) {
-            // Some IMAP servers expose a safe single-part text section as BODY[TEXT].
-            bodyAttribute = "BODY[TEXT]"
-            bodyLine = textLine
-        } else {
-            throw GmailIMAPError.invalidResponse
-        }
-        guard let sectionBody = Self.captureLiteral(in: bodyLine, afterAttribute: bodyAttribute) else {
-            throw GmailIMAPError.invalidResponse
-        }
-
-        let mimeAttribute = "BODY[\(section).MIME]"
-        let mimeHeaderLine = lines.first(where: {
-            Self.captureLiteral(in: $0, afterAttribute: mimeAttribute) != nil
-        })
-        let mimeHeader = mimeHeaderLine.flatMap {
-            Self.captureLiteral(in: $0, afterAttribute: mimeAttribute)
-        }
-        if let mimeHeader {
-            let lowerMime = mimeHeader.lowercased()
-            if lowerMime.contains("content-disposition:") && lowerMime.contains("attachment") {
-                throw GmailIMAPError.noSelectableTextPart
-            }
-        }
+        let lines = IMAPTextBody.ownedResponses(responseLines, uid: uid)
+        let decoded = try IMAPTextBody.decode(parts, from: lines)
         let topHeader = lines.compactMap { Self.captureLiteral(in: $0, afterAttribute: "BODY[HEADER]") }.first
-
-        let declaredLiteralLength = Self.captureLiteralLength(in: bodyLine, afterAttribute: bodyAttribute) ?? sectionBody.utf8.count
-        let isTruncated = declaredLiteralLength >= 500_000 || sectionBody.utf8.count >= 500_000
-
-        let mimeHeaderBlock = mimeHeader ?? ""
-        let hasHeaderTerminator = mimeHeaderBlock.hasSuffix("\r\n\r\n")
-            || mimeHeaderBlock.hasSuffix("\n\n")
-        let headerSeparator = hasHeaderTerminator ? "" : "\r\n\r\n"
-        let partContentToDecode: String
-        if isTruncated && mimeHeaderBlock.lowercased().contains("base64") {
-            let cleanBase64 = sectionBody.filter { !$0.isWhitespace }
-            let validLen = (cleanBase64.count / 4) * 4
-            let truncatedBase64 = String(cleanBase64.prefix(validLen))
-            partContentToDecode = mimeHeaderBlock + headerSeparator + truncatedBase64
-        } else {
-            partContentToDecode = mimeHeaderBlock + headerSeparator + sectionBody
-        }
-
-        let decoded = MIMETextDecoder.decode(partContentToDecode)
-
-        let finalHtml: String
-        let finalText: String
-
-        if isTruncated {
-            finalHtml = ""
-            let notice = AppLanguage.localized(
-                "mail.bodyTruncated",
-                defaultValue: AppLanguage.current == .english
-                    ? "\n\n[Message truncated due to size limit]"
-                    : "\n\n[크기 제한으로 인해 메일 일부가 생략되었습니다]",
-                language: .current
-            )
-            let baseText = decoded.text.isEmpty ? String(decoded.html.prefix(1000)) : decoded.text
-            finalText = baseText + notice
-        } else {
-            finalHtml = decoded.html
-            finalText = decoded.text
-        }
+        let finalHtml = decoded.html
+        let finalText = decoded.text
 
         let records = Self.parseRecords(lines)
         guard let fallbackRecord = records.first(where: { $0.uid == uid }) else {
@@ -1143,235 +1097,14 @@ actor GmailIMAPService: MailboxPagingProvider {
             receivedAt: topHeaderFields["date"].flatMap(Self.parseDate)
                 ?? fallbackRecord.receivedAt,
             isRead: fallbackRecord.isRead,
-            body: partContentToDecode
+            body: finalText
         )
 
         let metadata = metadata(record, snippet: String(finalText.prefix(200)))
         return MailboxMessageContent(metadata: metadata, body: finalText, htmlBody: finalHtml)
     }
 
-    // MARK: - BODYSTRUCTURE S-expression parser & part selector
 
-    struct BodyPartLeaf: Sendable, Equatable {
-        let sectionNumber: String
-        let mediaType: String
-        let subtype: String
-        let charset: String?
-        let isAttachment: Bool
-    }
-
-    enum SExpr: Sendable, Equatable {
-        case atom(String)
-        case list([SExpr])
-    }
-
-    private nonisolated static func parseSExpr(_ text: String) -> SExpr? {
-        var index = text.startIndex
-        return parseExpr(text, index: &index, depth: 0)
-    }
-
-    private nonisolated static func parseExpr(_ text: String, index: inout String.Index, depth: Int) -> SExpr? {
-        guard depth < 64 else { return nil }
-        skipWhitespace(text, index: &index)
-        guard index < text.endIndex else { return nil }
-
-        if text[index] == "(" {
-            text.formIndex(after: &index)
-            var elements: [SExpr] = []
-            while index < text.endIndex {
-                skipWhitespace(text, index: &index)
-                if index < text.endIndex, text[index] == ")" {
-                    text.formIndex(after: &index)
-                    return .list(elements)
-                }
-                guard let element = parseExpr(text, index: &index, depth: depth + 1) else { return nil }
-                elements.append(element)
-            }
-            return nil
-        } else if text[index] == "\"" {
-            text.formIndex(after: &index)
-            var str = ""
-            var escaped = false
-            while index < text.endIndex {
-                let char = text[index]
-                text.formIndex(after: &index)
-                if escaped {
-                    str.append(char)
-                    escaped = false
-                } else if char == "\\" {
-                    escaped = true
-                } else if char == "\"" {
-                    return .atom(str)
-                } else {
-                    str.append(char)
-                }
-            }
-            return nil
-        } else {
-            let start = index
-            while index < text.endIndex {
-                let char = text[index]
-                if char.isWhitespace || char == "(" || char == ")" || char == "\"" {
-                    break
-                }
-                text.formIndex(after: &index)
-            }
-            guard start < index else { return nil }
-            return .atom(String(text[start..<index]))
-        }
-    }
-
-    private nonisolated static func skipWhitespace(_ text: String, index: inout String.Index) {
-        while index < text.endIndex, text[index].isWhitespace {
-            text.formIndex(after: &index)
-        }
-    }
-
-    private nonisolated static func collectLeaves(
-        expr: SExpr,
-        prefix: String,
-        into leaves: inout [BodyPartLeaf]
-    ) {
-        guard case .list(let elements) = expr, !elements.isEmpty else { return }
-
-        if let first = elements.first, case .list = first {
-            var childIndex = 1
-            for element in elements {
-                if case .list = element {
-                    let childPrefix = prefix.isEmpty ? "\(childIndex)" : "\(prefix).\(childIndex)"
-                    collectLeaves(expr: element, prefix: childPrefix, into: &leaves)
-                    childIndex += 1
-                } else {
-                    break
-                }
-            }
-        } else if let typeAtom = elements.first, case .atom(let typeStr) = typeAtom {
-            let mediaType = typeStr.uppercased()
-            let subtype = elements.count > 1 ? (extractAtomString(elements[1])?.uppercased() ?? "") : ""
-            let charset = extractCharset(from: elements.count > 2 ? elements[2] : nil)
-            let isAttach = isAttachmentDisposition(elements: elements, mediaType: mediaType)
-            let section = prefix.isEmpty ? "1" : prefix
-            leaves.append(BodyPartLeaf(
-                sectionNumber: section,
-                mediaType: mediaType,
-                subtype: subtype,
-                charset: charset,
-                isAttachment: isAttach
-            ))
-        }
-    }
-
-    private nonisolated static func extractAtomString(_ expr: SExpr) -> String? {
-        if case .atom(let str) = expr { return str }
-        return nil
-    }
-
-    private nonisolated static func extractCharset(from expr: SExpr?) -> String? {
-        guard let expr, case .list(let params) = expr else { return nil }
-        var i = 0
-        while i + 1 < params.count {
-            if let name = extractAtomString(params[i]), name.uppercased() == "CHARSET" {
-                return extractAtomString(params[i + 1])
-            }
-            i += 2
-        }
-        return nil
-    }
-
-    private nonisolated static func isAttachmentDisposition(elements: [SExpr], mediaType: String) -> Bool {
-        let dispIndex = (mediaType == "TEXT") ? 9 : 8
-        if elements.count > dispIndex {
-            let dispExpr = elements[dispIndex]
-            if case .list(let dispList) = dispExpr, let first = dispList.first, case .atom(let dispStr) = first {
-                if dispStr.uppercased() == "ATTACHMENT" {
-                    return true
-                }
-            }
-        }
-        if mediaType != "TEXT" && mediaType != "MULTIPART" {
-            return true
-        }
-        return false
-    }
-
-    private nonisolated static func selectPreferredTextLeaf(from leaves: [BodyPartLeaf]) -> BodyPartLeaf? {
-        let nonAttachments = leaves.filter { !$0.isAttachment }
-        if let html = nonAttachments.first(where: { $0.mediaType == "TEXT" && $0.subtype == "HTML" }) {
-            return html
-        }
-        if let plain = nonAttachments.first(where: { $0.mediaType == "TEXT" && $0.subtype == "PLAIN" }) {
-            return plain
-        }
-        return nonAttachments.first(where: { $0.mediaType == "TEXT" })
-    }
-
-    private nonisolated static func extractBodyStructureString(from lines: [String]) -> String? {
-        for line in lines {
-            guard let range = line.range(of: "BODYSTRUCTURE", options: .caseInsensitive) else { continue }
-            let tail = line[range.upperBound...]
-            guard let openParen = tail.firstIndex(of: "(") else { continue }
-            var depth = 0
-            var inQuote = false
-            var isEscaped = false
-            var endIdx = openParen
-            for idx in line.indices[openParen...] {
-                let char = line[idx]
-                if isEscaped {
-                    isEscaped = false
-                    continue
-                }
-                if char == "\\" && inQuote {
-                    isEscaped = true
-                    continue
-                }
-                if char == "\"" {
-                    inQuote.toggle()
-                    continue
-                }
-                if !inQuote {
-                    if char == "(" {
-                        depth += 1
-                    } else if char == ")" {
-                        depth -= 1
-                        if depth == 0 {
-                            endIdx = idx
-                            return String(line[openParen...endIdx])
-                        }
-                    }
-                }
-            }
-        }
-        return nil
-    }
-
-    private nonisolated static func isSafeSinglePartFallback(_ lines: [String]) -> Bool {
-        guard let bstruct = extractBodyStructureString(from: lines),
-              let sexpr = parseSExpr(bstruct),
-              case .list(let outer) = sexpr
-        else {
-            return false
-        }
-        let elements: [SExpr]
-        if outer.count == 1, case .list(let nested) = outer[0] {
-            elements = nested
-        } else {
-            elements = outer
-        }
-        guard elements.count >= 2,
-              case .atom(let type) = elements[0],
-              type.uppercased() == "TEXT",
-              case .atom(let subtype) = elements[1],
-              ["PLAIN", "HTML"].contains(subtype.uppercased()),
-              !bstruct.localizedCaseInsensitiveContains("attachment")
-        else {
-            return false
-        }
-        return true
-    }
-
-    private nonisolated static func captureLiteralLength(in line: String) -> Int? {
-        IMAPWireSyntax.literal(line)?.length
-    }
     // MARK: - Metadata + category resolution
 
     private func fetchMetadata(for uids: [UInt32]) async throws -> [MailboxMessageMetadata] {
@@ -1454,12 +1187,6 @@ actor GmailIMAPService: MailboxPagingProvider {
 
     // MARK: - Wire parsing
 
-    private nonisolated static func supportsTextBody(_ lines: [String]) -> Bool {
-        lines.contains { line in
-            let upper = line.uppercased()
-            return upper.contains("TEXT") && (upper.contains("PLAIN") || upper.contains("HTML"))
-        }
-    }
 
     private nonisolated static func parseUIDs(_ lines: [String]) -> [UInt32] {
         IMAPWireSyntax.searchUIDs(lines)
@@ -1547,9 +1274,6 @@ actor GmailIMAPService: MailboxPagingProvider {
         IMAPWireSyntax.literal(line, attribute: attribute)?.text
     }
 
-    private nonisolated static func captureLiteralLength(in line: String, afterAttribute attribute: String) -> Int? {
-        IMAPWireSyntax.literal(line, attribute: attribute)?.length
-    }
 
     private nonisolated static func parseRecord(_ lines: [String]) -> IMAPMessageRecord? {
         parseRecords(lines).first
@@ -1598,7 +1322,7 @@ nonisolated enum IMAPWireSyntax {
                 }
                 guard markerEnd > next, markerEnd < bytes.endIndex, bytes[markerEnd] == 125,
                       let length = Int(String(decoding: bytes[next..<markerEnd], as: UTF8.self)),
-                      length <= 500_000 else { break }
+                      length <= IMAPResponseDecoder.maximumLiteralBytes else { break }
                 let start = bytes.index(after: markerEnd)
                 let end = bytes.index(start, offsetBy: length, limitedBy: bytes.endIndex) ?? bytes.endIndex
                 let matchesAttribute = attribute.map {

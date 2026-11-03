@@ -15,7 +15,7 @@ nonisolated enum IMAPResponseDecoderError: Error, Equatable {
 /// independently actionable tagged responses. Declaration CRLFs are omitted in
 /// the returned `{length}<bytes>` representation expected by the service parsers.
 nonisolated struct IMAPResponseDecoder: Sendable {
-    static let maximumLiteralBytes = 500_000
+    static let maximumLiteralBytes = maximumResponseBytes
     static let maximumLineBytes = 65_536
     static let maximumResponseBytes = 8 * 1_024 * 1_024
     static let maximumResponsesPerAppend = 10_000
@@ -168,4 +168,418 @@ nonisolated struct IMAPResponseDecoder: Sendable {
         }
         return length
     }
+}
+
+/// Content-policy outcomes, not transport failures or successful hydration.
+nonisolated enum IMAPTextBodyError: Error, Equatable {
+    case tooLarge
+    case noReadableText
+    case invalidResponse
+}
+
+/// Selects complete readable MIME representations without downloading attachments.
+nonisolated enum IMAPTextBody {
+    struct Part: Sendable, Equatable {
+        let section: String
+        let subtype: String
+        let octets: Int
+        let encoding: String
+        let charset: String?
+        let isRootSinglePart: Bool
+        let contributesText: Bool
+        let representation: String
+
+        init(
+            section: String,
+            subtype: String,
+            octets: Int,
+            encoding: String = "7BIT",
+            charset: String? = nil,
+            isRootSinglePart: Bool = false,
+            contributesText: Bool = true,
+            representation: String? = nil
+        ) {
+            self.section = section
+            self.subtype = subtype
+            self.octets = octets
+            self.encoding = encoding.uppercased()
+            self.charset = charset
+            self.isRootSinglePart = isRootSinglePart
+            self.contributesText = contributesText
+            self.representation = representation ?? section
+        }
+    }
+
+    static func ownedResponses(_ lines: [String], uid: UInt32) -> [String] {
+        lines.filter {
+            IMAPWireSyntax.isFetch(IMAPWireSyntax.protocolText($0))
+                && IMAPWireSyntax.token("UID", in: $0)
+                    .flatMap { IMAPWireSyntax.positiveDecimal($0, as: UInt32.self) } == uid
+        }
+    }
+
+    static func select(from lines: [String], uid: UInt32) throws -> [Part] {
+        let owned = ownedResponses(lines, uid: uid)
+        guard let structure = extractBodyStructureString(from: owned),
+              let expr = parseSExpr(structure) else { throw IMAPTextBodyError.invalidResponse }
+        let parts = try select(expr, prefix: "", depth: 0)
+        guard !parts.isEmpty else { throw IMAPTextBodyError.noReadableText }
+        var octets = 0
+        for part in parts where part.contributesText {
+            guard part.octets <= MIMETextDecoder.maximumMessageBytes - octets else {
+                throw IMAPTextBodyError.tooLarge
+            }
+            octets += part.octets
+        }
+        // Keep display alternatives only when they fit the existing shared
+        // budget. A large duplicate HTML representation must not block plain.
+        for part in parts where !part.contributesText {
+            guard part.octets <= MIMETextDecoder.maximumMessageBytes - octets else {
+                return parts.filter(\.contributesText)
+            }
+            octets += part.octets
+        }
+        return parts
+    }
+
+    static func fetchAttributes(_ parts: [Part]) -> String {
+        parts.map { "BODY.PEEK[\($0.section).MIME] BODY.PEEK[\($0.section)]" }.joined(separator: " ")
+    }
+
+    /// Required text is decoded before optional display copies so display budget
+    /// or content failures cannot make a complete plain body unconfirmed.
+    static func decode(_ parts: [Part], from lines: [String]) throws -> MIMETextDecoder.Result {
+        var text: [String] = []
+        var html = [String?](repeating: nil, count: parts.count)
+        var textRepresentations = Set<String>()
+        var htmlRepresentations = Set<String>()
+        var bytes = 0
+        var displayFailed = false
+        for contributesText in [true, false] {
+            for (index, part) in parts.enumerated() where part.contributesText == contributesText {
+                if !contributesText && displayFailed { break }
+                do {
+                    let decoded = try decodePart(part, from: lines, remainingBytes: MIMETextDecoder.maximumMessageBytes - bytes)
+                    bytes += decoded.bytes
+                    if part.contributesText {
+                        text.append(decoded.content.text)
+                        textRepresentations.insert(part.representation)
+                    }
+                    if !decoded.content.html.isEmpty {
+                        html[index] = decoded.content.html
+                        htmlRepresentations.insert(part.representation)
+                    }
+                } catch let error as IMAPTextBodyError {
+                    guard !part.contributesText else { throw error }
+                    // No transport calls happen here. Only optional HTML's
+                    // local content/framing/budget validation is discarded.
+                    displayFailed = true
+                }
+            }
+        }
+        let body = text.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !body.isEmpty else { throw IMAPTextBodyError.noReadableText }
+        return MIMETextDecoder.Result(
+            text: body,
+            html: !displayFailed && textRepresentations.isSubset(of: htmlRepresentations)
+                ? html.compactMap { $0 }.joined(separator: "\n") : ""
+        )
+    }
+
+    private static func decodePart(
+        _ part: Part,
+        from lines: [String],
+        remainingBytes: Int
+    ) throws -> (content: MIMETextDecoder.Result, bytes: Int) {
+        let bodyAttribute = "BODY[\(part.section)]"
+        let mimeAttribute = "BODY[\(part.section).MIME]"
+        if lines.contains(where: { line in
+            let syntax = IMAPWireSyntax.protocolText(line)
+            return [bodyAttribute, mimeAttribute].contains { attribute in
+                syntax.range(
+                    of: NSRegularExpression.escapedPattern(for: attribute) + #"<[0-9]+>"#,
+                    options: [.regularExpression, .caseInsensitive]
+                ) != nil
+            }
+        }) {
+            throw IMAPTextBodyError.noReadableText
+        }
+        guard let body = lines.compactMap({ IMAPWireSyntax.literal($0, attribute: bodyAttribute) }).first,
+              body.text.utf8.count == body.length
+        else { throw IMAPTextBodyError.invalidResponse }
+        // BODYSTRUCTURE octets are estimates; the complete section response's
+        // literal declaration, not that estimate, frames the actual bytes.
+        var mime: String
+        if let header = lines.compactMap({ IMAPWireSyntax.literal($0, attribute: mimeAttribute)?.text }).first {
+            mime = header
+        } else if lines.contains(where: {
+            IMAPWireSyntax.protocolText($0).range(
+                of: NSRegularExpression.escapedPattern(for: mimeAttribute) + #"\s+NIL(?=[ )]|$)"#,
+                options: [.regularExpression, .caseInsensitive]
+            ) != nil
+        }) {
+            guard part.isRootSinglePart else { throw IMAPTextBodyError.noReadableText }
+            mime = ""
+        } else {
+            throw IMAPTextBodyError.invalidResponse
+        }
+        // Only a proven single-part root shares the message header's MIME
+        // fields. A multipart root header cannot describe a selected leaf.
+        if mime.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            guard part.isRootSinglePart else { throw IMAPTextBodyError.noReadableText }
+            if let rootHeader = lines.compactMap({ IMAPWireSyntax.literal($0, attribute: "BODY[HEADER]")?.text }).first {
+                mime = rootHeader
+            }
+        }
+        let separator = mime.hasSuffix("\r\n\r\n") || mime.hasSuffix("\n\n") ? "" : "\r\n\r\n"
+        let size = mime.utf8.count + separator.utf8.count + body.length
+        guard size <= remainingBytes else { throw IMAPTextBodyError.tooLarge }
+        guard let content = MIMETextDecoder.decodeTextPart(
+            mime + separator + body.text,
+            subtype: part.subtype,
+            expectedEncoding: part.encoding,
+            expectedCharset: part.charset
+        ) else {
+            throw IMAPTextBodyError.noReadableText
+        }
+        return (content, size)
+    }
+
+    enum SExpr: Sendable, Equatable {
+        case atom(String)
+        case list([SExpr])
+    }
+
+    private nonisolated static func parseSExpr(_ text: String) -> SExpr? {
+        var index = text.startIndex
+        guard let expr = parseExpr(text, index: &index, depth: 0) else { return nil }
+        skipWhitespace(text, index: &index)
+        return index == text.endIndex ? expr : nil
+    }
+
+    private nonisolated static func parseExpr(_ text: String, index: inout String.Index, depth: Int) -> SExpr? {
+        guard depth < 64 else { return nil }
+        skipWhitespace(text, index: &index)
+        guard index < text.endIndex else { return nil }
+
+        if text[index] == "(" {
+            text.formIndex(after: &index)
+            var elements: [SExpr] = []
+            while index < text.endIndex {
+                skipWhitespace(text, index: &index)
+                if index < text.endIndex, text[index] == ")" {
+                    text.formIndex(after: &index)
+                    return .list(elements)
+                }
+                guard let element = parseExpr(text, index: &index, depth: depth + 1) else { return nil }
+                elements.append(element)
+            }
+            return nil
+        } else if text[index] == "\"" {
+            text.formIndex(after: &index)
+            var str = ""
+            var escaped = false
+            while index < text.endIndex {
+                let char = text[index]
+                text.formIndex(after: &index)
+                if escaped {
+                    str.append(char)
+                    escaped = false
+                } else if char == "\\" {
+                    escaped = true
+                } else if char == "\"" {
+                    return .atom(str)
+                } else {
+                    str.append(char)
+                }
+            }
+            return nil
+        } else {
+            let start = index
+            while index < text.endIndex {
+                let char = text[index]
+                if char.isWhitespace || char == "(" || char == ")" || char == "\"" {
+                    break
+                }
+                text.formIndex(after: &index)
+            }
+            guard start < index else { return nil }
+            return .atom(String(text[start..<index]))
+        }
+    }
+
+    private nonisolated static func skipWhitespace(_ text: String, index: inout String.Index) {
+        while index < text.endIndex, text[index].isWhitespace {
+            text.formIndex(after: &index)
+        }
+    }
+
+    private static func select(_ expr: SExpr, prefix: String, depth: Int) throws -> [Part] {
+        guard depth <= MIMETextDecoder.maximumDepth,
+              case .list(let elements) = expr, !elements.isEmpty else {
+            throw IMAPTextBodyError.noReadableText
+        }
+        if case .list = elements[0] {
+            let children = elements.prefix { if case .list = $0 { return true }; return false }
+            guard children.count <= MIMETextDecoder.maximumParts,
+                  elements.count > children.count,
+                  let subtype = extractAtomString(elements[children.count])?.uppercased()
+            else { throw IMAPTextBodyError.noReadableText }
+            // Multipart extension order is subtype, parameters, disposition.
+            if hasAttachmentParameters(elements.count > children.count + 1 ? elements[children.count + 1] : nil)
+                || isAttached(elements.count > children.count + 2 ? elements[children.count + 2] : nil) {
+                return []
+            }
+            guard ["ALTERNATIVE", "MIXED", "RELATED", "SIGNED"].contains(subtype) else {
+                throw IMAPTextBodyError.noReadableText
+            }
+            if subtype == "ALTERNATIVE" {
+                // A plain alternative represents the whole message, unlike
+                // the first HTML leaf inside a composed related/mixed branch.
+                var choices: [[Part]] = []
+                for (offset, child) in children.enumerated() {
+                    do {
+                        choices.append(try select(child, prefix: section(prefix, offset + 1), depth: depth + 1))
+                    } catch IMAPTextBodyError.noReadableText {
+                        // Unsupported alternatives (e.g. text/calendar) do not
+                        // invalidate a complete supported representation.
+                        continue
+                    }
+                }
+                guard let plain = choices.first(where: { isRepresentation($0, subtype: "PLAIN") }) else {
+                    return choices.last(where: { !$0.isEmpty }) ?? []
+                }
+                guard let display = choices.last(where: { isRepresentation($0, subtype: "HTML") }) else {
+                    return plain
+                }
+                let representation = "alternative:" + prefix
+                return plain.filter(\.contributesText).map {
+                    Part(section: $0.section, subtype: $0.subtype, octets: $0.octets, encoding: $0.encoding, charset: $0.charset, representation: representation)
+                } + display.filter(\.contributesText).map {
+                    Part(section: $0.section, subtype: $0.subtype, octets: $0.octets, encoding: $0.encoding, charset: $0.charset, contributesText: false, representation: representation)
+                }
+            }
+            var result: [Part] = []
+            for (offset, child) in children.enumerated() {
+                result += try select(child, prefix: section(prefix, offset + 1), depth: depth + 1)
+                guard result.count <= MIMETextDecoder.maximumParts else { throw IMAPTextBodyError.noReadableText }
+            }
+            return result
+        }
+        guard let mediaType = extractAtomString(elements[0])?.uppercased() else {
+            throw IMAPTextBodyError.noReadableText
+        }
+        let dispositionIndex = mediaType == "TEXT" ? 9 : (mediaType == "MESSAGE" ? 11 : 8)
+        if hasAttachmentParameters(elements.count > 2 ? elements[2] : nil)
+            || isAttached(elements.count > dispositionIndex ? elements[dispositionIndex] : nil) {
+            return []
+        }
+        // An inline forwarded message can carry later instructions. It is not a
+        // binary decoration: without decoding it we cannot confirm the whole body.
+        if mediaType == "MESSAGE" { throw IMAPTextBodyError.noReadableText }
+        guard mediaType == "TEXT" else { return [] }
+        guard elements.count > 7,
+              let subtype = extractAtomString(elements[1])?.uppercased(),
+              ["PLAIN", "HTML"].contains(subtype),
+              let encoding = extractAtomString(elements[5]),
+              let size = extractAtomString(elements[6]),
+              !size.isEmpty, size.utf8.allSatisfy({ (48...57).contains($0) }),
+              let octets = Int(size)
+        else { throw IMAPTextBodyError.noReadableText }
+        return [Part(
+            section: prefix.isEmpty ? "1" : prefix,
+            subtype: subtype,
+            octets: octets,
+            encoding: encoding,
+            charset: charset(in: elements[2]),
+            isRootSinglePart: prefix.isEmpty
+        )]
+    }
+
+    private static func isRepresentation(_ parts: [Part], subtype: String) -> Bool {
+        var found = false
+        for part in parts where part.contributesText {
+            guard part.subtype == subtype else { return false }
+            found = true
+        }
+        return found
+    }
+
+    private static func section(_ prefix: String, _ child: Int) -> String {
+        prefix.isEmpty ? "\(child)" : "\(prefix).\(child)"
+    }
+
+    private nonisolated static func extractAtomString(_ expr: SExpr) -> String? {
+        if case .atom(let str) = expr { return str }
+        return nil
+    }
+
+    private static func charset(in expr: SExpr) -> String? {
+        guard case .list(let params) = expr, params.count >= 2 else { return nil }
+        for index in stride(from: 0, to: params.count - 1, by: 2) {
+            if extractAtomString(params[index])?.uppercased() == "CHARSET" {
+                return extractAtomString(params[index + 1])
+            }
+        }
+        return nil
+    }
+
+    private static func hasAttachmentParameters(_ expr: SExpr?) -> Bool {
+        guard let expr, case .list(let params) = expr else { return false }
+        for index in stride(from: 0, to: params.count, by: 2) {
+            guard let name = extractAtomString(params[index])?.uppercased() else { continue }
+            if name == "NAME" || name.hasPrefix("NAME*") || name == "FILENAME" || name.hasPrefix("FILENAME*") {
+                return true
+            }
+        }
+        return false
+    }
+
+    private static func isAttached(_ expr: SExpr?) -> Bool {
+        guard let expr, case .list(let disposition) = expr else { return false }
+        return disposition.first.flatMap(extractAtomString)?.uppercased() == "ATTACHMENT"
+            || hasAttachmentParameters(disposition.count > 1 ? disposition[1] : nil)
+    }
+
+    private nonisolated static func extractBodyStructureString(from lines: [String]) -> String? {
+        for line in lines {
+            guard let range = line.range(of: "BODYSTRUCTURE", options: .caseInsensitive),
+                  IMAPWireSyntax.protocolText(String(line[..<range.upperBound])).uppercased().hasSuffix("BODYSTRUCTURE")
+            else { continue }
+            let tail = line[range.upperBound...]
+            guard let openParen = tail.firstIndex(of: "(") else { continue }
+            var depth = 0
+            var inQuote = false
+            var isEscaped = false
+            var endIdx = openParen
+            for idx in line.indices[openParen...] {
+                let char = line[idx]
+                if isEscaped {
+                    isEscaped = false
+                    continue
+                }
+                if char == "\\" && inQuote {
+                    isEscaped = true
+                    continue
+                }
+                if char == "\"" {
+                    inQuote.toggle()
+                    continue
+                }
+                if !inQuote {
+                    if char == "(" {
+                        depth += 1
+                    } else if char == ")" {
+                        depth -= 1
+                        if depth == 0 {
+                            endIdx = idx
+                            return String(line[openParen...endIdx])
+                        }
+                    }
+                }
+            }
+        }
+        return nil
+    }
+
 }

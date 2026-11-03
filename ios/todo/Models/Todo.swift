@@ -121,6 +121,9 @@ final class Todo {
     var sourceSenderEmail: String = ""
     /// Opaque authenticated mailbox namespace for email-source Todos.
     var sourceAccountNamespace: String = ""
+    /// Stable item within the source email. Empty is legacy whole-email capture;
+    /// new action captures retain identity even after the user edits the title.
+    var sourceItemID: String = ""
     /// 이메일 triage 상태 — TodoTriage.rawValue. 기본 "todo" → 기존 항목/수동 항목은 메인 목록 유지
     var triageStatus: String = TodoTriage.todo.rawValue
 

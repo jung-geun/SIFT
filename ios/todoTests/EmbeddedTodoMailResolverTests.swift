@@ -32,8 +32,8 @@ final class TestHydrationPagingProvider: MailboxPagingProvider {
         return mockContent
     }
 
-    func markAsRead(messageID: String, expectedGlobalMessageID: String?) async throws {}
-    func trashMessage(messageID: String, expectedGlobalMessageID: String?) async throws {}
+    func markAsRead(messageID: String, expectedGlobalMessageID: String?, expectedAccountNamespace: String) async throws {}
+    func trashMessage(messageID: String, expectedGlobalMessageID: String?, expectedAccountNamespace: String) async throws {}
 }
 
 @MainActor

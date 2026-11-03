@@ -192,6 +192,7 @@ final class FullCloudSyncEngine {
     private(set) var journal: CloudSyncJournal
     private(set) var storeIdentifier: String?
     private(set) var didEnqueueChanges = false
+    private(set) var unavailableConflictKeys = Set<String>()
     private var journalDirty = false
 
     private enum Operation {
@@ -209,6 +210,157 @@ final class FullCloudSyncEngine {
             journal = try JSONDecoder().decode(CloudSyncJournal.self, from: Data(contentsOf: journalURL))
             guard journal.version == 1 else { throw FullCloudSyncError.invalidJournal }
         } else { journal = CloudSyncJournal() }
+    }
+
+    /// Review only actual competing model edits. Ordinary incoming updates and
+    /// an initial cloud restore are not conflicts merely because bytes differ.
+    func modelConflicts(local: CloudModelCodec.Snapshot) async throws -> [CloudSyncConflict] {
+        unavailableConflictKeys = []
+        var descriptor = FetchDescriptor<CloudDataRevision>()
+        descriptor.propertiesToFetch = [\.revisionID, \.itemKey, \.logicalClock, \.installationID, \.isTombstone, \.contentDigest]
+        let rows = try cloud.fetch(descriptor).filter { CloudModelCodec.isModelKey($0.itemKey) }
+        let groups = Dictionary(grouping: rows, by: \.itemKey)
+        var result = [CloudSyncConflict]()
+        for key in Set(groups.keys).union(local.conflictingKeys).sorted() {
+            let revisions = groups[key, default: []]
+            let latest = revisions.max { newer($1, than: checkpoint($0)) }
+            let baseline = journal.items[key]
+            let localDigest = local.records[key].map(CloudFileStore.digest)
+            let pending = journal.pendingPublications[key]
+            let concurrent = latest.map {
+                baseline != nil && localDigest != baseline?.digest && localDigest != checkpoint($0).digest
+                    && newer($0, than: baseline!)
+                    && (pending == nil || pending!.digest != localDigest)
+            } ?? false
+            let peers = latest.map { latest in
+                revisions.filter { $0.logicalClock == latest.logicalClock }
+            } ?? []
+            let competingPeers = Set(peers.map { checkpoint($0).digest ?? "deleted" }).count > 1
+                && (pending == nil || pending!.logicalClock <= (latest?.logicalClock ?? 0))
+            guard local.conflictingKeys.contains(key) || concurrent || competingPeers else { continue }
+            var versions = try local.versions[key, default: []].map {
+                try CloudModelCodec.reviewVersion(key: key, payload: $0,
+                    origin: local.origins[key] ?? .local, source: local.origins[key] == .legacy ? "legacy" : "local")
+            }
+            if local.versions[key] == nil && baseline != nil {
+                versions.append(try CloudModelCodec.reviewVersion(key: key, payload: nil, origin: .local, source: "local"))
+            }
+            // All superseded remote payloads are retained before resolution,
+            // not only the currently winning logical clock.
+            var unavailable = false
+            var relevant = versions.map(\.payload)
+            for revision in revisions {
+                do {
+                    let payload = try await materialize(revision)
+                    if revision.logicalClock == latest?.logicalClock { relevant.append(payload) }
+                    versions.append(try CloudModelCodec.reviewVersion(key: key, payload: payload, origin: .cloud,
+                        source: revision.installationID,
+                        revision: revision.revisionID.uuidString + ":" + String(revision.logicalClock)))
+                } catch FullCloudSyncError.revisionValidation(.missingPayload) {
+                    // Keep this identity held while an external CloudKit asset
+                    // arrives; do not starve independent records or offer a
+                    // deletion placeholder for an unreadable version.
+                    unavailable = true
+                }
+            }
+            if unavailable { unavailableConflictKeys.insert(key); continue }
+            if !local.conflictingKeys.contains(key) {
+                do {
+                    if try Set(relevant.map { try CloudModelCodec.semanticDigest(key: key, payload: $0) ?? "deleted" }).count <= 1 {
+                        continue
+                    }
+                } catch let error as CloudModelCodec.CodecError {
+                    switch error {
+                    case .malformedPayload(_), .unsupportedSchema(_):
+                        // A newer schema is not proof of semantic equivalence.
+                        // Keep the complete readable versions reviewable and
+                        // held; never let this one key starve unrelated sync.
+                        DiagnosticRecorder.shared.record(error: error, component: "sync.fullData", operation: "reviewSchema")
+                    default: throw error
+                    }
+                } catch is DecodingError {
+                    DiagnosticRecorder.shared.record(error: FullCloudSyncError.invalidRevision,
+                        component: "sync.fullData", operation: "reviewSchema")
+                }
+            }
+            result.append(CloudSyncConflict(key: key, versions: versions))
+        }
+        return result
+    }
+
+    func cloudVersions(key: String) async throws -> [CloudSyncConflictVersion] {
+        var result = [CloudSyncConflictVersion]()
+        for row in try cloud.fetch(FetchDescriptor<CloudDataRevision>()).filter({ $0.itemKey == key }) {
+            let payload = try await materialize(row)
+            result.append(try CloudModelCodec.reviewVersion(key: key, payload: payload,
+                origin: .cloud, source: row.installationID,
+                revision: row.revisionID.uuidString + ":" + String(row.logicalClock)))
+        }
+        return result
+    }
+
+    /// The protected review archive is committed by the caller first. Write an
+    /// ordinary publication intent before local apply so a cloud-save failure or
+    /// restart retries the same selected version instead of restoring a loser.
+    func resolve(key: String, payload: Data?, expectedCloudVersions: [CloudSyncConflictVersion],
+                 isValid: () -> Bool, isApplied: () -> Bool = { false }, apply: () throws -> Void,
+                 saveCloud: (ModelContext) throws -> Void = { try $0.save() }) throws {
+        try checkCurrent(isValid)
+        let all = try cloud.fetch(FetchDescriptor<CloudDataRevision>())
+        let rows = all.filter { $0.itemKey == key }
+        let observed = try rows.map { row in
+            try CloudRevisionValidation.validate(key: row.itemKey, clock: row.logicalClock,
+                installation: row.installationID, isDeleted: row.isTombstone, contentDigest: row.contentDigest,
+                payload: row.payload, expectedKey: key, expected: checkpoint(row))
+            return try CloudModelCodec.reviewVersion(key: key, payload: row.payload, origin: .cloud,
+                source: row.installationID, revision: row.revisionID.uuidString + ":" + String(row.logicalClock))
+        }
+        guard Set(observed.map(\.id)) == Set(expectedCloudVersions.map(\.id)) else {
+            throw CloudSyncConflictError.staleSelection
+        }
+        let maximum = (all.map(\.logicalClock) + journal.items.values.map(\.logicalClock)
+            + journal.pendingPublications.values.map(\.logicalClock)
+            + journal.pendingApplies.values.map { $0.target.logicalClock }).max() ?? 0
+        guard maximum < Int64.max else { throw FullCloudSyncError.clockOverflow }
+        let target = CloudSyncCheckpoint(digest: payload.map(CloudFileStore.digest), revisionID: UUID(),
+            logicalClock: maximum + 1, installationID: installationID)
+        let previousJournal = journal
+        journal.pendingPublications[key] = target
+        journal.pendingApplies.removeValue(forKey: key)
+        journalDirty = true
+        do { try persistJournal() }
+        catch { journal = previousJournal; journalDirty = true; throw error }
+        do {
+            try checkCurrent(isValid)
+            try apply()
+        } catch {
+            // A post-save side effect (for example clearing a meeting fence)
+            // may fail after the canonical bytes committed. Preserve the
+            // publication intent in that case for normal replay.
+            if !isApplied() {
+                journal = previousJournal
+                journalDirty = true
+                try persistJournal()
+            }
+            throw error
+        }
+        do {
+            let revision = CloudDataRevision(itemKey: key, clock: target.logicalClock,
+                installationID: installationID, payload: payload)
+            revision.revisionID = target.revisionID
+            cloud.insert(revision)
+            for row in rows { cloud.delete(row) }
+            try saveCloud(cloud)
+        } catch {
+            cloud.rollback()
+            // Keep the selected intent: local apply already committed.
+            throw error
+        }
+        didEnqueueChanges = true
+        remember(key, target)
+        journal.pendingPublications.removeValue(forKey: key)
+        journalDirty = true
+        try persistJournal()
     }
 
     /// Write intent before either store is changed. A restart can distinguish an

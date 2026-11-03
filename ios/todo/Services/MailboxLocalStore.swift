@@ -142,6 +142,8 @@ final class MailboxLocalStore {
         let id: String; let rawMessageID: String; let providerGlobalMessageID: String; let providerRawValue: String
         let sourceAccountNamespace: String; let threadID: String; let subject: String
         let from: String; let snippet: String; let body: String; let htmlBody: String?; let receivedAt: Date
+        let bodyContentVersion: Int
+        let lastBodyFetchAttemptAt: Date
         let isRead: Bool; let labelIDs: [String]; let isInInbox: Bool
         let hasBeenViewedInApp: Bool
         let outlookInferenceClassificationRawValue: String; let providerCategoryNames: [String]; let providerFolderID: String
@@ -155,6 +157,8 @@ final class MailboxLocalStore {
             providerRawValue = email.providerRawValue; sourceAccountNamespace = email.sourceAccountNamespace
             threadID = email.threadID; subject = email.subject
             from = email.from; snippet = email.snippet; body = email.body; htmlBody = email.htmlBody; receivedAt = email.receivedAt
+            bodyContentVersion = email.bodyContentVersion
+            lastBodyFetchAttemptAt = email.lastBodyFetchAttemptAt
             isRead = email.isRead; labelIDs = email.labelIDs; isInInbox = email.isInInbox
             hasBeenViewedInApp = email.hasBeenViewedInApp
             outlookInferenceClassificationRawValue = email.outlookInferenceClassificationRawValue; providerCategoryNames = email.providerCategoryNames; providerFolderID = email.providerFolderID
@@ -170,6 +174,8 @@ final class MailboxLocalStore {
             email.providerRawValue = providerRawValue; email.sourceAccountNamespace = sourceAccountNamespace
             email.threadID = threadID; email.subject = subject
             email.from = from; email.snippet = snippet; email.body = body; email.htmlBody = htmlBody; email.receivedAt = receivedAt
+            email.bodyContentVersion = bodyContentVersion
+            email.lastBodyFetchAttemptAt = lastBodyFetchAttemptAt
             email.isRead = isRead; email.labelIDs = labelIDs; email.isInInbox = isInInbox
             email.hasBeenViewedInApp = hasBeenViewedInApp
             email.outlookInferenceClassificationRawValue = outlookInferenceClassificationRawValue; email.providerCategoryNames = providerCategoryNames; email.providerFolderID = providerFolderID
@@ -391,6 +397,20 @@ final class MailboxLocalStore {
         pendingStore.remove(applied)
     }
 
+    func recordBodyFetchAttempt(
+        for email: EmailMessage,
+        at date: Date,
+        in context: ModelContext
+    ) throws {
+        email.lastBodyFetchAttemptAt = date
+        do {
+            try saveContext(context)
+        } catch {
+            context.rollback()
+            throw error
+        }
+    }
+
     func updateContent(
         _ content: MailboxMessageContent,
         for email: EmailMessage,
@@ -406,7 +426,6 @@ final class MailboxLocalStore {
             throw MailboxLocalStoreError.contentIdentityMismatch
         }
         if !email.providerGlobalMessageID.isEmpty,
-           !content.metadata.providerGlobalMessageID.isEmpty,
            email.providerGlobalMessageID != content.metadata.providerGlobalMessageID {
             throw MailboxLocalStoreError.contentIdentityMismatch
         }
@@ -416,6 +435,7 @@ final class MailboxLocalStore {
             || email.htmlBody != normalizedHTML
         email.body = content.body
         email.htmlBody = normalizedHTML
+        email.bodyContentVersion = 1
         if content.metadata.provider == .gmail {
             // Gmail body fetches intentionally omit list headers; never erase
             // metadata already committed by the preceding page fetch.
@@ -736,6 +756,9 @@ final class MailboxLocalStore {
         rows.enumerated().sorted { lhs, rhs in
             let left = lhs.element
             let right = rhs.element
+            if left.hasCompleteBody != right.hasCompleteBody {
+                return left.hasCompleteBody
+            }
             let leftHasContent = hasContent(left)
             let rightHasContent = hasContent(right)
             let leftHasAnalyzedContent = leftHasContent
@@ -761,9 +784,11 @@ final class MailboxLocalStore {
     ) {
         // Collapsing duplicates must never make a previously viewed message new again.
         survivor.hasBeenViewedInApp = rows.contains(where: \.hasBeenViewedInApp)
-        if let bodySource = preferredSurvivor(in: rows.filter(hasContent)) {
+        survivor.lastBodyFetchAttemptAt = rows.reduce(Date.distantPast) { max($0, $1.lastBodyFetchAttemptAt) }
+        if let bodySource = preferredSurvivor(in: rows.filter { hasContent($0) || $0.hasCompleteBody }) {
             survivor.body = bodySource.body
             survivor.htmlBody = bodySource.htmlBody
+            survivor.bodyContentVersion = bodySource.bodyContentVersion
         }
         if let analysisSource = rows
             .filter({
@@ -817,6 +842,8 @@ final class MailboxLocalStore {
         if isIdentityMismatch(email: email, metadata: metadata) {
             email.body = ""
             email.htmlBody = nil
+            email.bodyContentVersion = 0
+            email.lastBodyFetchAttemptAt = .distantPast
             invalidateAnalysis(for: email)
         }
         if metadata.provider != .gmail

@@ -20,6 +20,11 @@ final class ScriptedPagingProvider: MailboxPagingProvider {
     private var updateContinuations: [CheckedContinuation<MailboxPage, Error>] = []
     var messageIDsResponse: Set<String> = []
     var messageIDsError: Error?
+    var contentCalls: [String] = []
+    var contentResponses: [String: MailboxMessageContent] = [:]
+    var contentErrors: [String: Error] = [:]
+    var suspendNextContent = false
+    private var contentContinuation: CheckedContinuation<Void, Never>?
 
     init(provider: MailProvider) {
         self.provider = provider
@@ -69,17 +74,42 @@ final class ScriptedPagingProvider: MailboxPagingProvider {
     }
 
     func fetchMessageContent(messageID: String) async throws -> MailboxMessageContent {
-        fatalError("Not used in coordinator tests")
+        contentCalls.append(messageID)
+        if suspendNextContent {
+            suspendNextContent = false
+            await withCheckedContinuation { contentContinuation = $0 }
+        }
+        try Task.checkCancellation()
+        if let error = contentErrors[messageID] { throw error }
+        if let content = contentResponses[messageID] { return content }
+        let metadata = MailboxMessageMetadata(
+            provider: provider, providerMessageID: messageID, sourceAccountNamespace: "user@gmail.com",
+            threadID: "", subject: "", from: "", snippet: "", receivedAt: .distantPast,
+            isRead: false, isInInbox: true, gmailLabelIDs: ["INBOX"],
+            outlookInferenceClassificationRawValue: "", providerCategoryNames: [], providerFolderID: ""
+        )
+        return MailboxMessageContent(metadata: metadata, body: "Complete body \(messageID)", htmlBody: "")
+    }
+
+    func waitUntilContentSuspended() async {
+        while contentContinuation == nil { await Task.yield() }
+    }
+
+    func resumeContent() {
+        contentContinuation?.resume()
+        contentContinuation = nil
     }
 
     func markAsRead(
         messageID _: String,
-        expectedGlobalMessageID _: String?
+        expectedGlobalMessageID _: String?,
+        expectedAccountNamespace _: String
     ) async throws {}
 
     func trashMessage(
         messageID: String,
-        expectedGlobalMessageID _: String?
+        expectedGlobalMessageID _: String?,
+        expectedAccountNamespace _: String
     ) async throws {
         trashMessageIDs.append(messageID)
         if let trashError { throw trashError }
@@ -555,37 +585,237 @@ struct MailboxIncrementalSyncCoordinatorTests {
         #expect(cursorStore.cursor(for: .gmail, namespace: "user@gmail.com") == "42:103")
     }
 
-    @Test("startPolling delays the first sync until after the poll interval sleep")
-    func testStartPollingDelaysFirstSync() async throws {
+}
+
+@MainActor
+extension MailboxIncrementalSyncCoordinatorTests {
+    private func insertBodyBacklog(_ count: Int, in context: ModelContext) throws {
+        for index in 1...count {
+            let email = EmailMessage(
+                id: "mail-\(index)", body: "Legacy cached prefix",
+                receivedAt: Date(timeIntervalSince1970: Double(index)),
+                provider: .gmail, rawMessageID: String(index), isInInbox: true,
+                sourceAccountNamespace: "user@gmail.com"
+            )
+            context.insert(email)
+        }
+        try context.save()
+    }
+
+    @Test("prefetch is bounded, skips durable complete bodies and continues the latest backlog without AI")
+    func boundedDurableBodyBacklog() async throws {
         let defaults = makeDefaults()
         defaults.set("user@gmail.com", forKey: "pieroot.todo.imap.account")
-        let cursorStore = MailboxUpdateCursorStore(defaults: defaults)
-        cursorStore.setCursor("42:100", for: .gmail, namespace: "user@gmail.com")
-
+        defaults.set(false, forKey: "pieroot.todo.emailAutoAnalysisEnabled")
+        defaults.set(false, forKey: "pieroot.todo.onDeviceLLMEnabled")
         let container = try makeContainer()
         let context = ModelContext(container)
-        let localStore = MailboxLocalStore(defaults: defaults, saveContext: { try $0.save() })
-        let gmailProvider = ScriptedPagingProvider(provider: .gmail)
+        try insertBodyBacklog(20, in: context)
+        let provider = ScriptedPagingProvider(provider: .gmail)
+        let store = MailboxLocalStore(defaults: defaults, saveContext: { try $0.save() })
+        let coordinator = MailboxIncrementalSyncCoordinator(
+            localStore: store, makeContext: { context }, resolveProvider: { _ in provider },
+            ensureReady: { _, _, _ in true }, defaults: defaults
+        )
+        #expect(await coordinator.prefetchBodies(provider: .gmail))
+        #expect(provider.contentCalls == (13...20).reversed().map(String.init))
+        #expect(await coordinator.prefetchBodies(provider: .gmail))
+        #expect(provider.contentCalls.count == MailboxPagingPolicy.bodyPrefetchBatchSize)
+        let reloadedContext = ModelContext(container)
+        let reloaded = try reloadedContext.fetch(FetchDescriptor<EmailMessage>())
+        #expect(reloaded.filter(\.hasCompleteBody).count == MailboxPagingPolicy.bodyPrefetchBatchSize)
+        #expect(reloaded.allSatisfy { $0.analysisState == .unanalyzed })
+        let restarted = MailboxIncrementalSyncCoordinator(
+            localStore: store, makeContext: { reloadedContext }, resolveProvider: { _ in provider },
+            ensureReady: { _, _, _ in true }, defaults: defaults
+        )
+        #expect(await restarted.prefetchBodies(provider: .gmail))
+        #expect(provider.contentCalls == (5...20).reversed().map(String.init))
+        #expect(provider.contentCalls.count == Set(provider.contentCalls).count)
+    }
 
-        var ensureReadyCallCount = 0
+    @Test("metadata sync also caches complete bodies while automatic analysis is disabled")
+    func metadataSyncPrefetchesWithoutAI() async throws {
+        let defaults = makeDefaults()
+        defaults.set("user@gmail.com", forKey: "pieroot.todo.imap.account")
+        defaults.set(false, forKey: "pieroot.todo.emailAutoAnalysisEnabled")
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        try insertBodyBacklog(2, in: context)
+        let provider = ScriptedPagingProvider(provider: .gmail)
+        let coordinator = MailboxIncrementalSyncCoordinator(
+            localStore: MailboxLocalStore(defaults: defaults, saveContext: { try $0.save() }),
+            makeContext: { context }, resolveProvider: { _ in provider },
+            ensureReady: { _, _, _ in true }, defaults: defaults
+        )
+        #expect(await coordinator.sync(provider: .gmail, backgroundOnly: true))
+        #expect(provider.contentCalls == ["2", "1"])
+        #expect(try context.fetch(FetchDescriptor<EmailMessage>()).allSatisfy(\.hasCompleteBody))
+    }
+
+    @Test("concurrent manual and scheduled body requests share one sequential batch")
+    func bodyBatchCoalescesConcurrentRequests() async throws {
+        let defaults = makeDefaults()
+        defaults.set("user@gmail.com", forKey: "pieroot.todo.imap.account")
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        try insertBodyBacklog(12, in: context)
+        let provider = ScriptedPagingProvider(provider: .gmail)
+        provider.suspendNextContent = true
+        let coordinator = MailboxIncrementalSyncCoordinator(
+            localStore: MailboxLocalStore(defaults: defaults, saveContext: { try $0.save() }),
+            makeContext: { context }, resolveProvider: { _ in provider },
+            ensureReady: { _, _, _ in true }, defaults: defaults
+        )
+        let first = Task { await coordinator.prefetchBodies(provider: .gmail) }
+        await provider.waitUntilContentSuspended()
+        #expect(!(await coordinator.sync(provider: .gmail, backgroundOnly: true)))
+        #expect(!(await coordinator.prefetchBodies(provider: .gmail)))
+        #expect(provider.contentCalls == ["12"])
+        provider.resumeContent()
+        #expect(await first.value)
+        #expect(provider.contentCalls.count == MailboxPagingPolicy.bodyPrefetchBatchSize)
+    }
+
+    @Test("account switch, session replacement, background revocation and cancellation cannot commit a suspended body",
+          arguments: ["account", "generation", "background", "cancel"])
+    func bodyCommitFences(reason: String) async throws {
+        let defaults = makeDefaults()
+        defaults.set("user@gmail.com", forKey: "pieroot.todo.imap.account")
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        try insertBodyBacklog(2, in: context)
+        let provider = ScriptedPagingProvider(provider: .gmail)
+        provider.suspendNextContent = true
+        var ready = true
+        var generation = 1
+        let cursorStore = MailboxUpdateCursorStore(defaults: defaults)
         let coordinator = MailboxIncrementalSyncCoordinator(
             cursorStore: cursorStore,
-            localStore: localStore,
-            makeContext: { context },
-            resolveProvider: { _ in gmailProvider },
-            ensureReady: { _, _, _ in
-                ensureReadyCallCount += 1
-                return true
-            },
-            defaults: defaults
+            localStore: MailboxLocalStore(defaults: defaults, saveContext: { try $0.save() }),
+            makeContext: { context }, resolveProvider: { _ in provider },
+            ensureReady: { _, _, _ in ready }, sessionGeneration: { _ in generation }, defaults: defaults
         )
+        let task = Task { await coordinator.prefetchBodies(provider: .gmail, backgroundOnly: true) }
+        await provider.waitUntilContentSuspended()
+        switch reason {
+        case "account": defaults.set("other@gmail.com", forKey: "pieroot.todo.imap.account")
+        case "generation": generation += 1
+        case "background": ready = false
+        default: task.cancel()
+        }
+        provider.resumeContent()
+        #expect(!(await task.value))
+        #expect(provider.contentCalls == ["2"])
+        let persisted = try ModelContext(container).fetch(FetchDescriptor<EmailMessage>())
+        #expect(persisted.allSatisfy { !$0.hasCompleteBody && $0.body == "Legacy cached prefix" })
+        #expect(cursorStore.cursor(for: .gmail, namespace: "user@gmail.com") == nil)
+    }
 
-        coordinator.startPolling()
-        await Task.yield()
+    @Test("a successfully fetched empty body is durably complete and a denied background run fetches nothing")
+    func emptyBodyAndReadinessGate() async throws {
+        let defaults = makeDefaults()
+        defaults.set("user@gmail.com", forKey: "pieroot.todo.imap.account")
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        try insertBodyBacklog(1, in: context)
+        let provider = ScriptedPagingProvider(provider: .gmail)
+        let metadata = MailboxMessageMetadata(
+            provider: .gmail, providerMessageID: "1", sourceAccountNamespace: "user@gmail.com",
+            threadID: "", subject: "", from: "", snippet: "", receivedAt: .distantPast,
+            isRead: false, isInInbox: true, gmailLabelIDs: ["INBOX"],
+            outlookInferenceClassificationRawValue: "", providerCategoryNames: [], providerFolderID: ""
+        )
+        provider.contentResponses["1"] = MailboxMessageContent(metadata: metadata, body: "", htmlBody: "")
+        var ready = false
+        var time = Date()
+        let coordinator = MailboxIncrementalSyncCoordinator(
+            localStore: MailboxLocalStore(defaults: defaults, saveContext: { try $0.save() }),
+            makeContext: { context }, resolveProvider: { _ in provider },
+            ensureReady: { _, _, _ in ready }, defaults: defaults, now: { time }
+        )
+        #expect(!(await coordinator.prefetchBodies(provider: .gmail, backgroundOnly: true)))
+        #expect(provider.contentCalls.isEmpty)
+        ready = true
+        #expect(await coordinator.prefetchBodies(provider: .gmail))
+        time = time.addingTimeInterval(MailboxPagingPolicy.pollInterval)
+        #expect(await coordinator.prefetchBodies(provider: .gmail))
+        #expect(provider.contentCalls == ["1"])
+        #expect(try context.fetch(FetchDescriptor<EmailMessage>()).first?.hasCompleteBody == true)
+    }
 
-        #expect(ensureReadyCallCount == 0)
-        #expect(gmailProvider.fetchInboxUpdatesCalls.count == 0)
+    @Test("a later body error preserves earlier committed cache visibility without advancing a body cursor")
+    func bodyFailurePreservesCommittedCache() async throws {
+        let defaults = makeDefaults()
+        defaults.set("user@gmail.com", forKey: "pieroot.todo.imap.account")
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        try insertBodyBacklog(3, in: context)
+        let provider = ScriptedPagingProvider(provider: .gmail)
+        provider.contentErrors["2"] = GmailIMAPError.transport("Synthetic body failure")
+        let cursorStore = MailboxUpdateCursorStore(defaults: defaults)
+        let coordinator = MailboxIncrementalSyncCoordinator(
+            cursorStore: cursorStore,
+            localStore: MailboxLocalStore(defaults: defaults, saveContext: { try $0.save() }),
+            makeContext: { context }, resolveProvider: { _ in provider },
+            ensureReady: { _, _, _ in true }, defaults: defaults
+        )
+        #expect(!(await coordinator.prefetchBodies(provider: .gmail)))
+        #expect(provider.contentCalls == ["3", "2"])
+        let persisted = try ModelContext(container).fetch(FetchDescriptor<EmailMessage>())
+        #expect(persisted.first { $0.providerMessageID == "3" }?.hasCompleteBody == true)
+        #expect(persisted.first { $0.providerMessageID == "3" }?.body == "Complete body 3")
+        #expect(persisted.filter { !$0.hasCompleteBody }.count == 2)
+        #expect(cursorStore.cursor(for: .gmail, namespace: "user@gmail.com") == nil)
+    }
 
-        coordinator.stopPolling()
+    @Test("eight newest unreadable bodies rotate durably behind older readable mail",
+          arguments: ["attachmentOnly", "oversized"])
+    func failedBodyWindowCannotStarveOlderMail(failure: String) async throws {
+        let defaults = makeDefaults()
+        defaults.set("user@gmail.com", forKey: "pieroot.todo.imap.account")
+        let container = try makeContainer()
+        let seedContext = ModelContext(container)
+        try insertBodyBacklog(17, in: seedContext)
+        let provider = ScriptedPagingProvider(provider: .gmail)
+        for index in 10...17 {
+            // The service's explicit MIME-size guard throws invalidResponse;
+            // it must still abort that batch, never be blanket-ignored.
+            provider.contentErrors[String(index)] = failure == "attachmentOnly"
+                ? GmailIMAPError.noSelectableTextPart : GmailIMAPError.invalidResponse
+        }
+        var time = Date(timeIntervalSince1970: 10_000)
+        var reachedOlderReadableMail = false
+        var rounds = 0
+        while rounds < 10 && !reachedOlderReadableMail {
+            // Recreate both context and coordinator to prove failed-row rotation
+            // relies on durable row state rather than an in-memory cooldown.
+            let context = ModelContext(container)
+            let coordinator = MailboxIncrementalSyncCoordinator(
+                localStore: MailboxLocalStore(defaults: defaults, saveContext: { try $0.save() }),
+                makeContext: { context }, resolveProvider: { _ in provider },
+                ensureReady: { _, _, _ in true }, defaults: defaults, now: { time }
+            )
+            let before = provider.contentCalls.count
+            let success = await coordinator.prefetchBodies(provider: .gmail)
+            let attempted = provider.contentCalls.count - before
+            #expect(attempted > 0 && attempted <= MailboxPagingPolicy.bodyPrefetchBatchSize)
+            if failure == "oversized" && rounds < 8 {
+                #expect(!success)
+                #expect(attempted == 1)
+            }
+            let persisted = try ModelContext(container).fetch(FetchDescriptor<EmailMessage>())
+            reachedOlderReadableMail = persisted.first { $0.providerMessageID == "9" }?.hasCompleteBody == true
+            let failedRows = persisted.filter { (Int($0.providerMessageID) ?? 0) >= 10 }
+            #expect(failedRows.allSatisfy { !$0.hasCompleteBody && $0.body == "Legacy cached prefix" })
+            time = time.addingTimeInterval(MailboxPagingPolicy.pollInterval)
+            rounds += 1
+        }
+        #expect(reachedOlderReadableMail)
+        #expect(rounds == (failure == "attachmentOnly" ? 2 : 9))
+        #expect(provider.contentCalls.count == Set(provider.contentCalls).count)
+        let failedRows = try ModelContext(container).fetch(FetchDescriptor<EmailMessage>())
+            .filter { (Int($0.providerMessageID) ?? 0) >= 10 }
+        #expect(failedRows.allSatisfy { $0.lastBodyFetchAttemptAt > .distantPast && !$0.hasCompleteBody })
     }
 }

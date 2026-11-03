@@ -30,6 +30,7 @@ enum GmailIMAPContentMigration {
             row.from = MIMETextDecoder.decodeRFC2047(row.from)
             row.body = ""
             row.htmlBody = nil
+            row.bodyContentVersion = 0
             EmailAnalysisContract.resetAnalysis(row)
 
             if let globalMessageID = globalMessageID(from: row.id) {

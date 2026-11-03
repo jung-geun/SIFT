@@ -263,7 +263,162 @@ struct CalendarScheduleColumn: Identifiable {
     }
 }
 
-/// Embedded day / multi-day / week timeline. Its caller owns navigation and the day headings.
+/// One bounded projection, independent of the viewport's leading date and partially visible column.
+/// This is a non-publishing memo: scrolling can read it without causing another SwiftUI state update.
+@MainActor
+private final class CalendarScheduleProjectionCache {
+    final class Snapshot {
+        let days: [CalendarScheduleDay]
+        let hasTimedItems: Bool
+        lazy var spanLayout = CalendarScheduleSpanLayout(days: days)
+        lazy var spansByID = Dictionary(uniqueKeysWithValues: spanLayout.spans.map { ($0.id, $0) })
+
+        init(days: [CalendarScheduleDay]) {
+            self.days = days
+            hasTimedItems = days.contains { !$0.timedItems.isEmpty }
+        }
+    }
+
+    private struct TodoInput: Equatable {
+        let persistentID: PersistentIdentifier
+        let id: UUID
+        let startDate: Date?
+        let dueDate: Date?
+        let eventID: String?
+        let isCompleted: Bool
+
+        init(_ todo: Todo) {
+            persistentID = todo.persistentModelID
+            id = todo.id
+            startDate = todo.startDate
+            dueDate = todo.dueDate
+            eventID = todo.calendarEventID
+            isCompleted = todo.isCompleted
+        }
+    }
+
+    private var snapshot: Snapshot?
+    private var start: Date?
+    private var count = 0
+    private var calendar: Calendar?
+    private var events: [CalendarService.CalendarEventSummary] = []
+    private var todoInputs: [TodoInput] = []
+
+    func projection(start: Date, count: Int, calendar: Calendar,
+                    events: [CalendarService.CalendarEventSummary], todos: [Todo]) -> Snapshot {
+        let currentTodoInputs = todos.map(TodoInput.init)
+        if let snapshot, self.start == start, self.count == count, self.calendar == calendar,
+           todoInputs == currentTodoInputs, self.events.elementsEqual(events, by: Self.sameEvent) {
+            return snapshot
+        }
+        let index = CalendarScheduleIndex(events: events, todos: todos)
+        let days = (0..<max(count, 0)).compactMap { offset in
+            calendar.date(byAdding: .day, value: offset, to: start).map {
+                CalendarScheduleDay(date: $0, events: events, todos: todos, calendar: calendar, index: index)
+            }
+        }
+        let snapshot = Snapshot(days: days)
+        self.start = start
+        self.count = count
+        self.calendar = calendar
+        self.events = events
+        todoInputs = currentTodoInputs
+        self.snapshot = snapshot
+        return snapshot
+    }
+
+    private static func sameEvent(_ lhs: CalendarService.CalendarEventSummary,
+                                  _ rhs: CalendarService.CalendarEventSummary) -> Bool {
+        lhs.title == rhs.title && lhs.notes == rhs.notes
+            && lhs.startDate == rhs.startDate && lhs.endDate == rhs.endDate
+            && lhs.isRecurring == rhs.isRecurring && lhs.isAllDay == rhs.isAllDay
+            && lhs.identifier == rhs.identifier && lhs.externalIdentifier == rhs.externalIdentifier
+            && lhs.marker == rhs.marker && lhs.calendarTitle == rhs.calendarTitle && lhs.calendarID == rhs.calendarID
+    }
+}
+
+/// Geometry is meaningful only in the column-width coordinate system that produced its offset.
+struct CalendarScheduleScrollViewport: Equatable {
+    let offset: CGFloat
+    let columnWidth: CGFloat
+    let columns: Range<Int>
+    let acknowledgesPosition: Bool
+
+    init(offset: CGFloat, columnWidth: CGFloat, visibleCount: Int, expectedOffset: CGFloat? = nil) {
+        self.offset = offset
+        self.columnWidth = columnWidth
+        columns = Self.columnRange(offset: offset, columnWidth: columnWidth, visibleCount: visibleCount)
+        acknowledgesPosition = expectedOffset.map { abs(offset - $0) <= 0.5 } ?? false
+    }
+
+    func usesColumnWidth(_ width: CGFloat) -> Bool { abs(columnWidth - width) < 0.000001 }
+
+    static func columnRange(offset: CGFloat, columnWidth: CGFloat, visibleCount: Int) -> Range<Int> {
+        let fractionalColumn = max(0, offset / columnWidth)
+        let nearestColumn = fractionalColumn.rounded()
+        // Native scrolling quantizes fractional point widths. A subpixel discrepancy must not
+        // turn an aligned leading date into yesterday, or add an invisible trailing date.
+        let tolerance = max(0.000001, 0.5 / columnWidth)
+        let column = abs(fractionalColumn - nearestColumn) <= tolerance ? nearestColumn : fractionalColumn
+        return Int(floor(column))..<Int(ceil(column + CGFloat(visibleCount)))
+    }
+}
+
+/// Native pixel positions are recorded without publishing per-pixel SwiftUI updates.
+@MainActor
+final class CalendarScheduleNativeScrollPosition {
+    private var lastViewport: CalendarScheduleScrollViewport?
+
+    func record(_ viewport: CalendarScheduleScrollViewport) { lastViewport = viewport }
+
+    func matches(offset: CGFloat, columnWidth: CGFloat) -> Bool {
+        guard let lastViewport, lastViewport.usesColumnWidth(columnWidth) else { return false }
+        return abs(lastViewport.offset - offset) <= 0.5
+    }
+}
+
+/// Counteracts only the native horizontal scroll, keeping time labels visible during diagonal movement.
+private struct TimelinePinnedGutter: ViewModifier {
+    func body(content: Content) -> some View {
+        content.visualEffect { view, geometry in
+            view.offset(x: max(0, -geometry.frame(in: .scrollView(axis: .horizontal)).minX))
+        }
+    }
+}
+
+/// Keeps a spanning event's title and linked-task action within the visible part of its one bar.
+/// Geometry updates are local to the bar, not the schedule's event/day projection.
+private struct TimelineSpanContent<Content: View>: View {
+    let viewportWidth: CGFloat
+    let gutterWidth: CGFloat
+    let content: Content
+    @State private var visiblePortion = CGRect.zero
+
+    init(viewportWidth: CGFloat, gutterWidth: CGFloat, @ViewBuilder content: () -> Content) {
+        self.viewportWidth = viewportWidth
+        self.gutterWidth = gutterWidth
+        self.content = content()
+    }
+
+    var body: some View {
+        GeometryReader { geometry in
+            content
+                .padding(.horizontal, 6)
+                .frame(width: visiblePortion.width, height: geometry.size.height)
+                .offset(x: visiblePortion.minX)
+                .accessibilityHidden(visiblePortion.width == 0)
+        }
+        .onGeometryChange(for: CGRect.self) { geometry in
+            let frame = geometry.frame(in: .scrollView(axis: .horizontal))
+            let leading = min(frame.width, max(0, gutterWidth - frame.minX))
+            let width = max(0, min(frame.maxX, viewportWidth) - max(frame.minX, gutterWidth))
+            return CGRect(x: leading, y: 0, width: width, height: 0)
+        } action: { visiblePortion = $0 }
+        .clipped()
+    }
+}
+
+/// Embedded day / multi-day / week timeline with a shared, horizontally scrolling date surface.
 struct CalendarScheduleView: View {
     let startDate: Date
     let dayCount: Int
@@ -272,11 +427,15 @@ struct CalendarScheduleView: View {
     let calendar: Calendar
     let today: Date
     var onDataChanged: () -> Void = {}
+    var scrollTargetDate: Date? = nil
+    var scrollTargetRevision: Int = 0
+    var onVisibleDayChanged: ((Date) -> Void)? = nil
 
     var body: some View {
         CalendarScheduleContent(startDate: startDate, dayCount: dayCount, events: events, todos: todos,
                                 calendar: calendar, today: today, mode: .timeline(alwaysShow: true),
-                                onDataChanged: onDataChanged)
+                                onDataChanged: onDataChanged, scrollTargetDate: scrollTargetDate,
+                                scrollTargetRevision: scrollTargetRevision, onVisibleDayChanged: onVisibleDayChanged)
     }
 }
 
@@ -358,7 +517,11 @@ private struct CalendarScheduleContent: View {
     let onDataChanged: () -> Void
     let onLoadMore: (() -> Void)?
     let isLoadingMore: Bool
+    let scrollTargetDate: Date?
+    let scrollTargetRevision: Int
+    let onVisibleDayChanged: ((Date) -> Void)?
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
     @State private var presentation: SchedulePresentation?
     @State private var mutation: ScheduleMutation?
     @State private var errorMessage: String?
@@ -370,13 +533,33 @@ private struct CalendarScheduleContent: View {
     @State private var now: Date
     @State private var lastAutomaticLoadEnd: Date?
     @State private var lastAutomaticContentDate: Date?
-    private let hourHeight: CGFloat = 64
-    private let labelWidth: CGFloat = 44
+    @State private var timelineWindowStart: Date
+    @State private var leadingVisibleDate: Date
+    @State private var visibleColumns: Range<Int>
+    @State private var horizontalPosition = ScrollPosition(x: 0)
+    @State private var isRepositioning = true
+    @State private var positionedColumnWidth: CGFloat = 0
+    @State private var pendingHorizontalOffset: CGFloat?
+    @State private var nativeScrollPosition = CalendarScheduleNativeScrollPosition()
+    @State private var projectionCache = CalendarScheduleProjectionCache()
+    @ScaledMetric(relativeTo: .subheadline) private var dateHeadingHeight: CGFloat = 44
+    private var allDayRowHeight: CGFloat {
+        verticalSizeClass == .compact
+            ? max(48, compactTimeLineHeight + 8)
+            : max(48, compactTitleLineHeight * 2 + 8)
+    }
+    @ScaledMetric(relativeTo: .caption) private var hourHeight: CGFloat = 64
+    @ScaledMetric(relativeTo: .caption2) private var labelWidth: CGFloat = 44
+    @ScaledMetric(relativeTo: .caption) private var compactTitleLineHeight: CGFloat = 16
+    @ScaledMetric(relativeTo: .caption2) private var compactTimeLineHeight: CGFloat = 14
+    private let rollingWindowDayCount = 121
     private let dateFormatter: DateFormatter
 
     init(startDate: Date, dayCount: Int, events: [CalendarService.CalendarEventSummary], todos: [Todo],
          calendar: Calendar, today: Date, mode: Mode, onDataChanged: @escaping () -> Void,
-         onLoadMore: (() -> Void)? = nil, isLoadingMore: Bool = false, showsAddButton: Bool = false) {
+         onLoadMore: (() -> Void)? = nil, isLoadingMore: Bool = false, showsAddButton: Bool = false,
+         scrollTargetDate: Date? = nil, scrollTargetRevision: Int = 0,
+         onVisibleDayChanged: ((Date) -> Void)? = nil) {
         self.startDate = startDate
         self.dayCount = dayCount
         self.events = events
@@ -388,6 +571,15 @@ private struct CalendarScheduleContent: View {
         self.onLoadMore = onLoadMore
         self.isLoadingMore = isLoadingMore
         self.showsAddButton = showsAddButton
+        self.scrollTargetDate = scrollTargetDate
+        self.scrollTargetRevision = scrollTargetRevision
+        self.onVisibleDayChanged = onVisibleDayChanged
+        let firstDay = calendar.startOfDay(for: startDate)
+        _timelineWindowStart = State(initialValue: dayCount > 1
+            ? calendar.date(byAdding: .day, value: -60, to: firstDay) ?? firstDay : firstDay)
+        _leadingVisibleDate = State(initialValue: calendar.startOfDay(for: scrollTargetDate ?? startDate))
+        let firstColumn = dayCount > 1 ? 60 : 0
+        _visibleColumns = State(initialValue: firstColumn..<(firstColumn + min(max(dayCount, 1), 3)))
         let formatter = DateFormatter()
         formatter.locale = AppLanguage.current.locale
         formatter.calendar = calendar
@@ -396,22 +588,20 @@ private struct CalendarScheduleContent: View {
         _now = State(initialValue: Date())
     }
 
-    private var days: [CalendarScheduleDay] {
-        let start = calendar.startOfDay(for: startDate)
-        let index = CalendarScheduleIndex(events: events, todos: todos)
-        return (0..<max(dayCount, 0)).compactMap { offset in
-            calendar.date(byAdding: .day, value: offset, to: start).map {
-                CalendarScheduleDay(date: calendar.startOfDay(for: $0), events: events, todos: todos, calendar: calendar, index: index)
-            }
-        }
+    private var projectedSchedule: CalendarScheduleProjectionCache.Snapshot {
+        let rolling: Bool
+        if case .timeline = mode { rolling = dayCount > 1 } else { rolling = false }
+        let start = rolling ? timelineWindowStart : calendar.startOfDay(for: startDate)
+        let count = rolling ? rollingWindowDayCount : dayCount
+        return projectionCache.projection(start: start, count: count, calendar: calendar, events: events, todos: todos)
     }
 
     var body: some View {
-        let scheduleDays = days
+        let schedule = projectedSchedule
         Group {
             switch mode {
-            case .agenda: agenda(scheduleDays)
-            case .timeline(let alwaysShow): timeline(scheduleDays, alwaysShow: alwaysShow)
+            case .agenda: agenda(schedule.days)
+            case .timeline(let alwaysShow): timeline(schedule, alwaysShow: alwaysShow)
             }
         }
         .background(AppTheme.surface)
@@ -487,78 +677,231 @@ private struct CalendarScheduleContent: View {
         }
     }
 
-    @ViewBuilder
-    private func timeline(_ days: [CalendarScheduleDay], alwaysShow: Bool) -> some View {
-        let hasTimed = days.contains { !$0.timedItems.isEmpty }
-        let allDayCount = days.map { $0.allDayItems.count }.max() ?? 0
-        VStack(spacing: 0) {
-            if days.count > 1 {
-                HStack(spacing: 0) {
-                    Color.clear.frame(width: labelWidth + 4)
-                    ForEach(days) { day in
-                        let isToday = calendar.isDate(day.date, inSameDayAs: today)
-                        VStack(spacing: 2) {
-                            Text(dateLabel(day.date, template: "EEE"))
-                                .font(.caption2)
-                            Text(dateLabel(day.date, template: "d"))
-                                .font(.subheadline.weight(isToday ? .bold : .medium))
-                        }
-                        .foregroundStyle(isToday ? AppTheme.destructive : Color.primary)
-                        .frame(maxWidth: .infinity)
-                        .accessibilityElement(children: .ignore)
-                        .accessibilityLabel(agendaDateTitle(day.date))
-                        .accessibilityIdentifier("calendar.schedule.day.\(day.date.timeIntervalSince1970)")
+    private func timeline(_ snapshot: CalendarScheduleProjectionCache.Snapshot, alwaysShow: Bool) -> some View {
+        let days = snapshot.days
+        let hasTimed = snapshot.hasTimedItems
+        let lower = min(days.count, max(0, visibleColumns.lowerBound))
+        let upper = min(days.count, max(lower, visibleColumns.upperBound))
+        let visibleLayout = CalendarScheduleSpanLayout(days: Array(days[lower..<upper]))
+        let fullSpansByID = snapshot.spansByID
+        let visibleSpans = visibleLayout.spans.compactMap { local -> CalendarScheduleSpanLayout.Span? in
+            guard let full = fullSpansByID[local.id] else { return nil }
+            return CalendarScheduleSpanLayout.Span(item: full.item, firstColumn: full.firstColumn,
+                lastColumn: full.lastColumn, lane: local.lane,
+                continuesBefore: full.continuesBefore, continuesAfter: full.continuesAfter)
+        }
+        return GeometryReader { viewport in
+            let viewportHeight = viewport.size.height
+            let allDayPadding: CGFloat = viewportHeight < 320 ? 4 : 8
+            let visibleCount = visibleDayCount(width: viewport.size.width)
+            let columnWidth = max(1, (viewport.size.width - labelWidth - 4) / CGFloat(visibleCount))
+            let contentWidth = labelWidth + 4 + CGFloat(days.count) * columnWidth
+            let headingHeight = min(dateHeadingHeight, max(44, viewportHeight * 0.25))
+            let remainingHeight = max(0, viewportHeight - (dayCount > 1 ? headingHeight : 0) - 2)
+            let oneLaneHeight = min(remainingHeight, allDayRowHeight + allDayPadding * 2)
+            let allDayHeightLimit = max(oneLaneHeight, min(160,
+                max(0, remainingHeight - min(160, viewportHeight * 0.6))))
+            ScrollView(.horizontal) {
+                VStack(spacing: 0) {
+                    if dayCount > 1 {
+                        dateHeadings(days, columnWidth: columnWidth, height: headingHeight)
+                        Divider()
                     }
-                }
-                .padding(.vertical, 6)
-                .fixedSize(horizontal: false, vertical: true)
-                Divider()
-            }
-            if allDayCount > 0 {
-                ScrollView(.vertical) {
-                    HStack(alignment: .top, spacing: 0) {
-                        Text(calendarCopy("calendar.allDay", "All-day", "종일"))
-                            .font(.caption2).foregroundStyle(.secondary)
-                            .frame(width: labelWidth, alignment: .trailing)
-                            .padding(.trailing, 4)
-                        ForEach(days) { day in
-                            VStack(alignment: .leading, spacing: 4) {
-                                ForEach(day.allDayItems) { item in
-                                    allDayChip(item, day: day)
-                                }
+                    if visibleLayout.laneCount > 0 {
+                        allDaySurface(visibleSpans, laneCount: visibleLayout.laneCount,
+                                      columnWidth: columnWidth, viewportWidth: viewport.size.width,
+                                      heightLimit: allDayHeightLimit, verticalPadding: allDayPadding,
+                                      constrained: alwaysShow || hasTimed)
+                        if alwaysShow || hasTimed { Divider() }
+                    }
+                    if alwaysShow || hasTimed {
+                        ScrollViewReader { proxy in
+                            ScrollView(.vertical) {
+                                timelineGrid(days, columnWidth: columnWidth)
+                                    .padding(.top, 8)
+                                    .padding(.bottom, 12)
                             }
-                            .frame(maxWidth: .infinity, alignment: .topLeading)
-                            .padding(.horizontal, 3)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .onAppear { scrollToInitialHour(initialDays(), proxy: proxy) }
+                            .onChange(of: startDate) { _, _ in
+                                if dayCount == 1 { scrollToInitialHour(days, proxy: proxy) }
+                            }
+                            .onChange(of: scrollTargetRevision) { _, _ in
+                                scrollToInitialHour(initialDays(), proxy: proxy)
+                            }
+                            .onChange(of: dayCount) { _, _ in
+                                scrollToInitialHour(initialDays(), proxy: proxy)
+                            }
                         }
+                    } else if visibleLayout.laneCount == 0 {
+                        ContentUnavailableView(calendarCopy("calendar.schedule.empty", "No Events", "일정 없음"), systemImage: "calendar")
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
-                    .padding(.vertical, 8)
                 }
-                .frame(height: alwaysShow || hasTimed ? min(132, 16 + CGFloat(allDayCount) * 36) : nil)
-                .frame(maxHeight: alwaysShow || hasTimed ? nil : .infinity)
-                if alwaysShow || hasTimed { Divider() }
+                .frame(width: contentWidth, height: viewportHeight, alignment: .top)
             }
-            if alwaysShow || hasTimed {
-                ScrollViewReader { proxy in
-                    ScrollView(.vertical) {
-                        timelineGrid(days)
-                            .padding(.top, 8)
-                            .padding(.bottom, 12)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .onAppear { scrollToInitialHour(days, proxy: proxy) }
-                    .onChange(of: startDate) { _, _ in scrollToInitialHour(days, proxy: proxy) }
+            .frame(height: viewportHeight, alignment: .top)
+            .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
+            .scrollPosition($horizontalPosition)
+            .scrollIndicators(dayCount > 1 ? .visible : .hidden, axes: .horizontal)
+            .onScrollGeometryChange(for: CalendarScheduleScrollViewport.self) { geometry in
+                CalendarScheduleScrollViewport(
+                    offset: max(0, geometry.contentOffset.x + geometry.contentInsets.leading),
+                    columnWidth: columnWidth, visibleCount: visibleCount, expectedOffset: pendingHorizontalOffset)
+            } action: { _, viewport in
+                nativeScrollPosition.record(viewport)
+                // Rotation can report the OLD pixel offset with the NEW column width before
+                // onChange has repositioned it. Never publish that mixed-coordinate date.
+                guard viewport.usesColumnWidth(positionedColumnWidth) else { return }
+                if pendingHorizontalOffset != nil {
+                    guard viewport.acknowledgesPosition else { return }
+                    pendingHorizontalOffset = nil
+                    isRepositioning = false
+                    return
                 }
-            } else if allDayCount == 0 {
-                ContentUnavailableView(calendarCopy("calendar.schedule.empty", "No Events", "일정 없음"), systemImage: "calendar")
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                guard !isRepositioning else { return }
+                if visibleColumns != viewport.columns { visibleColumns = viewport.columns }
+                let column = viewport.columns.lowerBound
+                guard dayCount > 1, let date = days.indices.contains(column) ? days[column].date : nil,
+                      date != leadingVisibleDate else { return }
+                leadingVisibleDate = date
+                onVisibleDayChanged?(date)
+            }
+            .onScrollPhaseChange { _, phase, context in
+                if (phase == .tracking || phase == .interacting), pendingHorizontalOffset != nil {
+                    // An explicit drag takes ownership from an interrupted positioning request.
+                    pendingHorizontalOffset = nil
+                    isRepositioning = false
+                }
+                guard dayCount > 1, phase == .idle, !isRepositioning,
+                      abs(columnWidth - positionedColumnWidth) < 0.000001 else { return }
+                recenterTimelineWindow(offset: max(0, context.geometry.contentOffset.x + context.geometry.contentInsets.leading),
+                                       columnWidth: columnWidth, visibleCount: visibleCount)
+            }
+            .onAppear {
+                if dayCount > 1 {
+                    positionTimeline(on: scrollTargetDate ?? startDate, columnWidth: columnWidth,
+                                     visibleCount: visibleCount, deferred: true)
+                }
+                else { isRepositioning = false }
+            }
+            .onChange(of: scrollTargetRevision) { _, _ in
+                guard dayCount > 1 else { return }
+                positionTimeline(on: scrollTargetDate ?? startDate, columnWidth: columnWidth, visibleCount: visibleCount)
+            }
+            .onChange(of: dayCount) { _, count in
+                guard count > 1 else {
+                    leadingVisibleDate = calendar.startOfDay(for: scrollTargetDate ?? startDate)
+                    repositionTimeline(offset: 0, columnWidth: columnWidth, visibleCount: visibleCount)
+                    return
+                }
+                let target = calendar.startOfDay(for: scrollTargetDate ?? startDate)
+                timelineWindowStart = calendar.date(byAdding: .day, value: -60, to: target) ?? target
+                positionTimeline(on: target, columnWidth: columnWidth, visibleCount: visibleCount)
+            }
+            .onChange(of: columnWidth) { _, width in
+                guard dayCount > 1 else { return }
+                positionTimeline(on: leadingVisibleDate, columnWidth: width, visibleCount: visibleCount)
+            }
+            .onChange(of: calendar) { _, _ in
+                guard dayCount > 1 else { return }
+                let target = calendar.startOfDay(for: leadingVisibleDate)
+                timelineWindowStart = calendar.date(byAdding: .day, value: -60, to: target) ?? target
+                positionTimeline(on: target, columnWidth: columnWidth, visibleCount: visibleCount)
             }
         }
+        .clipped()
         .onReceive(Timer.publish(every: 60, on: .main, in: .common).autoconnect()) { now = $0 }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("calendar.timeline")
     }
 
-    private func timelineGrid(_ days: [CalendarScheduleDay]) -> some View {
+    private func visibleDayCount(width: CGFloat) -> Int {
+        guard dayCount > 1 else { return 1 }
+        let available = max(1, width - labelWidth - 4)
+        // Small tablets and split windows need readable columns; a landscape phone still caps at three.
+        let phone = UIDevice.current.userInterfaceIdiom == .phone
+        return min(dayCount, available >= 840 && !phone ? 7 : available >= 450 ? 3 : 2)
+    }
+
+    private func dateHeadings(_ days: [CalendarScheduleDay], columnWidth: CGFloat, height: CGFloat) -> some View {
+        HStack(spacing: 0) {
+            Color.clear.frame(width: labelWidth + 4, height: height)
+                .background(AppTheme.surface)
+                .modifier(TimelinePinnedGutter())
+                .zIndex(1)
+            HStack(spacing: 0) {
+                ForEach(days) { day in
+                    let isToday = calendar.isDate(day.date, inSameDayAs: today)
+                    ViewThatFits(in: .vertical) {
+                        VStack(spacing: 2) {
+                            Text(dateLabel(day.date, template: "EEE")).font(.caption2)
+                            Text(dateLabel(day.date, template: "d"))
+                                .font(.subheadline.weight(isToday ? .bold : .medium))
+                        }
+                        HStack(spacing: 4) {
+                            Text(dateLabel(day.date, template: "EEE")).font(.caption2)
+                            Text(dateLabel(day.date, template: "d"))
+                                .font(.subheadline.weight(isToday ? .bold : .medium))
+                        }
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.65)
+                    }
+                    .foregroundStyle(isToday ? AppTheme.destructive : Color.primary)
+                    .frame(width: columnWidth, height: height)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(agendaDateTitle(day.date))
+                    .accessibilityIdentifier("calendar.schedule.day.\(day.date.timeIntervalSince1970)")
+                }
+            }
+        }
+        .frame(height: height)
+    }
+
+    private func allDaySurface(_ spans: [CalendarScheduleSpanLayout.Span], laneCount: Int,
+                               columnWidth: CGFloat, viewportWidth: CGFloat, heightLimit: CGFloat,
+                               verticalPadding: CGFloat, constrained: Bool) -> some View {
+        let rowHeight = allDayRowHeight
+        return ScrollView(.vertical) {
+            HStack(alignment: .top, spacing: 0) {
+                Text(calendarCopy("calendar.allDay", "All-day", "종일"))
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                    .frame(width: labelWidth, alignment: .trailing)
+                    .padding(.trailing, 4)
+                    .frame(maxHeight: .infinity, alignment: .topTrailing)
+                    .background(AppTheme.surface)
+                    .modifier(TimelinePinnedGutter())
+                    .zIndex(1)
+                ZStack(alignment: .topLeading) {
+                    ForEach(spans) { span in
+                        TimelineSpanContent(viewportWidth: viewportWidth, gutterWidth: labelWidth + 4) {
+                            allDayChip(span.item, continuesBefore: span.continuesBefore, continuesAfter: span.continuesAfter)
+                        }
+                            .frame(width: CGFloat(span.lastColumn - span.firstColumn + 1) * columnWidth - 6,
+                                   height: rowHeight - 4)
+                            .background(span.item.color.opacity(0.14),
+                                        in: RoundedRectangle(cornerRadius: AppTheme.controlRadius))
+                            .overlay {
+                                RoundedRectangle(cornerRadius: AppTheme.controlRadius)
+                                    .strokeBorder(span.item.color.opacity(0.45), lineWidth: 0.75)
+                                    .allowsHitTesting(false)
+                            }
+                            .offset(x: CGFloat(span.firstColumn) * columnWidth + 3, y: CGFloat(span.lane) * rowHeight)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+                .frame(height: CGFloat(laneCount) * rowHeight, alignment: .topLeading)
+            }
+            .padding(.vertical, verticalPadding)
+        }
+        .frame(height: constrained ? min(heightLimit, verticalPadding * 2 + CGFloat(laneCount) * rowHeight) : nil)
+        .frame(maxHeight: constrained ? nil : .infinity)
+        .accessibilityIdentifier("calendar.timeline.allDay")
+    }
+
+    private func timelineGrid(_ days: [CalendarScheduleDay], columnWidth: CGFloat) -> some View {
         HStack(alignment: .top, spacing: 0) {
             VStack(alignment: .trailing, spacing: 0) {
                 ForEach(0..<24, id: \.self) { hour in
@@ -569,45 +912,106 @@ private struct CalendarScheduleContent: View {
                         .id("hour-\(hour)")
                 }
             }
-            ForEach(days) { day in
-                GeometryReader { geometry in
-                    ZStack(alignment: .topLeading) {
-                        blankTimeSurface(day)
-                        VStack(spacing: 0) {
-                            ForEach(0..<24, id: \.self) { _ in
-                                Divider()
-                                Spacer().frame(height: hourHeight - 0.5)
+            .background(AppTheme.surface)
+            .modifier(TimelinePinnedGutter())
+            .zIndex(1)
+            LazyHStack(spacing: 0) {
+                ForEach(days) { day in
+                    GeometryReader { geometry in
+                        ZStack(alignment: .topLeading) {
+                            blankTimeSurface(day)
+                            VStack(spacing: 0) {
+                                ForEach(0..<24, id: \.self) { _ in
+                                    Divider()
+                                    Spacer().frame(height: hourHeight - 0.5)
+                                }
+                            }
+                            .allowsHitTesting(false)
+                            ForEach(CalendarScheduleColumn.layout(day.timedItems)) { item in
+                                timelineBlock(item, day: day, trackWidth: geometry.size.width)
+                            }
+                            if let draft, draft.day == day.date {
+                                rangePreview(draft.range, day: day, color: AppTheme.accent)
+                            }
+                            if let preview = resizePreview, preview.day == day.date {
+                                rangePreview(preview.range, day: day, color: preview.item.color)
+                            }
+                            if calendar.isDate(day.date, inSameDayAs: today), now >= day.date, now < day.end {
+                                let lineY = yOffset(now, day: day)
+                                Rectangle().fill(AppTheme.destructive)
+                                    .frame(height: 1.5).offset(y: lineY).allowsHitTesting(false)
+                                Circle().fill(AppTheme.destructive)
+                                    .frame(width: 6, height: 6).position(x: 3, y: lineY).allowsHitTesting(false)
                             }
                         }
-                        .allowsHitTesting(false)
-                        ForEach(CalendarScheduleColumn.layout(day.timedItems)) { item in
-                            timelineBlock(item, day: day, trackWidth: geometry.size.width)
-                        }
-                        if let draft, draft.day == day.date {
-                            rangePreview(draft.range, day: day, color: AppTheme.accent)
-                        }
-                        if let preview = resizePreview, preview.day == day.date {
-                            rangePreview(preview.range, day: day, color: preview.item.color)
-                        }
-                        if calendar.isDate(day.date, inSameDayAs: today), now >= day.date, now < day.end {
-                            let lineY = yOffset(now, day: day)
-                            Rectangle().fill(AppTheme.destructive)
-                                .frame(height: 1.5).offset(y: lineY)
-                                .allowsHitTesting(false)
-                            Circle().fill(AppTheme.destructive)
-                                .frame(width: 6, height: 6).position(x: 3, y: lineY)
-                                .allowsHitTesting(false)
-                        }
+                        .clipped()
                     }
-                    .clipped()
-                }
-                .frame(maxWidth: .infinity)
-                .frame(height: hourHeight * 24)
-                .overlay(alignment: .leading) {
-                    Rectangle().fill(Color(.separator)).frame(width: 0.5)
+                    .frame(width: columnWidth, height: hourHeight * 24)
+                    .overlay(alignment: .leading) {
+                        Rectangle().fill(Color(.separator)).frame(width: 0.5)
+                    }
                 }
             }
         }
+    }
+
+    private func initialDays() -> [CalendarScheduleDay] {
+        let target = calendar.startOfDay(for: scrollTargetDate ?? startDate)
+        let index = CalendarScheduleIndex(events: events, todos: todos)
+        return (0..<max(dayCount, 0)).compactMap { offset in
+            calendar.date(byAdding: .day, value: offset, to: target).map {
+                CalendarScheduleDay(date: $0, events: events, todos: todos, calendar: calendar, index: index)
+            }
+        }
+    }
+
+    private func positionTimeline(on date: Date, columnWidth: CGFloat, visibleCount: Int, deferred: Bool = false) {
+        let target = calendar.startOfDay(for: date)
+        var column = calendar.dateComponents([.day], from: timelineWindowStart, to: target).day ?? 0
+        if column < 0 || column + dayCount > rollingWindowDayCount {
+            timelineWindowStart = calendar.date(byAdding: .day, value: -60, to: target) ?? target
+            column = calendar.dateComponents([.day], from: timelineWindowStart, to: target).day ?? 0
+        }
+        leadingVisibleDate = target
+        repositionTimeline(offset: CGFloat(column) * columnWidth, columnWidth: columnWidth,
+                           visibleCount: visibleCount, deferred: deferred)
+    }
+
+    private func recenterTimelineWindow(offset: CGFloat, columnWidth: CGFloat, visibleCount: Int) {
+        let column = Int(offset / columnWidth)
+        // Keep a bounded projection. Rebase only after inertia ends and preserve the exact fractional-day offset.
+        if column < 28, let earlier = calendar.date(byAdding: .day, value: -56, to: timelineWindowStart) {
+            timelineWindowStart = earlier
+            repositionTimeline(offset: offset + 56 * columnWidth, columnWidth: columnWidth, visibleCount: visibleCount)
+        } else if column + visibleCount > rollingWindowDayCount - 28,
+                  let later = calendar.date(byAdding: .day, value: 56, to: timelineWindowStart) {
+            timelineWindowStart = later
+            repositionTimeline(offset: offset - 56 * columnWidth, columnWidth: columnWidth, visibleCount: visibleCount)
+        }
+    }
+
+
+    private func repositionTimeline(offset: CGFloat, columnWidth: CGFloat, visibleCount: Int, deferred: Bool = false) {
+        isRepositioning = true
+        positionedColumnWidth = columnWidth
+        pendingHorizontalOffset = offset
+        visibleColumns = CalendarScheduleScrollViewport.columnRange(
+            offset: offset, columnWidth: columnWidth, visibleCount: visibleCount)
+        if nativeScrollPosition.matches(offset: offset, columnWidth: columnWidth) {
+            // Repeated Today can be a true no-op, with no new native geometry notification.
+            pendingHorizontalOffset = nil
+            isRepositioning = false
+            return
+        }
+        let reposition = {
+            guard pendingHorizontalOffset == offset,
+                  abs(positionedColumnWidth - columnWidth) < 0.000001 else { return }
+            horizontalPosition.scrollTo(x: offset)
+        }
+        // A rolling rebase changes dates and offset in the same transaction. Only initial appearance
+        // waits for the scroll view to mount; deferring a rebase would briefly show different dates.
+        if deferred { DispatchQueue.main.async(execute: reposition) }
+        else { reposition() }
     }
 
     private func yOffset(_ date: Date, day: CalendarScheduleDay) -> CGFloat {
@@ -624,6 +1028,7 @@ private struct CalendarScheduleContent: View {
             let height = CGFloat(item.displayEndMinute - item.displayStartMinute) * hourHeight / 60
             itemControl(item, compact: true, showTime: height > 38, height: height)
                 .frame(width: width, height: height, alignment: .top)
+                .clipped()
                 .background(item.color.opacity(0.14), in: RoundedRectangle(cornerRadius: AppTheme.controlRadius, style: .continuous))
                 .overlay {
                     RoundedRectangle(cornerRadius: AppTheme.controlRadius, style: .continuous)
@@ -751,23 +1156,26 @@ private struct CalendarScheduleContent: View {
         DispatchQueue.main.async { proxy.scrollTo("hour-\(hour)", anchor: .top) }
     }
 
-    private func allDayChip(_ item: CalendarScheduleItem, day: CalendarScheduleDay) -> some View {
+    private func allDayChip(_ item: CalendarScheduleItem, continuesBefore: Bool, continuesAfter: Bool) -> some View {
         HStack(spacing: 2) {
             Button { open(item) } label: {
                 HStack(spacing: 4) {
                     Circle().fill(item.color).frame(width: 6, height: 6)
-                    if item.start < day.date { Image(systemName: "chevron.left").font(.caption2) }
-                    Text(item.title).font(.caption.weight(.medium)).lineLimit(2)
+                    if continuesBefore { Image(systemName: "chevron.left").font(.caption2).accessibilityHidden(true) }
+                    Text(item.title)
+                        .font(verticalSizeClass == .compact ? .caption2.weight(.medium) : .caption.weight(.medium))
+                        .lineLimit(verticalSizeClass == .compact ? 1 : 2)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                    if item.end > day.end { Image(systemName: "chevron.right").font(.caption2) }
+                    if continuesAfter { Image(systemName: "chevron.right").font(.caption2).accessibilityHidden(true) }
                 }
                 .foregroundStyle(.primary)
-                .frame(minHeight: 28)
+                .frame(minHeight: 44)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityIdentifier(item.accessibilityID)
-            linkedControl(item)
+            .accessibilityLabel(Text(item.title))
+            linkedControl(item, minimumSize: 44)
         }
         .contextMenu { itemMenu(item) }
     }
@@ -863,15 +1271,20 @@ private struct CalendarScheduleContent: View {
     }
 
     private func itemControl(_ item: CalendarScheduleItem, compact: Bool, showTime: Bool, height: CGFloat?) -> some View {
-        HStack(alignment: .top, spacing: 2) {
+        let showsTime = showTime && (!compact || (height ?? .infinity) >= compactTitleLineHeight + compactTimeLineHeight + 12)
+        let titleLines: Int? = compact ? max(1, min(4, Int(((height ?? compactTitleLineHeight)
+            - 10 - (showsTime ? compactTimeLineHeight + 2 : 0)) / compactTitleLineHeight))) : nil
+        return HStack(alignment: .top, spacing: 2) {
             Button { open(item) } label: {
                 HStack(alignment: .top, spacing: 4) {
                     Image(systemName: item.symbol).font(.caption2).foregroundStyle(item.color)
+                        .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
+                        .accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(item.title)
                             .font(compact ? .caption.weight(.semibold) : .body)
-                            .foregroundStyle(.primary).lineLimit(compact ? 2 : nil)
-                        if showTime {
+                            .foregroundStyle(.primary).lineLimit(titleLines)
+                        if showsTime {
                             Text("\(item.start, style: .time) – \(item.end, style: .time)")
                                 .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
                         }
@@ -884,28 +1297,35 @@ private struct CalendarScheduleContent: View {
             }
             .buttonStyle(.plain)
             .accessibilityIdentifier(item.accessibilityID)
+            .accessibilityLabel(compact
+                ? Text("\(item.title), \(item.start, style: .time) – \(item.end, style: .time)")
+                : Text(item.title))
             .modifier(TimelineResizeAccessibility(enabled: item.event != nil && !item.isAllDay) { edge, minutes in
                 adjust(item, edge: edge, minutes: minutes)
             })
-            linkedControl(item)
+            linkedControl(item, minimumSize: 30)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .contextMenu { itemMenu(item) }
     }
 
     @ViewBuilder
-    private func linkedControl(_ item: CalendarScheduleItem) -> some View {
+    private func linkedControl(_ item: CalendarScheduleItem, minimumSize: CGFloat) -> some View {
         if let event = item.linkedEvent {
             Button { openEventEdit(event) } label: {
                 Image(systemName: event.isRecurring ? "arrow.triangle.2.circlepath.circle.fill" : "calendar.circle.fill")
-                    .foregroundStyle(AppTheme.accent).frame(minWidth: 30, minHeight: 30)
+                    .foregroundStyle(AppTheme.accent)
+                    .frame(minWidth: minimumSize, minHeight: minimumSize)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel(calendarCopy("calendar.editLinkedEvent", "Edit Calendar Event", "캘린더 일정 편집"))
             .accessibilityIdentifier("calendar.editLinkedEvent")
         } else if let todo = item.linkedTodo {
             Button { presentTodo(todo) } label: {
-                Image(systemName: "checklist").foregroundStyle(AppTheme.accent).frame(minWidth: 30, minHeight: 30)
+                Image(systemName: "checklist").foregroundStyle(AppTheme.accent)
+                    .frame(minWidth: minimumSize, minHeight: minimumSize)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel(calendarCopy("calendar.openLinkedTodo", "Open Linked To-do", "연결된 할 일 열기"))

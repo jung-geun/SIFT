@@ -247,6 +247,11 @@ final class FullCloudSyncService: ObservableObject {
     @Published private(set) var restoredItemCount = 0
     @Published private(set) var isRecordingDeferred = false
     @Published private(set) var hasFinishedInitialRestore = false
+    @Published private(set) var conflicts = [CloudSyncConflict]()
+    @Published private(set) var retainedConflicts = [CloudSyncConflict]()
+    private var conflictArchive: CloudSyncConflictArchive?
+    private var conflictContexts: (app: ModelContext, email: ModelContext, meeting: ModelContext)?
+    private var resolvingConflict = false
 
     private var cloudContainer: ModelContainer?
     private var legacyContainer: ModelContainer?
@@ -264,6 +269,7 @@ final class FullCloudSyncService: ObservableObject {
     private var cachedModelRecords = [String: Data]()
     private var cachedModelDigests = [String: String]()
     private var cachedModelConflicts = Set<String>()
+    private var cachedModelSnapshot = CloudModelCodec.Snapshot()
     private var modelChangeVersion = 0
     private var rerunForLocalSave = false
     lazy var connectionSync = FullCloudConnectionSync(operations: [
@@ -290,8 +296,192 @@ final class FullCloudSyncService: ObservableObject {
     private init() {
         root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         fileStore = CloudFileStore(root: root)
+        loadConflictArchive()
     }
 
+
+    #if DEBUG || SIFT_QA
+    /// Isolated native QA uses the actual codec, journal and resolver, never a
+    /// credential bypass on persistent user stores.
+    init(conflictApp: ModelContext, conflictEmail: ModelContext, conflictMeeting: ModelContext,
+         engine: FullCloudSyncEngine, archiveURL: URL) {
+        precondition([conflictApp, conflictEmail, conflictMeeting].allSatisfy {
+            $0.container.configurations.allSatisfy(\.isStoredInMemoryOnly)
+        })
+        root = archiveURL.deletingLastPathComponent()
+        fileStore = CloudFileStore(root: root)
+        self.engine = engine
+        conflictContexts = (conflictApp, conflictEmail, conflictMeeting)
+        conflictArchive = CloudSyncConflictArchive(url: archiveURL)
+        retainedConflicts = (try? conflictArchive?.load()) ?? []
+    }
+    #endif
+
+    private func loadConflictArchive() {
+        guard let account = UserDefaults.standard.string(forKey: UserCloudSyncPolicy.accountKey),
+              !account.isEmpty else { return }
+        let url = root.appendingPathComponent("CloudSyncConflicts", isDirectory: true)
+            .appendingPathComponent(CloudFileStore.digest(Data(account.utf8)) + ".json")
+        conflictArchive = CloudSyncConflictArchive(url: url)
+        do { retainedConflicts = try conflictArchive!.load() }
+        catch {
+            // Never replace an unreadable recovery file with an empty history.
+            DiagnosticRecorder.shared.record(error: error, component: "sync.fullData", operation: "readConflictHistory")
+        }
+    }
+
+    private func reviewContexts() throws -> (app: ModelContext, email: ModelContext, meeting: ModelContext) {
+        if let conflictContexts { return conflictContexts }
+        guard UserCloudSyncPolicy.isEnabled, let data = AppDataContainer.shared,
+              data.isPersistentStoreAvailable else { throw CloudSyncConflictError.syncUnavailable }
+        let contexts = (app: ModelContext(data.container), email: ModelContext(data.emailContainer),
+                        meeting: ModelContext(data.meetingContainer))
+        for context in [contexts.app, contexts.email, contexts.meeting] { context.autosaveEnabled = false }
+        return contexts
+    }
+
+    private func reviewSnapshot(_ contexts: (app: ModelContext, email: ModelContext, meeting: ModelContext)) throws -> CloudModelCodec.Snapshot {
+        var snapshot = try CloudModelCodec.capture(app: contexts.app, email: contexts.email, meeting: contexts.meeting)
+        if let legacyContainer, let engine {
+            let legacy = try CloudModelCodec.captureMain(ModelContext(legacyContainer))
+            for key in legacy.conflictingKeys where snapshot.versions[key] == nil && engine.journal.items[key] == nil {
+                snapshot.conflictingKeys.insert(key)
+                snapshot.versions[key] = legacy.versions[key]
+                snapshot.origins[key] = .legacy
+            }
+        }
+        return snapshot
+    }
+
+    func refreshConflicts() async throws {
+        if conflictArchive == nil { loadConflictArchive() }
+        if let conflictArchive { retainedConflicts = try conflictArchive.load() }
+        guard let engine else { throw CloudSyncConflictError.syncUnavailable }
+        guard !resolvingConflict else { throw CloudSyncConflictError.busy }
+        let generation = accountGeneration
+        let localVersion = modelChangeVersion
+        let contexts = try reviewContexts()
+        let snapshot = try reviewSnapshot(contexts)
+        let reviewed = try await engine.modelConflicts(local: snapshot)
+        let fresh = try reviewSnapshot(contexts)
+        guard generation == accountGeneration, localVersion == modelChangeVersion,
+              snapshot.versions.mapValues(Set.init) == fresh.versions.mapValues(Set.init) else {
+            throw CloudSyncConflictError.staleSelection
+        }
+        conflicts = reviewed
+        clearResolvedError()
+    }
+
+    private func retainedVersions(_ conflict: CloudSyncConflict) throws -> [CloudSyncConflictVersion] {
+        var seen = Set<String>()
+        var versions = [CloudSyncConflictVersion]()
+        for original in conflict.versions {
+            // Durable entries retain original provenance. Review identity is
+            // only the item and bytes, never a recursively wrapped history ID.
+            let version = try CloudModelCodec.reviewVersion(key: conflict.itemKey, payload: original.payload,
+                origin: .retained, source: conflict.itemKey)
+            if seen.insert(version.id).inserted { versions.append(version) }
+        }
+        return versions.sorted { $0.id < $1.id }
+    }
+
+    private func currentReview(key: String, retained: [CloudSyncConflictVersion] = [],
+                               contexts: (app: ModelContext, email: ModelContext, meeting: ModelContext)) async throws -> CloudSyncConflict {
+        guard let engine else { throw CloudSyncConflictError.syncUnavailable }
+        let before = try reviewSnapshot(contexts)
+        var versions = try before.versions[key, default: []].map {
+            try CloudModelCodec.reviewVersion(key: key, payload: $0,
+                origin: before.origins[key] ?? .local, source: before.origins[key] == .legacy ? "legacy" : "local")
+        }
+        if versions.isEmpty && (engine.journal.items[key] != nil || !retained.isEmpty) {
+            versions.append(try CloudModelCodec.reviewVersion(key: key, payload: nil, origin: .local, source: "local"))
+        }
+        versions += try await engine.cloudVersions(key: key)
+        let after = try reviewSnapshot(contexts)
+        guard Set(before.versions[key, default: []]) == Set(after.versions[key, default: []]) else {
+            throw CloudSyncConflictError.staleSelection
+        }
+        versions += retained
+        return CloudSyncConflict(key: key, versions: versions)
+    }
+
+    func reviewRetainedConflict(_ retained: CloudSyncConflict) async throws -> CloudSyncConflict {
+        guard !synchronizing, !resolvingConflict else { throw CloudSyncConflictError.busy }
+        guard let saved = try conflictArchive?.load().first(where: { $0.id == retained.id }),
+              saved == retained else { throw CloudSyncConflictError.versionUnavailable }
+        return try await currentReview(key: saved.itemKey, retained: retainedVersions(saved), contexts: reviewContexts())
+    }
+
+    func resolveConflict(_ conflict: CloudSyncConflict, selecting versionID: String,
+                         save: @MainActor (ModelContext) throws -> Void = { try $0.save() }) async throws {
+        guard !synchronizing, !resolvingConflict else { throw CloudSyncConflictError.busy }
+        guard !MeetingCaptureCoordinator.hasActiveCaptureForCloudSync else { throw CloudSyncConflictError.recordingActive }
+        guard let engine, let conflictArchive else { throw CloudSyncConflictError.syncUnavailable }
+        let generation = accountGeneration
+        let localVersion = modelChangeVersion
+        let contexts = try reviewContexts()
+        let requestedRetained = conflict.versions.filter { $0.origin == .retained }
+        let history = try conflictArchive.load()
+        let availableRetained = try history.flatMap { try retainedVersions($0) }
+        guard requestedRetained.allSatisfy({ availableRetained.contains($0) }) else {
+            throw CloudSyncConflictError.versionUnavailable
+        }
+        resolvingConflict = true
+        defer { resolvingConflict = false }
+        let current = try await currentReview(key: conflict.itemKey, retained: requestedRetained, contexts: contexts)
+        guard generation == accountGeneration, localVersion == modelChangeVersion,
+              current.fingerprint == conflict.fingerprint else {
+            throw CloudSyncConflictError.staleSelection
+        }
+        guard let selected = current.versions.first(where: { $0.id == versionID }) else {
+            throw CloudSyncConflictError.versionUnavailable
+        }
+        // Envelope history cannot recover child audio directories destroyed by
+        // a meeting tombstone. Whole-meeting deletion remains the dedicated
+        // meeting flow with its drain, rollback and original-track handling.
+        if selected.payload == nil, try CloudModelCodec.meetingID(for: current.itemKey) != nil {
+            throw CloudSyncConflictError.dependentContentUnavailable
+        }
+        retainedConflicts = try conflictArchive.retain(current)
+        let isAuthorized: @Sendable () -> Bool
+        if conflictContexts != nil { isAuthorized = { true } }
+        else { isAuthorized = UserCloudSyncPolicy.captureAuthorization() }
+        let valid = {
+            generation == self.accountGeneration && isAuthorized()
+                && !MeetingCaptureCoordinator.hasActiveCaptureForCloudSync
+        }
+        let ignored = Set([contexts.app, contexts.email, contexts.meeting].map(ObjectIdentifier.init))
+        ignoredSaveContexts.formUnion(ignored)
+        defer { ignoredSaveContexts.subtract(ignored) }
+        var canonicalCommitted = false
+        do {
+            try engine.resolve(key: current.itemKey, payload: selected.payload,
+                expectedCloudVersions: current.versions.filter { $0.origin == .cloud }, isValid: valid,
+                isApplied: { canonicalCommitted }, apply: {
+                try self.applyModelRecord(key: current.itemKey, payload: selected.payload,
+                    app: contexts.app, email: contexts.email, meeting: contexts.meeting,
+                    isAuthorized: isAuthorized, save: { context in
+                        try save(context)
+                        canonicalCommitted = true
+                    }, resolvingConflict: true)
+            })
+        } catch {
+            modelDataDirty = true
+            throw error
+        }
+        modelDataDirty = true
+        modelChangeVersion += 1
+        conflicts.removeAll { $0.itemKey == current.itemKey }
+        cachedModelConflicts.remove(current.itemKey)
+        queuedSequence &+= 1
+        lastEnqueueDate = Date()
+        isQueuedForCloud = true
+        SettingsStore.shared.didRestoreFullCloudPreferences()
+        MemoryService.shared.invalidateCache()
+        NotificationCenter.default.post(name: UserCloudSyncPolicy.didRestoreNotification, object: nil)
+        clearResolvedError()
+        schedule()
+    }
     func configure(vocabulary: UserVocabularyService) { vocabularyService = vocabulary }
 
     /// Storage consent neither installs models nor grants OS or external-AI access.
@@ -346,6 +536,8 @@ final class FullCloudSyncService: ObservableObject {
                 Task { @MainActor [weak self] in
                     UserDefaults.standard.set(false, forKey: UserCloudSyncPolicy.syncKey)
                     self?.stop()
+                    self?.conflictArchive = nil
+                    self?.retainedConflicts = []
                 }
             }
         defaultsSubscription = NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)
@@ -416,6 +608,8 @@ final class FullCloudSyncService: ObservableObject {
         cachedModelRecords = [:]
         cachedModelDigests = [:]
         cachedModelConflicts = []
+        cachedModelSnapshot = CloudModelCodec.Snapshot()
+        conflicts = []
         connectionSync.reset()
         hasFinishedInitialRestore = false
         failureState = FullCloudSyncFailureState()
@@ -470,7 +664,7 @@ final class FullCloudSyncService: ObservableObject {
     }
 
     func synchronizeNow() async throws {
-        guard UserCloudSyncPolicy.isRequested, !synchronizing else { return }
+        guard UserCloudSyncPolicy.isRequested, !synchronizing, !resolvingConflict else { return }
         guard !Self.usesSyntheticEnvironment else { throw CancellationError() }
         let generation = accountGeneration
         var failureChannel = FullCloudSyncFailureState.Channel.preparation
@@ -565,6 +759,7 @@ final class FullCloudSyncService: ObservableObject {
         shadowStoreID = shadowID
         legacyStoreID = importID
         engine = reconciliation
+        loadConflictArchive()
         cloudContainer = model
         legacyContainer = legacy
         ignoredSaveContexts.insert(ObjectIdentifier(cloudContext))
@@ -611,11 +806,16 @@ final class FullCloudSyncService: ObservableObject {
                 let legacy = try CloudModelCodec.captureMain(ModelContext(legacyContainer))
                 for key in legacy.conflictingKeys where snapshot.records[key] == nil && engine.journal.items[key] == nil {
                     snapshot.conflictingKeys.insert(key)
+                    if snapshot.versions[key] == nil {
+                        snapshot.versions[key] = legacy.versions[key]
+                        snapshot.origins[key] = .legacy
+                    }
                 }
                 for (key, payload) in legacy.records where snapshot.records[key] == nil
                     && !snapshot.conflictingKeys.contains(key) && engine.journal.items[key] == nil {
                     try CloudModelCodec.apply(key: key, payload: payload, app: app, email: email, meeting: meeting)
                     snapshot.records[key] = payload
+                    snapshot.versions[key] = [payload]
                 }
                 if app.hasChanges { try app.save() }
             }
@@ -626,14 +826,22 @@ final class FullCloudSyncService: ObservableObject {
             cachedModelRecords = snapshot.records
             cachedModelDigests = snapshot.records.mapValues(CloudFileStore.digest)
             cachedModelConflicts = snapshot.conflictingKeys
+            cachedModelSnapshot = snapshot
             modelDataDirty = false
         }
+        // Cloud envelope metadata can change without local edits. Reuse the
+        // dirty-gated portable snapshot instead of re-encoding all mail bodies
+        // and meeting transcripts on every maintenance pass.
+        let reviewed = try await engine.modelConflicts(local: cachedModelSnapshot)
+        guard modelVersion == modelChangeVersion, accountVersion == accountGeneration else { throw CancellationError() }
+        conflicts = reviewed
+        let heldConflictKeys = cachedModelConflicts.union(reviewed.map(\.itemKey)).union(engine.unavailableConflictKeys)
         var records = cachedModelRecords
         let preferences = try CloudPreferenceStore.capture()
         records.merge(preferences) { _, value in value }
         let routineStore = RoutineStore.shared
         // Routine acceptance must not choose an arbitrary local task version.
-        let canReconcileAcceptances = !cachedModelConflicts.contains { $0.hasPrefix("Todo/") }
+        let canReconcileAcceptances = !heldConflictKeys.contains { $0.hasPrefix("Todo/") }
         if canReconcileAcceptances {
             try routineStore.reconcileAcceptances(todos: app.fetch(FetchDescriptor<Todo>()))
         }
@@ -655,13 +863,13 @@ final class FullCloudSyncService: ObservableObject {
                 NotificationCenter.default.post(name: UserCloudSyncPolicy.didRestoreNotification, object: nil)
             }
         }
-        let heldMeetingIDs = try Set(cachedModelConflicts.compactMap { key in
+        let heldMeetingIDs = try Set(heldConflictKeys.compactMap { key in
             try CloudModelCodec.meetingID(for: key).map { Substring($0) }
         })
         let meetingFilePrefix = "file/Meetings/"
         let meetingFilePrefixCount = meetingFilePrefix.count
         try await engine.reconcile(digests: digests,
-            temporarilyUnavailable: cachedModelConflicts.union(["file/LocalRoutines/routines.json"]),
+            temporarilyUnavailable: heldConflictKeys.union(["file/LocalRoutines/routines.json"]),
             isTemporarilyUnavailable: { key in
                 guard !heldMeetingIDs.isEmpty, key.hasPrefix(meetingFilePrefix) else { return false }
                 let meetingID = key.dropFirst(meetingFilePrefixCount).prefix { $0 != "/" }
@@ -719,14 +927,15 @@ final class FullCloudSyncService: ObservableObject {
         if canReconcileAcceptances {
             try routineStore.reconcileAcceptances(todos: app.fetch(FetchDescriptor<Todo>()))
         }
-        return cachedModelConflicts.isEmpty
+        return heldConflictKeys.isEmpty
     }
 
     func applyModelRecord(key: String, payload: Data?, app: ModelContext,
                           email: ModelContext, meeting: ModelContext,
                           meetingRootURL: URL = AppDataContainer.meetingDirectory(),
                           isAuthorized: @Sendable () -> Bool,
-                          save: @MainActor (ModelContext) throws -> Void = { try $0.save() }) throws {
+                          save: @MainActor (ModelContext) throws -> Void = { try $0.save() },
+                          resolvingConflict: Bool = false) throws {
         let meetingID = try CloudModelCodec.meetingID(for: key)
         var deletedIDs = Set<String>()
         var newlyFenced = [String]()
@@ -747,7 +956,8 @@ final class FullCloudSyncService: ObservableObject {
                         isAuthorized: isAuthorized)
                 }
             }
-            try CloudModelCodec.apply(key: key, payload: payload, app: app, email: email, meeting: meeting)
+            try CloudModelCodec.apply(key: key, payload: payload, app: app, email: email, meeting: meeting,
+                resolvingConflict: resolvingConflict)
             guard isAuthorized() else { throw CancellationError() }
             if app.hasChanges { try save(app) }
             if email.hasChanges { try save(email) }
@@ -845,8 +1055,8 @@ final class FullCloudSyncService: ObservableObject {
 
     private var modelConflictMessage: String {
         AppLanguage.localized("settings.sync.full.identityConflict",
-            defaultValue: "내용이 서로 다른 중복 항목의 동기화만 보류했습니다. 원본은 보존하며 다른 데이터는 계속 동기화를 시도합니다. 기기 인증을 다시 승인해도 이 충돌은 해결되지 않습니다.",
-            language: .current, comment: "Conflicting identities are held, not deleted or treated as completed. No private record key is shown.")
+            defaultValue: "내용이 다른 중복 항목의 동기화를 보류했습니다. 아래 ‘동기화 충돌’에서 버전을 비교해 사용할 내용을 선택하세요. 원본은 보존하며 다른 데이터는 계속 동기화를 시도합니다.",
+            language: .current, comment: "Held identities link to the explicit version comparison below; originals and unrelated synchronization are preserved.")
     }
 
     private func clearResolvedError() {
@@ -855,7 +1065,7 @@ final class FullCloudSyncService: ObservableObject {
                 defaultValue: "전체 iCloud 동기화를 완료하지 못했습니다. 데이터는 기기에 보존됩니다. iCloud 로그인·저장공간·키체인 상태를 확인한 후 다시 시도하세요.",
                 language: .current, comment: "Full sync failure without private content or credentials.")
         } else {
-            errorMessage = cachedModelConflicts.isEmpty && failureState.failures.isEmpty ? nil : modelConflictMessage
+            errorMessage = cachedModelConflicts.isEmpty && conflicts.isEmpty && failureState.failures.isEmpty ? nil : modelConflictMessage
         }
     }
 

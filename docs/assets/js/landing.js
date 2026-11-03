@@ -20,9 +20,6 @@
     const updateOrientation = () => tablist.setAttribute('aria-orientation', wideLayout.matches ? 'vertical' : 'horizontal');
     updateOrientation();
     wideLayout.addEventListener('change', updateOrientation);
-    if (!tablist.hasAttribute('aria-label') && !tablist.hasAttribute('aria-labelledby')) {
-      tablist.setAttribute('aria-label', '앱 화면');
-    }
     tabs.forEach((tab, index) => {
       tab.setAttribute('role', 'tab');
       tab.setAttribute('aria-controls', panels[index].id);
@@ -151,7 +148,7 @@
     if (motionToggle) {
       motionToggle.hidden = reduced;
       motionToggle.setAttribute('aria-pressed', String(stopped));
-      motionToggle.textContent = stopped ? '모션 재생' : '모션 멈추기';
+      motionToggle.textContent = stopped ? motionToggle.dataset.playLabel : motionToggle.dataset.pauseLabel;
     }
     replayButtons.forEach((button) => {
       button.hidden = reduced;

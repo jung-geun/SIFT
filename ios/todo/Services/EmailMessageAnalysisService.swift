@@ -2,31 +2,74 @@ import CryptoKit
 import Foundation
 import SwiftData
 
+struct EmailAnalysisOutcome<Value> {
+    let value: Value
+    let executionPath: AnalysisExecutionPath
+}
+
 
 enum EmailAnalysisContract {
-    static let summaryContractVersion = 7
+    static let summaryContractVersion = 8
 
+    /// Normalize presentation whitespace, not evidence. A signature separator or
+    /// quoted section can precede a current obligation, so neither removes source.
     static func normalizedBody(_ body: String) -> String {
         unescapedWhitespace(in: body)
-            .components(separatedBy: .newlines)
-            .prefix { line in !line.trimmingCharacters(in: .whitespaces).hasPrefix("--") }
-            .filter { line in
-                let trimmed = line.trimmingCharacters(in: .whitespaces)
-                return !trimmed.hasPrefix(">") && !trimmed.localizedCaseInsensitiveContains("cid:")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func uniqueItems(_ items: [String]) -> [String] {
+        var seen = Set<String>()
+        return items.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && seen.insert($0).inserted }
+    }
+
+    static func normalizedActionText(_ text: String) -> String {
+        text.precomposedStringWithCanonicalMapping
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+            .lowercased()
+    }
+
+    static func actionIdentifier(_ action: String) -> String {
+        SHA256.hash(data: Data(normalizedActionText(action).utf8))
+            .map { String(format: "%02x", $0) }.joined()
+    }
+
+    static func currentActionItems(for email: EmailMessage) -> [String] {
+        guard isCurrentAnalysis(email), email.analysisFailureReasonRaw == nil else { return [] }
+        return uniqueItems(email.analysisActionItems)
+    }
+
+    static func todoCandidate(for email: EmailMessage) -> Bool? {
+        guard isCurrentAnalysis(email), email.analysisFailureReasonRaw == nil else { return nil }
+        return !currentActionItems(for: email).isEmpty
+    }
+
+    /// Bounded model contexts overlap at boundaries, but never drop a source
+    /// section. Prefer paragraph/line boundaries so quoted context stays visible.
+    static func bodyChunks(_ body: String, characterLimit: Int = 1_800, overlap: Int = 200) -> [String] {
+        precondition(characterLimit > overlap && overlap >= 0)
+        var chunks: [String] = []
+        var start = body.startIndex
+        while start < body.endIndex {
+            var end = body.index(start, offsetBy: characterLimit, limitedBy: body.endIndex) ?? body.endIndex
+            if end < body.endIndex {
+                let lower = body.index(start, offsetBy: max(overlap + 1, characterLimit / 2))
+                if let boundary = body[lower..<end].lastIndex(of: "\n") {
+                    end = body.index(after: boundary)
+                }
             }
-            .map {
-                $0
-                    .replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression)
-                    .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-            }
-            .filter { !$0.isEmpty }
-            .joined(separator: "\n")
+            chunks.append(String(body[start..<end]))
+            guard end < body.endIndex else { break }
+            start = body.index(end, offsetBy: -overlap, limitedBy: start) ?? end
+        }
+        return chunks
     }
 
     static func fingerprint(subject: String, body: String) -> String {
-        // Native triage consumes original evidence, including quoted/signature text.
-        // Salt with the contract version to invalidate legacy Boolean predicate caches.
+        // Hash complete evidence, not a model context window or presentation summary.
+        // The version invalidates legacy independent Boolean recommendations.
         return SHA256.hash(
             data: Data("\(summaryContractVersion)\u{0}\(subject)\u{0}\(body)".utf8)
         )
@@ -47,8 +90,9 @@ enum EmailAnalysisContract {
         subject: String,
         body: String
     ) -> Bool {
-        !normalizedBody(body).isEmpty
-            && email.analysisState == .analyzed
+        // Contract 8 only analyzes complete bodies. Its current version and exact
+        // source fingerprint also attest a synced result without a local fetch.
+        !normalizedBody(body).isEmpty && email.analysisState == .analyzed
             && email.analysisVersion == summaryContractVersion
             && email.analyzedBodyFingerprint == fingerprint(
                 subject: subject,
@@ -75,7 +119,7 @@ enum EmailAnalysisContract {
         let sentences = informativeSentences(from: normalizedBody(body))
         guard !sentences.isEmpty else {
             return EmailSummaryResult(
-                summary: subject.trimmingCharacters(in: .whitespacesAndNewlines),
+                summary: normalizedBody(body),
                 keyPoints: [],
                 actionItems: []
             )
@@ -200,36 +244,19 @@ final class EmailMessageAnalysisService {
     ) async throws -> EmailSummaryResult
     typealias FoundationModelsEnabledProvider = @MainActor () -> Bool
     typealias FoundationModelsAvailabilityProvider = @MainActor () -> Bool
-    /// Persist candidate as true and notCandidate as false; uncertain or unavailable stays
-    /// nil with no candidate fingerprint, so it remains reviewable and never renders negative.
-    typealias TodoCandidateProvider = @MainActor (String, String, String) async throws -> EmailCandidateOutcome?
 
     private let foundationModelsSummaryProvider: FoundationModelsSummaryProvider
     private let foundationModelsEnabledProvider: FoundationModelsEnabledProvider
     private let foundationModelsAvailabilityProvider: FoundationModelsAvailabilityProvider
-    private let todoCandidateProvider: TodoCandidateProvider
 
     init(
         foundationModelsSummaryProvider: FoundationModelsSummaryProvider? = nil,
         foundationModelsEnabledProvider: @escaping FoundationModelsEnabledProvider = { BetaFeaturePolicy().authorizes(.foundationModels, for: .emailAnalysis) },
-        foundationModelsAvailabilityProvider: FoundationModelsAvailabilityProvider? = nil,
-        todoCandidateProvider: @escaping TodoCandidateProvider = { subject, sender, body in
-            try Task.checkCancellation()
-            let laya = LayaDecisionService.shared
-            guard BetaFeaturePolicy().authorizes(.laya, for: .layaModelManagement),
-                  laya.isCapable, laya.isModelInstalled,
-                  !laya.isLoading, !laya.isDeleting else { return nil }
-            let outcome = try await LayaEmailDecisionService().candidateOutcome(
-                subject: subject, sender: sender, body: body
-            )
-            try Task.checkCancellation()
-            return outcome
-        }
+        foundationModelsAvailabilityProvider: FoundationModelsAvailabilityProvider? = nil
     ) {
         self.foundationModelsSummaryProvider = foundationModelsSummaryProvider ?? Self.summarizeWithFoundationModels
         self.foundationModelsEnabledProvider = foundationModelsEnabledProvider
         self.foundationModelsAvailabilityProvider = foundationModelsAvailabilityProvider ?? Self.foundationModelsAvailable
-        self.todoCandidateProvider = todoCandidateProvider
     }
 
     func analyze(
@@ -237,6 +264,7 @@ final class EmailMessageAnalysisService {
         context: ModelContext,
         language: AppLanguage = .current
     ) async throws {
+        try Task.checkCancellation()
         let key = EmailMessageKey(email)
         let originalModelID = email.persistentModelID
         guard activeKeys.insert(key).inserted else { return }
@@ -247,7 +275,14 @@ final class EmailMessageAnalysisService {
             subject: email.subject,
             body: email.body
         )
-        guard !source.isEmpty else {
+        let shouldRetryRuleFallback = shouldRetryRuleFallback(email)
+        let needsSummary = email.analysisState != .analyzed
+            || email.analyzedBodyFingerprint != fingerprint
+            || email.analysisVersion != EmailAnalysisContract.summaryContractVersion
+            || shouldRetryRuleFallback
+        guard needsSummary else { return }
+        guard email.hasCompleteBody, !source.isEmpty else {
+            if EmailAnalysisContract.isCurrentAnalysis(email) { return }
             persistFailure(
                 email,
                 context: context,
@@ -260,15 +295,6 @@ final class EmailMessageAnalysisService {
                     comment: "Email analysis missing body error"
                 )
             )
-            return
-        }
-        let shouldRetryRuleFallback = shouldRetryRuleFallback(email)
-        let needsSummary = email.analysisState != .analyzed
-            || email.analyzedBodyFingerprint != fingerprint
-            || email.analysisVersion != EmailAnalysisContract.summaryContractVersion
-            || shouldRetryRuleFallback
-        guard needsSummary else {
-            try await classifyInbox(email, key: key, fingerprint: fingerprint, body: email.body, context: context)
             return
         }
 
@@ -303,7 +329,7 @@ final class EmailMessageAnalysisService {
                 return
             }
 
-            let result = outcome.value
+            let result = outcome.value.normalized
             switch outcome.executionPath {
             case .rules(let reason):
                 currentEmail.analysisFailureReasonRaw = reason.rawValue
@@ -325,6 +351,8 @@ final class EmailMessageAnalysisService {
             currentEmail.analyzedBodyFingerprint = fingerprint
             currentEmail.analysisVersion = EmailAnalysisContract.summaryContractVersion
             currentEmail.analyzedAt = Date()
+            currentEmail.analysisTodoCandidate = currentEmail.analysisFailureReasonRaw == nil ? !result.actionItems.isEmpty : nil
+            currentEmail.analysisTodoCandidateFingerprint = currentEmail.analysisTodoCandidate == nil ? "" : fingerprint
             guard save(context) else {
                 persistFailure(
                     currentEmail,
@@ -366,10 +394,27 @@ final class EmailMessageAnalysisService {
             currentEmail.analysisFailureReasonRaw = ProviderErrorMapper.fallbackReason(for: error)?.rawValue
             persistFailure(currentEmail, context: context, message: error.localizedDescription)
         }
-        if let currentEmail = try resolvedEmail(matching: key, in: context),
-           currentEmail.analysisState == .analyzed {
-            try await classifyInbox(currentEmail, key: key, fingerprint: fingerprint, body: currentEmail.body, context: context)
+    }
+
+    /// The same complete-body structured analysis used by opted-in ingestion.
+    /// A disabled/unavailable provider yields factual rules with no invented tasks.
+    func summarizeContent(
+        subject: String,
+        sender: String,
+        body: String,
+        allowFoundationModels: Bool,
+        language: AppLanguage = .current
+    ) async throws -> EmailSummaryResult {
+        let source = EmailAnalysisContract.normalizedBody(body)
+        guard !source.isEmpty else {
+            return EmailSummaryResult(summary: "", keyPoints: [], actionItems: [])
         }
+        guard allowFoundationModels else {
+            return EmailAnalysisContract.deterministicSummary(subject: subject, body: source, language: language)
+        }
+        return try await summarize(
+            subject: subject, sender: sender, body: source, language: language
+        ).value.normalized
     }
     private func summarize(
         subject: String,
@@ -453,49 +498,6 @@ final class EmailMessageAnalysisService {
     }
 
 
-    private func classifyInbox(
-        _ email: EmailMessage,
-        key: EmailMessageKey,
-        fingerprint: String,
-        body: String,
-        context: ModelContext
-    ) async throws {
-        guard email.isInInbox,
-              email.analysisTodoCandidate == nil || email.analysisTodoCandidateFingerprint != fingerprint
-        else { return }
-        let subject = email.subject
-        let sender = email.from
-        let outcome: EmailCandidateOutcome?
-        do {
-            try Task.checkCancellation()
-            outcome = try await todoCandidateProvider(subject, sender, body)
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch {
-            try Task.checkCancellation()
-            return
-        }
-        try Task.checkCancellation()
-        guard let currentEmail = try resolvedEmail(matching: key, in: context),
-              !discardAnalysisIfSourceChanged(currentEmail, expectedFingerprint: fingerprint, context: context)
-        else { return }
-        // Sender changes are not in the shared body fingerprint; compare all original
-        // inference fields after suspension before committing the recommendation.
-        guard currentEmail.subject == subject, currentEmail.from == sender, currentEmail.body == body else {
-            EmailAnalysisContract.resetAnalysis(currentEmail)
-            _ = save(context)
-            return
-        }
-        let candidate: Bool?
-        switch outcome {
-        case .candidate?: candidate = true
-        case .notCandidate?: candidate = false
-        case .uncertain?, nil: candidate = nil
-        }
-        currentEmail.analysisTodoCandidate = candidate
-        currentEmail.analysisTodoCandidateFingerprint = candidate == nil ? "" : fingerprint
-        _ = save(context)
-    }
 
     private func resolvedEmail(
         matching key: EmailMessageKey,
@@ -523,9 +525,11 @@ final class EmailMessageAnalysisService {
             subject: email.subject,
             body: email.body
         )
-        guard currentFingerprint != expectedFingerprint else { return false }
-        EmailAnalysisContract.resetAnalysis(email)
-        _ = save(context)
+        guard !email.hasCompleteBody || currentFingerprint != expectedFingerprint else { return false }
+        if !EmailAnalysisContract.isCurrentAnalysis(email) {
+            EmailAnalysisContract.resetAnalysis(email)
+            _ = save(context)
+        }
         return true
     }
 
@@ -546,4 +550,12 @@ struct EmailSummaryResult: Sendable {
     let summary: String
     let keyPoints: [String]
     let actionItems: [String]
+
+    var normalized: EmailSummaryResult {
+        EmailSummaryResult(
+            summary: summary.trimmingCharacters(in: .whitespacesAndNewlines),
+            keyPoints: EmailAnalysisContract.uniqueItems(keyPoints),
+            actionItems: EmailAnalysisContract.uniqueItems(actionItems)
+        )
+    }
 }

@@ -418,6 +418,14 @@ struct GmailServiceTests {
         }
     }
 
+    private func seedMutationAccount() {
+        let payload = Data(#"{"email":"mutation@example.com"}"#.utf8).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        seedGmailToken(account: "id_token", value: "e30.\(payload).synthetic-signature")
+    }
+
     private func seedGmailToken(account: String, value: String) {
         // A fresh authorized fixture, not an OAuth refresh or legacy migration,
         // may replace the preceding test's durable local sign-out fence.
@@ -536,6 +544,7 @@ struct GmailServiceTests {
         }
         // 1. 토큰 설정
         seedGmailTokens()
+        seedMutationAccount()
 
         // 2. Mock 설정: 403 Forbidden
         MockURLProtocol.requestHandler = { request in
@@ -552,7 +561,7 @@ struct GmailServiceTests {
 
         // 3. 실행 및 검증
         await #expect(throws: EmailError.apiFailed) {
-            try await sut.markAsRead(messageID: "test-msg-id")
+            try await sut.markAsRead(messageID: "test-msg-id", expectedAccountNamespace: "mutation@example.com")
         }
         }
     }
@@ -567,9 +576,10 @@ struct GmailServiceTests {
         }
 
         seedGmailTokens(scopeVersion: nil)
+        seedMutationAccount()
 
         await #expect(throws: EmailError.notAuthenticated) {
-            try await sut.markAsRead(messageID: "msg-old-scope")
+            try await sut.markAsRead(messageID: "msg-old-scope", expectedAccountNamespace: "mutation@example.com")
         }
 
         #expect(KeychainStore.get(service: "pieroot.todo.gmail", account: "access_token") == nil)
@@ -588,6 +598,7 @@ struct GmailServiceTests {
         }
 
         seedGmailTokens()
+        seedMutationAccount()
         var capturedMethod: String?
         var capturedRemoveLabelIDs: [String]?
 
@@ -607,7 +618,7 @@ struct GmailServiceTests {
             return (response, "{}".data(using: .utf8))
         }
 
-        try await sut.markAsRead(messageID: "msg-read")
+        try await sut.markAsRead(messageID: "msg-read", expectedAccountNamespace: "mutation@example.com")
 
         #expect(capturedMethod == "POST")
         #expect(capturedRemoveLabelIDs == ["UNREAD"])
@@ -624,6 +635,7 @@ struct GmailServiceTests {
         }
 
         seedGmailTokens()
+        seedMutationAccount()
         var capturedMethod: String?
         var capturedPath: String?
 
@@ -640,7 +652,7 @@ struct GmailServiceTests {
             return (response, "{}".data(using: .utf8))
         }
 
-        try await sut.trashMessage(messageID: "msg-trash")
+        try await sut.trashMessage(messageID: "msg-trash", expectedAccountNamespace: "mutation@example.com")
 
         #expect(capturedMethod == "POST")
         #expect(capturedPath?.hasSuffix("/messages/msg-trash/trash") == true)
@@ -1852,16 +1864,17 @@ struct GmailServiceTests {
             resetSharedState()
             defer { resetSharedState() }
             seedGmailTokens()
+            seedMutationAccount()
             seedGmailToken(account: "access_token_expires_at", value: String(Date().addingTimeInterval(3600).timeIntervalSince1970))
             var paths: [String] = []
             MockURLProtocol.requestHandler = { request in
                 paths.append(request.url!.path)
                 return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data("{}".utf8))
             }
-            try await sut.markAsRead(messageID: "ff", expectedGlobalMessageID: "255")
-            try await sut.trashMessage(messageID: "ff", expectedGlobalMessageID: "255")
-            await #expect(throws: MailboxMutationError.self) { try await sut.trashMessage(messageID: "ff", expectedGlobalMessageID: "256") }
-            await #expect(throws: EmailError.apiFailed) { try await sut.markAsRead(messageID: "../threads/wrong") }
+            try await sut.markAsRead(messageID: "ff", expectedGlobalMessageID: "255", expectedAccountNamespace: "mutation@example.com")
+            try await sut.trashMessage(messageID: "ff", expectedGlobalMessageID: "255", expectedAccountNamespace: "mutation@example.com")
+            await #expect(throws: MailboxMutationError.self) { try await sut.trashMessage(messageID: "ff", expectedGlobalMessageID: "256", expectedAccountNamespace: "mutation@example.com") }
+            await #expect(throws: EmailError.apiFailed) { try await sut.markAsRead(messageID: "../threads/wrong", expectedAccountNamespace: "mutation@example.com") }
             #expect(paths == ["/gmail/v1/users/me/messages/ff/modify", "/gmail/v1/users/me/messages/ff/trash"])
         }
     }
@@ -1916,4 +1929,31 @@ struct GmailServiceTests {
         }
     }
     #endif
+}
+
+@MainActor
+extension GmailServiceTests {
+    @Test("OAuth mutations reject empty or mismatched account provenance before sending a request",
+          arguments: ["", "other@example.com"])
+    func oauthMutationRequiresMatchingAccount(expectedAccount: String) async throws {
+        await withIsolatedProviderState {
+            resetSharedState()
+            defer { resetSharedState() }
+            seedGmailTokens()
+            seedMutationAccount()
+            seedGmailToken(account: "access_token_expires_at", value: String(Date().addingTimeInterval(3600).timeIntervalSince1970))
+            var requests = 0
+            MockURLProtocol.requestHandler = { request in
+                requests += 1
+                return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data("{}".utf8))
+            }
+            await #expect(throws: EmailError.notAuthenticated) {
+                try await sut.markAsRead(messageID: "ff", expectedGlobalMessageID: "255", expectedAccountNamespace: expectedAccount)
+            }
+            await #expect(throws: EmailError.notAuthenticated) {
+                try await sut.trashMessage(messageID: "ff", expectedGlobalMessageID: "255", expectedAccountNamespace: expectedAccount)
+            }
+            #expect(requests == 0)
+        }
+    }
 }

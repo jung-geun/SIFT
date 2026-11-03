@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import SwiftData
 @testable import todo
 
 // MARK: - Foundation Models availability and deterministic adapters
@@ -14,22 +15,21 @@ import FoundationModels
 
 @available(iOS 26.0, *)
 private final class CapturingEmailRuntime: @unchecked Sendable, FoundationModelsRuntime {
-    private enum Output {
-        case summary(FMEmailSummaryOutput)
-        case deadline(FMEmailOutput)
-    }
-
-    private let output: Output
     private let lock = NSLock()
-    private var lastInstructions = ""
-    private var lastPrompt = ""
+    private var summaryCount = 0
+    private let summaryOutputs: [FMEmailSummaryOutput]
+    private var summaryFailureIndex: Int?
+    private var reviewDispositions: [FMEmailActionDisposition] = []
+    private var reviewCount = 0
 
-    init(output: FMEmailSummaryOutput) {
-        self.output = .summary(output)
-    }
 
-    init(output: FMEmailOutput) {
-        self.output = .deadline(output)
+
+    init(outputs: [FMEmailSummaryOutput], failingAt index: Int? = nil,
+         reviewDispositions: [FMEmailActionDisposition] = []) {
+        precondition(!outputs.isEmpty)
+        self.summaryOutputs = outputs
+        self.summaryFailureIndex = index
+        self.reviewDispositions = reviewDispositions
     }
 
     func rankTodos(
@@ -38,29 +38,33 @@ private final class CapturingEmailRuntime: @unchecked Sendable, FoundationModels
         options: GenerationOptions
     ) async throws -> FMPriorityRankingList { fatalError("unexpected runtime call") }
 
-    func analyzeEmail(
-        instructions: String,
-        userPrompt: String
-    ) async throws -> FMEmailOutput {
-        guard case .deadline(let output) = output else { fatalError("unexpected runtime call") }
-        lock.withLock {
-            lastInstructions = instructions
-            lastPrompt = userPrompt
-        }
-        return output
-    }
 
     func summarizeEmail(
         instructions: String,
         userPrompt: String
     ) async throws -> FMEmailSummaryOutput {
-        guard case .summary(let output) = output else { fatalError("unexpected runtime call") }
-        lock.withLock {
-            lastInstructions = instructions
-            lastPrompt = userPrompt
+        let index = lock.withLock {
+            let index = summaryCount
+            summaryCount += 1
+            return index
         }
-        return output
+        if index == summaryFailureIndex { throw NSError(domain: "section-failure", code: 1) }
+        return summaryOutputs[min(index, summaryOutputs.count - 1)]
     }
+
+    func reviewEmailActions(candidates: [EmailActionReviewCandidate], sourceSection: String) async throws -> FMEmailActionReviewOutput {
+        let index = lock.withLock {
+            let index = reviewCount
+            reviewCount += 1
+            return index
+        }
+        let disposition: FMEmailActionDisposition = reviewDispositions.isEmpty ? .unaffected
+            : reviewDispositions[min(index, reviewDispositions.count - 1)]
+        return FMEmailActionReviewOutput(reviews: candidates.map {
+            FMEmailActionReview(actionIndex: $0.index, disposition: disposition)
+        })
+    }
+
 
     func generatePersonaNarrative(
         instructions: String,
@@ -78,16 +82,7 @@ private final class CapturingEmailRuntime: @unchecked Sendable, FoundationModels
         options: GenerationOptions
     ) async throws -> FMTranscriptCorrectionOutput { fatalError("unexpected runtime call") }
 
-    func draftTodoFromEmail(
-        instructions: String,
-        userPrompt: String
-    ) async throws -> FMEmailTodoDraftOutput { fatalError("unexpected runtime call") }
 
-    func request() async -> (instructions: String, prompt: String) {
-        lock.withLock {
-            (lastInstructions, lastPrompt)
-        }
-    }
 }
 
 @available(iOS 26.0, *)
@@ -101,10 +96,6 @@ private struct NarrativeRuntime: FoundationModelsRuntime {
         options: GenerationOptions
     ) async throws -> FMPriorityRankingList { fatalError("unexpected runtime call") }
 
-    func analyzeEmail(
-        instructions: String,
-        userPrompt: String
-    ) async throws -> FMEmailOutput { fatalError("unexpected runtime call") }
 
     func summarizeEmail(
         instructions: String,
@@ -127,59 +118,89 @@ private struct NarrativeRuntime: FoundationModelsRuntime {
         options: GenerationOptions
     ) async throws -> FMTranscriptCorrectionOutput { fatalError("unexpected runtime call") }
 
-    func draftTodoFromEmail(
-        instructions: String,
-        userPrompt: String
-    ) async throws -> FMEmailTodoDraftOutput { fatalError("unexpected runtime call") }
 }
 
 @Suite("FM email summary adapter", .serialized)
 @MainActor
 struct FMEmailSummaryAdapterTests {
-    @Test("Guided Generation output is normalized into a detail-card summary")
-    func summarizesEmailWithTypedOutput() async throws {
+
+    @Test("A late action survives informational sections; a failed later section never returns partial analysis",
+          arguments: [false, true])
+    func lateActionsAndSectionFailure(failLater: Bool) async throws {
         guard #available(iOS 26.0, *) else { return }
         try await AIProviderTestIsolation.shared.withLock {
-            let defaults = UserDefaults.standard
-            let selectedKey = SettingsStore.betaSelectedProviderKey
-            let originalSelection = defaults.object(forKey: selectedKey)
-            defer {
-                if let originalSelection {
-                    defaults.set(originalSelection, forKey: selectedKey)
-                } else {
-                    defaults.removeObject(forKey: selectedKey)
-                }
-            }
-            defaults.set(PersonaAIProvider.foundationModels.rawValue, forKey: selectedKey)
-
-            let body = String(repeating: "x", count: 1_500) + "TRUNCATED"
-            let runtime = CapturingEmailRuntime(
-                output: FMEmailSummaryOutput(
-                    summary: "  Submit the proposal by Friday.  ",
-                    keyPoints: [" Deadline: Friday ", "", "Owner: Product team"],
-                    actionItems: [" Reply with the final proposal ", ""]
+            let body = String(repeating: "Informational status.\n", count: 300)
+                + "Please check access and renew the token if needed."
+            let chunks = EmailAnalysisContract.bodyChunks(body)
+            let outputs = chunks.indices.map { index in
+                FMEmailSummaryOutput(
+                    summary: index == 0 ? "Integration status." : "",
+                    keyPoints: [],
+                    actionItems: index == chunks.count - 1 ? ["Check access", "Renew the token if needed"] : []
                 )
-            )
+            }
+            let runtime = CapturingEmailRuntime(outputs: outputs, failingAt: failLater ? chunks.count - 1 : nil)
             let service = FoundationModelsService(runtime: runtime, policy: AIProviderTestIsolation.foundationPolicy)
-            let result = try await service.summarizeEmail(
-                subject: "Proposal review",
-                sender: "Product team <product@example.com>",
-                body: body,
-                language: .english
-            )
-            let request = await runtime.request()
+            if failLater {
+                await #expect(throws: (any Error).self) {
+                    try await service.summarizeEmail(subject: "Status", sender: "Team", body: body, language: .english)
+                }
+            } else {
+                let result = try await service.summarizeEmail(subject: "Status", sender: "Team", body: body, language: .english)
+                #expect(result.actionItems == ["Check access", "Renew the token if needed"])
+            }
+        }
+    }
 
-            #expect(result.summary == "Submit the proposal by Friday.")
-            #expect(result.keyPoints == ["Deadline: Friday", "Owner: Product team"])
-            #expect(result.actionItems == ["Reply with the final proposal"])
-            #expect(request.instructions.contains("single email"))
-            #expect(request.instructions.contains("untrusted data"))
-            #expect(request.prompt.contains("<email>"))
-            #expect(request.prompt.contains("</email>"))
-            #expect(request.prompt.contains("Proposal review"))
-            #expect(request.prompt.contains("Product team <product@example.com>"))
-            #expect(request.prompt.contains(String(repeating: "x", count: 1_500)))
-            #expect(!request.prompt.contains("TRUNCATED"))
+    @Test("A withdrawal beyond the overlap removes an earlier request; unresolved conditions cannot propose it",
+          arguments: [false, true])
+    func reconcilesDistantWithdrawal(unresolvedCondition: Bool) async throws {
+        guard #available(iOS 26.0, *) else { return }
+        try await AIProviderTestIsolation.shared.withLock {
+            let action = "Send the approval response."
+            let body = "Please send the approval response.\n"
+                + String(repeating: "Unrelated factual context.\n", count: 240)
+                + (unresolvedCondition
+                   ? "The earlier request now depends on an approval whose status is unknown."
+                   : "The earlier request is cancelled; no response needed.")
+            let chunks = EmailAnalysisContract.bodyChunks(body)
+            #expect(chunks.count > 2)
+            let outputs = chunks.indices.map { index in
+                FMEmailSummaryOutput(
+                    summary: index == 0 ? "Approval response requested." : "Later source context.",
+                    keyPoints: [],
+                    actionItems: index == 0 ? [action] : []
+                )
+            }
+            let reviews = chunks.indices.map { index -> FMEmailActionDisposition in
+                index == chunks.count - 1 ? (unresolvedCondition ? .unresolved : .withdrawn) : .unaffected
+            }
+            let runtime = CapturingEmailRuntime(outputs: outputs, reviewDispositions: reviews)
+            let provider = FoundationModelsService(runtime: runtime, policy: AIProviderTestIsolation.foundationPolicy)
+            let schema = Schema([EmailMessage.self])
+            let container = try ModelContainer(for: schema, configurations: [
+                ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)
+            ])
+            let context = ModelContext(container)
+            let email = EmailMessage(id: "distant-withdrawal", subject: "Approval", body: body)
+            email.bodyContentVersion = 1
+            context.insert(email)
+            let analysis = EmailMessageAnalysisService(
+                foundationModelsSummaryProvider: { subject, sender, body, language in
+                    try await provider.summarizeEmail(subject: subject, sender: sender, body: body, language: language)
+                },
+                foundationModelsEnabledProvider: { true },
+                foundationModelsAvailabilityProvider: { true }
+            )
+            try await analysis.analyze(email, context: context)
+            #expect(EmailAnalysisContract.currentActionItems(for: email).isEmpty)
+            #expect(EmailAnalysisContract.todoCandidate(for: email) == (unresolvedCondition ? nil : false))
+            if unresolvedCondition {
+                #expect(email.analysisFailureReasonRaw == RuleFallbackReason.invalidResponse.rawValue)
+            } else {
+                #expect(email.analysisFailureReasonRaw == nil)
+                #expect(email.analysisActionItems.isEmpty)
+            }
         }
     }
 
@@ -237,50 +258,5 @@ struct FMEmailSummaryAdapterTests {
 }
 
 
-@Suite("FM email deadline adapter")
-@MainActor
-struct FMEmailDeadlineAdapterTests {
-    @Test("An empty typed deadline produces no email extraction")
-    func missingDeadlineDoesNotInventExtraction() async throws {
-        guard #available(iOS 26.0, *) else { return }
-        let now = Date(timeIntervalSince1970: 1_782_432_000)
-        let runtime = CapturingEmailRuntime(output: FMEmailOutput(
-            dueDateISO: "",
-            isAllDay: false,
-            sender: "동료",
-            senderEmail: "colleague@company.com",
-            keywordScore: 0,
-            deadlineSentence: "",
-            notes: "점심 메뉴 추천"
-        ))
-        let policy = BetaFeaturePolicy(accessReader: {
-            BetaProviderAccess(
-                foundationModelsEnabled: true,
-                onDeviceEnabled: false,
-                openAIEnabled: false,
-                layaEnabled: false,
-                meetingVoiceProcessingEnabled: false
-            )
-        }, selectionReader: { .foundationModels })
-        let service = FoundationModelsService(runtime: runtime, policy: policy)
-        let message = GmailMessage(
-            id: "no-deadline", threadID: "thread", messageID: "<no-deadline@test>",
-            subject: "점심 메뉴 추천",
-            from: "동료 <colleague@company.com>",
-            snippet: "오늘 점심 뭐 먹을까요?",
-            body: "오늘 점심 메뉴 추천해주세요. 한식? 중식?",
-            htmlBody: nil,
-            receivedAt: now,
-            labelIds: [], isBulk: false
-        )
-
-        let result = try await service.analyzeEmail(message, now: now, language: .korean)
-        let request = await runtime.request()
-
-        // Prove the nonempty message reached the adapter, rather than an early nil return.
-        #expect(request.prompt.contains(message.body))
-        #expect(result == nil)
-    }
-}
 
 #endif // canImport(FoundationModels)

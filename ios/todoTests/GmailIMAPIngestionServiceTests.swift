@@ -26,8 +26,7 @@ struct GmailIMAPIngestionServiceTests {
 
     private func makeAnalysisService() -> EmailMessageAnalysisService {
         EmailMessageAnalysisService(
-            foundationModelsEnabledProvider: { false },
-            todoCandidateProvider: { _, _, _ in nil }
+            foundationModelsEnabledProvider: { false }
         )
     }
 
@@ -51,6 +50,25 @@ struct GmailIMAPIngestionServiceTests {
                 "A0001 OK SELECT"
             ])
         }
+    }
+
+    private func addBodyFetch(
+        _ transport: ScriptedIMAPTransport,
+        uid: Int,
+        globalID: Int,
+        body: String,
+        estimatedOctets: Int? = nil
+    ) throws {
+        transport.addRoute(matching: "UID FETCH \(uid) (BODYSTRUCTURE)", response: [
+            "* 1 FETCH (UID \(uid) BODYSTRUCTURE (\"TEXT\" \"PLAIN\" (\"CHARSET\" \"UTF-8\") NIL NIL \"7BIT\" \(estimatedOctets ?? body.utf8.count) 1 NIL NIL))",
+            "A0010 OK FETCH"
+        ])
+        let mime = "Content-Type: text/plain; charset=utf-8\r\n\r\n"
+        let wire = "* 1 FETCH (UID \(uid) X-GM-MSGID \(globalID) BODY[1.MIME] {\(mime.utf8.count)}\r\n\(mime) BODY[1] {\(body.utf8.count)}\r\n\(body))\r\nA0011 OK FETCH\r\n"
+        var decoder = IMAPResponseDecoder()
+        let frames = try decoder.append(Data(wire.utf8))
+        try decoder.finish()
+        transport.addRoute(matching: "UID FETCH \(uid) (UID FLAGS INTERNALDATE", response: frames)
     }
 
     @Test("parser migration decodes existing IMAP rows once")
@@ -131,10 +149,8 @@ struct GmailIMAPIngestionServiceTests {
             transport.addRoute(matching: "category:forums", response: ["* SEARCH", "A0008 OK SEARCH"])
 
             // Body fetches during ingestion
-            transport.addRoute(matching: "UID FETCH 10 (BODYSTRUCTURE)", response: ["* 1 FETCH (UID 10 BODYSTRUCTURE ((\"TEXT\" \"PLAIN\")))", "A0010 OK FETCH"])
-            transport.addRoute(matching: "UID FETCH 10 (UID FLAGS INTERNALDATE", response: ["* 1 FETCH (UID 10 X-GM-MSGID 1010 BODY[TEXT] {11}Body text 10)", "A0011 OK FETCH"])
-            transport.addRoute(matching: "UID FETCH 20 (BODYSTRUCTURE)", response: ["* 1 FETCH (UID 20 BODYSTRUCTURE ((\"TEXT\" \"PLAIN\")))", "A0012 OK FETCH"])
-            transport.addRoute(matching: "UID FETCH 20 (UID FLAGS INTERNALDATE", response: ["* 1 FETCH (UID 20 X-GM-MSGID 1020 BODY[TEXT] {11}Body text 20)", "A0013 OK FETCH"])
+            try addBodyFetch(transport, uid: 10, globalID: 1010, body: "Body text 10")
+            try addBodyFetch(transport, uid: 20, globalID: 1020, body: "Body text 20")
 
             let imapService = GmailIMAPService(transport: transport)
             let service = GmailIMAPIngestionService(emailContext: context, imapService: imapService,
@@ -187,14 +203,7 @@ struct GmailIMAPIngestionServiceTests {
             transport.addRoute(matching: "category:social", response: ["* SEARCH", "A0006 OK SEARCH"])
             transport.addRoute(matching: "category:updates", response: ["* SEARCH", "A0007 OK SEARCH"])
             transport.addRoute(matching: "category:forums", response: ["* SEARCH", "A0008 OK SEARCH"])
-            transport.addRoute(matching: "UID FETCH 1 (BODYSTRUCTURE)", response: [
-                "* 1 FETCH (UID 1 BODYSTRUCTURE ((\"TEXT\" \"PLAIN\")))",
-                "A0010 OK FETCH"
-            ])
-            transport.addRoute(matching: "UID FETCH 1 (UID FLAGS INTERNALDATE", response: [
-                "* 1 FETCH (UID 1 X-GM-MSGID 9001 BODY[TEXT] {15}Rehydrated body)",
-                "A0011 OK FETCH"
-            ])
+            try addBodyFetch(transport, uid: 1, globalID: 9001, body: "Rehydrated body")
 
             let service = GmailIMAPIngestionService(
                 emailContext: context,
@@ -249,8 +258,7 @@ struct GmailIMAPIngestionServiceTests {
 
             // Add routes for body fetch of page 1 items
             for uid in 101...200 {
-                transport.addRoute(matching: "UID FETCH \(uid) (BODYSTRUCTURE)", response: ["* 1 FETCH (UID \(uid) BODYSTRUCTURE ((\"TEXT\" \"PLAIN\")))", "A0100 OK FETCH"])
-                transport.addRoute(matching: "UID FETCH \(uid) (UID FLAGS INTERNALDATE", response: ["* 1 FETCH (UID \(uid) X-GM-MSGID \(1000 + uid) BODY[TEXT] {9}Body \(uid))", "A0101 OK FETCH"])
+                try addBodyFetch(transport, uid: uid, globalID: 1000 + uid, body: "Body \(uid)")
             }
 
             // Page 2: 1 item (201)
@@ -268,8 +276,7 @@ struct GmailIMAPIngestionServiceTests {
             transport.addRoute(matching: "category:updates", response: ["* SEARCH", "A0015 OK SEARCH"])
             transport.addRoute(matching: "category:forums", response: ["* SEARCH", "A0016 OK SEARCH"])
 
-            transport.addRoute(matching: "UID FETCH 201 (BODYSTRUCTURE)", response: ["* 1 FETCH (UID 201 BODYSTRUCTURE ((\"TEXT\" \"PLAIN\")))", "A0200 OK FETCH"])
-            transport.addRoute(matching: "UID FETCH 201 (UID FLAGS INTERNALDATE", response: ["* 1 FETCH (UID 201 X-GM-MSGID 1201 BODY[TEXT] {8}Body 201)", "A0201 OK FETCH"])
+            try addBodyFetch(transport, uid: 201, globalID: 1201, body: "Body 201")
 
             let imapService = GmailIMAPService(transport: transport)
             let service = GmailIMAPIngestionService(emailContext: context, imapService: imapService,
@@ -301,7 +308,7 @@ struct GmailIMAPIngestionServiceTests {
                 "* SEARCH 999",
                 "A0002 OK SEARCH"
             ])
-            transport.addRoute(matching: "UID FETCH 999", response: [
+            transport.addRoute(matching: "UID FETCH 999 (UID FLAGS X-GM-MSGID", response: [
                 "* 999 FETCH (UID 999 X-GM-MSGID 1999 X-GM-THRID 2000 BODY[HEADER.FIELDS] {76}Subject: Test 999\r\nFrom: sender@example.com\r\nDate: Tue, 1 Jul 2025 10:00:00 +0000\r\n\r\n)",
                 "A0003 OK FETCH"
             ])
@@ -360,8 +367,7 @@ struct GmailIMAPIngestionServiceTests {
 
             // Add routes for body fetch of page 1 items
             for uid in 101...200 {
-                transport.addRoute(matching: "UID FETCH \(uid) (BODYSTRUCTURE)", response: ["* 1 FETCH (UID \(uid) BODYSTRUCTURE ((\"TEXT\" \"PLAIN\")))", "A0100 OK FETCH"])
-                transport.addRoute(matching: "UID FETCH \(uid) (UID FLAGS INTERNALDATE", response: ["* 1 FETCH (UID \(uid) X-GM-MSGID \(5000 + uid) BODY[TEXT] {9}Body \(uid))", "A0101 OK FETCH"])
+                try addBodyFetch(transport, uid: uid, globalID: 5000 + uid, body: "Body \(uid)")
             }
 
             // Page 2: 1 item (201)
@@ -378,8 +384,7 @@ struct GmailIMAPIngestionServiceTests {
             transport.addRoute(matching: "UID FETCH 201 (BODYSTRUCTURE)", error: GmailIMAPError.transport("Page 2 body fetch error"), once: true)
 
             // Page 2 body fetch success routes for retry
-            transport.addRoute(matching: "UID FETCH 201 (BODYSTRUCTURE)", response: ["* 1 FETCH (UID 201 BODYSTRUCTURE ((\"TEXT\" \"PLAIN\")))", "A0200 OK FETCH"])
-            transport.addRoute(matching: "UID FETCH 201 (UID FLAGS INTERNALDATE", response: ["* 1 FETCH (UID 201 X-GM-MSGID 6201 BODY[TEXT] {8}Body 201)", "A0201 OK FETCH"])
+            try addBodyFetch(transport, uid: 201, globalID: 6201, body: "Body 201")
 
             let imapService = GmailIMAPService(transport: transport)
             let service = GmailIMAPIngestionService(emailContext: context, imapService: imapService,
@@ -438,8 +443,7 @@ struct GmailIMAPIngestionServiceTests {
             transport.addRoute(matching: "category:updates", response: ["* SEARCH", "A0007 OK SEARCH"])
             transport.addRoute(matching: "category:forums", response: ["* SEARCH", "A0008 OK SEARCH"])
 
-            transport.addRoute(matching: "UID FETCH 50 (BODYSTRUCTURE)", response: ["* 1 FETCH (UID 50 BODYSTRUCTURE ((\"TEXT\" \"PLAIN\")))", "A0010 OK FETCH"])
-            transport.addRoute(matching: "UID FETCH 50 (UID FLAGS INTERNALDATE", response: ["* 1 FETCH (UID 50 X-GM-MSGID 1050 BODY[TEXT] {7}Body 50)", "A0011 OK FETCH"])
+            try addBodyFetch(transport, uid: 50, globalID: 1050, body: "Body 50")
 
             let imapService = GmailIMAPService(transport: transport)
             let service = GmailIMAPIngestionService(emailContext: context, imapService: imapService,
@@ -448,6 +452,71 @@ struct GmailIMAPIngestionServiceTests {
             let result = try await service.sync(account: email, backgroundEnabled: false)
             #expect(result.analyzedCount == 1)
             #expect(cursorStore.cursor(for: email) == "42:50")
+        }
+    }
+
+    @Test("oversize and unreadable messages remain unconfirmed without starving later analysis")
+    func contentPolicyFailuresDoNotAbortBatch() async throws {
+        try await AIProviderTestIsolation.shared.withLock {
+            try setupCredentials()
+            defer { cleanupCredentials() }
+            let container = try makeContainer()
+            let context = ModelContext(container)
+            let ledgerContainer = try makeLedgerContainer()
+            let ledger = MailAnalysisLedgerStore(container: ledgerContainer)
+            let defaults = makeDefaults()
+            let cursor = GmailIMAPIngestionCursorStore(defaults: defaults)
+            let transport = ScriptedIMAPTransport()
+            setupAuth(transport: transport)
+            transport.addRoute(matching: "UID SEARCH ALL", response: ["* SEARCH 1 2 3 4", "A0002 OK SEARCH"])
+            let header = "Subject: Synthetic batch item\r\nFrom: sender@example.com\r\n\r\n"
+            transport.addRoute(matching: "UID FETCH 1,2,3,4", response: (1...4).map { uid in
+                "* \(uid) FETCH (UID \(uid) X-GM-MSGID \(8000 + uid) BODY[HEADER.FIELDS] {\(header.utf8.count)}\(header))"
+            } + ["A0003 OK FETCH"])
+            for category in ["primary", "promotions", "social", "updates", "forums"] {
+                transport.addRoute(matching: "category:\(category)", response: ["* SEARCH", "A0004 OK SEARCH"])
+            }
+            transport.addRoute(matching: "UID FETCH 1 (BODYSTRUCTURE)", response: [
+                "* 1 FETCH (UID 1 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" \(MIMETextDecoder.maximumMessageBytes + 1) 1 NIL NIL))",
+                "A0010 OK FETCH"
+            ])
+            transport.addRoute(matching: "UID FETCH 2 (BODYSTRUCTURE)", response: [
+                "* 2 FETCH (UID 2 BODYSTRUCTURE (\"APPLICATION\" \"PDF\" NIL NIL NIL \"BASE64\" 9000000 NIL (\"ATTACHMENT\" NIL)))",
+                "A0011 OK FETCH"
+            ])
+            try addBodyFetch(transport, uid: 3, globalID: 8003, body: "Complete literal despite an estimated structure size.", estimatedOctets: 1)
+            try addBodyFetch(transport, uid: 4, globalID: 8004, body: "The meeting is informational only.")
+            let service = GmailIMAPIngestionService(
+                emailContext: context,
+                imapService: GmailIMAPService(transport: transport),
+                cursorStore: cursor,
+                ledgerStore: ledger,
+                analysisService: makeAnalysisService()
+            )
+            let result = try await service.sync(account: email, backgroundEnabled: false)
+            #expect(result.analyzedCount == 2)
+            #expect(result.skippedCount == 2)
+            #expect(cursor.cursor(for: email) == "42:4")
+            let saved = try context.fetch(FetchDescriptor<EmailMessage>())
+            #expect(saved.count == 2)
+            #expect(Set(saved.map(\.providerMessageID)) == ["3", "4"])
+            #expect(saved.allSatisfy { $0.bodyContentVersion == 1 })
+            #expect(saved.first(where: { $0.providerMessageID == "3" })?.body == "Complete literal despite an estimated structure size.")
+            #expect(saved.first(where: { $0.providerMessageID == "4" })?.body == "The meeting is informational only.")
+            #expect(transport.commands.allSatisfy {
+                !$0.hasPrefix("UID FETCH 1 (UID FLAGS INTERNALDATE")
+                    && !$0.hasPrefix("UID FETCH 2 (UID FLAGS INTERNALDATE")
+            })
+            for globalID in ["8001", "8002"] {
+                let fingerprint = MailAnalysisFingerprint.make(
+                    provider: "gmail-imap",
+                    canonicalAccount: email,
+                    gmailMessageID: globalID,
+                    key: try MailAnalysisLedgerKeyStore.key()
+                )
+                #expect(try ledger.claimOutcome(fingerprint, revision: 2) == .acquired)
+                try ledger.release(fingerprint)
+            }
         }
     }
 }

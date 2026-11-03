@@ -12,10 +12,59 @@ private struct TodoRowView: View {
     var onDelete: (() -> Void)? = nil
     var onPromote: (() -> Void)? = nil
 
+    #if targetEnvironment(macCatalyst)
     @State private var isHovered = false
+    @FocusState private var isMenuFocused: Bool
+    @Environment(\.accessibilityVoiceOverEnabled) private var isVoiceOverEnabled
+    private var showsMenu: Bool { isHovered || isMenuFocused || isVoiceOverEnabled }
+    #endif
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
+        HStack(alignment: .top, spacing: 0) {
+            NavigationLink(value: todo) {
+                primaryContent
+            }
+            .buttonStyle(.plain)
+            .navigationLinkIndicatorVisibility(.hidden)
+            .accessibilityIdentifier("todo.row.open.\(todo.id.uuidString)")
+
+            #if targetEnvironment(macCatalyst)
+            // Preserve the pointer shortcut alongside swipe and context actions.
+            Menu {
+                rowMenuActions
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.body)
+                    .frame(minWidth: 44, minHeight: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .frame(width: 44, height: 44)
+            .contentShape(Rectangle())
+            .menuIndicator(.hidden)
+            .focused($isMenuFocused)
+            .opacity(showsMenu ? 1 : 0)
+            .allowsHitTesting(showsMenu)
+            .accessibilityLabel(AppLanguage.localized("todo.moreActions", defaultValue: "더 보기", language: .current, comment: "Secondary to-do toolbar menu accessibility label."))
+            .accessibilityIdentifier("todo.row.more.\(todo.id.uuidString)")
+            #endif
+        }
+        .padding(.vertical, 10)
+        .contentShape(Rectangle())
+        #if targetEnvironment(macCatalyst)
+        .onHover { hovering in
+            withAnimation(AppTheme.motion(reduceMotion: reduceMotion)) {
+                isHovered = hovering
+            }
+        }
+        #endif
+        .contextMenu {
+            rowMenuActions
+        }
+    }
+
+    private var primaryContent: some View {
         HStack(alignment: .top, spacing: 12) {
             VStack(alignment: .leading, spacing: 8) {
                 Text(todo.title.isEmpty
@@ -53,32 +102,12 @@ private struct TodoRowView: View {
                     .accessibilityLabel("AI 정리 완료")
                     .accessibilityIdentifier("todo.row.aiAnalyzed")
             }
-
-            // Preserve the pointer shortcut alongside swipe and context actions.
-            if isHovered {
-                Menu {
-                    rowMenuActions
-                } label: {
-                    Image(systemName: "ellipsis")
-                        .font(.body)
-                        .frame(minWidth: 44, minHeight: 44)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.borderless)
-                .accessibilityLabel(AppLanguage.localized("todo.moreActions", defaultValue: "더 보기", language: .current, comment: "Secondary to-do toolbar menu accessibility label."))
-                .transition(reduceMotion ? .identity : .opacity)
-            }
         }
-        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        #if targetEnvironment(macCatalyst)
+        .padding(.trailing, 12)
+        #endif
         .contentShape(Rectangle())
-        .onHover { hovering in
-            withAnimation(AppTheme.motion(reduceMotion: reduceMotion)) {
-                isHovered = hovering
-            }
-        }
-        .contextMenu {
-            rowMenuActions
-        }
     }
 
     @ViewBuilder
@@ -142,6 +171,7 @@ private struct TodoUndoSnapshot {
     let sourceThreadID: String
     let sourceSenderEmail: String
     let sourceAccountNamespace: String
+    let sourceItemID: String
     let triageStatus: String
     let tags: [String]
     let calendarEventID: String?
@@ -171,6 +201,7 @@ private struct TodoUndoSnapshot {
         self.sourceThreadID = todo.sourceThreadID
         self.sourceSenderEmail = todo.sourceSenderEmail
         self.sourceAccountNamespace = todo.sourceAccountNamespace
+        self.sourceItemID = todo.sourceItemID
         self.triageStatus = todo.triageStatus
         self.tags = todo.tags
         self.calendarEventID = todo.calendarEventID
@@ -200,6 +231,7 @@ private struct TodoUndoSnapshot {
         todo.sourceThreadID = sourceThreadID
         todo.sourceSenderEmail = sourceSenderEmail
         todo.sourceAccountNamespace = sourceAccountNamespace
+        todo.sourceItemID = sourceItemID
         todo.triageStatus = triageStatus
         todo.calendarEventID = calendarEventID
         todo.isFixedSchedule = isFixedSchedule
@@ -231,6 +263,7 @@ private struct TodoUndoSnapshot {
         todo.sourceThreadID = sourceThreadID
         todo.sourceSenderEmail = sourceSenderEmail
         todo.sourceAccountNamespace = sourceAccountNamespace
+        todo.sourceItemID = sourceItemID
         todo.triageStatus = triageStatus
         todo.tags = tags
         todo.calendarEventID = calendarEventID
@@ -774,14 +807,12 @@ struct TodoListView: View {
                 }
             } else {
                 ForEach(filteredTodos) { todo in
-                    NavigationLink(value: todo) {
-                        TodoRowView(
-                            todo: todo,
-                            onToggleComplete: { toggleComplete(todo) },
-                            onDelete: { deleteTodo(todo) },
-                            onPromote: { promoteTodo(todo) }
-                        )
-                    }
+                    TodoRowView(
+                        todo: todo,
+                        onToggleComplete: { toggleComplete(todo) },
+                        onDelete: { deleteTodo(todo) },
+                        onPromote: { promoteTodo(todo) }
+                    )
                     .swipeActions(edge: .leading, allowsFullSwipe: true) {
                         if todo.triage == .review {
                             promoteButton(todo)

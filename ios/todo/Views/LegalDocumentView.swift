@@ -23,7 +23,7 @@ enum LegalDocument: String, CaseIterable {
 
     var effectiveDate: String {
         let (key, fallback): (String, String) = switch self {
-        case .privacy: ("legal.privacy.effectiveDate", "시행일: 2026년 11월 9일 · 공고일: 2026년 11월 1일")
+        case .privacy: ("legal.privacy.effectiveDate", "시행일: 2026년 11월 12일 · 공고일: 2026년 11월 4일")
         case .terms: ("legal.terms.effectiveDate", "시행일: 2026년 10월 13일")
         }
         return AppLanguage.localized(key, defaultValue: fallback, language: .current, comment: "Effective date for this legal document.")
@@ -328,6 +328,11 @@ private struct ThirdPartyCard: View {
 
 private struct PrivacyPolicyContent: View {
     var body: some View {
+        InfoBox(
+            text: "2026년 11월 4일 추가 개정 공고, 11월 12일 시행 예정: 주기적 메일 목록·전체 본문 저장, 허용 계정의 백그라운드 수집, 전체 본문 처리 항목에 근거한 제안과 충돌 원본의 기기 내 보관·선택 복원을 안내합니다. 기존 개별 동의는 확대하지 않습니다. 1.0.14는 종전 11월 9일 이후 공개 안내와 달리 11월 2일 공개됐습니다. 1.0.15는 수동 출시로 제출하고 11월 12일 00:00 KST 전에는 공개하지 않습니다.",
+            localizationKey: "legal.privacy.revisionNotice"
+        )
+
         LegalCard(number: 1, title: "수집하는 정보 및 목적") {
             LegalSubTitle(text: "1-1. 직접 입력 정보")
             LegalTable(
@@ -351,8 +356,8 @@ private struct PrivacyPolicyContent: View {
             LegalSubTitle(text: "1-3. 이메일 연동 (Gmail·Outlook, 선택, 명시적 동의 후 활성화)")
             LegalLocalizedBullets(items: [
                 ("legal.text.수집 항목: 메시지 제목·발신자·스니펫·본문. Gmail OAuth는 gmail.modify 권한으로 열람·읽음 처리·휴지통 동작을 제공하며 IMAP 연결은 Gmail·Outlook 앱 비밀번호를 사용", "수집 항목: 메시지 제목·발신자·스니펫·본문. Gmail OAuth는 gmail.modify 권한으로 열람·읽음 처리·휴지통 동작을 제공하며 IMAP 연결은 Gmail·Outlook 앱 비밀번호를 사용"),
-                ("legal.text.목적: 마감·일정 관련 이메일에서 할 일 자동 추출", "목적: 마감·일정 관련 이메일에서 할 일 자동 추출"),
-                ("legal.privacy.email.storage", "메시지는 우선 기기에 저장합니다. 전체 iCloud 저장에 명시적으로 동의하면 메일 본문과 분석 결과도 같은 Apple 계정에서 저장·복원합니다. 이는 외부 AI로 데이터를 전송하는 동의가 아닙니다."),
+                ("legal.privacy.email.processing", "목적: 전체 본문을 기기 내에서 요약하고 확인/처리 필요 항목에만 근거해 할 일을 제안합니다. 미완료·이전 부분 본문이나 분석 실패를 제목·요약에서 임의로 만든 할 일의 근거로 사용하지 않습니다."),
+                ("legal.privacy.email.storage", "메시지는 우선 기기에 저장합니다. AI 분석 설정과 별개로 목록·전체 본문을 주기적으로 저장하며 백그라운드 수집은 이 기기에서 허용한 계정에만 적용하고 실제 시각은 iOS가 결정합니다. 전체 iCloud 저장에 명시적으로 동의하면 본문·분석도 같은 Apple 계정에서 저장·복원합니다. 외부 AI 전송 동의는 별개입니다."),
                 ("legal.privacy.email.credentials", "OAuth 토큰·IMAP 앱 비밀번호는 해당 제공자의 인증을 위해 Keychain에 저장합니다. 전체 iCloud 저장을 켜면 같은 Apple 계정의 기기에서 iCloud 키체인을 통해 복원할 수 있습니다."),
                 ("legal.text.HTML 메일을 열면 HTTPS 이미지·스타일·글꼴을 자동으로 불러올 수 있으며, 해당 외부 호스트는 열람 시각과 기기 IP를 기록할 수 있음. JavaScript·양식·프레임·미디어·HTTP 리소스는 차단", "HTML 메일을 열면 HTTPS 이미지·스타일·글꼴을 자동으로 불러올 수 있으며, 해당 외부 호스트는 열람 시각과 기기 IP를 기록할 수 있음. JavaScript·양식·프레임·미디어·HTTP 리소스는 차단"),
                 ("legal.text.자동 메일 후보·요약은 기기 내에서 처리합니다. 메일 전송 동의 후 상세에서 직접 외부 분석을 요청할 때만 선택한 메일의 제목·평문 본문을 OpenAI로 전송하며 원문과 로컬 요약은 보존합니다.", "자동 메일 후보·요약은 기기 내에서 처리합니다. 메일 전송 동의 후 상세에서 직접 외부 분석을 요청할 때만 선택한 메일의 제목·평문 본문을 OpenAI로 전송하며 원문과 로컬 요약은 보존합니다."),
@@ -541,7 +546,7 @@ private struct PrivacyPolicyContent: View {
             ])
             LegalBullets([
                 "iCloud 데이터는 Apple의 전송 중·저장 시 암호화 인프라 이용",
-                "앱은 비보안 암호화를 사용하지 않음 (ITSAppUsesNonExemptEncryption = NO)",
+                "앱은 수출 규제상 비면제 암호화를 사용하지 않음 (ITSAppUsesNonExemptEncryption = NO)",
             ])
         }
 

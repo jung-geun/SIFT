@@ -26,6 +26,13 @@ final class EmailMessage {
     var snippet: String = ""
     var body: String = ""         // 세니타이징된 평문 본문 — 온디바이스 전용
     var htmlBody: String? = nil   // 원본 HTML 본문 (WKWebView 렌더링용) — 온디바이스 전용
+    /// Only a complete provider body fetch sets this. Legacy cached prefixes stay
+    /// visible offline but must be refreshed before analysis.
+    var bodyContentVersion: Int = 0
+    /// Device-local rotation state; failed bodies never monopolize the backlog.
+    var lastBodyFetchAttemptAt: Date = Date.distantPast
+
+    var hasCompleteBody: Bool { bodyContentVersion == 1 }
     var receivedAt: Date = Date.distantPast
     var isRead: Bool = false
     /// Local attention state, independent of the provider's read/unread flags.
@@ -58,8 +65,8 @@ final class EmailMessage {
     var analyzedAt: Date? = nil
     /// Bump when the structured summary prompt or model contract changes.
     var analysisVersion: Int = 0
-    /// Laya recommendation only; the user can always save any email manually.
-    /// Nil means no valid inference for the current email body, not a negative decision.
+    /// Compatibility storage derived only from structured summary action items.
+    /// Readers use EmailAnalysisContract.todoCandidate(for:) for current validity.
     var analysisTodoCandidate: Bool? = nil
     var analysisTodoCandidateFingerprint: String = ""
 
@@ -406,5 +413,20 @@ enum MailboxPagingPolicy {
     nonisolated static let pageSize = 100
     nonisolated static let updatesMinimumInterval: TimeInterval = 30
     nonisolated static let pollInterval: TimeInterval = 5 * 60
+    nonisolated static let backgroundRefreshInterval: TimeInterval = 15 * 60
     nonisolated static let maxUpdateDrainPages = 10
+    nonisolated static let bodyPrefetchBatchSize = 8
+
+    /// Frequent cache refreshes must not also rerun the opted-in daily AI pass.
+    nonisolated static func backgroundAnalysisIsDue(
+        hour: Int,
+        lastAttempt: Date?,
+        now: Date = Date(),
+        calendar: Calendar = .current
+    ) -> Bool {
+        guard let target = calendar.date(
+            bySettingHour: max(0, min(23, hour)), minute: 0, second: 0, of: now
+        ), now >= target else { return false }
+        return lastAttempt.map { !calendar.isDate($0, inSameDayAs: now) } ?? true
+    }
 }
