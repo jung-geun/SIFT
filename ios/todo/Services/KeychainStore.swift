@@ -68,15 +68,13 @@ nonisolated enum KeychainStore {
         private var ended = false
         private var taskCancelled = false
 
-        init(allowsUI: Bool, parent: AuthenticationAttempt?) {
+        init(allowsUI: Bool, purpose: String?, parent: AuthenticationAttempt?) {
             self.allowsUI = allowsUI
             self.parent = parent
             context.interactionNotAllowed = !allowsUI
-            context.localizedReason = AppLanguage.localized(
-                allowsUI ? "security.keychain.syncPurpose" : "security.keychain.quietPurpose",
-                defaultValue: allowsUI
-                    ? "Unlock saved account connections to sync them with iCloud. Cancel to leave protected connections unchanged."
-                    : "Check saved account connections without requesting authentication.",
+            context.localizedReason = purpose ?? AppLanguage.localized(
+                "security.keychain.quietPurpose",
+                defaultValue: "Check saved account connections without requesting authentication.",
                 language: .current)
         }
 
@@ -126,15 +124,21 @@ nonisolated enum KeychainStore {
     static func withoutAuthenticationUI<T>(
         isolation: isolated (any Actor)? = #isolation, _ operation: () async throws -> T
     ) async throws -> T {
-        try await withAuthenticationAttempt(allowsUI: false, isolation: isolation, operation)
+        try await withAuthenticationAttempt(allowsUI: false, purpose: nil, isolation: isolation, operation)
     }
 
-    /// Only a dedicated, explained user action may enter this scope. One OS
-    /// context is reused across families; the OS still decides the prompt count.
-    static func withUserInitiatedCredentialSync<T>(
+    /// Enter only after the app explains this operation's purpose and the user
+    /// explicitly approves it. Tapping an unrelated action is not approval.
+    /// Authorization is task-local, expires on return, and cannot override a
+    /// surrounding noninteractive scope. No credential bytes are cached.
+    static func withApprovedAuthentication<T>(
+        purpose: String,
         isolation: isolated (any Actor)? = #isolation, _ operation: () async throws -> T
     ) async throws -> T {
-        try await withAuthenticationAttempt(allowsUI: true, isolation: isolation, operation)
+        guard !purpose.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw KeychainStoreError.authorizationChanged
+        }
+        return try await withAuthenticationAttempt(allowsUI: true, purpose: purpose, isolation: isolation, operation)
     }
 
     static func checkAuthenticationAttempt() throws {
@@ -142,7 +146,7 @@ nonisolated enum KeychainStore {
     }
 
     private static func withAuthenticationAttempt<T>(
-        allowsUI: Bool, isolation: isolated (any Actor)?, _ operation: () async throws -> T
+        allowsUI: Bool, purpose: String?, isolation: isolated (any Actor)?, _ operation: () async throws -> T
     ) async throws -> T {
         // Each quiet family has its own failure boundary, so a protected account
         // cannot block unrelated app data. Parent cancellation/end still wins.
@@ -153,7 +157,7 @@ nonisolated enum KeychainStore {
             try current.check()
             return value
         }
-        let attempt = AuthenticationAttempt(allowsUI: allowsUI, parent: authenticationAttempt)
+        let attempt = AuthenticationAttempt(allowsUI: allowsUI, purpose: purpose, parent: authenticationAttempt)
         defer { attempt.finish() }
         return try await withTaskCancellationHandler {
             try await $authenticationAttempt.withValue(attempt) {
@@ -188,10 +192,10 @@ nonisolated enum KeychainStore {
         try attempt?.beginOperation()
         defer { attempt?.endOperation() }
         let context = noninteractiveProbe ? LAContext() : (attempt?.context ?? LAContext())
-        if noninteractiveProbe { context.interactionNotAllowed = true }
         if attempt == nil || noninteractiveProbe {
-            context.localizedReason = AppLanguage.localized("security.keychain.actionPurpose",
-                defaultValue: "Unlock saved credentials for the action you requested.", language: .current)
+            context.interactionNotAllowed = true
+            context.localizedReason = AppLanguage.localized("security.keychain.quietPurpose",
+                defaultValue: "Check saved account connections without requesting authentication.", language: .current)
         }
         defer { if attempt == nil || noninteractiveProbe { context.invalidate() } }
         var authenticatedQuery = query
@@ -209,13 +213,12 @@ nonisolated enum KeychainStore {
         status = callSecurity(operation, query: authenticatedQuery, attributes: attributes, result: &result)
         #endif
         if !noninteractiveProbe && status != errSecSuccess && status != errSecItemNotFound && status != errSecDuplicateItem {
-            if attempt != nil { throw securityError(status) }
+            throw securityError(status)
         }
         return status
     }
 
     private static func securityError(_ status: OSStatus) -> KeychainStoreError {
-        guard let attempt = authenticationAttempt else { return .security(status) }
         let error: KeychainStoreError
         switch status {
         case errSecUserCanceled: error = .authenticationCancelled
@@ -224,7 +227,7 @@ nonisolated enum KeychainStore {
         // the user's authorization for other families in this explicit attempt.
         default: return .security(status)
         }
-        attempt.fail(error)
+        authenticationAttempt?.fail(error)
         return error
     }
 
@@ -414,6 +417,8 @@ nonisolated enum KeychainStore {
     }
 
     private static func record(_ error: Error, operation: String) {
+        if let keychainError = error as? KeychainStoreError,
+           keychainError == .authenticationRequired || keychainError == .authenticationCancelled { return }
         DiagnosticRecorder.shared.record(error: error, component: "security.keychain", operation: operation)
         logger.error("Keychain \(operation) failed")
     }

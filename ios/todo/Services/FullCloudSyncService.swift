@@ -123,7 +123,10 @@ final class FullCloudConnectionSync: ObservableObject {
 
         if userInitiated {
             do {
-                try await KeychainStore.withUserInitiatedCredentialSync {
+                try await KeychainStore.withApprovedAuthentication(purpose: AppLanguage.localized(
+                    "security.keychain.syncPurpose",
+                    defaultValue: "Unlock saved account connections to sync them with iCloud. Cancel to leave protected connections unchanged.",
+                    language: .current)) {
                     for operation in self.operations {
                         do { try await run(operation) }
                         catch {

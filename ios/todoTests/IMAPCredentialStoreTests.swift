@@ -719,7 +719,7 @@ struct IMAPCredentialStoreTests {
             let account = query[kSecAttrAccount as String] as! String
             return (h.local[account] == nil ? errSecItemNotFound : errSecInteractionNotAllowed, nil)
         }) {
-            try await KeychainStore.withUserInitiatedCredentialSync {
+            try await KeychainStore.withApprovedAuthentication(purpose: "Approve fixture credential synchronization") {
                 let restored = try store.applyFullSyncPolicy()
                 #expect(restored.map(\.account) == [email])
             }
@@ -761,7 +761,7 @@ struct IMAPCredentialStoreTests {
                 #expect(error is IMAPPortableTestHarness.Failure)
             }
             h.failure = nil
-            try await KeychainStore.withUserInitiatedCredentialSync { _ = try store.applyFullSyncPolicy() }
+            try await KeychainStore.withApprovedAuthentication(purpose: "Approve fixture credential synchronization") { _ = try store.applyFullSyncPolicy() }
             #expect(h.hasReceipt(email))
             #expect(try h.slots(email).credential(read: store.localRead) == Data("foreground secret".utf8))
             let restoredSlot = try #require(h.slots(email).activeSlot)

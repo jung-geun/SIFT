@@ -179,7 +179,7 @@ struct FirebaseSyncService {
     }
 
     private func googleIDToken() throws -> String {
-        guard let token = KeychainStore.get(service: "pieroot.todo.gmail", account: "id_token"), !token.isEmpty else {
+        guard let token = try KeychainStore.getChecked(service: "pieroot.todo.gmail", account: "id_token"), !token.isEmpty else {
             throw FirebaseSyncError.missingGoogleIDToken
         }
         return token

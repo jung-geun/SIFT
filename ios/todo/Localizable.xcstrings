@@ -1,6 +1,816 @@
 {
   "sourceLanguage" : "ko",
   "strings" : {
+  "mail.credential.connectPurpose": {
+    "comment": "Explicit approval to retry saving a user-entered mail app password; do not interpolate the password.",
+    "extractionState": "manual",
+    "localizations": {
+      "ko": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "입력한 앱 비밀번호로 이 계정의 메일 연결을 확인하고 키체인에 저장합니다. 기존 비밀번호를 교체해야 하는 경우 해당 계정의 보호된 저장 정보에 접근합니다. 화면에서 요청한 연결·저장만 다시 시도하며 다른 계정은 변경하지 않습니다."
+        }
+      },
+      "en": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Verify this account’s mail connection with the app password you entered and save it in Keychain. If an existing password must be replaced, access this account’s protected stored information. Only the connection and save you requested will be retried; no other account is changed."
+        }
+      },
+      "es": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Verificar la conexión de correo de esta cuenta con la contraseña de aplicación introducida y guardarla en el llavero. Si hay que reemplazar una contraseña existente, acceder a los datos protegidos de esta cuenta. Solo se reintentará la conexión y el guardado solicitados; no se modificará otra cuenta."
+        }
+      },
+      "ja": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "入力したアプリ用パスワードでこのアカウントのメール接続を確認し、キーチェーンに保存します。既存のパスワードを置き換える必要がある場合、このアカウントの保護された保存情報にアクセスします。要求した接続と保存だけを再試行し、他のアカウントは変更しません。"
+        }
+      },
+      "zh-Hans": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "使用你输入的应用专用密码验证此账户的邮件连接，并将其保存到钥匙串。如需替换已有密码，将访问此账户受保护的已存信息。仅重试你请求的连接和保存操作，不会更改其他账户。"
+        }
+      },
+      "fr": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Vérifier la connexion de messagerie de ce compte avec le mot de passe d’application saisi et l’enregistrer dans le trousseau. Si un mot de passe existant doit être remplacé, accéder aux informations protégées de ce compte. Seules la connexion et la sauvegarde demandées seront réessayées ; aucun autre compte ne sera modifié."
+        }
+      },
+      "it": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Verificare la connessione di posta di questo account con la password per app inserita e salvarla nel portachiavi. Se è necessario sostituire una password esistente, accedere alle informazioni protette di questo account. Verranno ritentati solo la connessione e il salvataggio richiesti; nessun altro account verrà modificato."
+        }
+      },
+      "de": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Die E-Mail-Verbindung dieses Kontos mit dem eingegebenen App-Passwort prüfen und es im Schlüsselbund speichern. Falls ein vorhandenes Passwort ersetzt werden muss, auf die geschützten gespeicherten Informationen dieses Kontos zugreifen. Nur die angeforderte Verbindung und Speicherung werden wiederholt; andere Konten bleiben unverändert."
+        }
+      }
+    }
+  },
+  "mail.credential.background.title": {
+    "comment": "Explicit mail settings credential action; explain purpose and OS authentication before approval.",
+    "extractionState": "manual",
+    "localizations": {
+      "ko": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "백그라운드 메일 접근 승인"
+        }
+      },
+      "en": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Approve background mail access"
+        }
+      },
+      "es": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Aprobar acceso al correo en segundo plano"
+        }
+      },
+      "ja": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "バックグラウンドのメールアクセスを許可"
+        }
+      },
+      "zh-Hans": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "批准后台邮件访问"
+        }
+      },
+      "fr": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Autoriser l’accès au courrier en arrière-plan"
+        }
+      },
+      "it": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Approva l’accesso alla posta in background"
+        }
+      },
+      "de": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "E-Mail-Zugriff im Hintergrund erlauben"
+        }
+      }
+    }
+  },
+  "mail.credential.background.allow": {
+    "comment": "Explicit mail settings credential action; explain purpose and OS authentication before approval.",
+    "extractionState": "manual",
+    "localizations": {
+      "ko": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "위험을 이해하고 인증 허용"
+        }
+      },
+      "en": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Understand risks and allow authentication"
+        }
+      },
+      "es": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Entiendo los riesgos y permito autenticar"
+        }
+      },
+      "ja": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "リスクを理解して認証を許可"
+        }
+      },
+      "zh-Hans": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "了解风险并允许认证"
+        }
+      },
+      "fr": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Comprendre les risques et autoriser"
+        }
+      },
+      "it": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Comprendo i rischi e consento"
+        }
+      },
+      "de": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Risiken verstehen und Authentifizierung erlauben"
+        }
+      }
+    }
+  },
+  "mail.credential.background.purpose": {
+    "comment": "Explicit mail settings credential action; explain purpose and OS authentication before approval.",
+    "extractionState": "manual",
+    "localizations": {
+      "ko": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Gmail 앱 비밀번호의 백그라운드 접근을 허용합니다. 이미 저장된 비밀번호가 있으면 키체인에서 읽어 접근 정책을 변경합니다. 허용하면 Touch ID, Face ID 또는 시스템 암호 확인이 표시될 수 있습니다. 이후에는 기기가 잠겨도 이 기기에서 앱 비밀번호를 사용할 수 있어 분실·탈옥·앱 침해 위험이 증가할 수 있습니다."
+        }
+      },
+      "en": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Allow background access to the Gmail app password. If a password is already saved, read it from Keychain to change its access policy. Allowing may show Touch ID, Face ID, or a system password prompt. The app password will then be usable on this device while locked, increasing risks if the device is lost, jailbroken, or the app is compromised."
+        }
+      },
+      "es": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Permitir el acceso en segundo plano a la contraseña de aplicación de Gmail. Si ya hay una contraseña guardada, leerla del llavero para cambiar su política de acceso. Al permitirlo, puede aparecer Touch ID, Face ID o una solicitud de contraseña del sistema. Después, la contraseña podrá usarse con el dispositivo bloqueado, aumentando los riesgos en caso de pérdida, jailbreak o vulneración de la app."
+        }
+      },
+      "ja": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Gmailのアプリ用パスワードへのバックグラウンドアクセスを許可します。すでに保存されたパスワードがある場合は、キーチェーンから読み取ってアクセス方針を変更します。許可するとTouch ID、Face ID、またはシステムのパスワード確認が表示されることがあります。以後は端末のロック中もこの端末でアプリ用パスワードを使用できるため、紛失・脱獄・アプリ侵害時のリスクが高まる場合があります。"
+        }
+      },
+      "zh-Hans": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "允许在后台访问 Gmail 应用专用密码。如果已保存密码，将从钥匙串读取它以更改访问策略。允许后可能显示触控 ID、面容 ID 或系统密码确认。此后，即使设备锁定也能在此设备上使用该密码，因此设备丢失、越狱或应用遭入侵时的风险可能增加。"
+        }
+      },
+      "fr": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Autoriser l’accès en arrière-plan au mot de passe d’application Gmail. Si un mot de passe est déjà enregistré, le lire dans le trousseau pour modifier sa politique d’accès. L’autorisation peut afficher Touch ID, Face ID ou une demande de mot de passe système. Le mot de passe sera ensuite utilisable sur cet appareil verrouillé, ce qui augmente les risques en cas de perte, de débridage ou de compromission de l’app."
+        }
+      },
+      "it": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Consentire l’accesso in background alla password per app Gmail. Se una password è già salvata, leggerla dal portachiavi per modificarne l’accesso. L’autorizzazione può mostrare Touch ID, Face ID o una richiesta di password di sistema. La password sarà poi utilizzabile su questo dispositivo anche bloccato, aumentando i rischi in caso di smarrimento, jailbreak o compromissione dell’app."
+        }
+      },
+      "de": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Den Hintergrundzugriff auf das Gmail-App-Passwort erlauben. Ist bereits ein Passwort gespeichert, wird es aus dem Schlüsselbund gelesen, um seinen Zugriff zu ändern. Dabei kann Touch ID, Face ID oder eine Systempasswort-Abfrage erscheinen. Danach ist das App-Passwort auf diesem Gerät auch im gesperrten Zustand nutzbar. Das erhöht Risiken bei Verlust, Jailbreak oder einer kompromittierten App."
+        }
+      }
+    }
+  },
+  "mail.credential.explicitExplanation": {
+    "comment": "Explicit mail settings credential action; explain purpose and OS authentication before approval.",
+    "extractionState": "manual",
+    "localizations": {
+      "ko": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "허용한 경우에만 이 작업을 위해 Touch ID, Face ID 또는 시스템 암호 확인을 시작할 수 있습니다. 취소하면 재시도하지 않습니다."
+        }
+      },
+      "en": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Only your approval allows this action to start Touch ID, Face ID, or a system password prompt. Cancelling will not retry the action."
+        }
+      },
+      "es": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Solo tu aprobación permite que esta acción inicie Touch ID, Face ID o una solicitud de contraseña del sistema. Si cancelas, no se volverá a intentar."
+        }
+      },
+      "ja": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "許可した場合にのみ、この操作のためにTouch ID、Face ID、またはシステムのパスワード確認を開始できます。キャンセルすると再試行しません。"
+        }
+      },
+      "zh-Hans": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "只有你批准后，此操作才可启动触控 ID、面容 ID 或系统密码确认。取消后不会重试。"
+        }
+      },
+      "fr": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Seule votre autorisation permet à cette action de lancer Touch ID, Face ID ou une demande de mot de passe système. L’annulation ne relance pas l’action."
+        }
+      },
+      "it": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Solo la tua approvazione consente a questa azione di avviare Touch ID, Face ID o una richiesta di password di sistema. Se annulli, l’azione non verrà ritentata."
+        }
+      },
+      "de": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Nur mit deiner Zustimmung darf diese Aktion Touch ID, Face ID oder eine Systempasswort-Abfrage starten. Bei Abbruch wird die Aktion nicht wiederholt."
+        }
+      }
+    }
+  },
+  "mail.credential.disconnectPurpose": {
+    "comment": "Explicit mail settings credential action; explain purpose and OS authentication before approval.",
+    "extractionState": "manual",
+    "localizations": {
+      "ko": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "이 계정의 메일 연결을 해제하고 저장된 앱 비밀번호 및 관련 연결 정보를 삭제하기 위해 키체인 접근을 승인합니다. 이미 요청한 연결 해제만 다시 시도하며 다른 계정은 변경하지 않습니다."
+        }
+      },
+      "en": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Approve Keychain access to disconnect this mail account and delete its saved app password and related connection information. Only the disconnect you already requested will be retried; no other account is changed."
+        }
+      },
+      "es": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Aprobar el acceso al llavero para desconectar esta cuenta de correo y eliminar su contraseña de aplicación guardada y la información de conexión relacionada. Solo se reintentará la desconexión ya solicitada; no se modificará otra cuenta."
+        }
+      },
+      "ja": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "このメールアカウントの接続を解除し、保存されたアプリ用パスワードと関連する接続情報を削除するためにキーチェーンアクセスを許可します。すでに要求した接続解除だけを再試行し、他のアカウントは変更しません。"
+        }
+      },
+      "zh-Hans": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "批准钥匙串访问，以断开此邮件账户并删除已保存的应用专用密码及相关连接信息。仅重试你已请求的断开操作，不会更改其他账户。"
+        }
+      },
+      "fr": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Autoriser l’accès au trousseau pour déconnecter ce compte de messagerie et supprimer son mot de passe d’application enregistré ainsi que les informations de connexion associées. Seule la déconnexion déjà demandée sera réessayée ; aucun autre compte ne sera modifié."
+        }
+      },
+      "it": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Approva l’accesso al portachiavi per disconnettere questo account di posta ed eliminarne la password per app salvata e le relative informazioni di connessione. Verrà ritentata solo la disconnessione già richiesta; nessun altro account verrà modificato."
+        }
+      },
+      "de": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Den Schlüsselbundzugriff erlauben, um dieses E-Mail-Konto zu trennen und sein gespeichertes App-Passwort samt zugehörigen Verbindungsinformationen zu löschen. Nur die bereits angeforderte Trennung wird wiederholt; andere Konten bleiben unverändert."
+        }
+      }
+    }
+  },
+  "credentialApproval.mailPurpose": {
+    "comment": "App approval before system credential authentication; notification text must never include account identifiers or secrets.",
+    "extractionState": "manual",
+    "localizations": {
+      "ko": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "저장된 메일 앱 비밀번호를 키체인에서 읽어 이 계정의 메일 연결을 복구합니다. 비밀번호는 화면이나 알림에 표시하지 않습니다."
+        }
+      },
+      "en": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Read the saved mail app password from Keychain to restore this account’s mail connection. The password is never displayed on screen or in notifications."
+        }
+      },
+      "es": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Leer la contraseña de aplicación de correo guardada en el llavero para restablecer la conexión de esta cuenta. La contraseña no se muestra en pantalla ni en las notificaciones."
+        }
+      },
+      "ja": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "キーチェーンに保存されたメールのアプリ用パスワードを読み取り、このアカウントのメール接続を復元します。パスワードは画面や通知には表示しません。"
+        }
+      },
+      "zh-Hans": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "从钥匙串读取已保存的邮件应用专用密码，以恢复此账户的邮件连接。密码不会显示在屏幕或通知中。"
+        }
+      },
+      "fr": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Lire le mot de passe d’application de messagerie enregistré dans le trousseau pour rétablir la connexion de ce compte. Le mot de passe ne s’affiche jamais à l’écran ni dans les notifications."
+        }
+      },
+      "it": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Leggere dal portachiavi la password per app di posta salvata per ripristinare la connessione di questo account. La password non viene mai mostrata sullo schermo o nelle notifiche."
+        }
+      },
+      "de": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Das gespeicherte App-Passwort für E-Mail aus dem Schlüsselbund lesen, um die Verbindung dieses Kontos wiederherzustellen. Das Passwort wird weder auf dem Bildschirm noch in Mitteilungen angezeigt."
+        }
+      }
+    }
+  },
+  "credentialApproval.notification.title": {
+    "comment": "App approval before system credential authentication; notification text must never include account identifiers or secrets.",
+    "extractionState": "manual",
+    "localizations": {
+      "ko": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "인증 전에 확인이 필요합니다"
+        }
+      },
+      "en": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Review required before authentication"
+        }
+      },
+      "es": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Revisión necesaria antes de autenticar"
+        }
+      },
+      "ja": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "認証前に確認が必要です"
+        }
+      },
+      "zh-Hans": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "认证前需要确认"
+        }
+      },
+      "fr": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Vérification requise avant l’authentification"
+        }
+      },
+      "it": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Conferma richiesta prima dell’autenticazione"
+        }
+      },
+      "de": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Vor der Authentifizierung ist eine Bestätigung nötig"
+        }
+      }
+    }
+  },
+  "credentialApproval.notification.body": {
+    "comment": "App approval before system credential authentication; notification text must never include account identifiers or secrets.",
+    "extractionState": "manual",
+    "localizations": {
+      "ko": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "앱에서 계정과 사용 목적을 확인한 뒤 승인해 주세요. 승인 전에는 시스템 인증을 시작하지 않습니다."
+        }
+      },
+      "en": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Review the account and purpose in the app, then approve. System authentication will not start before your approval."
+        }
+      },
+      "es": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Revisa la cuenta y el propósito en la app y da tu aprobación. La autenticación del sistema no se iniciará antes."
+        }
+      },
+      "ja": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "アプリでアカウントと利用目的を確認してから許可してください。許可するまでシステム認証は開始しません。"
+        }
+      },
+      "zh-Hans": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "请在应用中确认账户和用途后再批准。未经批准，不会启动系统认证。"
+        }
+      },
+      "fr": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Vérifiez le compte et la finalité dans l’app, puis autorisez. L’authentification système ne démarrera pas avant votre accord."
+        }
+      },
+      "it": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Controlla account e scopo nell’app, poi autorizza. L’autenticazione di sistema non inizierà prima della tua approvazione."
+        }
+      },
+      "de": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Prüfe Konto und Zweck in der App und erteile dann deine Zustimmung. Die Systemauthentifizierung beginnt erst nach deiner Zustimmung."
+        }
+      }
+    }
+  },
+  "credentialApproval.open": {
+    "comment": "App approval before system credential authentication; notification text must never include account identifiers or secrets.",
+    "extractionState": "manual",
+    "localizations": {
+      "ko": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "인증 요청 확인"
+        }
+      },
+      "en": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Review authentication request"
+        }
+      },
+      "es": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Revisar solicitud de autenticación"
+        }
+      },
+      "ja": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "認証リクエストを確認"
+        }
+      },
+      "zh-Hans": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "查看认证请求"
+        }
+      },
+      "fr": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Vérifier la demande d’authentification"
+        }
+      },
+      "it": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Controlla la richiesta di autenticazione"
+        }
+      },
+      "de": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Authentifizierungsanfrage prüfen"
+        }
+      }
+    }
+  },
+  "credentialApproval.explanation": {
+    "comment": "App approval before system credential authentication; notification text must never include account identifiers or secrets.",
+    "extractionState": "manual",
+    "localizations": {
+      "ko": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "허용을 누른 경우에만 Touch ID, Face ID 또는 시스템 암호 확인이 표시될 수 있습니다. 나중에 선택하면 시스템 인증을 시작하지 않으며 앱에서 다시 확인할 수 있습니다."
+        }
+      },
+      "en": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Only after you tap Allow may Touch ID, Face ID, or a system password prompt appear. Choose Later to skip system authentication; you can review this request again in the app."
+        }
+      },
+      "es": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Solo después de pulsar Permitir podrá aparecer Touch ID, Face ID o una solicitud de contraseña del sistema. Elige Más tarde para no iniciar la autenticación del sistema; podrás volver a revisar la solicitud en la app."
+        }
+      },
+      "ja": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "「許可」を押した場合にのみ、Touch ID、Face ID、またはシステムのパスワード確認が表示されることがあります。「後で」を選ぶとシステム認証は開始せず、アプリで再度確認できます。"
+        }
+      },
+      "zh-Hans": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "仅在点按“允许”后，才可能显示触控 ID、面容 ID 或系统密码确认。选择“稍后”不会启动系统认证，你可在应用中再次查看此请求。"
+        }
+      },
+      "fr": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Touch ID, Face ID ou une demande de mot de passe système ne peuvent apparaître qu’après avoir touché Autoriser. Choisissez Plus tard pour ne pas lancer l’authentification système ; vous pourrez revoir cette demande dans l’app."
+        }
+      },
+      "it": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Touch ID, Face ID o una richiesta di password di sistema possono apparire solo dopo aver toccato Consenti. Scegli Più tardi per non avviare l’autenticazione di sistema; potrai rivedere la richiesta nell’app."
+        }
+      },
+      "de": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Erst nachdem du auf Erlauben tippst, kann Touch ID, Face ID oder eine Systempasswort-Abfrage erscheinen. Wähle Später, um die Systemauthentifizierung nicht zu starten. Du kannst die Anfrage in der App erneut prüfen."
+        }
+      }
+    }
+  },
+  "credentialApproval.failed": {
+    "comment": "App approval before system credential authentication; notification text must never include account identifiers or secrets.",
+    "extractionState": "manual",
+    "localizations": {
+      "ko": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "인증 또는 연결을 완료하지 못했습니다. 시스템 인증을 자동으로 다시 시도하지 않습니다. 다시 허용하거나 나중에 확인해 주세요."
+        }
+      },
+      "en": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Authentication or connection could not be completed. There will be no automatic authentication retry. Allow again or review this later."
+        }
+      },
+      "es": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "No se pudo completar la autenticación o la conexión. No se volverá a autenticar automáticamente. Permite de nuevo o revísalo más tarde."
+        }
+      },
+      "ja": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "認証または接続を完了できませんでした。認証を自動で再試行することはありません。もう一度許可するか、後で確認してください。"
+        }
+      },
+      "zh-Hans": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "无法完成认证或连接。不会自动重试认证。请再次允许或稍后查看。"
+        }
+      },
+      "fr": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "L’authentification ou la connexion n’a pas abouti. L’authentification ne sera pas relancée automatiquement. Autorisez à nouveau ou vérifiez plus tard."
+        }
+      },
+      "it": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Impossibile completare l’autenticazione o la connessione. L’autenticazione non verrà ritentata automaticamente. Consenti di nuovo o riprova più tardi."
+        }
+      },
+      "de": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Authentifizierung oder Verbindung konnten nicht abgeschlossen werden. Die Authentifizierung wird nicht automatisch wiederholt. Erlaube sie erneut oder prüfe die Anfrage später."
+        }
+      }
+    }
+  },
+  "credentialApproval.allow": {
+    "comment": "App approval before system credential authentication; notification text must never include account identifiers or secrets.",
+    "extractionState": "manual",
+    "localizations": {
+      "ko": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "허용하고 계속"
+        }
+      },
+      "en": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Allow and continue"
+        }
+      },
+      "es": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Permitir y continuar"
+        }
+      },
+      "ja": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "許可して続ける"
+        }
+      },
+      "zh-Hans": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "允许并继续"
+        }
+      },
+      "fr": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Autoriser et continuer"
+        }
+      },
+      "it": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Consenti e continua"
+        }
+      },
+      "de": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Erlauben und fortfahren"
+        }
+      }
+    }
+  },
+  "credentialApproval.later": {
+    "comment": "App approval before system credential authentication; notification text must never include account identifiers or secrets.",
+    "extractionState": "manual",
+    "localizations": {
+      "ko": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "나중에"
+        }
+      },
+      "en": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Later"
+        }
+      },
+      "es": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Más tarde"
+        }
+      },
+      "ja": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "後で"
+        }
+      },
+      "zh-Hans": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "稍后"
+        }
+      },
+      "fr": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Plus tard"
+        }
+      },
+      "it": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Più tardi"
+        }
+      },
+      "de": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Später"
+        }
+      }
+    }
+  },
+  "credentialApproval.title": {
+    "comment": "App approval before system credential authentication; notification text must never include account identifiers or secrets.",
+    "extractionState": "manual",
+    "localizations": {
+      "ko": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "인증 사용 승인"
+        }
+      },
+      "en": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Approve authentication"
+        }
+      },
+      "es": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Aprobar autenticación"
+        }
+      },
+      "ja": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "認証の利用を許可"
+        }
+      },
+      "zh-Hans": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "批准认证"
+        }
+      },
+      "fr": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Autoriser l’authentification"
+        }
+      },
+      "it": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Approva l’autenticazione"
+        }
+      },
+      "de": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Authentifizierung erlauben"
+        }
+      }
+    }
+  },
   "settings.sync.conflict.entity.other": {
     "comment": "Localized fallback for app records without a human-readable source title; do not expose Swift type names.",
     "extractionState": "manual",

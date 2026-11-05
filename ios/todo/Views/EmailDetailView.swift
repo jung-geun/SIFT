@@ -32,6 +32,16 @@ struct EmailDetailView: View {
     @State private var hasGmailStoredCredential = false
     @State private var hasOutlookStoredCredential = false
     @State private var showBackgroundWarning = false
+    @State private var backgroundWarningAccount = ""
+    @State private var isUpdatingBackgroundAccess = false
+    @State private var credentialAction: CredentialAction?
+    @State private var showCredentialApproval = false
+
+    private struct CredentialAction {
+        let account: String
+        let purpose: String
+        let operation: @MainActor () async throws -> Void
+    }
     @State private var showOutlookHelp = false
     @AppStorage("pieroot.todo.imap.account") private var imapAccount = ""
     @AppStorage("pieroot.todo.imap.backgroundEnabled") private var imapBackgroundEnabled = false
@@ -71,8 +81,12 @@ struct EmailDetailView: View {
                 email: account,
                 backgroundEnabled: backgroundEnabled
             )
+            MailCredentialApprovalCenter.shared.resolveMailApproval(provider: .gmail, namespace: account)
             return MailConnectionValidation(isAuthenticated: true, hasStoredCredential: true, failureMessage: nil)
         } catch {
+            if error as? KeychainStoreError == .authenticationRequired {
+                MailCredentialApprovalCenter.shared.requireMailApproval(provider: .gmail, namespace: account)
+            }
             return MailConnectionValidation(
                 isAuthenticated: false,
                 hasStoredCredential: MailCredentialFailurePolicy.hasStoredCredential(after: error),
@@ -93,8 +107,12 @@ struct EmailDetailView: View {
                 email: account,
                 backgroundEnabled: backgroundEnabled
             )
+            MailCredentialApprovalCenter.shared.resolveMailApproval(provider: .outlook, namespace: account)
             return MailConnectionValidation(isAuthenticated: true, hasStoredCredential: true, failureMessage: nil)
         } catch {
+            if error as? KeychainStoreError == .authenticationRequired {
+                MailCredentialApprovalCenter.shared.requireMailApproval(provider: .outlook, namespace: account)
+            }
             return MailConnectionValidation(
                 isAuthenticated: false,
                 hasStoredCredential: MailCredentialFailurePolicy.hasStoredCredential(after: error),
@@ -172,12 +190,14 @@ struct EmailDetailView: View {
                                     get: { imapBackgroundEnabled },
                                     set: { enabled in
                                         if enabled {
+                                            backgroundWarningAccount = imapAccount
                                             showBackgroundWarning = true
                                         } else {
                                             imapBackgroundEnabled = false
                                         }
                                     }
                                 ))
+                                .disabled(isUpdatingBackgroundAccess)
                                 Button {
                                     Task { await connectGmail() }
                                 } label: {
@@ -451,22 +471,45 @@ struct EmailDetailView: View {
         }
         .onDisappear {
             tutorial?.handleEmailDetailClosed()
+            credentialAction = nil
+            showCredentialApproval = false
         }
         .safeAreaInset(edge: .top, spacing: 0) {
             if let tutorial {
                 AppTutorialTipHost(tutorial: tutorial, screen: .emailDetail)
             }
         }
-        .alert("백그라운드 메일 불러오기", isPresented: $showBackgroundWarning) {
-            Button("위험을 이해하고 활성화") {
-                imapBackgroundEnabled = true
-                if !imapAccount.isEmpty {
-                    Task { try? IMAPCredentialStore.migrateAccess(for: imapAccount, toBackground: true) }
-                }
+        .alert(Self.credentialText("mail.credential.background.title", "백그라운드 메일 접근 승인"), isPresented: $showBackgroundWarning) {
+            Button(Self.credentialText("mail.credential.background.allow", "위험을 이해하고 인증 허용")) {
+                let account = backgroundWarningAccount
+                Task { await enableBackgroundAccess(for: account) }
             }
             Button("취소", role: .cancel) {}
         } message: {
-            Text("기기가 잠긴 뒤에도 이 기기에서 App Password를 사용할 수 있습니다. 분실·탈옥·앱 침해 위험이 증가할 수 있습니다.")
+            Text(backgroundWarningAccount.isEmpty ? imapEmail : backgroundWarningAccount)
+            Text(Self.backgroundAccessPurpose)
+        }
+        .alert(Self.credentialText("credentialApproval.title", "인증 사용 승인"), isPresented: $showCredentialApproval, presenting: credentialAction) { action in
+            Button(Self.credentialText("credentialApproval.allow", "허용하고 계속")) {
+                Task {
+                    do {
+                        try await KeychainStore.withApprovedAuthentication(purpose: action.purpose) {
+                            try await action.operation()
+                        }
+                    } catch {
+                        errorMessage = mailErrorMessage(error)
+                        showError = true
+                    }
+                    credentialAction = nil
+                }
+            }
+            Button(Self.credentialText("credentialApproval.later", "나중에"), role: .cancel) {
+                credentialAction = nil
+            }
+        } message: { action in
+            Text(action.account)
+            Text(action.purpose)
+            Text(Self.credentialText("mail.credential.explicitExplanation", "허용한 경우에만 이 작업을 위해 Touch ID, Face ID 또는 시스템 암호 확인을 시작할 수 있습니다. 취소하면 재시도하지 않습니다."))
         }
         .alert("오류", isPresented: $showError, presenting: errorMessage) { _ in
             Button("확인", role: .cancel) {}
@@ -615,130 +658,229 @@ struct EmailDetailView: View {
     }
 
 
-    private func signOutGmail() {
-        Task {
-            await GmailIMAPService.shared.disconnect()
-            do {
-                let targetAccount = imapAccount
-                try IMAPCredentialStore.delete(for: targetAccount)
-                MailboxIncrementalSyncCoordinator.shared.forgetCursor(for: .gmail, rawAccount: targetAccount)
-                GmailIMAPIngestionCursorStore().clearCursor(for: targetAccount)
-                imapAccount = ""
-                imapEmail = ""
-                isGmailAuthenticated = false
-                hasGmailStoredCredential = false
-                NotificationCenter.default.post(name: .gmailAuthChanged, object: false)
-                imapPassword = ""
-            } catch {
-                errorMessage = error.localizedDescription
-                showError = true
-            }
-        }
+    private static func credentialText(_ key: String, _ fallback: String) -> String {
+        AppLanguage.localized(key, defaultValue: fallback, language: .current, comment: "Explicit mail credential action approval.")
     }
 
-
-    private func signOutOutlook() {
-        Task {
-            await OutlookIMAPService.shared.disconnect()
-            do {
-                let targetAccount = outlookAccount
-                try OutlookIMAPCredentialStore.delete(for: targetAccount)
-                MailboxIncrementalSyncCoordinator.shared.forgetCursor(for: .outlook, rawAccount: targetAccount)
-                outlookAccount = ""
-                outlookEmail = ""
-                isOutlookAuthenticated = false
-                hasOutlookStoredCredential = false
-                NotificationCenter.default.post(name: Notification.Name("pieroot.todo.outlookAuthChanged"), object: false)
-                outlookPassword = ""
-            } catch {
-                errorMessage = error.localizedDescription
-                showError = true
-            }
-        }
+    private static var backgroundAccessPurpose: String {
+        credentialText("mail.credential.background.purpose", "Gmail 앱 비밀번호의 백그라운드 접근을 허용합니다. 이미 저장된 비밀번호가 있으면 키체인에서 읽어 접근 정책을 변경합니다. 허용하면 Touch ID, Face ID 또는 시스템 암호 확인이 표시될 수 있습니다. 이후에는 기기가 잠겨도 이 기기에서 앱 비밀번호를 사용할 수 있어 분실·탈옥·앱 침해 위험이 증가할 수 있습니다.")
     }
 
-    private func reconnectOutlook() async {
-        isConnectingOutlook = true
-        defer { isConnectingOutlook = false }
+    private func enableBackgroundAccess(for account: String) async {
+        guard account == imapAccount, !isUpdatingBackgroundAccess else { return }
+        isUpdatingBackgroundAccess = true
+        defer { isUpdatingBackgroundAccess = false }
         do {
-            try await OutlookIMAPService.shared.validateConnection(
-                email: outlookAccount,
-                backgroundEnabled: outlookBackgroundEnabled
-            )
-            isOutlookAuthenticated = true
-            hasOutlookStoredCredential = true
-            outlookConnectionFailure = nil
-            NotificationCenter.default.post(name: Notification.Name("pieroot.todo.outlookAuthChanged"), object: true)
+            if !account.isEmpty {
+                try await KeychainStore.withApprovedAuthentication(purpose: Self.backgroundAccessPurpose) {
+                    guard account == imapAccount else { throw CancellationError() }
+                    try IMAPCredentialStore.migrateAccess(for: account, toBackground: true)
+                }
+            }
+            guard account == imapAccount else { throw CancellationError() }
+            // An empty account configures the subsequent new connection only;
+            // there is no stored credential whose ACL could be migrated yet.
+            imapBackgroundEnabled = true
         } catch {
-            isOutlookAuthenticated = false
-            hasOutlookStoredCredential = MailCredentialFailurePolicy.hasStoredCredential(after: error)
-            outlookConnectionFailure = mailErrorMessage(error)
-            errorMessage = error.localizedDescription
+            errorMessage = mailErrorMessage(error)
             showError = true
         }
     }
 
-    private func reconnectGmail() async {
-        isConnectingGmail = true
-        defer { isConnectingGmail = false }
+    private func selectedAccount(for provider: MailProvider) -> String {
+        provider == .gmail ? imapAccount : outlookAccount
+    }
+
+    private func requiresCredentialApproval(_ error: any Error) -> Bool {
+        if let keychain = error as? KeychainStoreError { return keychain == .authenticationRequired }
+        if let deletion = error as? IMAPCredentialDeletionError {
+            return [deletion.portableError, deletion.localError].compactMap { $0 }.contains { requiresCredentialApproval($0) }
+        }
+        if let rollback = error as? IMAPCredentialRollbackError {
+            return requiresCredentialApproval(rollback.operationError) || requiresCredentialApproval(rollback.rollbackError)
+        }
+        return false
+    }
+
+    private func handleCredentialFailure(
+        _ error: any Error, provider: MailProvider, account: String, purpose: String,
+        retry: @escaping @MainActor () async throws -> Void
+    ) {
+        guard requiresCredentialApproval(error), selectedAccount(for: provider) == account else {
+            errorMessage = mailErrorMessage(error)
+            showError = true
+            return
+        }
+        credentialAction = CredentialAction(account: account, purpose: purpose) {
+            guard selectedAccount(for: provider) == account else { throw CancellationError() }
+            try await retry()
+        }
+        showCredentialApproval = true
+    }
+
+    private func signOutGmail() { signOutMail(.gmail) }
+    private func signOutOutlook() { signOutMail(.outlook) }
+
+    private func signOutMail(_ provider: MailProvider) {
+        let account = selectedAccount(for: provider)
+        Task {
+            do {
+                try await disconnectMail(provider, account: account)
+            } catch {
+                handleCredentialFailure(
+                    error, provider: provider, account: account,
+                    purpose: Self.credentialText("mail.credential.disconnectPurpose", "이 계정의 메일 연결을 해제하고 저장된 앱 비밀번호 및 관련 연결 정보를 삭제하기 위해 키체인 접근을 승인합니다. 이미 요청한 연결 해제만 다시 시도하며 다른 계정은 변경하지 않습니다.")
+                ) { try await disconnectMail(provider, account: account) }
+            }
+        }
+    }
+
+    private func disconnectMail(_ provider: MailProvider, account: String) async throws {
+        guard !account.isEmpty, selectedAccount(for: provider) == account else { throw CancellationError() }
+        switch provider {
+        case .gmail: await GmailIMAPService.shared.disconnect()
+        case .outlook: await OutlookIMAPService.shared.disconnect()
+        }
+        guard selectedAccount(for: provider) == account else { throw CancellationError() }
+        switch provider {
+        case .gmail:
+            try IMAPCredentialStore.delete(for: account)
+            MailboxIncrementalSyncCoordinator.shared.forgetCursor(for: .gmail, rawAccount: account)
+            GmailIMAPIngestionCursorStore().clearCursor(for: account)
+            imapAccount = ""
+            imapEmail = ""
+            imapPassword = ""
+            isGmailAuthenticated = false
+            hasGmailStoredCredential = false
+            NotificationCenter.default.post(name: .gmailAuthChanged, object: false)
+        case .outlook:
+            try OutlookIMAPCredentialStore.delete(for: account)
+            MailboxIncrementalSyncCoordinator.shared.forgetCursor(for: .outlook, rawAccount: account)
+            outlookAccount = ""
+            outlookEmail = ""
+            outlookPassword = ""
+            isOutlookAuthenticated = false
+            hasOutlookStoredCredential = false
+            NotificationCenter.default.post(name: Notification.Name("pieroot.todo.outlookAuthChanged"), object: false)
+        }
+    }
+
+    private func reconnectOutlook() async { await reconnectMail(.outlook) }
+    private func reconnectGmail() async { await reconnectMail(.gmail) }
+
+    private func reconnectMail(_ provider: MailProvider) async {
+        let account = selectedAccount(for: provider)
         do {
-            try await GmailIMAPService.shared.validateConnection(
-                email: imapAccount,
-                backgroundEnabled: imapBackgroundEnabled
-            )
+            try await validateExplicitMailConnection(provider, account: account)
+        } catch {
+            switch provider {
+            case .gmail:
+                isGmailAuthenticated = false
+                hasGmailStoredCredential = MailCredentialFailurePolicy.hasStoredCredential(after: error)
+                gmailConnectionFailure = mailErrorMessage(error)
+            case .outlook:
+                isOutlookAuthenticated = false
+                hasOutlookStoredCredential = MailCredentialFailurePolicy.hasStoredCredential(after: error)
+                outlookConnectionFailure = mailErrorMessage(error)
+            }
+            handleCredentialFailure(
+                error, provider: provider, account: account,
+                purpose: Self.credentialText("credentialApproval.mailPurpose", "저장된 메일 앱 비밀번호를 키체인에서 읽어 이 계정의 메일 연결을 복구합니다. 비밀번호는 화면이나 알림에 표시하지 않습니다.")
+            ) { try await validateExplicitMailConnection(provider, account: account) }
+        }
+    }
+
+    private func validateExplicitMailConnection(_ provider: MailProvider, account: String) async throws {
+        guard !account.isEmpty, selectedAccount(for: provider) == account else { throw CancellationError() }
+        if provider == .gmail { isConnectingGmail = true } else { isConnectingOutlook = true }
+        defer {
+            if provider == .gmail { isConnectingGmail = false } else { isConnectingOutlook = false }
+        }
+        switch provider {
+        case .gmail:
+            try await GmailIMAPService.shared.validateConnection(email: account, backgroundEnabled: imapBackgroundEnabled)
+        case .outlook:
+            try await OutlookIMAPService.shared.validateConnection(email: account, backgroundEnabled: outlookBackgroundEnabled)
+        }
+        guard selectedAccount(for: provider) == account else { throw CancellationError() }
+        MailCredentialApprovalCenter.shared.resolveMailApproval(provider: provider, namespace: account)
+        switch provider {
+        case .gmail:
             isGmailAuthenticated = true
             hasGmailStoredCredential = true
             gmailConnectionFailure = nil
             NotificationCenter.default.post(name: .gmailAuthChanged, object: true)
-        } catch {
-            isGmailAuthenticated = false
-            hasGmailStoredCredential = MailCredentialFailurePolicy.hasStoredCredential(after: error)
-            gmailConnectionFailure = mailErrorMessage(error)
-            errorMessage = error.localizedDescription
-            showError = true
+        case .outlook:
+            isOutlookAuthenticated = true
+            hasOutlookStoredCredential = true
+            outlookConnectionFailure = nil
+            NotificationCenter.default.post(name: Notification.Name("pieroot.todo.outlookAuthChanged"), object: true)
         }
     }
 
-    private func connectOutlook() async {
-        isConnectingOutlook = true
-        defer { isConnectingOutlook = false }
+    private func connectOutlook() async { await connectMail(.outlook) }
+    private func connectGmail() async { await connectMail(.gmail) }
+
+    private func connectMail(_ provider: MailProvider) async {
+        let email = provider == .gmail ? imapEmail : outlookEmail
+        let password = provider == .gmail ? imapPassword : outlookPassword
+        let selected = selectedAccount(for: provider)
+        let background = provider == .gmail ? imapBackgroundEnabled : outlookBackgroundEnabled
         do {
-            try await OutlookIMAPService.shared.authenticateAndSave(
-                email: outlookEmail,
-                appPassword: outlookPassword,
-                backgroundEnabled: outlookBackgroundEnabled
-            )
-            let canonical = OutlookIMAPCredentialStore.canonicalAccount(outlookEmail) ?? outlookEmail
-            outlookAccount = canonical
-            outlookPassword = ""
-            isOutlookAuthenticated = true
-            hasOutlookStoredCredential = true
-            NotificationCenter.default.post(name: Notification.Name("pieroot.todo.outlookAuthChanged"), object: true)
-            lastFetchMessage = String(format: AppLanguage.localized("mail.connection.connectedProvider", defaultValue: "%@ connected", language: .current, comment: "Successful mail provider connection. %@ is Gmail IMAP or Outlook IMAP."), "Outlook IMAP")
+            try await submitMailConnection(provider, email: email, password: password, selected: selected, background: background)
         } catch {
-            errorMessage = error.localizedDescription
-            showError = true
+            guard requiresCredentialApproval(error), selectedAccount(for: provider) == selected else {
+                errorMessage = mailErrorMessage(error)
+                showError = true
+                return
+            }
+            credentialAction = CredentialAction(
+                account: email,
+                purpose: Self.credentialText("mail.credential.connectPurpose", "입력한 앱 비밀번호로 이 계정의 메일 연결을 확인하고 키체인에 저장합니다. 기존 비밀번호를 교체해야 하는 경우 해당 계정의 보호된 저장 정보에 접근합니다. 화면에서 요청한 연결·저장만 다시 시도하며 다른 계정은 변경하지 않습니다.")
+            ) {
+                try await submitMailConnection(provider, email: email, password: password, selected: selected, background: background)
+            }
+            showCredentialApproval = true
         }
     }
-    private func connectGmail() async {
-        isConnectingGmail = true
-        defer { isConnectingGmail = false }
-        do {
-            try await GmailIMAPService.shared.authenticateAndSave(
-                email: imapEmail,
-                appPassword: imapPassword,
-                backgroundEnabled: imapBackgroundEnabled
-            )
-            imapAccount = IMAPCredentialStore.canonicalAccount(imapEmail) ?? imapEmail
+
+    private func submitMailConnection(
+        _ provider: MailProvider, email: String, password: String, selected: String, background: Bool
+    ) async throws {
+        func requireReviewedInput() throws {
+            let currentEmail = provider == .gmail ? imapEmail : outlookEmail
+            let currentPassword = provider == .gmail ? imapPassword : outlookPassword
+            let currentBackground = provider == .gmail ? imapBackgroundEnabled : outlookBackgroundEnabled
+            guard selectedAccount(for: provider) == selected, currentEmail == email,
+                  currentPassword == password, currentBackground == background else { throw CancellationError() }
+        }
+        try requireReviewedInput()
+        if provider == .gmail { isConnectingGmail = true } else { isConnectingOutlook = true }
+        defer {
+            if provider == .gmail { isConnectingGmail = false } else { isConnectingOutlook = false }
+        }
+        switch provider {
+        case .gmail:
+            try await GmailIMAPService.shared.authenticateAndSave(email: email, appPassword: password, backgroundEnabled: background)
+        case .outlook:
+            try await OutlookIMAPService.shared.authenticateAndSave(email: email, appPassword: password, backgroundEnabled: background)
+        }
+        try requireReviewedInput()
+        switch provider {
+        case .gmail:
+            imapAccount = IMAPCredentialStore.canonicalAccount(email) ?? email
             imapPassword = ""
             isGmailAuthenticated = true
             hasGmailStoredCredential = true
             NotificationCenter.default.post(name: .gmailAuthChanged, object: true)
-            lastFetchMessage = String(format: AppLanguage.localized("mail.connection.connectedProvider", defaultValue: "%@ connected", language: .current, comment: "Successful mail provider connection. %@ is Gmail IMAP or Outlook IMAP."), "Gmail IMAP")
-        } catch {
-            errorMessage = error.localizedDescription
-            showError = true
+        case .outlook:
+            outlookAccount = OutlookIMAPCredentialStore.canonicalAccount(email) ?? email
+            outlookPassword = ""
+            isOutlookAuthenticated = true
+            hasOutlookStoredCredential = true
+            NotificationCenter.default.post(name: Notification.Name("pieroot.todo.outlookAuthChanged"), object: true)
         }
+        lastFetchMessage = String(format: AppLanguage.localized("mail.connection.connectedProvider", defaultValue: "%@ connected", language: .current, comment: "Successful mail provider connection. %@ is Gmail IMAP or Outlook IMAP."), provider == .gmail ? "Gmail IMAP" : "Outlook IMAP")
     }
 
     nonisolated static func fetchStatusMessage(

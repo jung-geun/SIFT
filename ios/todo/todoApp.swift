@@ -99,6 +99,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterD
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
         UNUserNotificationCenter.current().delegate = self
+        _ = MailCredentialApprovalCenter.shared
         #if DEBUG
         if Bundle.main.bundleIdentifier == "pieroot.sift-todo.qa",
            ProcessInfo.processInfo.arguments.contains("-ui-test-in-memory-store"),
@@ -253,6 +254,19 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterD
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
         completionHandler([.banner, .sound, .badge])
+    }
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        if response.notification.request.identifier == MailCredentialApprovalCenter.notificationIdentifier {
+            Task { @MainActor in
+                MailCredentialApprovalCenter.shared.openFromNotification()
+            }
+        }
+        completionHandler()
     }
 }
 
@@ -607,6 +621,7 @@ struct todoApp: App {
             .environment(\.locale, appLanguage.locale)
             .appScreenStyle()
             .tint(AppTheme.accent)
+            .modifier(MailCredentialApprovalPresentation())
             .environmentObject(syncMonitor)
             .environmentObject(appUpdate)
             .environment(\.appTutorialState, tutorial)

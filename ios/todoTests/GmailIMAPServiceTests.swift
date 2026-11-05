@@ -1,4 +1,7 @@
+import CryptoKit
 import Foundation
+import LocalAuthentication
+import Security
 import SwiftData
 import Testing
 @testable import todo
@@ -30,6 +33,129 @@ struct GmailIMAPServiceTests {
             "* OK [UIDVALIDITY 42] selected",
             "A0001 OK SELECT"
         ])
+    }
+
+    @Test("isolated mail readiness stays quiet and an explicitly registered recovery retries only after approval")
+    func protectedReadinessAndExplicitApprovalRetry() async throws {
+        try await AIProviderTestIsolation.shared.withLock {
+            let suiteName = "MailCredentialApprovalTests.\(UUID().uuidString)"
+            let defaults = try #require(UserDefaults(suiteName: suiteName))
+            defer { defaults.removePersistentDomain(forName: suiteName) }
+            let pendingKey = "pieroot.todo.credentialApproval.pendingMail"
+            let account = "approval-\(UUID().uuidString.lowercased())@example.com"
+            defaults.set(account, forKey: "pieroot.todo.imap.account")
+            let center = MailCredentialApprovalCenter(defaults: defaults)
+
+            // The credential store still uses standard defaults for its slot
+            // pointer. Only this unique fixture account's pointer is touched.
+            let credentialDefaults = UserDefaults.standard
+            let pointerKey = IMAPCredentialStore.activeSlotKey(for: account)
+            let priorPointer = credentialDefaults.object(forKey: pointerKey)
+            defer {
+                center.resolveMailApproval(provider: .gmail, namespace: account)
+                center.present()
+                #expect(center.requests.isEmpty)
+                #expect(!center.isAuthenticating && !center.isPresented && !center.failed)
+                if let priorPointer { credentialDefaults.set(priorPointer, forKey: pointerKey) }
+                else { credentialDefaults.removeObject(forKey: pointerKey) }
+                #expect((credentialDefaults.object(forKey: pointerKey) as? NSObject) == (priorPointer as? NSObject))
+            }
+            credentialDefaults.set("a", forKey: pointerKey)
+
+            let transport = ScriptedIMAPTransport()
+            setupAuth(transport: transport, messageCount: 0)
+            let service = GmailIMAPService(transport: transport)
+            let purpose = "Read the saved fixture mail password to restore this account's connection."
+            let digest = SHA256.hash(data: Data(account.utf8)).map { String(format: "%02x", $0) }.joined()
+            let requestID = "mail.\(MailProvider.gmail.rawValue).\(digest)"
+            // Contexts are retained only to compare identity; LAContext invalidation
+            // can reset mutable properties, so snapshot them inside the backend.
+            var contexts: [(context: LAContext, interactionNotAllowed: Bool, localizedReason: String)] = []
+            var cancelApproval = true
+            var retryCount = 0
+
+            await KeychainStore.withSecurityOperationForTesting({ operation, query, _ in
+                #expect(operation == "read")
+                #expect(query[kSecAttrService as String] as? String == IMAPCredentialStore.service)
+                #expect(query[kSecAttrAccount as String] as? String == "\(account).imap-slot-a")
+                guard let context = query[kSecUseAuthenticationContext as String] as? LAContext else {
+                    Issue.record("Every protected credential read must carry an authentication context")
+                    return (errSecInteractionNotAllowed, nil)
+                }
+                let observation = (
+                    context: context,
+                    interactionNotAllowed: context.interactionNotAllowed,
+                    localizedReason: context.localizedReason
+                )
+                contexts.append(observation)
+                if observation.interactionNotAllowed { return (errSecInteractionNotAllowed, nil) }
+                #expect(observation.localizedReason == purpose)
+                if cancelApproval { return (errSecUserCanceled, nil) }
+                return (errSecSuccess, Data("fixture-app-password".utf8) as NSData)
+            }) {
+                await #expect(throws: KeychainStoreError.authenticationRequired) {
+                    try await service.ensureAuthenticated(email: account, backgroundEnabled: false)
+                }
+                #expect(contexts.count == 1)
+                #expect(contexts.first?.interactionNotAllowed == true)
+                #expect(transport.commands == ["CLOSE"])
+                #expect(await service.authenticatedAccount == nil)
+
+                // Registry.ensureReady hardcodes live shared transports. Register
+                // this isolated recovery explicitly; this does not pretend to test
+                // the registry's automatic approval capture or its retry closure.
+                center.requestApproval(id: requestID, account: account, purpose: purpose, notify: false) {
+                    retryCount += 1
+                    #expect(center.isAuthenticating)
+                    try await service.ensureAuthenticated(email: account, backgroundEnabled: false)
+                }
+                center.requireMailApproval(provider: .gmail, namespace: account, restoring: true)
+                #expect(center.requests.map(\.id) == [requestID])
+                #expect(center.requests.first?.account == account)
+                #expect(center.requests.first?.purpose == purpose)
+                #expect(defaults.stringArray(forKey: pendingKey) == [requestID])
+                center.present()
+                #expect(center.isPresented)
+                #expect(retryCount == 0)
+                #expect(contexts.count == 1)
+
+                await center.approve()
+                #expect(retryCount == 1)
+                #expect(contexts.count == 2)
+                #expect(contexts.last?.interactionNotAllowed == false)
+                #expect(center.failed && !center.isAuthenticating)
+                #expect(center.requests.map(\.id) == [requestID])
+                #expect(defaults.stringArray(forKey: pendingKey) == [requestID])
+                #expect(transport.commands == ["CLOSE", "CLOSE"])
+                #expect(await service.authenticatedAccount == nil)
+
+                cancelApproval = false
+                center.present()
+                #expect(center.isPresented && !center.failed)
+                #expect(retryCount == 1)
+                await center.approve()
+                #expect(retryCount == 2)
+                #expect(contexts.count == 3)
+                #expect(contexts.last?.interactionNotAllowed == false)
+                #expect(Set(contexts.dropFirst().map { ObjectIdentifier($0.context) }).count == 2)
+                #expect(center.requests.isEmpty)
+                #expect(!center.failed && !center.isAuthenticating && !center.isPresented)
+                #expect((defaults.stringArray(forKey: pendingKey) ?? []).isEmpty)
+                #expect(await service.authenticatedAccount == account)
+                #expect(transport.commands == [
+                    "CLOSE", "CLOSE", "CLOSE",
+                    "CONNECT_PREAUTH", "LOGIN \(account)", "CAPABILITY", "SELECT INBOX"
+                ])
+
+                // A successful explicit retry must not authorize later automatic reads.
+                #expect(throws: KeychainStoreError.authenticationRequired) {
+                    _ = try IMAPCredentialStore.credential(for: account)
+                }
+                #expect(contexts.count == 4)
+                #expect(contexts.last?.interactionNotAllowed == true)
+            }
+            await service.disconnect()
+        }
     }
 
     @Test("connection verification fails closed and preserves the saved password", arguments: ["denied", "disconnected", "missingHeaders", "missingIdentity"], [false, true])
