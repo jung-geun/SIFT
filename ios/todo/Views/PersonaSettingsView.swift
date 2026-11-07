@@ -103,9 +103,6 @@ struct PersonaSettingsView: View {
                 }
                 .accessibilityIdentifier("settings.languagePicker")
             }
-            #if !targetEnvironment(macCatalyst)
-            AdMobPrivacyOptionsRow()
-            #endif
             Section {
                 DisclosureGroup(isExpanded: $showsAdvancedSettings) {
                     NavigationLink(destination: PersonaDetailView()) {
@@ -155,13 +152,6 @@ struct PersonaSettingsView: View {
                     .accessibilityIdentifier("settings.closeButton")
             }
         }
-        #if !targetEnvironment(macCatalyst)
-        .task {
-            // Privacy choices remain accessible even when placement access disables ads.
-            // This explicit Settings-entry refresh never starts GMA or a startup form.
-            AdMobConsentManager.shared.refreshPrivacyOptionsRequirement()
-        }
-        #endif
         .task(id: tutorial?.currentStep) {
             revealTutorialSettings()
             let target: String?

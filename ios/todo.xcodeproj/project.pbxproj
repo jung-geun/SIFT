@@ -9,8 +9,6 @@
 /* Begin PBXBuildFile section */
 		A11A00012FE3E978006E59B5 /* Tokenizers in Frameworks */ = {isa = PBXBuildFile; productRef = A11A00022FE3E978006E59B5 /* Tokenizers */; };
 		AC11D1A10000000000000001 /* FluidAudio in Frameworks */ = {isa = PBXBuildFile; productRef = AC11D1A10000000000000002 /* FluidAudio */; };
-		AD5010010000000000000001 /* GoogleMobileAds in Frameworks */ = {isa = PBXBuildFile; platformFilter = ios; productRef = AD5010010000000000000002 /* GoogleMobileAds */; };
-		AD5010020000000000000001 /* GoogleUserMessagingPlatform in Frameworks */ = {isa = PBXBuildFile; platformFilter = ios; productRef = AD5010020000000000000002 /* GoogleUserMessagingPlatform */; };
 		AEDC6C8B2FE3E978006E59B5 /* MLXLLM in Frameworks */ = {isa = PBXBuildFile; productRef = AEDC6C8A2FE3E978006E59B5 /* MLXLLM */; };
 		AEDC6C8D2FE3E978006E59B5 /* MLXLMCommon in Frameworks */ = {isa = PBXBuildFile; productRef = AEDC6C8C2FE3E978006E59B5 /* MLXLMCommon */; };
 		AFC91B100000000000000001 /* WhisperKit in Frameworks */ = {isa = PBXBuildFile; productRef = AFC91B100000000000000002 /* WhisperKit */; };
@@ -167,8 +165,6 @@
 				A11A00012FE3E978006E59B5 /* Tokenizers in Frameworks */,
 				AC11D1A10000000000000001 /* FluidAudio in Frameworks */,
 				AFC91B100000000000000001 /* WhisperKit in Frameworks */,
-				AD5010010000000000000001 /* GoogleMobileAds in Frameworks */,
-				AD5010020000000000000001 /* GoogleUserMessagingPlatform in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -289,8 +285,6 @@
 				A11A00022FE3E978006E59B5 /* Tokenizers */,
 				AC11D1A10000000000000002 /* FluidAudio */,
 				AFC91B100000000000000002 /* WhisperKit */,
-				AD5010010000000000000002 /* GoogleMobileAds */,
-				AD5010020000000000000002 /* GoogleUserMessagingPlatform */,
 			);
 			productName = todo;
 			productReference = AE58F1A22FDEFA3B00690FA6 /* todo.app */;
@@ -443,8 +437,6 @@
 				7C0BE2ECDE9BE93C25B6A289 /* XCRemoteSwiftPackageReference "swift-collections" */,
 				AC11D1A10000000000000003 /* XCRemoteSwiftPackageReference "FluidAudio" */,
 				AFC91B100000000000000003 /* XCRemoteSwiftPackageReference "WhisperKit" */,
-				AD5010010000000000000003 /* XCRemoteSwiftPackageReference "swift-package-manager-google-mobile-ads" */,
-				AD5010020000000000000003 /* XCRemoteSwiftPackageReference "swift-package-manager-google-user-messaging-platform" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = AE58F1A32FDEFA3B00690FA6 /* Products */;
@@ -890,7 +882,6 @@
 		AE58F1C72FDEFA3C00690FA6 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ADMOB_APP_ID = "ca-app-pub-3940256099942544~1458002511";
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
@@ -940,8 +931,6 @@
 		AE58F1C82FDEFA3C00690FA6 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ADMOB_APP_ID = "ca-app-pub-6070999186513755~7828101623";
-				"ADMOB_APP_ID[sdk=iphonesimulator*]" = "ca-app-pub-3940256099942544~1458002511";
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
@@ -1536,22 +1525,6 @@
 				version = 0.17.4;
 			};
 		};
-		AD5010010000000000000003 /* XCRemoteSwiftPackageReference "swift-package-manager-google-mobile-ads" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/googleads/swift-package-manager-google-mobile-ads.git";
-			requirement = {
-				kind = exactVersion;
-				version = 13.11.0;
-			};
-		};
-		AD5010020000000000000003 /* XCRemoteSwiftPackageReference "swift-package-manager-google-user-messaging-platform" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/googleads/swift-package-manager-google-user-messaging-platform.git";
-			requirement = {
-				kind = exactVersion;
-				version = 3.1.0;
-			};
-		};
 		AFC91B100000000000000003 /* XCRemoteSwiftPackageReference "WhisperKit" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/argmaxinc/WhisperKit.git";
@@ -1572,16 +1545,6 @@
 			isa = XCSwiftPackageProductDependency;
 			package = AC11D1A10000000000000003 /* XCRemoteSwiftPackageReference "FluidAudio" */;
 			productName = FluidAudio;
-		};
-		AD5010010000000000000002 /* GoogleMobileAds */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = AD5010010000000000000003 /* XCRemoteSwiftPackageReference "swift-package-manager-google-mobile-ads" */;
-			productName = GoogleMobileAds;
-		};
-		AD5010020000000000000002 /* GoogleUserMessagingPlatform */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = AD5010020000000000000003 /* XCRemoteSwiftPackageReference "swift-package-manager-google-user-messaging-platform" */;
-			productName = GoogleUserMessagingPlatform;
 		};
 		AEDC6C8A2FE3E978006E59B5 /* MLXLLM */ = {
 			isa = XCSwiftPackageProductDependency;

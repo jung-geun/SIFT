@@ -10,6 +10,13 @@ description: Nuevas funciones, mejoras y correcciones de errores de cada versió
 
 # Novedades
 
+<a id="version-1-0-16"></a>
+## 1.0.16
+
+### Eliminación de publicidad
+
+- Se han eliminado los anuncios y los controles de consentimiento publicitario. Todas las funciones son gratuitas y no requieren compras dentro de la app.
+
 <a id="version-1-0-15"></a>
 ## 1.0.15
 

@@ -526,10 +526,7 @@ struct todoApp: App {
             globalSearchAppContainer: appData.container,
             globalSearchEmailContainer: appData.emailContainer,
             globalSearchMeetingContainer: appData.meetingContainer,
-            globalSearchMailAccess: searchMailAccess,
-            isAdPlacementEligible: hasOnboarded && hasCompletedTutorial
-                && !tutorial.isActive && scenePhase == .active
-                && tabVisibility.clamped(selectedTab) == AppTabID.todo.rawValue
+            globalSearchMailAccess: searchMailAccess
         )
         .tabItem { Label("할 일", systemImage: "checklist") }
         .tag(AppTabID.todo.rawValue)

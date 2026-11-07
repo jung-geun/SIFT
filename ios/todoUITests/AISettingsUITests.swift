@@ -92,7 +92,7 @@ final class AISettingsUITests: SIFTUITestCase {
     }
 
     func testLocalFallbackControlsInstallationWithoutDownloading() throws {
-        launch(.init(language: .english, additionalArguments: ["-ui-test-reset-beta", "-sift-test-ad-free"]))
+        launch(.init(language: .english, additionalArguments: ["-ui-test-reset-beta"]))
         openSettings()
         guard openBetaSettingsIfAvailable() else {
             XCTAssertFalse(app.buttons["beta.model.localDownload"].exists, "Apple-supported hardware without installed or loading models does not need fallback management.")
@@ -121,7 +121,7 @@ final class AISettingsUITests: SIFTUITestCase {
     }
 
     func testDisconnectedPersonalScreensDoNotOfferRemoteAnalysis() throws {
-        launch(.init(language: .english, additionalArguments: ["-ui-test-reset-beta", "-sift-test-ad-free"]))
+        launch(.init(language: .english, additionalArguments: ["-ui-test-reset-beta"]))
         openAISettings()
         requireHittable(app.buttons["openai.signIn"], message: "Fixture must be genuinely disconnected.")
         tap(app.navigationBars.buttons.element(boundBy: 0), message: "Return to Settings")

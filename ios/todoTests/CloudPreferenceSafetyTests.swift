@@ -70,4 +70,16 @@ struct CloudPreferenceSafetyTests {
             #expect(try CloudPreferenceValue(try #require(defaults.object(forKey: key))) == value)
         }
     }
+
+    @Test("Retired local support identifiers and keepsakes never enter cloud preferences")
+    func retiredSupportDataIsNotPortable() throws {
+        let suite = "SIFTCloudRetiredSupport-\(UUID())"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(["123456"], forKey: "pieroot.todo.support.coffeeTransactions")
+        defaults.set(4, forKey: "pieroot.todo.support.starlightStamps")
+        let snapshot = try CloudPreferenceStore.capture(defaults: defaults)
+        #expect(snapshot[CloudPreferenceStore.prefix + "pieroot.todo.support.coffeeTransactions"] == nil)
+        #expect(snapshot[CloudPreferenceStore.prefix + "pieroot.todo.support.starlightStamps"] == nil)
+    }
 }

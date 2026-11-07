@@ -25,17 +25,6 @@ The iOS app includes full pinned SDK license and notice texts, including
 vendored and embedded-library attributions, in ios/todo/ThirdPartyNotices.txt.
 Open them in the app via Settings > App Info > Open-Source Licenses.
 
-Google Mobile Ads 13.11.0 and User Messaging Platform 3.1.0
---------------------------------------------------------
-The Google advertising/consent SDK binaries retain Google's terms, not SIFT's
-Apache-2.0 license. Use of Google Mobile Ads is governed by the AdMob terms:
-  https://developers.google.com/admob/terms
-  https://adsense.google.com/adsense/terms
-Their Swift Package Manager wrapper sources are Copyright 2021 Google LLC,
-licensed under Apache-2.0 (the full license is included in the app notices):
-  https://github.com/googleads/swift-package-manager-google-mobile-ads
-  https://github.com/googleads/swift-package-manager-google-user-messaging-platform
-
 Backend, Android, and Python dependencies likewise retain their own licenses.
 Their manifests and lockfiles identify the dependencies; a license field on
 SIFT's own package does not change any dependency's license. The Apache notices

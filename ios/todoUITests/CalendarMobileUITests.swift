@@ -8,7 +8,7 @@ final class CalendarMobileUITests: SIFTUITestCase {
         var configuration = LaunchConfiguration()
         configuration.language = .english
         configuration.startTab = .calendar
-        configuration.additionalArguments = ["-sift-test-ad-free", "-ui-test-reset-beta", "-pieroot.todo.calendarAutoRegister", "NO"]
+        configuration.additionalArguments = ["-ui-test-reset-beta", "-pieroot.todo.calendarAutoRegister", "NO"]
         launch(configuration)
         if app.frame.width > app.frame.height {
             XCUIDevice.shared.orientation = .landscapeRight
@@ -45,7 +45,7 @@ final class CalendarMobileUITests: SIFTUITestCase {
         var configuration = LaunchConfiguration()
         configuration.language = .english
         configuration.startTab = .calendar
-        configuration.additionalArguments = ["-sift-test-ad-free", "-ui-test-reset-beta", "-pieroot.todo.calendarAutoRegister", "NO"]
+        configuration.additionalArguments = ["-ui-test-reset-beta", "-pieroot.todo.calendarAutoRegister", "NO"]
         launch(configuration)
         let unavailable = app.descendants(matching: .any)["calendar.permissionUnavailable"].firstMatch
         let isDenied = unavailable.waitForExistence(timeout: 10)
