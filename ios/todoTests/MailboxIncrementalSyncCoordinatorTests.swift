@@ -1069,4 +1069,46 @@ extension MailboxIncrementalSyncCoordinatorTests {
         #expect(attempts > 1)
         #expect(provider.fetchInboxPageCalls.count == 1)
     }
+
+    @Test("prefetchBodies skips body download when synced analysis already matches body fingerprint")
+    func prefetchSkipsSyncedAnalyzedMail() async throws {
+        let defaults = makeDefaults()
+        defaults.set("user@gmail.com", forKey: "pieroot.todo.imap.account")
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let synced = EmailMessage(
+            id: "gmail-imap:9001",
+            subject: "Synced subject",
+            body: "Synced complete body text from another device.",
+            receivedAt: Date(timeIntervalSince1970: 500),
+            provider: .gmail,
+            rawMessageID: "9001",
+            providerGlobalMessageID: "9001",
+            isInInbox: true,
+            sourceAccountNamespace: "user@gmail.com"
+        )
+        synced.bodyContentVersion = 0
+        synced.analysisState = .analyzed
+        synced.analysisVersion = EmailAnalysisContract.summaryContractVersion
+        synced.analysisFailureReasonRaw = nil
+        synced.analysisSummary = "Synced summary"
+        synced.analyzedBodyFingerprint = EmailAnalysisContract.fingerprint(
+            subject: synced.subject,
+            body: synced.body
+        )
+        context.insert(synced)
+        try context.save()
+
+        let provider = ScriptedPagingProvider(provider: .gmail)
+        let coordinator = MailboxIncrementalSyncCoordinator(
+            localStore: MailboxLocalStore(defaults: defaults, saveContext: { try $0.save() }),
+            makeContext: { context },
+            resolveProvider: { _ in provider },
+            ensureReady: { _, _, _ in true },
+            defaults: defaults,
+            enqueueAnalysis: { _, _ in }
+        )
+        #expect(await coordinator.prefetchBodies(provider: .gmail))
+        #expect(provider.contentCalls.isEmpty)
+    }
 }

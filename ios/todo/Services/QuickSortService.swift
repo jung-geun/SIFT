@@ -9,7 +9,7 @@ import SwiftData
 @MainActor
 final class QuickSortService {
     static let shared = QuickSortService()
-
+    static let defaultMaxConcurrency = 2
     struct Receipt: Codable, Equatable {
         let id: UUID
         let createdAt: Date
@@ -26,19 +26,35 @@ final class QuickSortService {
         }
     }
 
+    private struct StagedInsertions {
+        var order: [UUID] = []
+        var items: [UUID: Insertion] = [:]
+
+        mutating func record(_ id: UUID, _ insertion: Insertion) {
+            if items[id] == nil { order.append(id) }
+            items[id] = insertion
+        }
+    }
+
     private let defaults: UserDefaults
+    private let maxConcurrency: Int
     private let engine: @MainActor () -> any IntelligenceService
     private var context: ModelContext?
     private var saveSubscription: AnyCancellable?
-    private var staged: [ObjectIdentifier: [UUID: Insertion]] = [:]
+    private var staged: [ObjectIdentifier: StagedInsertions] = [:]
     private var receipts: [UUID: Receipt] = [:]
+    private var receiptOrder: [UUID] = []
+    private var queue: [UUID] = []
+    private var queuedIDs: Set<UUID> = []
     private var workers: [UUID: Task<Void, Never>] = [:]
     private var storageKey = ""
     private var generation = UUID()
 
     init(defaults: UserDefaults = .standard,
+         maxConcurrency: Int = QuickSortService.defaultMaxConcurrency,
          engine: @escaping @MainActor () -> any IntelligenceService = { RoutedIntelligenceEngine() }) {
         self.defaults = defaults
+        self.maxConcurrency = max(1, maxConcurrency)
         self.engine = engine
     }
 
@@ -54,7 +70,7 @@ final class QuickSortService {
         storageKey = "sift.local.newTaskPriority.\(storeDigest)"
         if let data = defaults.data(forKey: storageKey),
            let saved = try? JSONDecoder().decode([Receipt].self, from: data) {
-            receipts = Dictionary(saved.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
+            for receipt in saved { setReceipt(receipt) }
         }
         saveSubscription = NotificationCenter.default.publisher(for: ModelContext.didSave)
             .sink { [weak self] notification in
@@ -64,16 +80,19 @@ final class QuickSortService {
                     Task { @MainActor [weak self] in self?.didSave(notification) }
                 }
             }
-        for id in receipts.keys { launch(id) }
+        for id in receiptOrder { enqueue(id) }
     }
 
     func stop() {
         generation = UUID()
+        queue.removeAll()
+        queuedIDs.removeAll()
         workers.values.forEach { $0.cancel() }
         workers.removeAll()
         saveSubscription = nil
         staged.removeAll()
         receipts.removeAll()
+        receiptOrder.removeAll()
         context = nil
     }
 
@@ -91,9 +110,9 @@ final class QuickSortService {
         // Journal intent before the creation transaction. A restart may recover
         // it only when that exact input actually exists in the committed store.
         // No provider runs from this pre-save hook.
-        receipts[id] = Receipt(id: id, createdAt: todo.createdAt, digest: digest)
+        setReceipt(Receipt(id: id, createdAt: todo.createdAt, digest: digest))
         persist(synchronously: true)
-        staged[ObjectIdentifier(insertionContext), default: [:]][todo.id] = Insertion(todo)
+        staged[ObjectIdentifier(insertionContext), default: StagedInsertions()].record(id, Insertion(todo))
     }
 
     private func didSave(_ notification: Notification) {
@@ -103,19 +122,23 @@ final class QuickSortService {
         // A fresh context proves the insertion reached the persistent store. In
         // particular, an unrelated save cannot bless a rolled-back insertion.
         let committed = ModelContext(context.container)
-        for (id, insertion) in insertions {
-            receipts[id] = nil
-            guard let original = insertion.todo, original.modelContext === savedContext,
+        for id in insertions.order {
+            guard let insertion = insertions.items[id],
+                  let original = insertion.todo, original.modelContext === savedContext,
                   let todo = Self.fetch(id, in: committed), todo.createdAt == insertion.createdAt,
-                  Self.isEligible(todo), let digest = Self.digest(todo) else { continue }
-            receipts[id] = Receipt(id: id, createdAt: todo.createdAt, digest: digest)
+                  Self.isEligible(todo), let digest = Self.digest(todo) else {
+                removeReceipt(id)
+                continue
+            }
+            setReceipt(Receipt(id: id, createdAt: todo.createdAt, digest: digest))
         }
         persist()
-        for id in insertions.keys { launch(id) }
+        for id in insertions.order { enqueue(id) }
     }
 
     private func persist(synchronously: Bool = false) {
-        guard !storageKey.isEmpty, let data = try? JSONEncoder().encode(Array(receipts.values)) else { return }
+        let ordered = receiptOrder.compactMap { receipts[$0] }
+        guard !storageKey.isEmpty, let data = try? JSONEncoder().encode(ordered) else { return }
         defaults.set(data, forKey: storageKey)
         if synchronously {
             // Unlike ordinary preferences, this journal must precede the store
@@ -124,18 +147,46 @@ final class QuickSortService {
         }
     }
 
-    private func launch(_ id: UUID) {
-        guard workers[id] == nil, receipts[id] != nil else { return }
-        let generation = generation
-        workers[id] = Task { @MainActor [weak self] in
-            guard let self, !Task.isCancelled, self.generation == generation else { return }
-            await self.analyze(id, generation: generation)
-            if self.generation == generation { self.workers[id] = nil }
+    private func setReceipt(_ receipt: Receipt) {
+        if receipts[receipt.id] == nil { receiptOrder.append(receipt.id) }
+        receipts[receipt.id] = receipt
+    }
+
+    private func removeReceipt(_ id: UUID) {
+        guard receipts.removeValue(forKey: id) != nil else { return }
+        receiptOrder.removeAll { $0 == id }
+    }
+
+    private func enqueue(_ id: UUID) {
+        guard receipts[id] != nil, workers[id] == nil, !queuedIDs.contains(id) else { return }
+        queue.append(id)
+        queuedIDs.insert(id)
+        drainQueue()
+    }
+
+    private func drainQueue() {
+        guard context != nil else { return }
+        while workers.count < maxConcurrency, !queue.isEmpty {
+            let id = queue.removeFirst()
+            queuedIDs.remove(id)
+            guard receipts[id] != nil, workers[id] == nil else { continue }
+            let generation = generation
+            workers[id] = Task { @MainActor [weak self] in
+                defer {
+                    if let self, self.generation == generation {
+                        self.workers[id] = nil
+                        self.drainQueue()
+                    }
+                }
+                guard let self, !Task.isCancelled, self.generation == generation else { return }
+                await self.analyze(id, generation: generation)
+            }
         }
     }
 
     private func finish(_ id: UUID) {
-        receipts[id] = nil
+        removeReceipt(id)
+        if queuedIDs.remove(id) != nil { queue.removeAll { $0 == id } }
         persist()
     }
 

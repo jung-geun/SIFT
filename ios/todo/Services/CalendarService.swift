@@ -124,6 +124,57 @@ final class CalendarSyncCoalescer {
     }
 }
 
+/// Single-flight gate for weekly calendar imports. Concurrent launch/foreground
+/// callers share the active import pass rather than running duplicate passes.
+@MainActor
+final class CalendarWeeklyImportGate {
+    private final class Flight {
+        var activeWaiters: Set<UUID> = []
+        var task: Task<Void, Never>?
+
+        func cancelWaiter(_ id: UUID) {
+            guard activeWaiters.remove(id) != nil, activeWaiters.isEmpty else { return }
+            task?.cancel()
+        }
+    }
+
+    private var flights: [ObjectIdentifier: Flight] = [:]
+
+    func run(
+        context: ModelContext,
+        operation: @escaping @MainActor () async -> Void
+    ) async {
+        guard !Task.isCancelled else { return }
+        let key = ObjectIdentifier(context)
+        let flight: Flight
+        if let existing = flights[key] {
+            flight = existing
+        } else {
+            let created = Flight()
+            flights[key] = created
+            created.task = Task { @MainActor [weak self] in
+                defer {
+                    if self?.flights[key] === created {
+                        self?.flights.removeValue(forKey: key)
+                    }
+                }
+                await operation()
+            }
+            flight = created
+        }
+        let waiterID = UUID()
+        flight.activeWaiters.insert(waiterID)
+        await withTaskCancellationHandler {
+            await flight.task?.value
+        } onCancel: { [weak flight] in
+            Task { @MainActor in
+                flight?.cancelWaiter(waiterID)
+            }
+        }
+        flight.activeWaiters.remove(waiterID)
+    }
+}
+
 /// EventKit을 통해 iCloud·Google 캘린더를 읽고 TODO 마감을 캘린더에 등록.
 ///
 /// 사용자가 기기 설정 > 계정에서 캘린더 계정을 추가하면 EKEventStore에 자동 포함.
@@ -146,6 +197,7 @@ final class CalendarService {
     private var unresolvedEventIDs = Set<String>()
     private let unresolvedEventIDsLock = NSLock()
     private let syncCoalescer = CalendarSyncCoalescer()
+    private let weeklyImportGate = CalendarWeeklyImportGate()
 
     private func cachedUnresolvedEventID(_ identifier: String) -> Bool {
         unresolvedEventIDsLock.lock()
@@ -857,7 +909,7 @@ enum CalendarError: LocalizedError, Equatable {
 
 extension CalendarService {
 
-    private static let weeklyImportKey = "pieroot.todo.lastCalendarImportDate"
+    static let weeklyImportKey = "pieroot.todo.lastCalendarImportDate"
 
     /// Reconcile missing imported occurrences only with device-local source
     /// availability. Pending suggestions additionally require source selection.
@@ -1027,20 +1079,44 @@ extension CalendarService {
     /// 7일 쿨다운으로 캘린더 → TODO 주간 import를 실행.
     /// LLM 불필요 — EventKit 읽기 + SwiftData 쓰기만 수행.
     @MainActor
-    func runWeeklyImportIfDue(context: ModelContext) async {
-        guard isAuthorized else { return }
-        let last = UserDefaults.standard.double(forKey: Self.weeklyImportKey)
+    func runWeeklyImportIfDue(
+        context: ModelContext,
+        defaults: UserDefaults = .standard,
+        now: @escaping @MainActor () -> Date = Date.init,
+        isAuthorized: (@MainActor () -> Bool)? = nil,
+        isCloudRestoreReady: @escaping @MainActor () -> Bool = {
+            !UserCloudSyncPolicy.isRequested
+                || (UserCloudSyncPolicy.isEnabled && FullCloudSyncService.shared.hasFinishedTaskRestore)
+        },
+        importOperation: (@MainActor (ModelContext) async -> Bool)? = nil
+    ) async {
+        let checkAuthorized = isAuthorized ?? { [self] in
+            self.isAuthorized && EKEventStore.authorizationStatus(for: .event) == .fullAccess
+        }
+        guard !Task.isCancelled, checkAuthorized(), isCloudRestoreReady() else { return }
         let sevenDays: TimeInterval = 7 * 24 * 3600
         // 첫 실행 시 last == 0 이므로 항상 통과
-        guard Date().timeIntervalSince1970 - last >= sevenDays else { return }
-        let selection = taskAnalysisCalendarIDs
-        await syncCalendarTodos(context: context)
-        // A selection change during async notification reconciliation must not
-        // put the newly selected sources behind the previous weekly cooldown.
-        if selection == taskAnalysisCalendarIDs, !Task.isCancelled,
-           !UserCloudSyncPolicy.isRequested || (UserCloudSyncPolicy.isEnabled && FullCloudSyncService.shared.hasFinishedTaskRestore),
-           EKEventStore.authorizationStatus(for: .event) == .fullAccess {
-            UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: Self.weeklyImportKey)
+        guard now().timeIntervalSince1970 - defaults.double(forKey: Self.weeklyImportKey) >= sevenDays else {
+            return
+        }
+        await weeklyImportGate.run(context: context) { [self] in
+            guard !Task.isCancelled, checkAuthorized(), isCloudRestoreReady() else { return }
+            let last = defaults.double(forKey: Self.weeklyImportKey)
+            guard now().timeIntervalSince1970 - last >= sevenDays else { return }
+            let selection = Self.taskAnalysisCalendarIDs(defaults: defaults)
+            let runImport = importOperation ?? { [self] ctx in
+                await self.performCalendarImportPass(context: ctx, defaults: defaults).succeeded
+            }
+            let succeeded = await runImport(context)
+            // A selection change, cancellation, or failed snapshot/save must not
+            // put sources behind the weekly cooldown.
+            if succeeded,
+               !Task.isCancelled,
+               selection == Self.taskAnalysisCalendarIDs(defaults: defaults),
+               checkAuthorized(),
+               isCloudRestoreReady() {
+                defaults.set(now().timeIntervalSince1970, forKey: Self.weeklyImportKey)
+            }
         }
     }
 
@@ -1054,27 +1130,43 @@ extension CalendarService {
     @MainActor
     @discardableResult
     func syncCalendarTodos(context: ModelContext) async -> Bool {
-        guard isAuthorized else { return false }
+        let outcome = await performCalendarImportPass(context: context, defaults: .standard)
+        return outcome.succeeded && outcome.hasChanges
+    }
+
+    @MainActor
+    private func performCalendarImportPass(
+        context: ModelContext,
+        defaults: UserDefaults
+    ) async -> (succeeded: Bool, hasChanges: Bool) {
+        guard isAuthorized else { return (false, false) }
         // EventKit uses its own actor/store. Only immutable summaries cross back;
         // no SwiftData context or live EKEvent escapes its owning executor.
         guard let snapshot = await CalendarVisibleEventReader.shared.importSnapshot(now: Date()),
               !Task.isCancelled,
               EKEventStore.authorizationStatus(for: .event) == .fullAccess,
               !UserCloudSyncPolicy.isRequested
-                || (UserCloudSyncPolicy.isEnabled && FullCloudSyncService.shared.hasFinishedTaskRestore) else { return false }
-        let todos = (try? context.fetch(FetchDescriptor<Todo>())) ?? []
+                || (UserCloudSyncPolicy.isEnabled && FullCloudSyncService.shared.hasFinishedTaskRestore) else {
+            return (false, false)
+        }
+        guard let todos = try? context.fetch(FetchDescriptor<Todo>()) else { return (false, false) }
         let linksChanged = reconcileStaleCalendarReferences(in: todos)
-        if linksChanged { try? context.save() }
-        let changed = await syncCalendarTodos(
+        if linksChanged {
+            // Never roll back the shared UI context on save failure; leave
+            // unrelated user edits intact and report the import pass incomplete.
+            guard (try? context.save()) != nil else { return (false, false) }
+        }
+        let outcome = await reconcileCalendarTodos(
             context: context,
             events: snapshot.events,
             recoveryEvents: snapshot.recoveryEvents,
             now: snapshot.now,
             // Read consent AFTER the actor hop, immediately before model writes.
-            selectedCalendarIDs: taskAnalysisCalendarIDs.intersection(snapshot.availableCalendarIDs),
+            selectedCalendarIDs: Self.taskAnalysisCalendarIDs(defaults: defaults).intersection(snapshot.availableCalendarIDs),
             availableCalendarIDs: snapshot.availableCalendarIDs
         )
-        return linksChanged || changed
+        guard outcome.succeeded else { return (false, false) }
+        return (true, linksChanged || outcome.hasChanges)
     }
 
     /// Shared reconciliation path; all task writes happen before its first
@@ -1089,7 +1181,27 @@ extension CalendarService {
         selectedCalendarIDs: Set<String>,
         availableCalendarIDs: Set<String> = []
     ) async -> Bool {
-        var todos = (try? context.fetch(FetchDescriptor<Todo>())) ?? []
+        let outcome = await reconcileCalendarTodos(
+            context: context,
+            events: events,
+            recoveryEvents: recoveryEvents,
+            now: now,
+            selectedCalendarIDs: selectedCalendarIDs,
+            availableCalendarIDs: availableCalendarIDs
+        )
+        return outcome.succeeded && outcome.hasChanges
+    }
+
+    @MainActor
+    func reconcileCalendarTodos(
+        context: ModelContext,
+        events: [CalendarEventSummary],
+        recoveryEvents: [CalendarEventSummary],
+        now: Date,
+        selectedCalendarIDs: Set<String>,
+        availableCalendarIDs: Set<String> = []
+    ) async -> (succeeded: Bool, hasChanges: Bool) {
+        guard var todos = try? context.fetch(FetchDescriptor<Todo>()) else { return (false, false) }
         var hasChanges = false
         var insertedReviewTodos: [Todo] = []
         let observedEvents = events.filter { !$0.identifier.isEmpty }
@@ -1464,14 +1576,16 @@ extension CalendarService {
         }
 
         if hasChanges {
-            try? context.save()
+            // Never roll back the shared UI context on save failure; leave
+            // unrelated user edits intact and report the import pass incomplete.
+            guard (try? context.save()) != nil else { return (false, false) }
         }
         // New review suggestions never schedule notifications. Reconcile only
         // after completing the atomic import pass, not between source decisions.
         for todo in insertedReviewTodos {
             await TodoEligibilityReconciler.shared.reconcile(todo)
         }
-        return hasChanges
+        return (true, hasChanges)
     }
 
     /// 어플과 캘린더의 일정을 양방향으로 동기화하고, 충돌 시 최근 수정된 내용을 우선하여 갱신합니다.

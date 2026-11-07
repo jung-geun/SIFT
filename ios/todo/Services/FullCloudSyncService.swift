@@ -232,7 +232,7 @@ struct FullCloudSyncFailureState {
 /// Notifications advance this fence at receipt, before any MainActor hop.
 /// The pending identifier inventory is drained before cached bytes are captured.
 nonisolated final class FullCloudSaveFence: @unchecked Sendable {
-    struct Version: Sendable {
+    struct Version: Equatable, Sendable {
         var entities = [String: UInt64]()
         var unknown: UInt64 = 0
     }
@@ -473,6 +473,23 @@ struct FullCloudModelChanges {
 @MainActor
 final class FullCloudSyncService: ObservableObject {
     static let shared = FullCloudSyncService()
+    static let periodicTickInterval: Duration = .seconds(20)
+    static let safetyFullPassInterval: TimeInterval = 300
+
+    struct ReconcileObservation {
+        let saveVersion: FullCloudSaveFence.Version
+        let modelGenerations: [String: UInt64]
+        let defaultsGeneration: UInt64
+        let routineGeneration: UInt64
+        let cloudGeneration: UInt64
+        let meetingAuthorization: @Sendable () -> Bool
+    }
+
+    private struct CleanReconcileBaseline {
+        let completedAt: Date
+        let observation: ReconcileObservation
+    }
+
     private static let usesSyntheticEnvironment: Bool = {
         #if DEBUG
         let environment = ProcessInfo.processInfo.environment
@@ -543,6 +560,12 @@ final class FullCloudSyncService: ObservableObject {
     private var queuedSequence: UInt64 = 0
     private var lastEnqueueDate: Date?
     private var exportSequences = [UUID: UInt64]()
+    private var cloudChangeGeneration: UInt64 = 0
+    private var activeCloudImports = Set<UUID>()
+    private var defaultsChangeGeneration: UInt64 = 0
+    /// Device-local defaults (retry markers, cursors) must not wake the full pass.
+    private var portablePreferenceFingerprint: String?
+    private var lastCleanReconcile: CleanReconcileBaseline?
     private let saveFence = FullCloudSaveFence(entities: CloudModelCodec.entityNames)
     private let fileStore: CloudFileStore
     private let root: URL
@@ -568,6 +591,117 @@ final class FullCloudSyncService: ObservableObject {
         conflictContexts = (conflictApp, conflictEmail, conflictMeeting)
         conflictArchive = CloudSyncConflictArchive(url: archiveURL)
         retainedConflicts = (try? conflictArchive?.load()) ?? []
+    }
+
+    func attachIsolatedObserversForTesting() {
+        guard let conflictContexts, saveSubscription == nil else { return }
+        shadowImported = true
+        legacyImported = true
+        let tracked = Set([conflictContexts.app, conflictContexts.email, conflictContexts.meeting].map(ObjectIdentifier.init))
+        let saveFence = self.saveFence
+        saveSubscription = NotificationCenter.default.publisher(for: ModelContext.didSave)
+            .sink { [weak self, saveFence] notification in
+                guard let context = notification.object as? ModelContext,
+                      tracked.contains(ObjectIdentifier(context)) else { return }
+                saveFence.observe(notification)
+                if Thread.isMainThread {
+                    MainActor.assumeIsolated { self?.handleLocalSave(notification) }
+                } else {
+                    Task { @MainActor [weak self] in self?.handleLocalSave(notification) }
+                }
+            }
+    }
+
+    func recordCloudImportSignalForTesting() {
+        recordCloudImportCompletion()
+    }
+
+    @discardableResult
+    func runIsolatedPeriodicTickForTesting(now: Date, reconcilePassCount: inout Int) async throws -> Bool {
+        try await runPeriodicTickIfNeeded(now: now) {
+            reconcilePassCount += 1
+            try await self.synchronizeIsolatedForTesting(now: now)
+        }
+    }
+
+    private func synchronizeIsolatedForTesting(now: Date) async throws {
+        guard let conflictContexts, let engine else { throw CloudSyncConflictError.syncUnavailable }
+        synchronizing = true
+        rerunForLocalSave = false
+        dependencyContinuation = false
+        defer { synchronizing = false }
+        let observation = beginReconcileObservation()
+        let ignored = Set([conflictContexts.app, conflictContexts.email, conflictContexts.meeting].map(ObjectIdentifier.init))
+        saveFence.ignore(ignored)
+        defer { saveFence.unignore(ignored) }
+        let pendingSaves = saveFence.drain()
+        if pendingSaves.hasChanges {
+            if pendingSaves.needsFullCapture { modelCaptureCache.invalidateAll() }
+            else { modelCaptureCache.invalidate(identifiers: pendingSaves.identifiers) }
+            modelDataDirty = true
+        }
+        let modelVersions = modelChanges.generations
+        if modelDataDirty {
+            let changed = Set(CloudModelCodec.entityNames.filter {
+                modelVersions[$0, default: 0] != capturedModelGenerations[$0, default: 0]
+            }).union(unavailableModelEntities).union(pendingSaves.entities)
+            let selected = modelCaptureCache.requiresFullInventory || changed.isEmpty
+                ? CloudModelCodec.entityNames : changed
+            let captured = CloudModelCodec.captureAvailable(
+                app: conflictContexts.app, email: conflictContexts.email, meeting: conflictContexts.meeting,
+                previous: cachedModelSnapshot, entities: selected, cache: modelCaptureCache)
+            cachedModelRecords = captured.snapshot.records
+            cachedModelDigests = captured.snapshot.digests
+            cachedModelConflicts = captured.snapshot.conflictingKeys
+            cachedModelSnapshot = captured.snapshot
+            capturedModelGenerations = modelVersions
+            unavailableModelEntities = captured.unavailableEntities
+            modelCaptureError = captured.firstError
+            if !unavailableModelEntities.contains("Todo") {
+                taskAggregateDigest = captured.snapshot.taskAggregateDigest
+            }
+            modelDataDirty = !unavailableModelEntities.isEmpty
+        }
+        let reviewed = try await engine.modelConflicts(local: cachedModelSnapshot)
+        conflicts = reviewed
+        let held = cachedModelConflicts.union(reviewed.map(\.itemKey)).union(engine.unavailableConflictKeys)
+        let records = cachedModelRecords
+        var restored = 0
+        try await engine.reconcile(
+            digests: cachedModelDigests,
+            temporarilyUnavailable: held,
+            load: { records[$0] },
+            apply: { key, payload in
+                try self.applyModelRecord(
+                    key: key, payload: payload,
+                    app: conflictContexts.app, email: conflictContexts.email, meeting: conflictContexts.meeting,
+                    meetingRootURL: self.root.appendingPathComponent("Meetings", isDirectory: true),
+                    isAuthorized: { true }
+                )
+                restored += 1
+            }
+        )
+        if restored > 0 { rerunForLocalSave = true }
+        if FullCloudSyncProgress.shouldContinueDependencies(
+            enqueued: engine.didEnqueueChanges, restored: restored, hasDeferredKeys: !engine.deferredKeys.isEmpty
+        ) {
+            dependencyContinuation = true
+            rerunForLocalSave = true
+        }
+        if FullCloudSyncProgress.tasksRestored(
+            completedInventory: engine.didCompleteInventory,
+            heldKeys: held.union(engine.deferredKeys),
+            unavailableEntities: unavailableModelEntities,
+            isCurrent: { _ in true }
+        ) {
+            hasFinishedTaskRestore = true
+        }
+        if let modelCaptureError { throw modelCaptureError }
+        let completed = held.isEmpty && engine.deferredKeys.isEmpty && unavailableModelEntities.isEmpty
+        failureState.reconciledContent(completed: completed)
+        if completed { hasFinishedInitialRestore = true }
+        clearResolvedError()
+        finishReconcileObservation(observation, completed: completed, now: now)
     }
     #endif
 
@@ -805,7 +939,7 @@ final class FullCloudSyncService: ObservableObject {
             }
         defaultsSubscription = NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)
             .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.schedule() }
+            .sink { [weak self] _ in self?.handleDefaultsChange() }
         let saveFence = self.saveFence
         saveSubscription = NotificationCenter.default.publisher(for: ModelContext.didSave)
             .sink { [weak self, saveFence] notification in
@@ -827,8 +961,12 @@ final class FullCloudSyncService: ObservableObject {
         worker = Task.detached { @MainActor [weak self] in
             while let self, !Task.isCancelled, UserCloudSyncPolicy.isRequested {
                 // synchronizeNow publishes its failure once, with its actual phase.
-                try? await self.synchronizeNow()
-                do { try await Task.sleep(for: .seconds(20)) }
+                let ran = (try? await self.runPeriodicTickIfNeeded {
+                    try await self.synchronizeNow()
+                }) ?? true
+                // Idle ticks skip the full pass; still poll credential changes that arrive via iCloud Keychain.
+                if !ran, UserCloudSyncPolicy.isEnabled { _ = await self.connectionSync.reconcile() }
+                do { try await Task.sleep(for: Self.periodicTickInterval) }
                 catch { break }
             }
         }
@@ -897,6 +1035,11 @@ final class FullCloudSyncService: ObservableObject {
         lastEnqueueDate = nil
         saveFence.reset()
         dependencyContinuation = false
+        cloudChangeGeneration = 0
+        activeCloudImports.removeAll()
+        defaultsChangeGeneration = 0
+        portablePreferenceFingerprint = nil
+        lastCleanReconcile = nil
         // No key downgrade, shared deletion, signout or empty alternate store.
     }
 
@@ -958,6 +1101,102 @@ final class FullCloudSyncService: ObservableObject {
         return UserCloudSyncPolicy.isEnabled && hasFinishedTaskRestore
     }
 
+    private static func currentPortablePreferenceFingerprint() -> String? {
+        guard let snapshot = try? CloudPreferenceStore.capture() else { return nil }
+        var hash = Data()
+        for key in snapshot.keys.sorted() {
+            hash.append(Data(key.utf8)); hash.append(0)
+            hash.append(Data(CloudFileStore.digest(snapshot[key]!).utf8)); hash.append(0)
+        }
+        return CloudFileStore.digest(hash)
+    }
+
+    /// Only a changed portable preference (or an unreadable snapshot, treated
+    /// conservatively) counts as a local change and schedules a pass.
+    func handleDefaultsChange() {
+        let current = Self.currentPortablePreferenceFingerprint()
+        if let current, current == portablePreferenceFingerprint { return }
+        portablePreferenceFingerprint = current
+        defaultsChangeGeneration &+= 1
+        if synchronizing { rerunForLocalSave = true }
+        schedule()
+    }
+
+    func beginReconcileObservation() -> ReconcileObservation {
+        portablePreferenceFingerprint = Self.currentPortablePreferenceFingerprint()
+        return ReconcileObservation(
+            saveVersion: saveFence.snapshot(),
+            modelGenerations: modelChanges.generations,
+            defaultsGeneration: defaultsChangeGeneration,
+            routineGeneration: RoutineStore.shared.changeGeneration,
+            cloudGeneration: cloudChangeGeneration,
+            meetingAuthorization: MeetingCaptureCoordinator.captureCloudSyncAuthorization()
+        )
+    }
+
+    func finishReconcileObservation(_ observation: ReconcileObservation, completed: Bool, now: Date = Date()) {
+        guard completed,
+              !rerunForLocalSave,
+              !dependencyContinuation,
+              conflicts.isEmpty,
+              cachedModelConflicts.isEmpty,
+              failureState.failures.isEmpty,
+              errorMessage == nil,
+              activeCloudImports.isEmpty,
+              conflictContexts != nil || connectionSync.state != .failed else {
+            lastCleanReconcile = nil
+            return
+        }
+        lastCleanReconcile = CleanReconcileBaseline(completedAt: now, observation: observation)
+    }
+
+    func shouldRunPeriodicSynchronization(now: Date = Date()) -> Bool {
+        guard let baseline = lastCleanReconcile else { return true }
+        let elapsed = now.timeIntervalSince(baseline.completedAt)
+        guard elapsed >= 0, elapsed < Self.safetyFullPassInterval,
+              cloudContainer != nil || conflictContexts != nil,
+              let engine,
+              shadowImported && legacyImported,
+              hasFinishedInitialRestore && hasFinishedTaskRestore,
+              !modelDataDirty,
+              !rerunForLocalSave && !dependencyContinuation,
+              unavailableModelEntities.isEmpty && modelCaptureError == nil,
+              modelChanges.generations == baseline.observation.modelGenerations,
+              saveFence.snapshot() == baseline.observation.saveVersion,
+              defaultsChangeGeneration == baseline.observation.defaultsGeneration,
+              RoutineStore.shared.changeGeneration == baseline.observation.routineGeneration,
+              activeCloudImports.isEmpty && cloudChangeGeneration == baseline.observation.cloudGeneration,
+              baseline.observation.meetingAuthorization(),
+              !isRecordingDeferred,
+              !MeetingCaptureCoordinator.hasActiveCaptureForCloudSync,
+              !MeetingCaptureCoordinator.hasActiveMeetingWorkForCloudSync,
+              conflicts.isEmpty && cachedModelConflicts.isEmpty,
+              engine.unavailableConflictKeys.isEmpty,
+              engine.journal.pendingApplies.isEmpty,
+              engine.journal.pendingPublications.isEmpty,
+              engine.deferredKeys.isEmpty,
+              engine.unsettledMeetingKeys.isEmpty,
+              failureState.failures.isEmpty && errorMessage == nil else {
+            return true
+        }
+        if conflictContexts == nil {
+            return connectionSync.state == .notChecked
+                || connectionSync.state == .checking
+                || connectionSync.state == .failed
+        }
+        return false
+    }
+
+    @discardableResult
+    func runPeriodicTickIfNeeded(
+        now: Date = Date(),
+        perform: @MainActor () async throws -> Void
+    ) async rethrows -> Bool {
+        guard shouldRunPeriodicSynchronization(now: now) else { return false }
+        try await perform()
+        return true
+    }
+
     func synchronizeNow() async throws {
         guard UserCloudSyncPolicy.isRequested, !synchronizing, !resolvingConflict else { return }
         guard !Self.usesSyntheticEnvironment else { throw CancellationError() }
@@ -986,11 +1225,14 @@ final class FullCloudSyncService: ObservableObject {
                 guard generation == accountGeneration, UserCloudSyncPolicy.isEnabled,
                       !Task.isCancelled else { throw CancellationError() }
                 if shadowImported && legacyImported {
+                    let observation = beginReconcileObservation()
                     let completed = try await reconcileContent()
                     guard generation == accountGeneration, UserCloudSyncPolicy.isEnabled,
                           !Task.isCancelled else { throw CancellationError() }
                     failureState.reconciledContent(completed: completed)
                     if completed { hasFinishedInitialRestore = true }
+                    clearResolvedError()
+                    finishReconcileObservation(observation, completed: completed)
                 }
                 clearResolvedError()
             }
@@ -1510,6 +1752,14 @@ final class FullCloudSyncService: ObservableObject {
         }
     }
 
+    private func recordCloudImportCompletion() {
+        cloudChangeGeneration &+= 1
+        modelDataDirty = true
+        modelChanges.invalidateAll(cache: modelCaptureCache)
+        if synchronizing { rerunForLocalSave = true }
+        schedule()
+    }
+
     private func handleCloudEvent(_ notification: Notification) {
         guard UserCloudSyncPolicy.isEnabled,
               let event = notification.userInfo?[NSPersistentCloudKitContainer.eventNotificationUserInfoKey]
@@ -1527,8 +1777,13 @@ final class FullCloudSyncService: ObservableObject {
             if event.type == .export, event.storeIdentifier == shadowStoreID {
                 exportSequences[event.identifier] = queuedSequence
             }
+            if event.type == .import {
+                activeCloudImports.insert(event.identifier)
+                cloudChangeGeneration &+= 1
+            }
             return
         }
+        activeCloudImports.remove(event.identifier)
         guard event.succeeded else {
             exportSequences.removeValue(forKey: event.identifier)
             report(event.error ?? CKError(.internalError), channel: .transport(store, eventType))
@@ -1546,9 +1801,7 @@ final class FullCloudSyncService: ObservableObject {
         } else if event.type == .import {
             if event.storeIdentifier == shadowStoreID { shadowImported = true }
             if event.storeIdentifier == legacyStoreID { legacyImported = true }
-            modelDataDirty = true
-            modelChanges.invalidateAll(cache: modelCaptureCache)
-            schedule()
+            recordCloudImportCompletion()
         }
     }
 

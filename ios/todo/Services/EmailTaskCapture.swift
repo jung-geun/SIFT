@@ -66,11 +66,15 @@ enum EmailTaskCapture {
     static func savedItems(for email: EmailMessage, in context: ModelContext) throws -> SavedItems {
         let ref = email.todoSourceRef
         let namespace = email.sourceAccountNamespace
+        let globalID = email.providerGlobalMessageID
         let emailSource = TodoSource.email.rawValue
-        let descriptor = FetchDescriptor<Todo>(predicate: #Predicate {
-            $0.source == emailSource && $0.sourceRef == ref && $0.sourceAccountNamespace == namespace
-        })
-        let tasks = try context.fetch(descriptor)
+        let tasks = try context.fetch(FetchDescriptor<Todo>(predicate: #Predicate {
+            $0.source == emailSource
+        })).filter { todo in
+            guard todo.sourceAccountNamespace.lowercased() == namespace.lowercased() else { return false }
+            if !ref.isEmpty && todo.sourceRef == ref { return true }
+            return !globalID.isEmpty && todo.sourceMessageID == globalID
+        }
         return SavedItems(
             titles: Set(tasks.map { normalizedTitle($0.title) }),
             sourceItemIDs: Set(tasks.map(\.sourceItemID).filter { !$0.isEmpty })
@@ -98,6 +102,9 @@ enum EmailTaskCapture {
             throw CaptureError.duplicate
         }
         let analyzer = EmailContentAnalyzer()
+        // User-reviewed title, notes and due date make this an independent edit, not
+        // a model-derived result. It keeps a random identity; sourceItemID/provenance
+        // dedupe applies after sync instead of manufacturing a competing payload.
         let todo = Todo(title: title, notes: notes, dueDate: dueDate, source: .email, sourceRef: email.todoSourceRef)
         todo.sourceAccountNamespace = email.sourceAccountNamespace
         todo.sourceItemID = source.itemID

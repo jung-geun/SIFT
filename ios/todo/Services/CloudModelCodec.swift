@@ -587,6 +587,13 @@ enum CloudModelCodec {
         try entity.apply(identity, envelope, context, app, decoder, resolvingConflict)
     }
 
+    private static let emailAnalysisFieldNames: Set<String> = [
+        "analysisStateRaw", "analysisSummary", "analysisDetail",
+        "analysisKeyPoints", "analysisActionItems", "analysisError",
+        "analysisFailureReasonRaw", "analyzedBodyFingerprint", "analyzedAt",
+        "analysisVersion", "analysisTodoCandidate", "analysisTodoCandidateFingerprint"
+    ]
+
     /// Re-decode through the registered typed schema: old absent default fields,
     /// dictionary ordering, and device-local neutral values are not user edits.
     /// Dates, ordering of arrays and every actual domain value remain significant.
@@ -597,7 +604,83 @@ enum CloudModelCodec {
               let entity = (mainEntities + emailEntities + meetingEntities).first(where: { $0.name == envelope.entity }),
               entity.validIdentity(envelope.identity) else { throw CodecError.identityMismatch(key) }
         try entity.validateSchema()
+        if envelope.entity == "EmailMessage" {
+            let model = try emails.decode(envelope, decoder: decoder())
+            if !model.analyzedBodyFingerprint.isEmpty {
+                let canonical = try emails.envelope(model, encoder: encoder())
+                let semanticFields = canonical.fields.filter { name, _ in
+                    name == "analyzedBodyFingerprint" || !emailAnalysisFieldNames.contains(name)
+                }
+                let normalized = Envelope(version: canonical.version, entity: canonical.entity,
+                    identity: canonical.identity, fields: semanticFields)
+                return CloudFileStore.digest(try encoder().encode(normalized))
+            }
+        }
         return CloudFileStore.digest(try entity.canonicalize(envelope, encoder(), decoder()))
+    }
+
+    /// Deterministically converges concurrent per-device email analyses when every
+    /// non-analysis field and the non-empty analyzed body fingerprint match.
+    /// Returns nil whenever any user/mailbox field differs so user edits are never lost.
+    static func preferredEmailAnalysisPayload(key: String, candidates: [Data]) -> Data? {
+        guard key.hasPrefix("EmailMessage/"), !candidates.isEmpty else { return nil }
+        do {
+            try emails.validateSchema()
+            let jsonDecoder = decoder()
+            let jsonEncoder = encoder()
+            struct Candidate {
+                let raw: Data
+                let canonicalBytes: Data
+                let nonAnalysisFields: [String: Data]
+                let fingerprint: String
+                let isAnalyzed: Bool
+                let hasNoFailure: Bool
+                let version: Int
+                let analyzedAt: Date?
+            }
+            var parsed = [Candidate]()
+            parsed.reserveCapacity(candidates.count)
+            for raw in candidates {
+                let envelope = try jsonDecoder.decode(Envelope.self, from: raw)
+                guard envelope.entity == "EmailMessage",
+                      key == "EmailMessage/" + envelope.identity,
+                      emails.validIdentity(envelope.identity) else { return nil }
+                let model = try emails.decode(envelope, decoder: jsonDecoder)
+                guard !model.analyzedBodyFingerprint.isEmpty else { return nil }
+                let canonical = try emails.envelope(model, encoder: jsonEncoder)
+                let canonicalBytes = try jsonEncoder.encode(canonical)
+                let nonAnalysis = canonical.fields.filter { !emailAnalysisFieldNames.contains($0.key) }
+                parsed.append(Candidate(
+                    raw: raw,
+                    canonicalBytes: canonicalBytes,
+                    nonAnalysisFields: nonAnalysis,
+                    fingerprint: model.analyzedBodyFingerprint,
+                    isAnalyzed: model.analysisState == .analyzed,
+                    hasNoFailure: model.analysisFailureReasonRaw == nil,
+                    version: model.analysisVersion,
+                    analyzedAt: model.analyzedAt
+                ))
+            }
+            guard let first = parsed.first,
+                  parsed.dropFirst().allSatisfy({
+                      $0.fingerprint == first.fingerprint && $0.nonAnalysisFields == first.nonAnalysisFields
+                  }) else { return nil }
+            let winner = parsed.min { lhs, rhs in
+                if lhs.isAnalyzed != rhs.isAnalyzed { return lhs.isAnalyzed }
+                if lhs.hasNoFailure != rhs.hasNoFailure { return lhs.hasNoFailure }
+                if lhs.version != rhs.version { return lhs.version > rhs.version }
+                switch (lhs.analyzedAt, rhs.analyzedAt) {
+                case let (l?, r?) where l != r: return l < r
+                case (_?, nil): return true
+                case (nil, _?): return false
+                default: break
+                }
+                return lhs.canonicalBytes.lexicographicallyPrecedes(rhs.canonicalBytes)
+            }
+            return winner?.raw
+        } catch {
+            return nil
+        }
     }
 
     /// Every field remains present for comparison; no heuristic title/notes-only

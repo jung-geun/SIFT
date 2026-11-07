@@ -49,6 +49,7 @@ final class MailboxIncrementalSyncCoordinator {
     private var lastAttempt: [String: Date] = [:]
     private var pollTasks: [Task<Void, Never>] = []
     private let enqueueAnalysis: (MailProvider, String) -> Void
+    private let resetAnalysisRetries: (MailProvider, String) -> Void
     private var syncGeneration: [MailProvider: Int] = [:]
 
     init(
@@ -60,6 +61,7 @@ final class MailboxIncrementalSyncCoordinator {
         sessionGeneration: ((MailProvider) async -> Int)? = nil,
         defaults: UserDefaults = .standard,
         enqueueAnalysis: ((MailProvider, String) -> Void)? = nil,
+        resetAnalysisRetries: ((MailProvider, String) -> Void)? = nil,
         now: @escaping () -> Date = Date.init
     ) {
         self.cursorStore = cursorStore ?? MailboxUpdateCursorStore(defaults: defaults)
@@ -77,6 +79,9 @@ final class MailboxIncrementalSyncCoordinator {
         self.now = now
         self.enqueueAnalysis = enqueueAnalysis ?? { provider, namespace in
             EmailAutomationOrchestrator.shared.enqueue(provider: provider, namespace: namespace)
+        }
+        self.resetAnalysisRetries = resetAnalysisRetries ?? { provider, namespace in
+            EmailAutomationOrchestrator.shared.resetAutomaticRetries(provider: provider, namespace: namespace)
         }
     }
 
@@ -162,6 +167,7 @@ final class MailboxIncrementalSyncCoordinator {
             // An explicit foreground refresh may retry a corrected credential
             // immediately, without changing scheduled-account backoff.
             readinessFailures.removeValue(forKey: "\(provider.rawValue):\(namespace)")
+            resetAnalysisRetries(provider, namespace)
         }
         return await coalesce(provider: provider, lane: .discovery, backgroundOnly: backgroundOnly) {
             await self.discoverNow(
@@ -377,8 +383,11 @@ final class MailboxIncrementalSyncCoordinator {
                 SortDescriptor(\.rawMessageID)
             ]
         )
-        descriptor.fetchLimit = MailboxPagingPolicy.bodyPrefetchBatchSize
-        let candidates = try context.fetch(descriptor)
+        let candidates = Array(
+            try context.fetch(descriptor).lazy.filter {
+                !(EmailAnalysisContract.isCurrentAnalysis($0) && $0.analysisFailureReasonRaw == nil)
+            }.prefix(MailboxPagingPolicy.bodyPrefetchBatchSize)
+        )
         let mailbox = resolveProvider(provider)
         let session = await sessionGeneration(provider)
         for email in candidates {
@@ -388,7 +397,10 @@ final class MailboxIncrementalSyncCoordinator {
                   isCurrent(provider: provider, namespace: namespace, generation: generation),
                   await sessionGeneration(provider) == session
             else { throw CancellationError() }
-            guard !email.hasCompleteBody, email.isInInbox else { continue }
+            guard !email.hasCompleteBody,
+                  !(EmailAnalysisContract.isCurrentAnalysis(email) && email.analysisFailureReasonRaw == nil),
+                  email.isInInbox
+            else { continue }
             let key = EmailMessageKey(email)
             try localStore.recordBodyFetchAttempt(for: email, at: now(), in: context)
             do {

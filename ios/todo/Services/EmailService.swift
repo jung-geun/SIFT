@@ -496,15 +496,42 @@ final class EmailService: NSObject, MailboxPagingProvider {
         todos newTodos: [Todo],
         events extractedEvents: [(event: ExtractedEmailEvent, sourceRef: String)],
         to context: ModelContext,
-        existingRefs: Set<String>
+        existingRefs: Set<String> = []
     ) -> EmailIngestionResult {
+        let existingTodos = (try? context.fetch(FetchDescriptor<Todo>())) ?? []
+        let existingIDs = Set(existingTodos.map(\.id))
+        let existingMailTodos = existingTodos.filter {
+            $0.todoSource == .email || !$0.sourceMessageID.isEmpty || !$0.sourceItemID.isEmpty
+        }
+        var handledIDs = existingIDs
         var handledActions = Set<String>()
         var insertedTodosByRef: [String: Todo] = [:]
         var insertedTodos: [Todo] = []
         var todoCount = 0
         for todo in newTodos where !existingRefs.contains(todo.sourceRef) {
-            let actionKey = "\(todo.sourceAccountNamespace)\u{0}\(todo.sourceRef)\u{0}\(todo.title)"
+            guard handledIDs.insert(todo.id).inserted else { continue }
+            let normalizedTitle = EmailAnalysisContract.normalizedActionText(todo.title)
+            let itemIdentity = todo.sourceItemID.isEmpty ? normalizedTitle : todo.sourceItemID
+            let actionKey = "\(todo.sourceAccountNamespace)\u{0}\(todo.sourceRef)\u{0}\(itemIdentity)"
             guard handledActions.insert(actionKey).inserted else { continue }
+            let matchesLegacy = existingMailTodos.contains { existing in
+                guard existing.sourceAccountNamespace == todo.sourceAccountNamespace
+                    || existing.sourceAccountNamespace.isEmpty
+                    || todo.sourceAccountNamespace.isEmpty
+                else { return false }
+                let sameMessage = (!todo.sourceRef.isEmpty && existing.sourceRef == todo.sourceRef)
+                    || (!todo.sourceMessageID.isEmpty && existing.sourceMessageID == todo.sourceMessageID)
+                guard sameMessage else { return false }
+                if existing.sourceItemID.isEmpty && todo.sourceItemID.isEmpty {
+                    return EmailAnalysisContract.normalizedActionText(existing.title) == normalizedTitle
+                }
+                if existing.sourceItemID.isEmpty {
+                    return true
+                }
+                return (!todo.sourceItemID.isEmpty && existing.sourceItemID == todo.sourceItemID)
+                    || EmailAnalysisContract.normalizedActionText(existing.title) == normalizedTitle
+            }
+            guard !matchesLegacy else { continue }
             context.insert(todo)
             TaskBehaviorRecorder.recordCreation(of: todo, actor: .emailIngestion, in: context)
             insertedTodosByRef[todo.sourceRef] = todo
@@ -582,13 +609,26 @@ final class EmailService: NSObject, MailboxPagingProvider {
             token: token
         )
 
+        let emailContext = await MainActor.run { ModelContext(AppDataContainer.shared.emailContainer) }
         let ingestionEngine = EmailIngestionEngine()
         var todos: [Todo] = []
         var successfullyAnalyzedIDs: [String] = []
         for message in messages {
             do {
+                let synced: SyncedMailAnalysis? = await MainActor.run {
+                    let providerRaw = message.provider.rawValue
+                    let messageID = message.providerMessageID.isEmpty ? message.id : message.providerMessageID
+                    let rows = (try? emailContext.fetch(FetchDescriptor<EmailMessage>(
+                        predicate: #Predicate { $0.providerRawValue == providerRaw && $0.rawMessageID == messageID }
+                    ))) ?? []
+                    let namespace = message.sourceAccountNamespace.lowercased()
+                    return rows.first { namespace.isEmpty || $0.sourceAccountNamespace.lowercased() == namespace }
+                        .flatMap { SyncedMailAnalysis($0, subject: message.subject, body: message.body) }
+                }
                 todos += try await ingestionEngine.extractTodos(
-                    from: message, allowFoundationModels: allowFoundationModels
+                    from: message,
+                    allowFoundationModels: allowFoundationModels,
+                    existingAnalysis: synced
                 )
                 successfullyAnalyzedIDs.append(message.id)
             } catch is CancellationError {

@@ -17,6 +17,24 @@ final class CloudSyncMonitor: ObservableObject {
     private var baselineCount = 0
     private var subscription: AnyCancellable?
     private var completionTask: Task<Void, Never>?
+    private var hasCompletedInitialBanner = false
+    private let statusPublisher: AnyPublisher<(Bool, String?), Never>
+    private let completionDuration: Duration
+
+    init(
+        statusPublisher: AnyPublisher<(Bool, String?), Never>? = nil,
+        completionDuration: Duration = .seconds(2)
+    ) {
+        self.completionDuration = completionDuration
+        if let statusPublisher {
+            self.statusPublisher = statusPublisher
+        } else {
+            let service = FullCloudSyncService.shared
+            self.statusPublisher = service.$hasFinishedInitialRestore
+                .combineLatest(service.$errorMessage)
+                .eraseToAnyPublisher()
+        }
+    }
 
     func startObserving(initialCount: Int) {
         guard UserCloudSyncPolicy.isRequested else { stopObserving(); return }
@@ -26,20 +44,23 @@ final class CloudSyncMonitor: ObservableObject {
         }
         baselineCount = initialCount
         importedCount = 0
-        phase = .importing
-        let service = FullCloudSyncService.shared
-        subscription = service.$hasFinishedInitialRestore
-            .combineLatest(service.$errorMessage)
+        if !hasCompletedInitialBanner, phase != .importing {
+            phase = .importing
+        }
+        subscription = statusPublisher
             .removeDuplicates(by: { $0.0 == $1.0 && $0.1 == $1.1 })
             .receive(on: RunLoop.main)
             .sink { [weak self] finished, error in
                 guard let self else { return }
                 guard UserCloudSyncPolicy.isRequested, error == nil else {
-                    self.phase = .idle
+                    if self.phase != .idle { self.phase = .idle }
                     return
                 }
-                if finished { self.finishImport() }
-                else { self.phase = .importing }
+                if finished {
+                    self.finishImport()
+                } else if !self.hasCompletedInitialBanner, self.phase != .importing {
+                    self.phase = .importing
+                }
             }
     }
 
@@ -47,8 +68,9 @@ final class CloudSyncMonitor: ObservableObject {
         subscription = nil
         completionTask?.cancel()
         completionTask = nil
-        phase = .idle
-        importedCount = 0
+        hasCompletedInitialBanner = false
+        if phase != .idle { phase = .idle }
+        if importedCount != 0 { importedCount = 0 }
     }
 
     func updateCount(_ total: Int) {
@@ -67,14 +89,18 @@ final class CloudSyncMonitor: ObservableObject {
     }
 
     private func finishImport() {
-        guard phase == .importing else { return }
+        guard !hasCompletedInitialBanner, phase == .importing else { return }
+        hasCompletedInitialBanner = true
         completionTask?.cancel()
         withAnimation { phase = .completed }
+        let duration = completionDuration
         completionTask = Task {
-            do { try await Task.sleep(for: .seconds(2)) }
+            do { try await Task.sleep(for: duration) }
             catch { return }
             guard !Task.isCancelled else { return }
-            withAnimation { phase = .idle }
+            if phase != .idle {
+                withAnimation { phase = .idle }
+            }
         }
     }
 }

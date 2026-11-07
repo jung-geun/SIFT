@@ -132,4 +132,33 @@ struct EmailTaskCaptureTests {
         }
         #expect(Set(try context.fetch(FetchDescriptor<Todo>()).map(\.sourceAccountNamespace)) == ["first@example.com", "second@example.com"])
     }
+
+    @Test("Capture keeps independent random identities but still blocks provenance duplicates including legacy rows")
+    func captureProvenanceDuplicateGuard() throws {
+        let contextA = ModelContext(try makeContainer())
+        let contextB = ModelContext(try makeContainer())
+        let emailA = message(actions: ["Renew the token if needed"])
+        emailA.providerGlobalMessageID = "gmail-global-777"
+        let emailB = message(actions: ["Renew the token if needed"], account: "FIRST@EXAMPLE.COM")
+        emailB.providerGlobalMessageID = "gmail-global-777"
+        let sourceA = try #require(EmailTaskCapture.source(for: emailA, action: "Renew the token if needed"))
+        let sourceB = try #require(EmailTaskCapture.source(for: emailB, action: "Renew the token if needed"))
+        let todoA = try EmailTaskCapture.save(source: sourceA, email: emailA, title: "Edited A", notes: "", dueDate: nil, in: contextA)
+        let todoB = try EmailTaskCapture.save(source: sourceB, email: emailB, title: "Edited B", notes: "", dueDate: nil, in: contextB)
+        // User-edited captures are independent records; they are not forced to share a key.
+        #expect(todoA.id != todoB.id)
+
+        let legacyContext = ModelContext(try makeContainer())
+        let legacyID = UUID()
+        let legacyTodo = Todo(id: legacyID, title: "Renew the token if needed", source: .email, sourceRef: emailA.todoSourceRef)
+        legacyTodo.sourceAccountNamespace = emailA.sourceAccountNamespace
+        legacyTodo.sourceItemID = EmailAnalysisContract.actionIdentifier("Renew the token if needed")
+        legacyContext.insert(legacyTodo)
+        try legacyContext.save()
+        #expect(throws: EmailTaskCapture.CaptureError.self) {
+            try EmailTaskCapture.save(source: sourceA, email: emailA, title: "Renew the token if needed", notes: "", dueDate: nil, in: legacyContext)
+        }
+        let retained = try legacyContext.fetch(FetchDescriptor<Todo>())
+        #expect(retained.count == 1 && retained.first?.id == legacyID)
+    }
 }

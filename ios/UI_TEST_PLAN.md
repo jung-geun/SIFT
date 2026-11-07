@@ -14,6 +14,17 @@ tests. Every UI test starts from an isolated in-memory SwiftData store.
 
 Run the shared `todo` or `todo-QA` scheme for normal simulator/physical-device testing: both Test actions use `Debug-QA` and install `pieroot.sift-todo.qa`, not the App Store app (`pieroot.sift-todo`). The ignored local `todo-unit-qa` and `todo-device-qa` schemes on this workstation now select `Debug-QA` and `Release-QA` respectively; other machines should use the shared schemes. `todo` Archive uses production `Release`, while `todo-QA` Archive uses `Release-QA`. Never pass `-configuration Debug` or `-configuration Release` to a test/install command intended for QA. Provision the distinct `iCloud.pieroot.sift-todo.qa` container for signed device builds; do not reuse the production container or OAuth URL scheme.
 
+### Decoupled background sync, mail polling, and task prioritization — 2026-11-07
+
+- Decoupled background synchronization, per-provider mailbox polling, and local task prioritization. Replaced monolithic save-invalidation loops with incremental entity generations and task aggregate hashing (`taskAggregateDigest`). Deferral of active meeting namespaces protects recording files without blocking unrelated model reconciliation.
+- Priority scoring operates exclusively on newly committed task insertions via `QuickSortService.recordInsertion`, preventing endless re-prioritization on status changes, edits, or cloud-restored items.
+- Independent mailbox polling runs at ~45-second foreground cadence per provider (Gmail, Outlook). Complete-body hydration queues local-only analysis in `EmailAutomationOrchestrator`, with failed-attempt backoff under `sift.local.mailAnalysisAttempt.` outside cloud preference sync.
+- Resolved repetitive "로컬 데이터 복원 완료" banner display by adding tuple-level deduplication (`.removeDuplicates(by: ==)`) to `CloudSyncMonitor` and enforcing that `.completed` can only transition from `.importing`.
+- Full `todo-QA -only-testing:todoTests` on current `main` (including the `CloudSyncMonitor` change) passed 1,698 of 1,698 tests, zero failures/skips: `/tmp/sift-final-main-20261107.xcresult`.
+- Disposable simulator smoke (iPhone 18 Pro Max, iOS 27.2) verified synthetic task creation and the active-to-completed transition. Cross-device iCloud sync, real-account mail and physical-device behavior are not verified.
+- Landed on `main` via PR #39 (merge commit `25aebdf`); `Publish public Pages` run `42344016153` succeeded.
+
+
 ### Advertising and in-app purchase removal — 2026-11-06
 
 - User explicitly cancelled all advertising and in-app payments. Removed GMA/UMP runtime owners, support/payment/privacy-entry views, coffee and starlight keepsakes/Easter egg, ad-report entry, StoreKit product configuration and startup listener, commercial tests and both SDK package/framework dependencies. The ordinary feedback flow remains. Removed 48 exclusively monetization/ad-legal catalog keys, SDK-only license notices and `docs/app-ads.txt`.

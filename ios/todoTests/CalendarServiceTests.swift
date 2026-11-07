@@ -73,6 +73,204 @@ struct CalendarServiceTests {
         #expect(blockedFinished)
     }
 
+    @Test("concurrent launch invocations of runWeeklyImportIfDue execute single-flight and mark completion only after success")
+    @MainActor
+    func weeklyImportDoubleInvocationIsSingleFlightAndMarksOnlyAfterSuccess() async throws {
+        let context = try importContext()
+        let suiteName = "CalendarWeeklyImportSingleFlight.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        CalendarService.setTaskAnalysisCalendarIDs(["work"], defaults: defaults)
+
+        var currentNow = Date(timeIntervalSince1970: 1_750_000_000)
+        let entered = CalendarSyncTestLatch()
+        let release = CalendarSyncTestLatch()
+        let secondSubmitted = CalendarSyncTestLatch()
+        var invocations = 0
+
+        let first = Task {
+            await CalendarService.shared.runWeeklyImportIfDue(
+                context: context,
+                defaults: defaults,
+                now: { currentNow },
+                isAuthorized: { true },
+                isCloudRestoreReady: { true },
+                importOperation: { _ in
+                    invocations += 1
+                    entered.open()
+                    await release.wait()
+                    return true
+                }
+            )
+        }
+        await entered.wait()
+
+        let second = Task {
+            secondSubmitted.open()
+            await CalendarService.shared.runWeeklyImportIfDue(
+                context: context,
+                defaults: defaults,
+                now: { currentNow },
+                isAuthorized: { true },
+                isCloudRestoreReady: { true },
+                importOperation: { _ in
+                    invocations += 1
+                    Issue.record("Concurrent weekly import must share the active flight")
+                    return true
+                }
+            )
+        }
+        await secondSubmitted.wait()
+        for _ in 0..<20 { await Task.yield() }
+
+        // While in flight, the import ran once and the completion marker is not yet written.
+        #expect(invocations == 1)
+        #expect(defaults.object(forKey: CalendarService.weeklyImportKey) == nil)
+
+        release.open()
+        await first.value
+        await second.value
+
+        #expect(invocations == 1)
+        #expect(defaults.double(forKey: CalendarService.weeklyImportKey) == currentNow.timeIntervalSince1970)
+
+        // Subsequent calls inside the 7-day cooldown do not re-run.
+        currentNow = currentNow.addingTimeInterval(6 * 86_400)
+        await CalendarService.shared.runWeeklyImportIfDue(
+            context: context,
+            defaults: defaults,
+            now: { currentNow },
+            isAuthorized: { true },
+            isCloudRestoreReady: { true },
+            importOperation: { _ in
+                invocations += 1
+                return true
+            }
+        )
+        #expect(invocations == 1)
+
+        // After 7 days elapse, weekly import runs again.
+        currentNow = currentNow.addingTimeInterval(2 * 86_400)
+        await CalendarService.shared.runWeeklyImportIfDue(
+            context: context,
+            defaults: defaults,
+            now: { currentNow },
+            isAuthorized: { true },
+            isCloudRestoreReady: { true },
+            importOperation: { _ in
+                invocations += 1
+                return true
+            }
+        )
+        #expect(invocations == 2)
+        #expect(defaults.double(forKey: CalendarService.weeklyImportKey) == currentNow.timeIntervalSince1970)
+    }
+
+    @Test("failed weekly import or store save never writes the completion marker and allows retry")
+    @MainActor
+    func weeklyImportFailureDoesNotWriteCompletionMarker() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("weekly-import-readonly-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let storeURL = directory.appendingPathComponent("store.sqlite")
+
+        let writableContainer = try ModelContainer(
+            for: AppDataContainer.appSchema,
+            configurations: [ModelConfiguration(schema: AppDataContainer.appSchema, url: storeURL, cloudKitDatabase: .none)]
+        )
+        writableContainer.mainContext.insert(Todo(title: "Existing task", notes: "Saved"))
+        try writableContainer.mainContext.save()
+
+        let readOnlyContainer = try ModelContainer(
+            for: AppDataContainer.appSchema,
+            configurations: [ModelConfiguration(schema: AppDataContainer.appSchema, url: storeURL, allowsSave: false, cloudKitDatabase: .none)]
+        )
+        let readOnlyContext = readOnlyContainer.mainContext
+        readOnlyContext.autosaveEnabled = false
+
+        let suiteName = "CalendarWeeklyImportFailure.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        CalendarService.setTaskAnalysisCalendarIDs(["source"], defaults: defaults)
+
+        let now = Date(timeIntervalSince1970: 1_750_100_000)
+        let event = importEvent(identifier: "weekly-1", calendarID: "source", title: "Weekly Event", start: now.addingTimeInterval(3_600))
+        let existingInUI = try #require(readOnlyContext.fetch(FetchDescriptor<Todo>()).first)
+        existingInUI.notes = "Unsaved user typing"
+
+        let entered = CalendarSyncTestLatch()
+        let release = CalendarSyncTestLatch()
+        let secondSubmitted = CalendarSyncTestLatch()
+        var attempts = 0
+
+        let first = Task {
+            await CalendarService.shared.runWeeklyImportIfDue(
+                context: readOnlyContext,
+                defaults: defaults,
+                now: { now },
+                isAuthorized: { true },
+                isCloudRestoreReady: { true },
+                importOperation: { ctx in
+                    attempts += 1
+                    entered.open()
+                    await release.wait()
+                    return await CalendarService.shared.reconcileCalendarTodos(
+                        context: ctx, events: [event], recoveryEvents: [], now: now,
+                        selectedCalendarIDs: ["source"], availableCalendarIDs: ["source"]
+                    ).succeeded
+                }
+            )
+        }
+        await entered.wait()
+
+        let second = Task {
+            secondSubmitted.open()
+            await CalendarService.shared.runWeeklyImportIfDue(
+                context: readOnlyContext,
+                defaults: defaults,
+                now: { now },
+                isAuthorized: { true },
+                isCloudRestoreReady: { true },
+                importOperation: { _ in
+                    attempts += 1
+                    Issue.record("Concurrent weekly import must share the active flight")
+                    return true
+                }
+            )
+        }
+        await secondSubmitted.wait()
+        for _ in 0..<20 { await Task.yield() }
+        #expect(attempts == 1)
+        release.open()
+        await first.value
+        await second.value
+
+        #expect(attempts == 1)
+        #expect(defaults.object(forKey: CalendarService.weeklyImportKey) == nil)
+        #expect(existingInUI.notes == "Unsaved user typing")
+
+        // Retrying on a writable context succeeds and now records the completion marker.
+        let retryContext = writableContainer.mainContext
+        await CalendarService.shared.runWeeklyImportIfDue(
+            context: retryContext,
+            defaults: defaults,
+            now: { now },
+            isAuthorized: { true },
+            isCloudRestoreReady: { true },
+            importOperation: { ctx in
+                attempts += 1
+                return await CalendarService.shared.reconcileCalendarTodos(
+                    context: ctx, events: [event], recoveryEvents: [], now: now,
+                    selectedCalendarIDs: ["source"], availableCalendarIDs: ["source"]
+                ).succeeded
+            }
+        )
+        #expect(attempts == 2)
+        #expect(defaults.double(forKey: CalendarService.weeklyImportKey) == now.timeIntervalSince1970)
+        #expect(try retryContext.fetch(FetchDescriptor<Todo>()).count == 2)
+    }
+
     @Test("an explicit writable destination never follows the system default")
     @MainActor
     func explicitDestinationRemainsSelected() throws {

@@ -167,12 +167,17 @@ struct RoutedIntelligenceEngineTests {
 @MainActor
 private final class SuspendedCreationPriorityEngine: IntelligenceService {
     private(set) var requestedIDs: [UUID] = []
+    private(set) var inFlightCount = 0
+    private(set) var maxObservedInFlight = 0
     private var continuations: [UUID: CheckedContinuation<[PriorityResult], Error>] = [:]
 
     func prioritize(todos: [Todo], events: [CalendarService.CalendarEventSummary],
                     persona: PersonaContext, progress: IntelligenceProgressHandler?) async throws -> [PriorityResult] {
         let id = todos[0].id
         requestedIDs.append(id)
+        inFlightCount += 1
+        maxObservedInFlight = max(maxObservedInFlight, inFlightCount)
+        defer { inFlightCount -= 1 }
         return try await withCheckedThrowingContinuation { continuations[id] = $0 }
     }
 
@@ -581,5 +586,80 @@ struct CommittedCreationPriorityTests {
         for _ in 0..<20 { await Task.yield() }
         #expect(engine.requestedIDs.isEmpty)
         #expect(old.computedPriorityScore == 0)
+    }
+
+    @Test("Concurrency is capped at 2 in FIFO order with per-ID dedupe and cancellation-safe receipts")
+    func boundedConcurrencyCapPreservesFIFOAndDedupeAndRestartSemantics() async throws {
+        let (container, defaults, suite) = try fixture()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let context = container.mainContext
+        let firstEngine = SuspendedCreationPriorityEngine()
+        let firstService = QuickSortService(defaults: defaults, engine: { firstEngine })
+        firstService.start(context: context)
+
+        let t1 = Todo(title: "FIFO 1")
+        let t2 = Todo(title: "FIFO 2")
+        let t3 = Todo(title: "FIFO 3")
+        let t4 = Todo(title: "FIFO 4")
+        for todo in [t1, t2, t3, t4] {
+            insert(todo, service: firstService, context: context)
+        }
+        // Re-recording insertion before save must preserve original FIFO order and dedupe per ID.
+        firstService.recordInsertion(t1, in: context)
+        firstService.recordInsertion(t3, in: context)
+        try context.save()
+
+        #expect(await settle { firstEngine.requestedIDs.count == 2 && firstEngine.inFlightCount == 2 })
+        for _ in 0..<30 { await Task.yield() }
+        #expect(firstEngine.requestedIDs == [t1.id, t2.id])
+        #expect(firstEngine.inFlightCount == 2)
+        #expect(firstEngine.maxObservedInFlight == 2)
+
+        // Finishing slot 1 advances strictly to FIFO 3 while keeping in-flight <= 2.
+        firstEngine.complete(t1.id)
+        #expect(await settle {
+            t1.computedPriorityScore == 0.83
+                && firstEngine.requestedIDs == [t1.id, t2.id, t3.id]
+                && firstEngine.inFlightCount == 2
+        })
+        for _ in 0..<20 { await Task.yield() }
+        #expect(firstEngine.requestedIDs == [t1.id, t2.id, t3.id])
+        #expect(firstEngine.maxObservedInFlight == 2)
+
+        // Cancelling the service preserves unfinished in-flight (t2, t3) and queued (t4) receipts in FIFO order.
+        firstService.stop()
+        firstEngine.cancel(t2.id)
+        firstEngine.cancel(t3.id)
+        for _ in 0..<20 { await Task.yield() }
+        #expect(t2.computedPriorityScore == 0)
+        #expect(t3.computedPriorityScore == 0)
+        #expect(t4.computedPriorityScore == 0)
+
+        let secondEngine = SuspendedCreationPriorityEngine()
+        let secondService = QuickSortService(defaults: defaults, engine: { secondEngine })
+        secondService.start(context: context)
+        defer { secondService.stop() }
+
+        #expect(await settle { secondEngine.requestedIDs.count == 2 && secondEngine.inFlightCount == 2 })
+        for _ in 0..<20 { await Task.yield() }
+        #expect(secondEngine.requestedIDs == [t2.id, t3.id])
+        #expect(secondEngine.maxObservedInFlight == 2)
+
+        secondEngine.complete(t2.id)
+        #expect(await settle {
+            t2.computedPriorityScore == 0.83
+                && secondEngine.requestedIDs == [t2.id, t3.id, t4.id]
+                && secondEngine.inFlightCount == 2
+        })
+        secondEngine.complete(t3.id)
+        secondEngine.complete(t4.id)
+        #expect(await settle {
+            t3.computedPriorityScore == 0.83 && t4.computedPriorityScore == 0.83 && secondEngine.inFlightCount == 0
+        })
+        #expect(secondEngine.maxObservedInFlight == 2)
+
+        let key = try #require(defaults.dictionaryRepresentation().keys.first { $0.hasPrefix("sift.local.newTaskPriority.") })
+        let remaining = try JSONDecoder().decode([QuickSortService.Receipt].self, from: #require(defaults.data(forKey: key)))
+        #expect(remaining.isEmpty)
     }
 }
