@@ -17,6 +17,13 @@ description: Nuove funzioni, miglioramenti e correzioni di ogni versione di SIFT
 
 - Rimossi annunci e controlli del consenso pubblicitario. Tutte le funzioni sono gratuite, senza acquisti in-app.
 
+### Sincronizzazione, posta e priorità
+
+- Sincronizzazione, controllo della posta, elaborazione di calendario e riunioni e ordinamento per priorità ora procedono in modo indipendente.
+- Con iCloud vengono sincronizzati solo gli elementi modificati e la priorità viene ordinata solo quando si aggiunge una nuova attività. Completare o modificare un’attività esistente non riordina più tutto.
+- Con l’app aperta, nuova posta e relativi contenuti vengono controllati circa ogni 45 secondi e ogni dispositivo analizza le azioni delle nuove e-mail. Le analisi non riuscite vengono ritentate a intervalli crescenti.
+- Corretta la ripetizione dell’avviso «Dati locali ripristinati» e del banner «Ordinamento priorità con IA…» durante l’analisi della posta.
+
 <a id="version-1-0-15"></a>
 ## 1.0.15
 

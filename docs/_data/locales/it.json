@@ -162,6 +162,15 @@
         "Migliorati anno e mese in base allo scorrimento, viste adattate alla larghezza e navigazione orizzontale. Gli eventi di un’intera giornata o di almeno un giorno usano una barra continua; quelli con orario più brevi restano nel programma di ogni data.",
         "Riorganizzati i menu Altro delle attività e delle email su Mac, i pulsanti dei dettagli e le etichette lunghe delle azioni. I moduli di privacy pubblicitaria distinguono errori di configurazione, rete e disponibilità del modulo."
       ]
+    },
+    "1.0.16": {
+      "summary": "Pubblicità rimossa; sincronizzazione, posta e priorità ora procedono in modo indipendente.",
+      "details": [
+        "Sono stati rimossi la pubblicità e i controlli del consenso pubblicitario. Tutte le funzioni sono gratuite, senza acquisti in-app.",
+        "Sincronizzazione, controllo della posta, elaborazione di calendario e riunioni e ordinamento per priorità procedono in modo indipendente. Con iCloud vengono sincronizzati solo gli elementi modificati e la priorità viene ordinata solo quando si aggiunge una nuova attività.",
+        "Con l’app aperta, nuova posta e contenuti vengono controllati circa ogni 45 secondi e ogni dispositivo analizza le azioni; le analisi non riuscite vengono ritentate a intervalli crescenti.",
+        "Corretta la ripetizione dell’avviso «Dati locali ripristinati» e del banner «Ordinamento priorità con IA…» durante l’analisi della posta."
+      ]
     }
   }
 }

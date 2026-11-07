@@ -17,6 +17,13 @@ description: Nuevas funciones, mejoras y correcciones de errores de cada versió
 
 - Se han eliminado los anuncios y los controles de consentimiento publicitario. Todas las funciones son gratuitas y no requieren compras dentro de la app.
 
+### Sincronización, correo y prioridad
+
+- La sincronización, la revisión del correo, el procesamiento de calendario y reuniones y la ordenación por prioridad ahora funcionan de forma independiente.
+- Solo se sincronizan con iCloud los elementos modificados, y la prioridad se ordena solo al añadir una tarea nueva. Completar o editar una tarea existente ya no reordena todo.
+- Con la app abierta, se revisan el correo nuevo y sus contenidos cada 45 segundos aproximadamente, y cada dispositivo analiza las acciones del correo nuevo. Los análisis fallidos se reintentan con intervalos crecientes.
+- Se corrigió la repetición del aviso «Datos locales restaurados» y el banner «Ordenando prioridades con IA…» durante el análisis del correo.
+
 <a id="version-1-0-15"></a>
 ## 1.0.15
 

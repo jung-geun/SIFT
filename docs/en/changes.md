@@ -17,6 +17,13 @@ description: New features, improvements, and fixes in each version of SIFT.
 
 - Removed advertising and ad-consent controls. All app features are free to use without in-app purchases.
 
+### Sync, mail and priority
+
+- Sync, mail checks, calendar and meeting processing, and priority sorting now run independently instead of waiting for each other.
+- Only changed items are synced with iCloud, and priority is sorted only when a new to-do is added. Completing or editing an existing to-do no longer re-ranks everything.
+- While the app is open, new mail and message bodies are checked about every 45 seconds, and each device analyzes action items in new mail. Failed analyses are retried with growing intervals.
+- Fixed the "Local data restored" notice repeating, and the "Sorting priorities with AI…" banner showing during mail analysis.
+
 <a id="version-1-0-15"></a>
 ## 1.0.15
 

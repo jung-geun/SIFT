@@ -162,6 +162,15 @@
         "Improved scroll-tracked year and month, width-adaptive multi-day views, and horizontal calendar navigation. All-day events and events lasting at least a day use one continuous bar; shorter timed events remain in each day's timetable.",
         "Refined Mac task and email More menus, task detail buttons, and long email action labels. Advertising privacy forms now distinguish configuration, network, and form-delivery errors."
       ]
+    },
+    "1.0.16": {
+      "summary": "Removed ads and made sync, mail and priority sorting run independently.",
+      "details": [
+        "Removed advertising and ad-consent controls. All app features are free to use without in-app purchases.",
+        "Sync, mail checks, calendar and meeting processing, and priority sorting run independently instead of waiting for each other. Only changed items are synced with iCloud, and priority is sorted only when a new to-do is added.",
+        "While the app is open, new mail and bodies are checked about every 45 seconds and each device analyzes action items; failed analyses are retried with growing intervals.",
+        "Fixed the \"Local data restored\" notice repeating and the \"Sorting priorities with AI…\" banner showing during mail analysis."
+      ]
     }
   }
 }
