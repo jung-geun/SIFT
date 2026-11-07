@@ -162,6 +162,15 @@
         "Amélioration de l’année et du mois suivant le défilement, des vues adaptées à la largeur et de la navigation horizontale. Les événements sur toute la journée ou d’au moins un jour utilisent une barre continue ; les événements horaires plus courts restent dans le planning de chaque date.",
         "Les menus Plus des tâches et e-mails sur Mac, les boutons de détail et les longs intitulés d’actions ont été affinés. Les formulaires de confidentialité publicitaire distinguent les erreurs de configuration, de réseau et de mise à disposition."
       ]
+    },
+    "1.0.16": {
+      "summary": "Publicité supprimée ; synchronisation, e-mail et tri des priorités fonctionnent désormais indépendamment.",
+      "details": [
+        "La publicité et les contrôles de consentement publicitaire ont été supprimés. Toutes les fonctions sont gratuites, sans achat intégré.",
+        "La synchronisation, la relève des e-mails, le traitement du calendrier et des réunions et le tri des priorités fonctionnent indépendamment. Seuls les éléments modifiés sont synchronisés avec iCloud et la priorité n’est triée que lors de l’ajout d’une nouvelle tâche.",
+        "Tant que l’app est ouverte, les nouveaux e-mails et leur contenu sont relevés environ toutes les 45 secondes et chaque appareil analyse les actions ; les analyses échouées sont retentées à intervalles croissants.",
+        "Correction de la répétition de l’avis « Données locales restaurées » et du bandeau « Tri des priorités par IA… » pendant l’analyse des e-mails."
+      ]
     }
   }
 }

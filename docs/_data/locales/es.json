@@ -162,6 +162,15 @@
         "Mejoramos el año y mes según el desplazamiento, las vistas adaptadas al ancho y la navegación horizontal. Los eventos de todo el día o de al menos un día usan una barra continua; los eventos horarios más cortos permanecen en el horario de cada fecha.",
         "Simplificamos los menús Más de tareas y correo en Mac, los botones del detalle de tareas y las etiquetas largas de acciones de correo. Los formularios de privacidad publicitaria distinguen errores de configuración, red y presentación."
       ]
+    },
+    "1.0.16": {
+      "summary": "Se eliminó la publicidad y la sincronización, el correo y la prioridad ahora funcionan de forma independiente.",
+      "details": [
+        "Se eliminaron la publicidad y los controles de consentimiento publicitario. Todas las funciones son gratuitas y sin compras dentro de la app.",
+        "La sincronización, la revisión del correo, el procesamiento de calendario y reuniones y la ordenación por prioridad funcionan de forma independiente. Solo se sincronizan con iCloud los elementos modificados y la prioridad se ordena solo al añadir una tarea nueva.",
+        "Con la app abierta, el correo nuevo y sus contenidos se revisan cada 45 segundos aproximadamente y cada dispositivo analiza las acciones; los análisis fallidos se reintentan con intervalos crecientes.",
+        "Se corrigió la repetición del aviso «Datos locales restaurados» y el banner «Ordenando prioridades con IA…» durante el análisis del correo."
+      ]
     }
   }
 }

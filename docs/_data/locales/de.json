@@ -162,6 +162,15 @@
         "Verbessert wurden die Jahr-/Monatsanzeige beim Scrollen, breitenangepasste Mehrtagesansichten und horizontale Navigation. Ganztägige oder mindestens einen Tag dauernde Termine nutzen einen Balken; kürzere zeitgebundene Termine bleiben im Stundenplan jedes Datums.",
         "Überarbeitet wurden die Mehr-Menüs für Aufgaben und E-Mails auf dem Mac, die Detail-Schaltflächen und lange Aktionsbezeichnungen. Datenschutzformulare für Werbung unterscheiden Konfigurations-, Netzwerk- und Bereitstellungsfehler."
       ]
+    },
+    "1.0.16": {
+      "summary": "Werbung entfernt; Synchronisierung, E-Mail und Prioritätssortierung laufen jetzt unabhängig voneinander.",
+      "details": [
+        "Werbung und Werbe-Einwilligungen wurden entfernt. Alle App-Funktionen sind ohne In-App-Käufe kostenlos nutzbar.",
+        "Synchronisierung, E-Mail-Abruf, Kalender- und Besprechungsverarbeitung und Prioritätssortierung laufen unabhängig voneinander. Nur geänderte Einträge werden mit iCloud synchronisiert, und die Priorität wird nur beim Hinzufügen einer neuen Aufgabe sortiert.",
+        "Solange die App geöffnet ist, werden neue E-Mails und Inhalte etwa alle 45 Sekunden abgerufen und jedes Gerät analysiert Handlungspunkte; fehlgeschlagene Analysen werden mit wachsenden Abständen wiederholt.",
+        "Behoben: Der Hinweis „Lokale Daten wiederhergestellt“ wiederholte sich, und das Banner „KI sortiert Prioritäten…“ erschien während der E-Mail-Analyse."
+      ]
     }
   }
 }

@@ -17,6 +17,13 @@ description: Nouvelles fonctions, améliorations et corrections de SIFT, version
 
 - Suppression de la publicité et des options de consentement publicitaire. Toutes les fonctions sont gratuites, sans achats intégrés.
 
+### Synchronisation, e-mail et priorité
+
+- La synchronisation, la relève des e-mails, le traitement du calendrier et des réunions et le tri des priorités fonctionnent désormais indépendamment.
+- Seuls les éléments modifiés sont synchronisés avec iCloud, et la priorité n’est triée que lors de l’ajout d’une nouvelle tâche. Terminer ou modifier une tâche existante ne relance plus tout le classement.
+- Tant que l’app est ouverte, les nouveaux e-mails et leur contenu sont relevés environ toutes les 45 secondes, et chaque appareil analyse les actions des nouveaux e-mails. Les analyses échouées sont retentées à intervalles croissants.
+- Correction de la répétition de l’avis « Données locales restaurées » et du bandeau « Tri des priorités par IA… » pendant l’analyse des e-mails.
+
 <a id="version-1-0-15"></a>
 ## 1.0.15
 

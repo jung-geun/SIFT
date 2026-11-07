@@ -17,6 +17,13 @@ description: Neue Funktionen, Verbesserungen und Fehlerbehebungen in den einzeln
 
 - Werbung und Steuerelemente zur Werbeeinwilligung wurden entfernt. Alle App-Funktionen sind ohne In-App-Käufe kostenlos nutzbar.
 
+### Synchronisierung, E-Mail und Priorität
+
+- Synchronisierung, E-Mail-Abruf, Kalender- und Besprechungsverarbeitung sowie Prioritätssortierung laufen jetzt unabhängig voneinander.
+- Nur geänderte Einträge werden mit iCloud synchronisiert, und die Priorität wird nur beim Hinzufügen einer neuen Aufgabe sortiert. Das Erledigen oder Bearbeiten bestehender Aufgaben löst keine vollständige Neuberechnung mehr aus.
+- Solange die App geöffnet ist, werden neue E-Mails und Inhalte etwa alle 45 Sekunden abgerufen, und jedes Gerät analysiert Handlungspunkte neuer E-Mails. Fehlgeschlagene Analysen werden mit wachsenden Abständen wiederholt.
+- Behoben: Der Hinweis „Lokale Daten wiederhergestellt“ wiederholte sich, und das Banner „KI sortiert Prioritäten…“ erschien während der E-Mail-Analyse.
+
 <a id="version-1-0-15"></a>
 ## 1.0.15
 
