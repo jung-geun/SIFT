@@ -1575,6 +1575,212 @@ struct FullCloudSyncTests {
         #expect(!FileManager.default.fileExists(atPath: outside.appendingPathComponent("audio/part-00.flac").path))
         #expect(!CloudFileStore.isPortablePath("Meetings/../LocalHealthHistory/history.json"))
     }
+
+    @Test("Periodic worker skips idle 20s ticks, runs a 5-minute safety pass, and never skips edits, cloud imports, conflicts, deletions or replays")
+    func periodicTickSkipsIdleAndRunsOnChangesSafetyConflictsDeletionsAndReplays() async throws {
+        let fixture = try CloudSyncFixture()
+        defer { fixture.remove() }
+        func context(_ schema: Schema) throws -> ModelContext {
+            let ctx = ModelContext(try ModelContainer(for: schema,
+                configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)]))
+            ctx.autosaveEnabled = false
+            return ctx
+        }
+        let app = try context(AppDataContainer.appSchema)
+        let email = try context(AppDataContainer.emailSchema)
+        let meeting = try context(AppDataContainer.meetingSchema)
+        let cloudContext = ModelContext(fixture.cloud)
+        cloudContext.autosaveEnabled = false
+
+        let journalURL = fixture.root.appendingPathComponent("periodic-journal.json")
+        let archiveURL = fixture.root.appendingPathComponent("periodic-conflicts.json")
+        let installation = UUID().uuidString
+        let engine = try FullCloudSyncEngine(cloud: cloudContext, installationID: installation, journalURL: journalURL)
+        let service = FullCloudSyncService(
+            conflictApp: app, conflictEmail: email, conflictMeeting: meeting,
+            engine: engine, archiveURL: archiveURL
+        )
+        service.attachIsolatedObserversForTesting()
+
+        let todo = Todo(title: "Initial task")
+        app.insert(todo)
+        try app.save()
+
+        var now = Date(timeIntervalSinceReferenceDate: 820_000_000)
+        var passes = 0
+
+        // 1. Initial tick runs full reconcile and establishes clean baseline.
+        #expect(try await service.runIsolatedPeriodicTickForTesting(now: now, reconcilePassCount: &passes))
+        #expect(passes == 1)
+
+        // 2. Subsequent 20s ticks skip while nothing changed (< 5 min).
+        for offset in [20.0, 40.0, 120.0, 299.0] {
+            #expect(!(try await service.runIsolatedPeriodicTickForTesting(
+                now: now.addingTimeInterval(offset),
+                reconcilePassCount: &passes
+            )))
+        }
+        #expect(passes == 1)
+
+        // 3. Slow safety full pass runs at 5 minutes, then returns to skipping when clean.
+        now = now.addingTimeInterval(FullCloudSyncService.safetyFullPassInterval)
+        #expect(try await service.runIsolatedPeriodicTickForTesting(now: now, reconcilePassCount: &passes))
+        #expect(passes == 2)
+        now = now.addingTimeInterval(20)
+        #expect(!(try await service.runIsolatedPeriodicTickForTesting(now: now, reconcilePassCount: &passes)))
+        #expect(passes == 2)
+
+        // 4. Local edit triggers periodic tick immediately.
+        todo.title = "Updated task"
+        try app.save()
+        now = now.addingTimeInterval(20)
+        #expect(try await service.runIsolatedPeriodicTickForTesting(now: now, reconcilePassCount: &passes))
+        #expect(passes == 3)
+        now = now.addingTimeInterval(20)
+        #expect(!(try await service.runIsolatedPeriodicTickForTesting(now: now, reconcilePassCount: &passes)))
+
+        // 5. Local deletion never skips and publishes a tombstone.
+        let todoKey = "Todo/" + todo.id.uuidString.lowercased()
+        app.delete(todo)
+        try app.save()
+        now = now.addingTimeInterval(20)
+        #expect(try await service.runIsolatedPeriodicTickForTesting(now: now, reconcilePassCount: &passes))
+        #expect(passes == 4)
+        #expect(engine.journal.items[todoKey]?.digest == nil)
+
+        // 6. Cloud import signal never skips and restores incoming record.
+        let remoteTodo = Todo(title: "Remote incoming")
+        let tempApp = try context(AppDataContainer.appSchema)
+        tempApp.insert(remoteTodo)
+        try tempApp.save()
+        let remoteSnapshot = try CloudModelCodec.capture(app: tempApp, email: email, meeting: meeting)
+        let remoteKey = "Todo/" + remoteTodo.id.uuidString.lowercased()
+        cloudContext.insert(CloudDataRevision(
+            itemKey: remoteKey, clock: 10,
+            installationID: UUID().uuidString,
+            payload: remoteSnapshot.records[remoteKey]
+        ))
+        try cloudContext.save()
+        service.recordCloudImportSignalForTesting()
+        now = now.addingTimeInterval(20)
+        #expect(try await service.runIsolatedPeriodicTickForTesting(now: now, reconcilePassCount: &passes))
+        #expect(passes == 5)
+        // Restore sets rerunForLocalSave for post-restore verification; next tick settles clean.
+        now = now.addingTimeInterval(20)
+        #expect(try await service.runIsolatedPeriodicTickForTesting(now: now, reconcilePassCount: &passes))
+        #expect(passes == 6)
+        now = now.addingTimeInterval(20)
+        #expect(!(try await service.runIsolatedPeriodicTickForTesting(now: now, reconcilePassCount: &passes)))
+
+        // 7. Pending conflict never skips periodic passes until resolved.
+        let localRestored = try #require(app.fetch(FetchDescriptor<Todo>()).first { $0.id == remoteTodo.id })
+        localRestored.title = "Competing local edit"
+        try app.save()
+        try #require(tempApp.fetch(FetchDescriptor<Todo>()).first).title = "Competing cloud edit"
+        try tempApp.save()
+        let competingSnapshot = try CloudModelCodec.capture(app: tempApp, email: email, meeting: meeting)
+        cloudContext.insert(CloudDataRevision(
+            itemKey: remoteKey, clock: 11,
+            installationID: UUID().uuidString,
+            payload: competingSnapshot.records[remoteKey]
+        ))
+        try cloudContext.save()
+        now = now.addingTimeInterval(20)
+        #expect(try await service.runIsolatedPeriodicTickForTesting(now: now, reconcilePassCount: &passes))
+        #expect(!service.conflicts.isEmpty)
+        // Even without any further local or cloud signals, a pending conflict must NOT skip!
+        now = now.addingTimeInterval(20)
+        #expect(service.shouldRunPeriodicSynchronization(now: now))
+        #expect(try await service.runIsolatedPeriodicTickForTesting(now: now, reconcilePassCount: &passes))
+
+        // 8. Pending replay / deletion intent in journal never skips!
+        let replayFixture = try CloudSyncFixture()
+        defer { replayFixture.remove() }
+        try FileManager.default.createDirectory(at: replayFixture.root, withIntermediateDirectories: true)
+        let replayJournalURL = replayFixture.root.appendingPathComponent("replay-journal.json")
+        var replayJournal = CloudSyncJournal()
+        let deletionReplayKey = "Todo/" + UUID().uuidString.lowercased()
+        replayJournal.pendingPublications[deletionReplayKey] = CloudSyncCheckpoint(
+            digest: nil, revisionID: UUID(), logicalClock: 25, installationID: installation
+        )
+        try JSONEncoder().encode(replayJournal).write(to: replayJournalURL, options: .atomic)
+        let replayEngine = try FullCloudSyncEngine(
+            cloud: ModelContext(replayFixture.cloud), installationID: installation, journalURL: replayJournalURL
+        )
+        let replayService = FullCloudSyncService(
+            conflictApp: try context(AppDataContainer.appSchema),
+            conflictEmail: try context(AppDataContainer.emailSchema),
+            conflictMeeting: try context(AppDataContainer.meetingSchema),
+            engine: replayEngine,
+            archiveURL: fixture.root.appendingPathComponent("replay-conflicts.json")
+        )
+        replayService.attachIsolatedObserversForTesting()
+        var replayPasses = 0
+        #expect(replayService.shouldRunPeriodicSynchronization(now: now))
+        #expect(try await replayService.runIsolatedPeriodicTickForTesting(now: now, reconcilePassCount: &replayPasses))
+        #expect(replayPasses == 1)
+        #expect(replayEngine.journal.pendingPublications[deletionReplayKey] == nil)
+        #expect(replayEngine.journal.items[deletionReplayKey]?.digest == nil)
+        // Once the replay finishes cleanly, subsequent idle ticks skip again.
+        now = now.addingTimeInterval(20)
+        #expect(!(try await replayService.runIsolatedPeriodicTickForTesting(now: now, reconcilePassCount: &replayPasses)))
+        #expect(replayPasses == 1)
+    }
+
+    @Test("Device-local defaults writes never wake the periodic pass, but a changed portable preference does")
+    func nonPortableDefaultsWritesDoNotDefeatPeriodicSkip() async throws {
+        let fixture = try CloudSyncFixture()
+        defer { fixture.remove() }
+        func context(_ schema: Schema) throws -> ModelContext {
+            let ctx = ModelContext(try ModelContainer(for: schema,
+                configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)]))
+            ctx.autosaveEnabled = false
+            return ctx
+        }
+        let cloudContext = ModelContext(fixture.cloud)
+        cloudContext.autosaveEnabled = false
+        let engine = try FullCloudSyncEngine(cloud: cloudContext, installationID: UUID().uuidString,
+            journalURL: fixture.root.appendingPathComponent("defaults-journal.json"))
+        let service = FullCloudSyncService(
+            conflictApp: try context(AppDataContainer.appSchema),
+            conflictEmail: try context(AppDataContainer.emailSchema),
+            conflictMeeting: try context(AppDataContainer.meetingSchema),
+            engine: engine, archiveURL: fixture.root.appendingPathComponent("defaults-conflicts.json"))
+        service.attachIsolatedObserversForTesting()
+        let defaults = UserDefaults.standard
+        let localKey = "sift.local.mailAnalysisAttempt.\(UUID().uuidString)"
+        let portableKey = "pieroot.todo.periodicSkipProbe.\(UUID().uuidString)"
+        defer {
+            defaults.removeObject(forKey: localKey)
+            defaults.removeObject(forKey: portableKey)
+        }
+        #expect(!CloudPreferenceStore.isUserPreference(localKey))
+        #expect(CloudPreferenceStore.isUserPreference(portableKey))
+
+        var passes = 0
+        let now = Date(timeIntervalSinceReferenceDate: 830_000_000)
+        #expect(try await service.runIsolatedPeriodicTickForTesting(now: now, reconcilePassCount: &passes))
+        #expect(passes == 1)
+        #expect(!service.shouldRunPeriodicSynchronization(now: now.addingTimeInterval(20)))
+
+        // Retry markers written while mail analysis runs: many notifications, no wake-up.
+        for index in 0..<5 {
+            defaults.set(Date().timeIntervalSince1970 + Double(index), forKey: localKey)
+            service.handleDefaultsChange()
+        }
+        #expect(!service.shouldRunPeriodicSynchronization(now: now.addingTimeInterval(40)))
+        #expect(!(try await service.runIsolatedPeriodicTickForTesting(
+            now: now.addingTimeInterval(40), reconcilePassCount: &passes)))
+        #expect(passes == 1)
+
+        // A real portable preference change is a local change and must run.
+        defaults.set("changed-by-user", forKey: portableKey)
+        service.handleDefaultsChange()
+        #expect(service.shouldRunPeriodicSynchronization(now: now.addingTimeInterval(60)))
+        #expect(try await service.runIsolatedPeriodicTickForTesting(
+            now: now.addingTimeInterval(60), reconcilePassCount: &passes))
+        #expect(passes == 2)
+    }
 }
 
 private enum CloudFixtureError: Error { case load, apply }

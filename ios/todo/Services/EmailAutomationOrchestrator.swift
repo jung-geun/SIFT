@@ -26,6 +26,19 @@ final class EmailAutomationOrchestrator: ObservableObject {
         let task: Task<Int, Never>
     }
 
+
+    nonisolated static let maxAutomaticAttempts = 5
+    nonisolated static let baseRetryInterval: TimeInterval = 5 * 60
+    nonisolated static let maxRetryInterval: TimeInterval = 24 * 60 * 60
+    private static let retryKeyPrefix = "sift.local.mailAnalysisAttempt."
+    private static let retryIndexKeyPrefix = "sift.local.mailAnalysisAttemptKeys."
+
+    private struct RetryMarker {
+        let source: String
+        let count: Int
+        let lastAttemptAt: Date
+        let retryAt: Date?
+    }
     private let defaults: UserDefaults
     private let makeContext: () -> ModelContext
     private let analysisService: EmailMessageAnalysisService
@@ -105,12 +118,20 @@ final class EmailAutomationOrchestrator: ObservableObject {
     func analyzeNow(provider: MailProvider, namespace: String) async -> Int {
         let account = Account(provider: provider, namespace: namespace)
         guard !Task.isCancelled, isEligible(account, mode: .manual) else { return 0 }
+        clearRetryMarkers(for: account)
         let task = start(account, mode: .manual)
         return await withTaskCancellationHandler {
             await task.value
         } onCancel: {
             task.cancel()
         }
+    }
+
+    /// Explicit user refreshes clear automatic retry caps/backoff for that
+    /// account without touching CloudKit preferences or message content.
+    func resetAutomaticRetries(provider: MailProvider, namespace: String) {
+        guard let canonical = canonicalNamespace(for: provider, raw: namespace) else { return }
+        clearRetryMarkers(for: Account(provider: provider, namespace: canonical))
     }
 
     func stopForegroundProcessing() {
@@ -157,7 +178,7 @@ final class EmailAutomationOrchestrator: ObservableObject {
             let descriptor = FetchDescriptor<EmailMessage>(
                 predicate: #Predicate {
                     $0.providerRawValue == providerRaw && $0.sourceAccountNamespace == namespace
-                        && $0.isInInbox && $0.bodyContentVersion == 1
+                        && $0.isInInbox
                 },
                 sortBy: [SortDescriptor(\.receivedAt, order: .reverse), SortDescriptor(\.rawMessageID)]
             )
@@ -166,31 +187,70 @@ final class EmailAutomationOrchestrator: ObservableObject {
             catch { return 0 }
             for email in rows {
                 guard !Task.isCancelled, isEligible(account, mode: mode) else { return 0 }
-                guard email.hasCompleteBody, !EmailAnalysisContract.normalizedBody(email.body).isEmpty,
-                      analysisService.needsAnalysis(email), !attempted.contains(EmailMessageKey(email))
+                guard !EmailAnalysisContract.normalizedBody(email.body).isEmpty,
+                      !attempted.contains(EmailMessageKey(email))
                 else { continue }
-                let identity = "\(providerRaw)\u{0}\(namespace)\u{0}\(email.providerMessageID)"
-                let retryKey = "sift.local.mailAnalysisAttempt."
-                    + EmailAnalysisContract.fingerprint(subject: identity, body: "")
-                let source = EmailAnalysisContract.fingerprint(subject: email.subject, body: email.body)
-                    + ":\(analysisService.retryEligibilityVersion)"
-                if mode != .manual, let marker = defaults.dictionary(forKey: retryKey),
-                   marker["source"] as? String == source, let last = marker["at"] as? Date,
-                   now().timeIntervalSince(last) < 5 * 60 {
+                // A synced analysis with a matching body fingerprint is already
+                // complete; skip local model work even before local body hydration.
+                if EmailAnalysisContract.isCurrentAnalysis(email), email.analysisFailureReasonRaw == nil {
+                    clearRetryMarker(for: email, account: account)
                     continue
                 }
+                guard email.hasCompleteBody, analysisService.needsAnalysis(email) else { continue }
+                let retryKey = self.retryKey(for: email, account: account)
+                let source = EmailAnalysisContract.fingerprint(subject: email.subject, body: email.body)
+                    + ":\(analysisService.retryEligibilityVersion)"
+                let existingMarker = readRetryMarker(forKey: retryKey)
+                let priorCount: Int
+                if let existingMarker, existingMarker.source == source {
+                    if mode != .manual {
+                        if existingMarker.count >= Self.maxAutomaticAttempts {
+                            continue
+                        }
+                        let dueAt = existingMarker.retryAt
+                            ?? existingMarker.lastAttemptAt.addingTimeInterval(
+                                Self.retryDelay(forAttempt: existingMarker.count)
+                            )
+                        if now() < dueAt {
+                            continue
+                        }
+                    }
+                    priorCount = mode == .manual ? 0 : existingMarker.count
+                } else {
+                    if existingMarker != nil {
+                        removeRetryMarker(forKey: retryKey, account: account)
+                    }
+                    priorCount = 0
+                }
                 attempted.insert(EmailMessageKey(email))
-                defaults.set(["source": source, "at": now()] as [String: Any], forKey: retryKey)
+                let attemptNumber = priorCount + 1
+                let attemptTime = now()
+                writeRetryMarker(
+                    RetryMarker(
+                        source: source,
+                        count: attemptNumber,
+                        lastAttemptAt: attemptTime,
+                        retryAt: attemptNumber >= Self.maxAutomaticAttempts
+                            ? nil
+                            : attemptTime.addingTimeInterval(Self.retryDelay(forAttempt: attemptNumber))
+                    ),
+                    forKey: retryKey,
+                    account: account
+                )
                 do {
                     try await analysisService.analyze(email, context: context, isAuthorized: {
                         self.isEligible(account, mode: mode)
                     })
                     if EmailAnalysisContract.isCurrentAnalysis(email) { completed += 1 }
                     if EmailAnalysisContract.isCurrentAnalysis(email), email.analysisFailureReasonRaw == nil {
-                        defaults.removeObject(forKey: retryKey)
+                        removeRetryMarker(forKey: retryKey, account: account)
                     }
                 } catch is CancellationError {
-                    defaults.removeObject(forKey: retryKey)
+                    if let existingMarker, existingMarker.source == source {
+                        writeRetryMarker(existingMarker, forKey: retryKey, account: account)
+                    } else {
+                        removeRetryMarker(forKey: retryKey, account: account)
+                    }
                     return 0
                 } catch {
                     DiagnosticRecorder.shared.record(error: error, component: "mail.local", operation: "analysis")
@@ -213,6 +273,82 @@ final class EmailAutomationOrchestrator: ObservableObject {
         case .outlook:
             return OutlookIMAPCredentialStore.canonicalAccount(defaults.string(forKey: "pieroot.todo.outlook.account") ?? "")
         }
+    }
+
+    private func canonicalNamespace(for provider: MailProvider, raw: String) -> String? {
+        switch provider {
+        case .gmail:
+            return IMAPCredentialStore.canonicalAccount(raw)
+        case .outlook:
+            return OutlookIMAPCredentialStore.canonicalAccount(raw)
+        }
+    }
+
+    nonisolated static func retryDelay(forAttempt attempt: Int) -> TimeInterval {
+        let exponent = max(0, min(10, attempt - 1))
+        return min(maxRetryInterval, baseRetryInterval * Double(1 << exponent))
+    }
+
+    private func retryKey(for email: EmailMessage, account: Account) -> String {
+        let identity = "\(account.provider.rawValue)\u{0}\(account.namespace)\u{0}\(email.providerMessageID)"
+        return Self.retryKeyPrefix + EmailAnalysisContract.fingerprint(subject: identity, body: "")
+    }
+
+    private func retryIndexKey(for account: Account) -> String {
+        let identity = "\(account.provider.rawValue)\u{0}\(account.namespace)"
+        return Self.retryIndexKeyPrefix + EmailAnalysisContract.fingerprint(subject: identity, body: "")
+    }
+
+    private func readRetryMarker(forKey key: String) -> RetryMarker? {
+        guard let raw = defaults.dictionary(forKey: key),
+              let source = raw["source"] as? String,
+              let lastAttemptAt = raw["at"] as? Date
+        else { return nil }
+        let count = max(1, (raw["count"] as? Int) ?? 1)
+        let retryAt = raw["retryAt"] as? Date
+        return RetryMarker(source: source, count: count, lastAttemptAt: lastAttemptAt, retryAt: retryAt)
+    }
+
+    private func writeRetryMarker(_ marker: RetryMarker, forKey key: String, account: Account) {
+        var payload: [String: Any] = [
+            "source": marker.source,
+            "count": marker.count,
+            "at": marker.lastAttemptAt
+        ]
+        if let retryAt = marker.retryAt {
+            payload["retryAt"] = retryAt
+        }
+        defaults.set(payload, forKey: key)
+        let indexKey = retryIndexKey(for: account)
+        var keys = Set(defaults.stringArray(forKey: indexKey) ?? [])
+        if keys.insert(key).inserted {
+            defaults.set(Array(keys), forKey: indexKey)
+        }
+    }
+
+    private func clearRetryMarker(for email: EmailMessage, account: Account) {
+        removeRetryMarker(forKey: retryKey(for: email, account: account), account: account)
+    }
+
+    private func removeRetryMarker(forKey key: String, account: Account) {
+        defaults.removeObject(forKey: key)
+        let indexKey = retryIndexKey(for: account)
+        var keys = Set(defaults.stringArray(forKey: indexKey) ?? [])
+        if keys.remove(key) != nil {
+            if keys.isEmpty {
+                defaults.removeObject(forKey: indexKey)
+            } else {
+                defaults.set(Array(keys), forKey: indexKey)
+            }
+        }
+    }
+
+    private func clearRetryMarkers(for account: Account) {
+        let indexKey = retryIndexKey(for: account)
+        for key in defaults.stringArray(forKey: indexKey) ?? [] {
+            defaults.removeObject(forKey: key)
+        }
+        defaults.removeObject(forKey: indexKey)
     }
 
     private func isEligible(_ account: Account, mode: Mode) -> Bool {

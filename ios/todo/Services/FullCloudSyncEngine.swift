@@ -208,6 +208,7 @@ final class FullCloudSyncEngine {
     private enum Operation {
         case apply(CloudDataRevision)
         case publish(CloudSyncCheckpoint)
+        case converge(CloudDataRevision?, CloudSyncCheckpoint, Data)
         case inspect(CloudDataRevision, adopt: Bool)
     }
 
@@ -263,7 +264,7 @@ final class FullCloudSyncEngine {
             // All superseded remote payloads are retained before resolution,
             // not only the currently winning logical clock.
             var unavailable = false
-            var relevant = versions.map(\.payload)
+            var relevant = concurrent ? versions.map(\.payload) : []
             for revision in revisions {
                 do {
                     let payload = try await materialize(revision)
@@ -538,6 +539,77 @@ final class FullCloudSyncEngine {
                 journal.pendingPublications.removeValue(forKey: key)
                 journalDirty = true
             }
+            if key.hasPrefix("EmailMessage/"), let remote, !remote.isTombstone {
+                let peers = revisionsByKey[key, default: []].filter { $0.logicalClock == remote.logicalClock }
+                let hasCompetingPeers = Set(peers.map { checkpoint($0).digest ?? "deleted" }).count > 1
+                let localCompetesWithRemote = local != nil && local != checkpoint(remote).digest
+                    && (baseline == nil || (local != baseline?.digest && newer(remote, than: baseline!)))
+                if (hasCompetingPeers || localCompetesWithRemote), peers.allSatisfy({ !$0.isTombstone }) {
+                    do {
+                        var candidates = [Data]()
+                        var peerByDigest = [String: CloudDataRevision]()
+                        let orderedPeers = [remote] + peers.filter { $0 !== remote }
+                        for peer in orderedPeers {
+                            if let data = try await materialize(peer) {
+                                try checkCurrent(isValid)
+                                if isUnavailable(key) { break }
+                                candidates.append(data)
+                                let digest = checkpoint(peer).digest ?? CloudFileStore.digest(data)
+                                if peerByDigest[digest] == nil { peerByDigest[digest] = peer }
+                            }
+                        }
+                        if isUnavailable(key) { continue }
+                        let includeLocal = local != nil && (baseline == nil || local != baseline?.digest)
+                        if includeLocal, let expectedLocalDigest = local {
+                            guard let localData = try await load(key) else { throw CloudFileError.changingFile }
+                            try checkCurrent(isValid)
+                            if isUnavailable(key) { continue }
+                            guard try CloudRevisionPayloadReader.digest(localData) == expectedLocalDigest else {
+                                throw CloudFileError.changingFile
+                            }
+                            candidates.append(localData)
+                        }
+                        if let winner = CloudModelCodec.preferredEmailAnalysisPayload(key: key, candidates: candidates) {
+                            let winningDigest = CloudFileStore.digest(winner)
+                            if winningDigest == checkpoint(remote).digest {
+                                planApply(key, remote: remote, source: local, operations: &operations)
+                                continue
+                            } else if winningDigest == local {
+                                let intended = CloudSyncCheckpoint(digest: winningDigest, revisionID: UUID(),
+                                    logicalClock: nextClock, installationID: installationID)
+                                journal.pendingPublications[key] = intended
+                                journalDirty = true
+                                operations[key] = .publish(intended)
+                                continue
+                            } else if let winningPeer = peerByDigest[winningDigest] {
+                                let intended = CloudSyncCheckpoint(digest: winningDigest, revisionID: UUID(),
+                                    logicalClock: nextClock, installationID: installationID)
+                                journal.pendingApplies[key] = CloudSyncPendingApply(
+                                    sourceDigest: local, target: checkpoint(winningPeer))
+                                journal.pendingPublications[key] = intended
+                                journalDirty = true
+                                operations[key] = .converge(winningPeer, intended, winner)
+                                continue
+                            }
+                        }
+                    } catch FullCloudSyncError.revisionValidation(.missingPayload) {
+                        missingPayloadKeys.insert(key)
+                        continue
+                    } catch CloudFileError.changingFile {
+                        deferredKeys.insert(key)
+                        continue
+                    } catch {
+                        if error is CancellationError {
+                            guard !Task.isCancelled, isValid(), isUnavailable(key) else { throw error }
+                        } else {
+                            guard isValid(), !Task.isCancelled else { throw error }
+                            firstItemError = firstItemError ?? error
+                        }
+                        deferredKeys.insert(key)
+                        continue
+                    }
+                }
+            }
             if baseline == nil, let remote {
                 planApply(key, remote: remote, source: local, operations: &operations)
             } else if local != baseline?.digest {
@@ -663,6 +735,37 @@ final class FullCloudSyncEngine {
                         if publications.count >= publicationLimit || payloadBytes >= payloadLimit {
                             try commitPublications()
                         }
+                    case .converge(let winningRemote, let intended, let payload):
+                        try commitPublications()
+                        if let winningRemote {
+                            _ = try await materialize(winningRemote, needsPayload: false)
+                            try checkCurrent(isValid)
+                            if isUnavailable(key) { continue }
+                        }
+                        try await apply(key, payload)
+                        restored += 1
+                        journal.pendingApplies.removeValue(forKey: key)
+                        journalDirty = true
+                        try checkCurrent(isValid)
+                        if isUnavailable(key) { continue }
+                        let size = payload.count
+                        if !publications.isEmpty, size > payloadLimit - payloadBytes {
+                            try commitPublications()
+                        }
+                        let revision = CloudDataRevision(itemKey: key, clock: intended.logicalClock,
+                            installationID: intended.installationID, payload: payload, digest: intended.digest ?? "")
+                        revision.revisionID = intended.revisionID
+                        try checkCurrent(isValid)
+                        cloud.insert(revision)
+                        for old in revisionsByKey[key, default: []] {
+                            try checkCurrent(isValid)
+                            cloud.delete(old)
+                        }
+                        publications.append((key, intended, revision))
+                        payloadBytes += size
+                        if publications.count >= publicationLimit || payloadBytes >= payloadLimit {
+                            try commitPublications()
+                        }
                     case .inspect(let remote, let adopt):
                         _ = try await materialize(remote, needsPayload: false)
                         try checkCurrent(isValid)
@@ -701,6 +804,7 @@ final class FullCloudSyncEngine {
             for key in orderedKeys where !isUnavailable(key) && !missingPayloadKeys.contains(key)
                     && !deferredKeys.contains(key) {
                 if case .publish? = operations[key] { continue }
+                if case .converge? = operations[key] { continue }
                 guard let remote = latest[key] else { continue }
                 for old in revisionsByKey[key, default: []] where old !== remote {
                     try checkCurrent(isValid)

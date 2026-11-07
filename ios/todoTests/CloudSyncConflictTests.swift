@@ -15,12 +15,13 @@ struct CloudSyncConflictTests {
         let email: ModelContext
         let meeting: ModelContext
         let cloud: ModelContext
-        let installation = UUID().uuidString
+        let installation: String
         let engine: FullCloudSyncEngine
         let service: FullCloudSyncService
         let date = Date(timeIntervalSinceReferenceDate: 810_000_000)
 
-        init() throws {
+        init(sharedCloud: ModelContainer? = nil, installation: String = UUID().uuidString) throws {
+            self.installation = installation
             root = FileManager.default.temporaryDirectory.appendingPathComponent("CloudConflict-\(UUID().uuidString)", isDirectory: true)
             func context(_ schema: Schema) throws -> ModelContext {
                 let configuration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)
@@ -31,7 +32,12 @@ struct CloudSyncConflictTests {
             app = try context(AppDataContainer.appSchema)
             email = try context(AppDataContainer.emailSchema)
             meeting = try context(AppDataContainer.meetingSchema)
-            cloud = try context(Schema([CloudDataRevision.self]))
+            if let sharedCloud {
+                cloud = ModelContext(sharedCloud)
+                cloud.autosaveEnabled = false
+            } else {
+                cloud = try context(Schema([CloudDataRevision.self]))
+            }
             engine = try FullCloudSyncEngine(cloud: cloud, installationID: installation,
                 journalURL: root.appendingPathComponent("journal.json"))
             service = FullCloudSyncService(conflictApp: app, conflictEmail: email, conflictMeeting: meeting,
@@ -494,5 +500,200 @@ struct CloudSyncConflictTests {
             #expect(try Data(contentsOf: files.appendingPathComponent(id).appendingPathComponent("audio.wav")) == Data("original audio \(id)".utf8))
         }
         #expect(try f.cloud.fetch(FetchDescriptor<CloudDataRevision>()).filter { $0.itemKey == key }.count == 2)
+    }
+
+    @Test("Two installations analyzing the same email converge deterministically with no held conflict",
+          arguments: [false, true])
+    func concurrentEmailAnalysisConvergesAcrossTwoInstallations(laterAnalyzedSyncsFirst: Bool) async throws {
+        let deviceA = try Fixture(installation: "00000000-0000-0000-0000-000000000001")
+        let deviceB = try Fixture(
+            sharedCloud: deviceA.cloud.container,
+            installation: "ffffffff-ffff-ffff-ffff-ffffffffffff"
+        )
+        defer { deviceA.remove(); deviceB.remove() }
+
+        let seed = EmailMessage(
+            id: "gmail-imap:msg-concurrent-analysis",
+            threadID: "thread-1",
+            subject: "Quarterly roadmap review",
+            from: "alice@example.com",
+            snippet: "Please review the attached roadmap before Friday.",
+            body: "Please review the attached roadmap before Friday and confirm your team milestones.",
+            htmlBody: "<p>Please review the attached roadmap before Friday and confirm your team milestones.</p>",
+            receivedAt: deviceA.date,
+            isRead: false,
+            provider: .gmail,
+            rawMessageID: "msg-concurrent-analysis",
+            providerGlobalMessageID: "1840000000000001",
+            labelIDs: ["INBOX"],
+            isInInbox: true
+        )
+        seed.sourceAccountNamespace = "acct-1"
+        deviceA.email.insert(seed)
+        try deviceA.email.save()
+
+        // Sync initial unanalyzed message to both installations.
+        try await deviceA.sync()
+        try await deviceB.sync()
+
+        let emailA = try #require(deviceA.email.fetch(FetchDescriptor<EmailMessage>()).first)
+        let emailB = try #require(deviceB.email.fetch(FetchDescriptor<EmailMessage>()).first)
+        let fingerprint = EmailAnalysisContract.fingerprint(subject: emailA.subject, body: emailA.body)
+
+        // Both devices independently analyze the exact same message body at different times.
+        let earlierDate = deviceA.date.addingTimeInterval(12)
+        let laterDate = deviceA.date.addingTimeInterval(47)
+
+        emailA.analysisState = .analyzed
+        emailA.analyzedBodyFingerprint = fingerprint
+        emailA.analysisVersion = EmailAnalysisContract.summaryContractVersion
+        emailA.analyzedAt = earlierDate
+        emailA.analysisSummary = "Device A summary: confirm Friday roadmap milestones."
+        emailA.analysisKeyPoints = ["Roadmap review due Friday"]
+        emailA.analysisActionItems = ["Confirm team milestones"]
+        emailA.analysisTodoCandidate = true
+        emailA.analysisTodoCandidateFingerprint = fingerprint
+        try deviceA.email.save()
+
+        emailB.analysisState = .analyzed
+        emailB.analyzedBodyFingerprint = fingerprint
+        emailB.analysisVersion = EmailAnalysisContract.summaryContractVersion
+        emailB.analyzedAt = laterDate
+        emailB.analysisSummary = "Device B summary: review roadmap document."
+        emailB.analysisKeyPoints = ["Check roadmap attachment"]
+        emailB.analysisActionItems = ["Review roadmap before Friday"]
+        emailB.analysisTodoCandidate = true
+        emailB.analysisTodoCandidateFingerprint = fingerprint
+        try deviceB.email.save()
+
+        if laterAnalyzedSyncsFirst {
+            try await deviceB.sync()
+            try await deviceA.service.refreshConflicts()
+            #expect(deviceA.service.conflicts.isEmpty)
+            try await deviceA.sync()
+            try await deviceB.service.refreshConflicts()
+            #expect(deviceB.service.conflicts.isEmpty)
+            try await deviceB.sync()
+        } else {
+            try await deviceA.sync()
+            try await deviceB.service.refreshConflicts()
+            #expect(deviceB.service.conflicts.isEmpty)
+            try await deviceB.sync()
+            try await deviceA.service.refreshConflicts()
+            #expect(deviceA.service.conflicts.isEmpty)
+            try await deviceA.sync()
+        }
+
+        #expect(deviceA.service.conflicts.isEmpty && deviceB.service.conflicts.isEmpty)
+        #expect(deviceA.engine.deferredKeys.isEmpty && deviceB.engine.deferredKeys.isEmpty)
+
+        let snapA = try deviceA.snapshot()
+        let snapB = try deviceB.snapshot()
+        #expect(snapA.conflictingKeys.isEmpty && snapB.conflictingKeys.isEmpty)
+        #expect(snapA.records == snapB.records)
+
+        let convergedA = try #require(deviceA.email.fetch(FetchDescriptor<EmailMessage>()).first)
+        let convergedB = try #require(deviceB.email.fetch(FetchDescriptor<EmailMessage>()).first)
+        #expect(convergedA.analyzedAt == earlierDate && convergedB.analyzedAt == earlierDate)
+        #expect(convergedA.analysisSummary == "Device A summary: confirm Friday roadmap milestones.")
+        #expect(convergedB.analysisSummary == convergedA.analysisSummary)
+        #expect(convergedB.analysisActionItems == ["Confirm team milestones"])
+    }
+
+    @Test("Equal-clock analysis peers converge to earliest analyzedAt while real user edits are never lost")
+    func equalClockEmailAnalysisAndUserEditProtection() async throws {
+        let deviceA = try Fixture(installation: "00000000-0000-0000-0000-000000000001")
+        let deviceB = try Fixture(
+            sharedCloud: deviceA.cloud.container,
+            installation: "ffffffff-ffff-ffff-ffff-ffffffffffff"
+        )
+        defer { deviceA.remove(); deviceB.remove() }
+
+        let message = EmailMessage(
+            id: "gmail-imap:msg-equal-clock",
+            subject: "Contract signature",
+            from: "legal@example.com",
+            body: "Please countersign the vendor agreement.",
+            receivedAt: deviceA.date,
+            isRead: false,
+            provider: .gmail,
+            labelIDs: ["INBOX"],
+            isInInbox: true
+        )
+        message.sourceAccountNamespace = "acct-1"
+        deviceA.email.insert(message)
+        try deviceA.email.save()
+
+        let baseSnapshot = try deviceA.snapshot()
+        let key = try #require(baseSnapshot.records.keys.first { $0.hasPrefix("EmailMessage/") })
+        let basePayload = try #require(baseSnapshot.records[key])
+        _ = try deviceA.remote(key, basePayload, clock: 1)
+        try await deviceA.sync()
+        try await deviceB.sync()
+
+        let fp = EmailAnalysisContract.fingerprint(subject: message.subject, body: message.body)
+        let earlyDate = deviceA.date.addingTimeInterval(5)
+        let lateDate = deviceA.date.addingTimeInterval(25)
+
+        let earlyPayload = try changed(
+            try changed(
+                try changed(
+                    try changed(basePayload, field: "analysisStateRaw", value: EmailAnalysisState.analyzed.rawValue),
+                    field: "analyzedBodyFingerprint", value: fp
+                ),
+                field: "analyzedAt", value: earlyDate
+            ),
+            field: "analysisSummary", value: "Early winner despite lower installationID"
+        )
+        let latePayload = try changed(
+            try changed(
+                try changed(
+                    try changed(basePayload, field: "analysisStateRaw", value: EmailAnalysisState.analyzed.rawValue),
+                    field: "analyzedBodyFingerprint", value: fp
+                ),
+                field: "analyzedAt", value: lateDate
+            ),
+            field: "analysisSummary", value: "Later loser despite higher installationID"
+        )
+
+        // Simulate simultaneous equal-clock cloud peers where higher installationID has LATER analyzedAt.
+        let peerRowA = CloudDataRevision(
+            itemKey: key, clock: 2,
+            installationID: "00000000-0000-0000-0000-000000000001",
+            payload: earlyPayload
+        )
+        let peerRowB = CloudDataRevision(
+            itemKey: key, clock: 2,
+            installationID: "ffffffff-ffff-ffff-ffff-ffffffffffff",
+            payload: latePayload
+        )
+        deviceA.cloud.insert(peerRowA)
+        deviceA.cloud.insert(peerRowB)
+        try deviceA.cloud.save()
+
+        try await deviceB.service.refreshConflicts()
+        #expect(deviceB.service.conflicts.isEmpty)
+        try await deviceB.sync()
+        try await deviceA.sync()
+
+        let rowA = try #require(deviceA.email.fetch(FetchDescriptor<EmailMessage>()).first)
+        let rowB = try #require(deviceB.email.fetch(FetchDescriptor<EmailMessage>()).first)
+        #expect(rowA.analysisSummary == "Early winner despite lower installationID")
+        #expect(rowB.analysisSummary == rowA.analysisSummary)
+        #expect(try deviceA.cloud.fetch(FetchDescriptor<CloudDataRevision>()).filter { $0.itemKey == key }.count == 1)
+
+        // A competing user edit (marking read + starring) vs another device's change is NEVER silently discarded.
+        rowA.isRead = true
+        rowA.labelIDs = ["INBOX", "STARRED"]
+        try deviceA.email.save()
+
+        rowB.analysisSummary = "Concurrent summary with stale unread state"
+        rowB.analyzedAt = deviceA.date.addingTimeInterval(1) // Even an earlier timestamp must not erase rowA's user edit!
+        try deviceB.email.save()
+
+        try await deviceB.sync()
+        try await deviceA.service.refreshConflicts()
+        #expect(deviceA.service.conflicts.map(\.itemKey) == [key])
+        #expect(rowA.isRead == true && rowA.labelIDs == ["INBOX", "STARRED"])
     }
 }

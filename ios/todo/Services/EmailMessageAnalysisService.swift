@@ -36,6 +36,36 @@ enum EmailAnalysisContract {
             .map { String(format: "%02x", $0) }.joined()
     }
 
+    /// Deterministic RFC 4122 v5 UUID so independent devices analyzing or
+    /// capturing the same mail action converge on one Todo identity.
+    static func deterministicTodoID(
+        provider: MailProvider,
+        sourceAccountNamespace: String,
+        messageID: String,
+        itemIdentity: String
+    ) -> UUID {
+        let namespaceBytes: [UInt8] = [
+            0x73, 0x69, 0x66, 0x74, 0x2d, 0x6d, 0x61, 0x69,
+            0x6c, 0x2d, 0x74, 0x6f, 0x64, 0x6f, 0x2d, 0x31
+        ]
+        let canonicalAccount = sourceAccountNamespace
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let canonicalMessageID = messageID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = "sift-mail-todo:v1\u{0}\(provider.rawValue)\u{0}\(canonicalAccount)\u{0}\(canonicalMessageID)\u{0}\(itemIdentity)"
+        var input = Data(namespaceBytes)
+        input.append(contentsOf: name.utf8)
+        var bytes = Array(Insecure.SHA1.hash(data: input).prefix(16))
+        bytes[6] = (bytes[6] & 0x0f) | 0x50
+        bytes[8] = (bytes[8] & 0x3f) | 0x80
+        return UUID(uuid: (
+            bytes[0], bytes[1], bytes[2], bytes[3],
+            bytes[4], bytes[5], bytes[6], bytes[7],
+            bytes[8], bytes[9], bytes[10], bytes[11],
+            bytes[12], bytes[13], bytes[14], bytes[15]
+        ))
+    }
+
     static func currentActionItems(for email: EmailMessage) -> [String] {
         guard isCurrentAnalysis(email), email.analysisFailureReasonRaw == nil else { return [] }
         return uniqueItems(email.analysisActionItems)

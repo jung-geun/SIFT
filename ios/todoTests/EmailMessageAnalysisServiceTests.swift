@@ -874,4 +874,152 @@ extension EmailAutomationOrchestratorTests {
         #expect(await restarted.runIfEligible(context: context))
         #expect(calls == 3)
     }
+
+    @Test("exponential backoff and attempt cap survive relaunch and reset on body change or explicit user refresh")
+    func persistentAttemptBackoffCapAndExplicitReset() async throws {
+        let container = try makeContainer()
+        let defaults = makeDefaults()
+        let seedContext = ModelContext(container)
+        let email = insertEmail("backoff-cap", in: seedContext)
+        try seedContext.save()
+
+        var calls = 0
+        var time = Date(timeIntervalSince1970: 50_000)
+        let service = EmailMessageAnalysisService(
+            foundationModelsSummaryProvider: { _, _, _, _ in
+                calls += 1
+                throw IntelligenceRoutingError.backendUnavailable(
+                    provider: .foundationModels,
+                    reason: RuleFallbackReason.unavailable.rawValue
+                )
+            },
+            foundationModelsEnabledProvider: { true },
+            foundationModelsAvailabilityProvider: { true }
+        )
+        let makeOrchestrator: () -> EmailAutomationOrchestrator = {
+            EmailAutomationOrchestrator(
+                defaults: defaults,
+                makeContext: { ModelContext(container) },
+                analysisService: service,
+                accountAvailable: { _, _ in true },
+                batteryAllowsAnalysis: { true },
+                now: { time }
+            )
+        }
+
+        // Attempt 1 at T=0; next due at +5m (300s).
+        #expect(await makeOrchestrator().runIfEligible(context: seedContext))
+        #expect(calls == 1)
+        let siftKeys = defaults.dictionaryRepresentation().keys.filter { $0.hasPrefix("sift.local.mailAnalysisAttempt.") }
+        #expect(siftKeys.count == 1)
+        #expect(defaults.dictionaryRepresentation().keys.allSatisfy { !$0.hasPrefix("pieroot.todo.mail.localAnalysisAttempt.") })
+
+        // Before +5m on relaunched orchestrator: skipped.
+        time = time.addingTimeInterval(299)
+        #expect(!(await makeOrchestrator().runIfEligible(context: seedContext)))
+        #expect(calls == 1)
+
+        // At +5m: attempt 2; next due at +10m (600s) — beyond a flat 5-minute throttle.
+        time = time.addingTimeInterval(1)
+        #expect(await makeOrchestrator().runIfEligible(context: seedContext))
+        #expect(calls == 2)
+
+        // +5m after attempt 2 is NOT enough under exponential backoff.
+        time = time.addingTimeInterval(5 * 60)
+        #expect(!(await makeOrchestrator().runIfEligible(context: seedContext)))
+        #expect(calls == 2)
+
+        // At +10m after attempt 2: attempt 3; next due at +20m.
+        time = time.addingTimeInterval(5 * 60)
+        #expect(await makeOrchestrator().runIfEligible(context: seedContext))
+        #expect(calls == 3)
+
+        // Attempt 4 at +20m; attempt 5 (cap) at +40m.
+        time = time.addingTimeInterval(20 * 60)
+        #expect(await makeOrchestrator().runIfEligible(context: seedContext))
+        #expect(calls == 4)
+        time = time.addingTimeInterval(40 * 60)
+        #expect(await makeOrchestrator().runIfEligible(context: seedContext))
+        #expect(calls == 5)
+
+        // Beyond maxRetryInterval after reaching cap: stays capped across relaunch.
+        time = time.addingTimeInterval(48 * 3_600)
+        #expect(!(await makeOrchestrator().runIfEligible(context: seedContext)))
+        #expect(calls == 5)
+
+        // Explicit user refresh resets automatic retry cap/backoff.
+        let refreshCoordinator = MailboxIncrementalSyncCoordinator(
+            localStore: MailboxLocalStore(defaults: defaults, saveContext: { try $0.save() }),
+            makeContext: { ModelContext(container) },
+            resolveProvider: { _ in ScriptedPagingProvider(provider: .gmail) },
+            ensureReady: { _, _, _ in true },
+            defaults: defaults,
+            enqueueAnalysis: { _, _ in },
+            resetAnalysisRetries: { provider, namespace in
+                makeOrchestrator().resetAutomaticRetries(provider: provider, namespace: namespace)
+            },
+            now: { time }
+        )
+        #expect(await refreshCoordinator.sync(provider: .gmail, minimumInterval: 0))
+        #expect(await makeOrchestrator().runIfEligible(context: seedContext))
+        #expect(calls == 6)
+
+        // Exhaust cap again, then verify body fingerprint change resets immediately.
+        for delay in [5 * 60.0, 10 * 60.0, 20 * 60.0, 40 * 60.0] {
+            time = time.addingTimeInterval(delay)
+            #expect(await makeOrchestrator().runIfEligible(context: seedContext))
+        }
+        #expect(calls == 10)
+        time = time.addingTimeInterval(48 * 3_600)
+        #expect(!(await makeOrchestrator().runIfEligible(context: seedContext)))
+        #expect(calls == 10)
+
+        let editContext = ModelContext(container)
+        let stored = try #require(editContext.fetch(FetchDescriptor<EmailMessage>()).first { $0.id == email.id })
+        stored.body = "Updated complete body after sender follow-up."
+        try editContext.save()
+        #expect(await makeOrchestrator().runIfEligible(context: editContext))
+        #expect(calls == 11)
+    }
+
+    @Test("synced email analysis with matching body fingerprint skips model invocation")
+    func syncedMatchingFingerprintSkipsOrchestratorAnalysis() async throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let defaults = makeDefaults()
+        let synced = insertEmail("synced-mail", complete: false, in: context)
+        synced.analysisState = .analyzed
+        synced.analysisVersion = EmailAnalysisContract.summaryContractVersion
+        synced.analysisFailureReasonRaw = nil
+        synced.analysisSummary = "Synced summary from peer device"
+        synced.analysisActionItems = ["Approve deployment"]
+        synced.analyzedBodyFingerprint = EmailAnalysisContract.fingerprint(
+            subject: synced.subject,
+            body: synced.body
+        )
+        try context.save()
+
+        var calls = 0
+        let service = EmailMessageAnalysisService(
+            foundationModelsSummaryProvider: { _, _, _, _ in
+                calls += 1
+                return EmailSummaryResult(summary: "Recomputed", keyPoints: [], actionItems: ["Duplicate"])
+            },
+            foundationModelsEnabledProvider: { true },
+            foundationModelsAvailabilityProvider: { true }
+        )
+        let orchestrator = EmailAutomationOrchestrator(
+            defaults: defaults,
+            makeContext: { context },
+            analysisService: service,
+            accountAvailable: { _, _ in true },
+            batteryAllowsAnalysis: { true }
+        )
+        #expect(!(await orchestrator.runIfEligible(context: context)))
+        synced.bodyContentVersion = 1
+        try context.save()
+        #expect(!(await orchestrator.runIfEligible(context: context)))
+        #expect(calls == 0)
+        #expect(synced.analysisSummary == "Synced summary from peer device")
+    }
 }

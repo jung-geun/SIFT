@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import Testing
 @testable import todo
@@ -84,7 +85,7 @@ struct CloudPreferenceSafetyTests {
     }
 }
 
-@Suite("CloudSyncMonitor completion deduplication")
+@Suite("CloudSyncMonitor completion deduplication", .serialized)
 @MainActor
 struct CloudSyncMonitorDeduplicationTests {
     @Test("Identical true-nil completion emissions from idle do not re-enter completed phase")
@@ -101,11 +102,67 @@ struct CloudSyncMonitorDeduplicationTests {
         UserDefaults.standard.set("test-account", forKey: UserCloudSyncPolicy.accountKey)
         UserDefaults.standard.set(UserCloudSyncPolicy.consentVersion, forKey: UserCloudSyncPolicy.consentKey)
 
-        let monitor = CloudSyncMonitor()
-        #expect(monitor.phase == .idle)
-        monitor.startObserving(initialCount: 0)
-        #expect(monitor.phase == .importing)
-        monitor.stopObserving()
-        #expect(monitor.phase == .idle)
+        // Polling with a generous bound: a slow machine can only delay, never fail.
+        func waitUntil(_ condition: () -> Bool) async throws {
+            let deadline = Date().addingTimeInterval(10)
+            while !condition(), Date() < deadline { try await Task.sleep(for: .milliseconds(5)) }
+            #expect(condition())
+        }
+        // Lets any queued RunLoop deliveries run; used only for negative assertions,
+        // where extra delay can hide a bug but can never cause a false failure.
+        func settle() async throws {
+            for _ in 0..<20 { try await Task.sleep(for: .milliseconds(5)) }
+        }
+
+        // Phase 1: a long banner keeps .completed stable while duplicates arrive.
+        let longSubject = CurrentValueSubject<(Bool, String?), Never>((false, nil))
+        let longMonitor = CloudSyncMonitor(
+            statusPublisher: longSubject.eraseToAnyPublisher(),
+            completionDuration: .seconds(60)
+        )
+        var longPhases = [CloudSyncPhase]()
+        let longCancellable = longMonitor.$phase.sink { longPhases.append($0) }
+        defer { longCancellable.cancel(); longMonitor.stopObserving() }
+        #expect(longMonitor.phase == .idle)
+        longMonitor.startObserving(initialCount: 0)
+        #expect(longMonitor.phase == .importing)
+        longSubject.send((false, nil))
+        longSubject.send((false, nil))
+        try await settle()
+        #expect(longMonitor.phase == .importing)
+        longSubject.send((true, nil))
+        try await waitUntil { longMonitor.phase == .completed }
+        for _ in 0..<5 { longSubject.send((true, nil)) }
+        try await settle()
+        #expect(longMonitor.phase == .completed)
+        #expect(longPhases == [.idle, .importing, .completed])
+        #expect(longPhases.filter { $0 == .completed }.count == 1)
+
+        // Phase 2: after auto-dismissal, identical re-emissions, foreground
+        // restarts and error->nil recovery never produce another banner.
+        let shortSubject = CurrentValueSubject<(Bool, String?), Never>((false, nil))
+        let shortMonitor = CloudSyncMonitor(
+            statusPublisher: shortSubject.eraseToAnyPublisher(),
+            completionDuration: .milliseconds(30)
+        )
+        var shortPhases = [CloudSyncPhase]()
+        let shortCancellable = shortMonitor.$phase.sink { shortPhases.append($0) }
+        defer { shortCancellable.cancel(); shortMonitor.stopObserving() }
+        shortMonitor.startObserving(initialCount: 0)
+        shortSubject.send((true, nil))
+        shortSubject.send((true, nil))
+        try await waitUntil { shortPhases == [.idle, .importing, .completed, .idle] }
+        for _ in 0..<5 { shortSubject.send((true, nil)) }
+        shortMonitor.startObserving(initialCount: 3)
+        shortSubject.send((true, "sync warning"))
+        shortSubject.send((true, nil))
+        shortSubject.send((true, nil))
+        try await settle()
+        #expect(shortMonitor.phase == .idle)
+        #expect(shortPhases.filter { $0 == .completed }.count == 1)
+        #expect(shortPhases == [.idle, .importing, .completed, .idle])
+
+        shortMonitor.stopObserving()
+        #expect(shortMonitor.phase == .idle)
     }
 }

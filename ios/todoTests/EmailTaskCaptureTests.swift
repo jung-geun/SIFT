@@ -132,4 +132,38 @@ struct EmailTaskCaptureTests {
         }
         #expect(Set(try context.fetch(FetchDescriptor<Todo>()).map(\.sourceAccountNamespace)) == ["first@example.com", "second@example.com"])
     }
+
+    @Test("Capturing the same action across two synced stores produces one deterministic Todo ID and skips legacy random-ID duplicates")
+    func deterministicActionCaptureAcrossStores() throws {
+        let storeA = try makeContainer()
+        let storeB = try makeContainer()
+        let contextA = ModelContext(storeA)
+        let contextB = ModelContext(storeB)
+        let emailA = message(actions: ["Check token settings", "Renew the token if needed"])
+        emailA.providerGlobalMessageID = "gmail-global-777"
+        let emailB = message(actions: ["Check token settings", "Renew the token if needed"], account: "FIRST@EXAMPLE.COM")
+        emailB.rawMessageID = "different-imap-uid"
+        emailB.providerGlobalMessageID = "gmail-global-777"
+
+        let sourceA = try #require(EmailTaskCapture.source(for: emailA, action: "Renew the token if needed"))
+        let sourceB = try #require(EmailTaskCapture.source(for: emailB, action: "Renew the token if needed"))
+        let todoA = try EmailTaskCapture.save(source: sourceA, email: emailA, title: "Renew the token if needed", notes: "", dueDate: nil, in: contextA)
+        let todoB = try EmailTaskCapture.save(source: sourceB, email: emailB, title: "Renew the token if needed", notes: "", dueDate: nil, in: contextB)
+        #expect(todoA.id == todoB.id)
+
+        let legacyStore = try makeContainer()
+        let legacyContext = ModelContext(legacyStore)
+        let legacyID = UUID()
+        let legacyTodo = Todo(id: legacyID, title: "Renew the token if needed", source: .email, sourceRef: emailA.todoSourceRef)
+        legacyTodo.sourceAccountNamespace = emailA.sourceAccountNamespace
+        legacyTodo.sourceItemID = EmailAnalysisContract.actionIdentifier("Renew the token if needed")
+        legacyContext.insert(legacyTodo)
+        try legacyContext.save()
+
+        #expect(throws: EmailTaskCapture.CaptureError.self) {
+            try EmailTaskCapture.save(source: sourceA, email: emailA, title: "Renew the token if needed", notes: "", dueDate: nil, in: legacyContext)
+        }
+        let retained = try legacyContext.fetch(FetchDescriptor<Todo>())
+        #expect(retained.count == 1 && retained.first?.id == legacyID)
+    }
 }

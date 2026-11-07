@@ -633,13 +633,10 @@ struct todoApp: App {
                     MailboxIncrementalSyncCoordinator.shared.startPolling()
                 }
                 Task {
-                    if UserCloudSyncPolicy.isRequested, !(await FullCloudSyncService.shared.waitForTaskRestore()) { return }
-                    await CalendarService.shared.runWeeklyImportIfDue(context: ctx)
-                }
-                Task {
-                    // iCloud 동기화가 진행 중이면 완료 후 캘린더 동기화
+                    // iCloud 동기화가 진행 중이면 완료 후 주간 import·캘린더 동기화 수행
                     // (iCloud에 먼저 도착한 캘린더 이벤트를 Todo 없는 신규로 오인하는 경쟁 조건 방지)
                     if UserCloudSyncPolicy.isRequested, !(await FullCloudSyncService.shared.waitForTaskRestore()) { return }
+                    await CalendarService.shared.runWeeklyImportIfDue(context: ctx)
                     await CalendarService.shared.syncCalendarWithTodos(context: ctx)
                     await CalendarService.shared.cleanupOldCompletedTodos(context: ctx)
                 }
@@ -777,9 +774,6 @@ struct todoApp: App {
                         Task {
                             if UserCloudSyncPolicy.isRequested, !(await FullCloudSyncService.shared.waitForTaskRestore()) { return }
                             await CalendarService.shared.runWeeklyImportIfDue(context: ctx)
-                        }
-                        Task {
-                            if UserCloudSyncPolicy.isRequested, !(await FullCloudSyncService.shared.waitForTaskRestore()) { return }
                             await CalendarService.shared.syncCalendarWithTodos(context: ctx)
                             await CalendarService.shared.cleanupOldCompletedTodos(context: ctx)
                         }
