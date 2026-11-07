@@ -432,18 +432,6 @@ private struct PrivacyPolicyContent: View {
             LegalLocalizedBullets(items: [
                 ("health.reset.warning", "연결과 자동 생성 동의를 중지하고 로컬 건강 기록·후보·비임상 중복 방지 표식을 모두 삭제합니다. 이미 생성된 할 일은 남습니다. 다시 연결하고 출처를 승인한 뒤 루틴을 확정하고 생성을 허용하면, 이전 할 일을 완료하거나 삭제했더라도 이미 처리한 일정이 다시 생성될 수 있습니다."),
             ])
-
-            Text(legalCopy("legal.privacy.ads.title", defaultValue: "1-11. Google AdMob 광고 및 동의"))
-                .font(.subheadline.bold())
-            LegalLocalizedBullets(items: [
-                ("legal.privacy.ads.requests", "광고를 제공하는 버전에 적용됩니다. 비개인 맞춤 광고를 요청하고 게시자 퍼스트 파티 ID를 비활성화합니다. ATT 추적 허용 팝업이나 IDFA 접근 권한은 요청하지 않지만, 이것이 SDK의 데이터 수집이나 추적 가능성이 없다는 뜻은 아닙니다."),
-                ("legal.privacy.ads.consent", "광고 요청 전 Google UMP로 동의 상태를 확인하고 필요한 안내·동의 양식을 표시합니다. UMP가 광고 요청을 허용하는 경우에만 요청하며, 필요한 경우 설정에서 광고 개인정보 옵션을 다시 열어 선택을 변경할 수 있습니다."),
-                ("legal.privacy.ads.data", "Google 광고·동의 SDK는 IP 주소와 그로부터 추정한 대략적 위치, 앱·기기 식별자, 광고 조회·클릭 등 상호작용, 충돌·진단·성능 정보를 광고 제공·부정행위 방지·측정 및 동의 관리에 처리할 수 있습니다. 일부 식별자·광고 및 상호작용 정보는 사용자와 연결되거나 추적에 사용될 수 있습니다. 비개인 맞춤 광고도 완전 익명이나 수집 없음이 아닙니다."),
-                ("legal.privacy.ads.boundary", "SIFT는 할 일·이메일·캘린더·건강·음성·전사·페르소나 내용을 광고 타기팅에 전달하지 않습니다. HealthKit 데이터는 광고에 절대 사용하지 않으며 광고 SDK로 보내지 않습니다. SDK의 진단 처리는 별도 선택형 SIFT 오류 보고와 구분됩니다."),
-                ("legal.privacy.ads.controls", "Google의 처리·보관·삭제에는 Google 정책과 적용되는 UMP 선택이 따릅니다. 앱 데이터나 로컬 진단을 삭제해도 Google이 이미 처리한 정보가 즉시 삭제되는 것은 아닙니다. Google 정책에서 개인정보 관리·삭제 방법을 확인하세요."),
-            ])
-            Link(legalCopy("legal.privacy.ads.policyLink", defaultValue: "Google 광고 데이터 처리 방침"), destination: URL(string: "https://policies.google.com/technologies/partner-sites")!)
-            Link(legalCopy("legal.privacy.ads.disclosureLink", defaultValue: "Google SDK 데이터 공개 안내"), destination: URL(string: "https://developers.google.com/admob/ios/privacy/data-disclosure")!)
         }
 
         LegalCard(number: 2, title: "정보 저장 위치") {
@@ -482,7 +470,6 @@ private struct PrivacyPolicyContent: View {
             VStack(spacing: 6) {
                 ThirdPartyCard(name: "Apple Inc.", provider: "미국 외 다수", items: "선택적 전체 iCloud 저장: 할 일·메일·회의 녹음/전사·루틴·학습 사전·설정·연결 정보. 건강정보·OS 권한·재다운로드 가능한 모델 파일은 제외합니다.", url: URL(string: "https://www.apple.com/legal/privacy/")!, itemsLocalizationKey: "legal.privacy.apple.storage")
                 ThirdPartyCard(name: "Google LLC", provider: "미국 외 다수", items: "Gmail 메시지 조회·사용자가 실행한 읽음/휴지통 반영 / OAuth 또는 IMAP 인증", url: URL(string: "https://policies.google.com/privacy")!)
-                ThirdPartyCard(name: "Google LLC", provider: "미국 외 다수", items: "광고 제공 버전: IP·대략적 위치·앱/기기 식별자·광고 상호작용·진단/성능 정보 — 광고 제공·부정행위 방지·측정·동의 관리", url: URL(string: "https://policies.google.com/privacy")!, itemsLocalizationKey: "legal.privacy.ads.recipient")
                 ThirdPartyCard(name: "Microsoft Corporation", provider: "미국 외 다수", items: "Outlook IMAP 인증·메일 조회·사용자가 실행한 읽음/휴지통 반영", url: URL(string: "https://privacy.microsoft.com/privacystatement")!)
                 ThirdPartyCard(name: "OpenAI", provider: "미국 외 다수", items: "ChatGPT 로그인·선택한 구독 사용 및 데이터별로 동의한 외부 분석", url: URL(string: "https://openai.com/policies/privacy-policy/")!)
             }

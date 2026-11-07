@@ -31,6 +31,8 @@ struct KeychainCredentialPortabilityTests {
             }
             return (errSecSuccess, nil)
         }) {
+            // No explicit scope must be just as quiet as background scopes.
+            _ = try KeychainStore.getDeviceOnly(service: service, account: "unscoped")
             try await KeychainStore.withoutAuthenticationUI {
                 try KeychainStore.setChecked(service: service, account: "generic", value: "fixture")
                 _ = try KeychainStore.getChecked(service: service, account: "generic")
@@ -49,6 +51,41 @@ struct KeychainCredentialPortabilityTests {
         #expect(protectedACLWrites == 2) // Same user-presence ACL on update + add.
     }
 
+    @Test("unscoped protected reads report authentication required rather than absence")
+    func unscopedProtectedReadNeverPrompts() async throws {
+        await KeychainStore.withSecurityOperationForTesting({ _, query, _ in
+            let context = query[kSecUseAuthenticationContext as String] as? LAContext
+            #expect(context?.interactionNotAllowed == true)
+            return (errSecInteractionNotAllowed, nil)
+        }) {
+            #expect(throws: KeychainStoreError.authenticationRequired) {
+                _ = try KeychainStore.getDeviceOnly(service: "test.auth.unscoped", account: "fixture")
+            }
+            #expect(throws: KeychainStoreError.authenticationRequired) {
+                _ = try KeychainStore.getChecked(service: "test.auth.unscoped", account: "fixture")
+            }
+        }
+    }
+
+    @Test("approved authentication requires a nonempty explained purpose before Security access")
+    func emptyApprovalPurposeCannotAuthorizeSecurity() async {
+        var queries = 0
+        do {
+            try await KeychainStore.withSecurityOperationForTesting({ _, _, _ in
+                queries += 1
+                return (errSecSuccess, Data([1]) as NSData)
+            }) {
+                try await KeychainStore.withApprovedAuthentication(purpose: " \n ") {
+                    _ = try KeychainStore.getDeviceOnly(service: "test.auth.empty-purpose", account: "fixture")
+                }
+            }
+            Issue.record("An unexplained approval must not authorize authentication")
+        } catch {
+            #expect(error as? KeychainStoreError == .authorizationChanged)
+        }
+        #expect(queries == 0)
+    }
+
     @Test("successful explicit reads share one context and later periodic passes never allow UI")
     func successfulAttemptDoesNotAuthorizePeriodicPrompts() async throws {
         var contexts: [LAContext] = []
@@ -59,7 +96,7 @@ struct KeychainCredentialPortabilityTests {
             else { contexts.append(context) }
             return (errSecSuccess, Data([1]) as NSData)
         }) {
-            try await KeychainStore.withUserInitiatedCredentialSync {
+            try await KeychainStore.withApprovedAuthentication(purpose: "Approve fixture credential synchronization") {
                 for index in 0..<34 {
                     _ = try KeychainStore.getDeviceOnly(service: "test.auth.explicit", account: "slot-\(index)")
                 }
@@ -83,7 +120,7 @@ struct KeychainCredentialPortabilityTests {
                 queries += 1
                 return (errSecUserCanceled, nil)
             }) {
-                try await KeychainStore.withUserInitiatedCredentialSync {
+                try await KeychainStore.withApprovedAuthentication(purpose: "Approve fixture credential synchronization") {
                     #expect(throws: KeychainStoreError.authenticationCancelled) {
                         _ = try KeychainStore.getDeviceOnly(service: "test.auth.cancel", account: "first")
                     }
@@ -133,14 +170,14 @@ struct KeychainCredentialPortabilityTests {
             allowsUI.append(!context.interactionNotAllowed)
             return (errSecSuccess, Data([1]) as NSData)
         }) {
-            try await KeychainStore.withUserInitiatedCredentialSync {
+            try await KeychainStore.withApprovedAuthentication(purpose: "Approve fixture credential synchronization") {
                 _ = try KeychainStore.getDeviceOnly(service: "test.auth.nesting", account: "explicit")
                 try await KeychainStore.withoutAuthenticationUI {
                     _ = try KeychainStore.getDeviceOnly(service: "test.auth.nesting", account: "restricted")
                 }
             }
             try await KeychainStore.withoutAuthenticationUI {
-                try await KeychainStore.withUserInitiatedCredentialSync {
+                try await KeychainStore.withApprovedAuthentication(purpose: "Approve fixture credential synchronization") {
                     _ = try KeychainStore.getDeviceOnly(service: "test.auth.nesting", account: "no-escalation")
                 }
             }
@@ -160,7 +197,7 @@ struct KeychainCredentialPortabilityTests {
             }
             return (errSecSuccess, Data([1]) as NSData)
         }) {
-            try await KeychainStore.withUserInitiatedCredentialSync {
+            try await KeychainStore.withApprovedAuthentication(purpose: "Approve fixture credential synchronization") {
                 #expect(throws: KeychainStoreError.security(errSecDecode)) {
                     _ = try KeychainStore.getDeviceOnly(service: "test.auth.partial", account: "malformed")
                 }
@@ -208,7 +245,7 @@ struct KeychainCredentialPortabilityTests {
                 queries += 1
                 return (errSecUserCanceled, nil)
             }) {
-                try await KeychainStore.withUserInitiatedCredentialSync {
+                try await KeychainStore.withApprovedAuthentication(purpose: "Approve fixture credential synchronization") {
                     _ = try? KeychainStore.getDeviceOnly(service: "test.auth.parent-cancel", account: "first")
                     do {
                         try await KeychainStore.withoutAuthenticationUI {
@@ -235,7 +272,7 @@ struct KeychainCredentialPortabilityTests {
             queries += 1
             return (errSecSuccess, Data([1]) as NSData)
         }) {
-            try await KeychainStore.withUserInitiatedCredentialSync {
+            try await KeychainStore.withApprovedAuthentication(purpose: "Approve fixture credential synchronization") {
                 Task {
                     await gate.wait()
                     return try KeychainStore.getDeviceOnly(service: "test.auth.ended", account: "child")
@@ -346,10 +383,10 @@ struct KeychainCredentialPortabilityTests {
         }
         try KeychainStore.setSynchronizable(service: service, account: "account", data: data)
         KeychainStore.setReadFailureForTesting(service: service, status: errSecInteractionNotAllowed)
-        #expect(throws: KeychainStoreError.security(errSecInteractionNotAllowed)) {
+        #expect(throws: KeychainStoreError.authenticationRequired) {
             try KeychainStore.getSynchronizable(service: service, account: "account")
         }
-        #expect(throws: KeychainStoreError.security(errSecInteractionNotAllowed)) {
+        #expect(throws: KeychainStoreError.authenticationRequired) {
             try KeychainStore.synchronizableAccounts(service: service)
         }
         KeychainStore.setReadFailureForTesting(service: service, status: nil)
@@ -552,7 +589,7 @@ struct KeychainCredentialPortabilityTests {
             try KeychainStore.applyFullSyncPolicyChecked()
             guard SettingsStore.supportsICloud else { return }
             defaults.set(UserCloudSyncPolicy.consentVersion, forKey: UserCloudSyncPolicy.consentKey)
-            #expect(throws: KeychainStoreError.security(errSecInteractionNotAllowed)) {
+            #expect(throws: KeychainStoreError.authenticationRequired) {
                 try KeychainStore.reconcileFullScopeGmailCredential(account: "checked-read-\(UUID().uuidString)")
             }
         }

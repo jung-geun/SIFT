@@ -8,6 +8,511 @@ import Testing
 @Suite("Full iCloud data reconciliation", .serialized)
 @MainActor
 struct FullCloudSyncTests {
+    @MainActor
+    private final class SaveProbe {
+        var changes = FullCloudModelChanges()
+        let cache = CloudModelCodec.CaptureCache()
+        let fence = FullCloudSaveFence(entities: CloudModelCodec.entityNames)
+        var notifications = 0
+        var observer: NSObjectProtocol?
+
+        func observe(_ context: ModelContext) {
+            let fence = self.fence
+            observer = NotificationCenter.default.addObserver(forName: ModelContext.didSave,
+                object: context, queue: nil) { [weak self] note in
+                fence.observe(note)
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.notifications += 1
+                    _ = self.changes.record(note, cache: self.cache)
+                }
+            }
+        }
+
+        func stop() {
+            if let observer { NotificationCenter.default.removeObserver(observer) }
+            observer = nil
+        }
+    }
+
+    @Test("Actual shared-store save metadata attributes inserts, updates and deletes to mail ledger identifiers")
+    func sdkSaveIdentifierShapesAndNoOpFallback() throws {
+        let schema = AppDataContainer.appSchema
+        let container = try ModelContainer(for: schema, configurations: [
+            ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)])
+        let context = ModelContext(container)
+        context.autosaveEnabled = false
+        let probe = SaveProbe()
+        probe.observe(context)
+        defer { probe.stop() }
+        let version = probe.changes.generations
+        let ledger = MailAnalysisLedgerRecord(fingerprintData: Data("shape-ledger".utf8),
+            revision: 0, stateRawValue: "pending")
+        context.insert(ledger)
+        try context.save()
+        let id = ledger.persistentModelID
+        let inserted = probe.fence.drain()
+        #expect(inserted.identifiers.contains(id))
+        #expect(!inserted.needsFullCapture)
+        #expect(probe.changes.isCurrent(key: "Todo/", snapshot: version))
+        ledger.revision = 1
+        try context.save()
+        let updated = probe.fence.drain()
+        #expect(updated.identifiers.contains(id))
+        #expect(!updated.needsFullCapture)
+        #expect(probe.changes.isCurrent(key: "Todo/", snapshot: version))
+        context.delete(ledger)
+        try context.save()
+        let deleted = probe.fence.drain()
+        #expect(deleted.identifiers.contains(id))
+        #expect(!deleted.needsFullCapture)
+        #expect(probe.changes.isCurrent(key: "Todo/", snapshot: version))
+        let notifications = probe.notifications
+        try context.save()
+        let noOp = probe.fence.drain()
+        // Some SDKs omit no-op events; any event without identifiers must take
+        // the conservative full-store fallback, never invent a changed item ID.
+        if probe.notifications == notifications { #expect(!noOp.hasChanges) }
+        else if noOp.identifiers.isEmpty { #expect(noOp.needsFullCapture) }
+        else { #expect(noOp.identifiers.allSatisfy { $0.entityName == "MailAnalysisLedgerRecord" }) }
+    }
+
+    @Test("A background context save fences its family before the MainActor invalidation callback can run")
+    func backgroundSaveFencesBeforeActorHop() async throws {
+        let fixture = try CloudSyncFixture()
+        defer { fixture.remove() }
+        try FileManager.default.createDirectory(at: fixture.root, withIntermediateDirectories: true)
+        let schema = AppDataContainer.emailSchema
+        let source = try ModelContainer(for: schema, configurations: [
+            ModelConfiguration(schema: schema, url: fixture.root.appendingPathComponent("mail.store"),
+                cloudKitDatabase: .none)])
+        let context = ModelContext(source)
+        let message = EmailMessage(id: "background-save")
+        message.body = "old body"
+        context.insert(message)
+        try context.save()
+        let id = message.persistentModelID
+        let fence = FullCloudSaveFence(entities: CloudModelCodec.entityNames)
+        let observer = NotificationCenter.default.addObserver(forName: ModelContext.didSave,
+            object: nil, queue: nil) { note in
+                guard let context = note.object as? ModelContext, context.container === source else { return }
+                fence.observe(note)
+            }
+        defer { NotificationCenter.default.removeObserver(observer) }
+        let version = fence.snapshot()
+        try await Task.detached {
+            let background = ModelContext(source)
+            let row = try #require(background.fetch(FetchDescriptor<EmailMessage>()).first)
+            row.body = "saved on the background context"
+            try background.save()
+        }.value
+        #expect(!fence.isCurrent(key: "EmailMessage/stale", snapshot: version))
+        #expect(fence.isCurrent(key: "Todo/independent", snapshot: version))
+        let pending = fence.drain()
+        #expect(pending.identifiers.contains(id))
+        #expect(pending.entities == ["EmailMessage"])
+        let peer = try fixture.peer("background-fence")
+        let stale = ["EmailMessage/stale": Data("old cached bytes".utf8),
+            "Todo/independent": Data("independent task".utf8)]
+        try await peer.engine.reconcile(digests: stale.mapValues(CloudFileStore.digest),
+            isKeyValid: { fence.isCurrent(key: $0, snapshot: version) },
+            load: { stale[$0] }, apply: { _, _ in Issue.record("Stale snapshots must never restore") })
+        #expect(peer.engine.deferredKeys == ["EmailMessage/stale"])
+        #expect(peer.engine.journal.items["Todo/independent"] != nil)
+        #expect(peer.engine.journal.items["EmailMessage/stale"] == nil)
+        #expect(try ModelContext(source).fetch(FetchDescriptor<EmailMessage>()).first?.body
+            == "saved on the background context")
+    }
+
+    @Test("Repeated actual mail saves cannot cancel task restore or publication, and replay never restores the same task again",
+          arguments: [false, true])
+    func repeatedMailSavesDoNotStarveTaskProgress(usesLedger: Bool) async throws {
+        let fixture = try CloudSyncFixture()
+        defer { fixture.remove() }
+        let emailSchema = usesLedger ? AppDataContainer.appSchema : AppDataContainer.emailSchema
+        let emailStore = try ModelContainer(for: emailSchema, configurations: [
+            ModelConfiguration(schema: emailSchema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)])
+        let email = ModelContext(emailStore)
+        email.autosaveEnabled = false
+        let message = EmailMessage(id: "synthetic-changing-mail")
+        let ledger = MailAnalysisLedgerRecord(fingerprintData: Data("synthetic-ledger".utf8),
+            revision: 0, stateRawValue: "pending")
+        if usesLedger { email.insert(ledger) } else { email.insert(message) }
+        try email.save()
+        let probe = SaveProbe()
+        probe.observe(email)
+        defer { probe.stop() }
+        let incoming = "Todo/incoming"
+        let outgoing = "Todo/outgoing"
+        let mail = usesLedger ? "MailAnalysisLedgerRecord/changing" : "EmailMessage/changing"
+        let cloud = ModelContext(fixture.cloud)
+        cloud.insert(CloudDataRevision(itemKey: incoming, clock: 1,
+            installationID: UUID().uuidString, payload: Data("remote task".utf8)))
+        try cloud.save()
+        let peer = try fixture.peer("busy-mail")
+        var values = [outgoing: Data("local task".utf8), mail: Data("mail before save".utf8)]
+        let versions = probe.changes.generations
+        let savedVersion = probe.fence.snapshot()
+        var applyCount = 0
+        var mailSaves = 0
+        func saveMail() throws {
+            mailSaves += 1
+            if usesLedger { ledger.revision = mailSaves }
+            else { message.body = "body revision \(mailSaves)" }
+            try email.save()
+            values[mail] = Data("mail revision \(mailSaves)".utf8)
+        }
+        try await peer.engine.reconcile(digests: values.mapValues(CloudFileStore.digest),
+            isKeyValid: { probe.changes.isCurrent(key: $0, snapshot: versions)
+                && probe.fence.isCurrent(key: $0, snapshot: savedVersion) }, load: { key in
+                let captured = values[key]
+                try saveMail()
+                return captured
+            }, apply: { key, payload in
+                try saveMail()
+                values[key] = payload
+                applyCount += 1
+            })
+        #expect(probe.notifications >= 3)
+        #expect(probe.changes.isCurrent(key: outgoing, snapshot: versions))
+        #expect(!probe.changes.isCurrent(key: mail, snapshot: versions))
+        #expect(values[incoming] == Data("remote task".utf8))
+        #expect(applyCount == 1)
+        #expect(peer.engine.didCompleteInventory)
+        #expect(peer.engine.deferredKeys == [mail])
+        #expect(peer.engine.journal.items[outgoing] != nil)
+        #expect(peer.engine.journal.pendingPublications[mail] != nil)
+        #expect(peer.engine.journal.items[mail] == nil)
+        let published = try ModelContext(fixture.cloud).fetch(FetchDescriptor<CloudDataRevision>())
+        #expect(published.contains { $0.itemKey == outgoing && $0.payload == values[outgoing] })
+        #expect(!published.contains { $0.itemKey == mail })
+
+        // A restarted foreground/background pass uses the durable same journal,
+        // not a fake completion or another initial-restore overwrite.
+        let restarted = try fixture.peer("busy-mail")
+        try await restarted.engine.reconcile(digests: values.mapValues(CloudFileStore.digest),
+            load: { values[$0] }, apply: { key, payload in values[key] = payload; applyCount += 1 })
+        #expect(applyCount == 1)
+        #expect(restarted.engine.deferredKeys.isEmpty)
+        #expect(restarted.engine.journal.pendingPublications.isEmpty)
+        let replayed = try ModelContext(fixture.cloud).fetch(FetchDescriptor<CloudDataRevision>())
+        #expect(replayed.count == 3)
+        #expect(replayed.first { $0.itemKey == mail }?.payload == values[mail])
+    }
+
+    @Test("A mail edit invalidating an already staged publication rebuilds only the bounded batch")
+    func stagedMailChangePreservesIndependentTaskBatch() async throws {
+        let fixture = try CloudSyncFixture()
+        defer { fixture.remove() }
+        let peer = try fixture.peer("staged-mail")
+        let mail = "EmailMessage/staged"
+        let task = "Todo/independent"
+        var mailCurrent = true
+        let values = [mail: Data("stale mail".utf8), task: Data("durable task".utf8)]
+        try await peer.engine.reconcile(digests: values.mapValues(CloudFileStore.digest),
+            isKeyValid: { $0 != mail || mailCurrent }, load: { key in
+                if key == task { mailCurrent = false }
+                return values[key]
+            }, apply: { _, _ in Issue.record("Local publications must not restore") })
+        let saved = try ModelContext(fixture.cloud).fetch(FetchDescriptor<CloudDataRevision>())
+        #expect(saved.count == 1)
+        #expect(saved.first?.itemKey == task)
+        #expect(saved.first?.payload == values[task])
+        #expect(peer.engine.journal.items[task] != nil)
+        #expect(peer.engine.journal.pendingPublications[mail] != nil)
+        #expect(peer.engine.journal.items[mail] == nil)
+        #expect(peer.engine.deferredKeys == [mail])
+    }
+
+    @Test("A held absent family is not deletion and cannot erase its checkpoint or pending intent")
+    func unavailableInventoryDoesNotManufactureTombstone() async throws {
+        let fixture = try CloudSyncFixture()
+        defer { fixture.remove() }
+        let peer = try fixture.peer("held-inventory")
+        let mail = "EmailMessage/retained"
+        peer.values[mail] = Data("retained body".utf8)
+        try await peer.reconcile()
+        let checkpoint = peer.engine.journal.items[mail]
+        let task = "Todo/continues"
+        let data = Data("task continues".utf8)
+        try await peer.engine.reconcile(digests: [task: CloudFileStore.digest(data)],
+            isKeyValid: { $0 != mail }, load: { _ in data },
+            apply: { _, _ in Issue.record("An unavailable inventory cannot authorize restore") })
+        #expect(peer.engine.journal.items[mail] == checkpoint)
+        #expect(peer.engine.deferredKeys == [mail])
+        let saved = try ModelContext(fixture.cloud).fetch(FetchDescriptor<CloudDataRevision>())
+        #expect(saved.first { $0.itemKey == mail }?.payload == peer.values[mail])
+        #expect(saved.first { $0.itemKey == task }?.payload == data)
+    }
+
+    @Test("A failed model apply keeps its recovery intent and real error while later task keys complete")
+    func rejectedMailApplyDoesNotStarveTaskRestore() async throws {
+        let fixture = try CloudSyncFixture()
+        defer { fixture.remove() }
+        let peer = try fixture.peer("rejected-mail")
+        let context = ModelContext(fixture.cloud)
+        for key in ["EmailMessage/rejected", "Todo/restored"] {
+            context.insert(CloudDataRevision(itemKey: key, clock: 1,
+                installationID: UUID().uuidString, payload: Data(key.utf8)))
+        }
+        try context.save()
+        var applied = Set<String>()
+        await #expect(throws: CloudFixtureError.apply) {
+            try await peer.engine.reconcile(digests: [:], load: { _ in nil }, apply: { key, _ in
+                if key.hasPrefix("EmailMessage/") { throw CloudFixtureError.apply }
+                applied.insert(key)
+            })
+        }
+        #expect(applied == ["Todo/restored"])
+        #expect(peer.engine.didCompleteInventory)
+        #expect(peer.engine.deferredKeys == ["EmailMessage/rejected"])
+        #expect(peer.engine.journal.pendingApplies["EmailMessage/rejected"] != nil)
+        #expect(peer.engine.journal.items["EmailMessage/rejected"] == nil)
+        #expect(peer.engine.journal.items["Todo/restored"] != nil)
+        #expect(FullCloudSyncProgress.tasksRestored(completedInventory: peer.engine.didCompleteInventory,
+            heldKeys: peer.engine.deferredKeys, unavailableEntities: [], isCurrent: { _ in true }))
+        #expect(!FullCloudSyncProgress.tasksRestored(completedInventory: peer.engine.didCompleteInventory,
+            heldKeys: ["Todo/deferred"], unavailableEntities: [], isCurrent: { _ in true }))
+    }
+
+    @Test("A previously completed pass cannot acknowledge task readiness for a later revoked inventory")
+    func revokedInventoryClearsCompletionEvidence() async throws {
+        let fixture = try CloudSyncFixture()
+        defer { fixture.remove() }
+        let peer = try fixture.peer("revoked-inventory")
+        peer.values["Todo/local"] = Data("original".utf8)
+        try await peer.reconcile()
+        #expect(peer.engine.didCompleteInventory)
+        let checkpoint = peer.engine.journal.items["Todo/local"]
+        var authorized = true
+        let values = ["Todo/local": Data("new uncommitted edit".utf8), "file/later": Data("later asset".utf8)]
+        await #expect(throws: CancellationError.self) {
+            try await peer.engine.reconcile(digests: values.mapValues(CloudFileStore.digest),
+                isValid: { authorized }, load: { key in
+                    if key == "file/later" { authorized = false }
+                    return values[key]
+                }, apply: { _, _ in Issue.record("Local edits must not restore") })
+        }
+        #expect(!peer.engine.didCompleteInventory)
+        #expect(!peer.engine.didEnqueueChanges)
+        #expect(peer.engine.journal.items["Todo/local"] == checkpoint)
+        #expect(peer.engine.journal.pendingPublications["Todo/local"] != nil)
+        let saved = try ModelContext(fixture.cloud).fetch(FetchDescriptor<CloudDataRevision>())
+        #expect(saved.count == 1)
+        #expect(saved.first?.payload == Data("original".utf8))
+        #expect(!FullCloudSyncProgress.tasksRestored(completedInventory: peer.engine.didCompleteInventory,
+            heldKeys: peer.engine.deferredKeys, unavailableEntities: [], isCurrent: { _ in true }))
+    }
+
+    @Test("Scoped meeting inventories preserve active originals and remote-only namespaces while unrelated audio syncs")
+    func scopedMeetingFilesMakeIndependentProgress() async throws {
+        let fixture = try CloudSyncFixture()
+        defer { fixture.remove() }
+        let store = CloudFileStore(root: fixture.root)
+        let rootID = UUID().uuidString.lowercased()
+        let childID = UUID().uuidString.lowercased()
+        let otherID = UUID().uuidString.lowercased()
+        let remoteID = UUID().uuidString.lowercased()
+        func key(_ id: String) -> String { "file/Meetings/\(id)/audio/part-00.flac" }
+        for id in [rootID, childID, otherID] {
+            try await store.apply(key: key(id), payload: Data(("original " + id).utf8), expectedDigest: nil)
+        }
+        let original = try await store.capture()
+        let peer = try fixture.peer("scoped-files")
+        for (key, file) in original { peer.values[key] = try await store.load(file) }
+        try await peer.reconcile()
+        let rootCheckpoint = peer.engine.journal.items[key(rootID)]
+        let context = ModelContext(fixture.cloud)
+        context.insert(CloudDataRevision(itemKey: key(remoteID), clock: 10,
+            installationID: UUID().uuidString, payload: Data("remote-only original".utf8)))
+        try context.save()
+        let otherData = Data("unrelated audio edit".utf8)
+        try await store.apply(key: key(otherID), payload: otherData, expectedDigest: original[key(otherID)]?.digest)
+
+        let scope = MeetingCloudSyncProtection.begin(meetingIDs: [rootID, childID])
+        defer { MeetingCloudSyncProtection.end(scope) }
+        let namespaces = MeetingCaptureCoordinator.captureCloudSyncNamespaceAuthorization()
+        let family: Set<String> = [rootID, childID]
+        let productionScope = FullCloudFileScope(graph: [rootID: family, childID: family, otherID: [otherID]],
+            heldMeetingIDs: [], modelUnavailable: false, namespaceAuthorization: namespaces)
+        let scoped: @Sendable (String) -> Bool = { productionScope.authorizes($0) }
+        let inventory = try await store.captureInventory(isMeetingAuthorized: scoped)
+        #expect(inventory.unavailableMeetingIDs == [rootID, childID])
+        #expect(inventory.authoritativeMeetingIDs == [otherID])
+        #expect(inventory.files.keys.sorted() == [key(otherID)])
+        #expect(inventory.firstError == nil)
+        var restores = 0
+        try await peer.engine.reconcile(digests: inventory.files.mapValues(\.digest),
+            isKeyValid: { value in CloudFileStore.meetingID(for: value).map(scoped) ?? true },
+            load: { value in
+                guard let file = inventory.files[value] else { return nil }
+                return try await store.load(file)
+            }, apply: { value, payload in
+                guard let id = CloudFileStore.meetingID(for: value) else { throw CloudFileError.invalidPath }
+                try await store.apply(key: value, payload: payload, expectedDigest: inventory.files[value]?.digest,
+                    isAuthorized: { scoped(id) })
+                restores += 1
+            })
+        #expect(restores == 0)
+        #expect(peer.engine.deferredKeys == [key(rootID), key(childID), key(remoteID)])
+        #expect(peer.engine.journal.items[key(rootID)] == rootCheckpoint)
+        #expect(peer.engine.journal.items[key(remoteID)] == nil)
+        let saved = try ModelContext(fixture.cloud).fetch(FetchDescriptor<CloudDataRevision>())
+        #expect(saved.first { $0.itemKey == key(rootID) }?.payload == peer.values[key(rootID)])
+        #expect(saved.first { $0.itemKey == key(childID) }?.payload == peer.values[key(childID)])
+        #expect(saved.first { $0.itemKey == key(otherID) }?.payload == otherData)
+        #expect(!FileManager.default.fileExists(atPath: fixture.root.appendingPathComponent("Meetings/\(remoteID)").path))
+
+        MeetingCloudSyncProtection.end(scope)
+        let ready = MeetingCaptureCoordinator.captureCloudSyncNamespaceAuthorization()
+        // The next model inventory now establishes the remote namespace's ownership.
+        let readyScope = FullCloudFileScope(graph: [rootID: family, childID: family,
+            otherID: [otherID], remoteID: [remoteID]], heldMeetingIDs: [],
+            modelUnavailable: false, namespaceAuthorization: ready)
+        let readyNamespaces: @Sendable (String) -> Bool = { readyScope.authorizes($0) }
+        let fresh = try await store.captureInventory(isMeetingAuthorized: readyNamespaces)
+        try await peer.engine.reconcile(digests: fresh.files.mapValues(\.digest),
+            isKeyValid: { value in CloudFileStore.meetingID(for: value).map(readyNamespaces) ?? true },
+            load: { value in
+                guard let file = fresh.files[value] else { return nil }
+                return try await store.load(file)
+            }, apply: { value, payload in
+                try await store.apply(key: value, payload: payload, expectedDigest: fresh.files[value]?.digest)
+                restores += 1
+            })
+        #expect(restores == 1)
+        let restored = try await store.capture()
+        let remoteFile = try #require(restored[key(remoteID)])
+        #expect(try await store.load(remoteFile) == Data("remote-only original".utf8))
+        #expect(peer.engine.deferredKeys.isEmpty)
+    }
+
+    @Test("An unreadable file invalidates its entire namespace, never the independent inventory or original cloud bytes")
+    func partialFileNamespaceCannotAuthorizeDeletion() async throws {
+        let fixture = try CloudSyncFixture()
+        defer { fixture.remove() }
+        let store = CloudFileStore(root: fixture.root)
+        let brokenID = UUID().uuidString.lowercased()
+        let healthyID = UUID().uuidString.lowercased()
+        let originalKey = "file/Meetings/\(brokenID)/audio/part-00.flac"
+        let healthyKey = "file/Meetings/\(healthyID)/audio/part-00.flac"
+        try await store.apply(key: originalKey, payload: Data("original retained".utf8), expectedDigest: nil)
+        try await store.apply(key: healthyKey, payload: Data("independent".utf8), expectedDigest: nil)
+        let before = try await store.capture()
+        let peer = try fixture.peer("partial-files")
+        for (key, file) in before { peer.values[key] = try await store.load(file) }
+        try await peer.reconcile()
+        try FileManager.default.createDirectory(at: fixture.root.appendingPathComponent(
+            "Meetings/\(brokenID)/audio/part-01.flac"), withIntermediateDirectories: true)
+        let inventory = try await store.captureInventory()
+        #expect(inventory.unavailableMeetingIDs == [brokenID])
+        #expect(!inventory.authoritativeMeetingIDs.contains(brokenID))
+        #expect(inventory.files[originalKey] == nil)
+        #expect(inventory.files[healthyKey] != nil)
+        #expect(inventory.firstError != nil)
+        let originalCheckpoint = peer.engine.journal.items[originalKey]
+        try await peer.engine.reconcile(digests: inventory.files.mapValues(\.digest),
+            isKeyValid: { CloudFileStore.meetingID(for: $0) != brokenID },
+            load: { value in
+                guard let file = inventory.files[value] else { return nil }
+                return try await store.load(file)
+            }, apply: { _, _ in Issue.record("Partial inventory is not a local deletion") })
+        #expect(peer.engine.journal.items[originalKey] == originalCheckpoint)
+        #expect(peer.engine.deferredKeys == [originalKey])
+        let saved = try ModelContext(fixture.cloud).fetch(FetchDescriptor<CloudDataRevision>())
+        #expect(saved.first { $0.itemKey == originalKey }?.payload == peer.values[originalKey])
+    }
+
+    @Test("A transient meeting-work scope revokes an actor file write even after the scope has ended")
+    func transientMeetingScopeFencesActorFileMutation() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("SIFTFileFence-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = CloudFileStore(root: root)
+        let id = UUID().uuidString.lowercased()
+        let key = "file/Meetings/\(id)/audio/part-00.flac"
+        let bytes = Data("do not overwrite original".utf8)
+        try await store.apply(key: key, payload: bytes, expectedDigest: nil)
+        let authorization = MeetingCaptureCoordinator.captureCloudSyncNamespaceAuthorization()
+        #expect(authorization(id))
+        let scope = MeetingCloudSyncProtection.begin(meetingIDs: [id])
+        MeetingCloudSyncProtection.end(scope)
+        #expect(!authorization(id))
+        await #expect(throws: CancellationError.self) {
+            try await store.apply(key: key, payload: Data("forbidden mutation".utf8),
+                expectedDigest: CloudFileStore.digest(bytes), isAuthorized: { authorization(id) })
+        }
+        let restored = try await store.capture()
+        let original = try #require(restored[key])
+        #expect(try await store.load(original) == bytes)
+    }
+
+    @Test("Marker-only children inherit an active parent's actor fence, including an incoming remote-only marker")
+    func markerParentProtectsModelAbsentChildNamespaces() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("SIFTMarkerFence-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let meetingRoot = root.appendingPathComponent("Meetings")
+        let store = CloudFileStore(root: root)
+        let parentID = UUID().uuidString.lowercased()
+        let childID = UUID().uuidString.lowercased()
+        let remoteChildID = UUID().uuidString.lowercased()
+        let key = "file/Meetings/\(childID)/audio/part-00.flac"
+        let bytes = Data("original child audio".utf8)
+        try await store.apply(key: key, payload: bytes, expectedDigest: nil)
+        let childDirectory = meetingRoot.appendingPathComponent(childID).appendingPathComponent("audio")
+        try MeetingCaptureRecoveryStore.markActive(meetingID: childID, parentMeetingID: parentID,
+            sourceKind: .microphone, sourceLabel: nil, sessionStartSample: 0,
+            languageTag: "en-US", timezoneIdentifier: "UTC", directoryURL: childDirectory, rootURL: meetingRoot)
+        let sourceRoot = root.appendingPathComponent("remote-source")
+        let remoteDirectory = sourceRoot.appendingPathComponent(remoteChildID).appendingPathComponent("audio")
+        try FileManager.default.createDirectory(at: remoteDirectory, withIntermediateDirectories: true)
+        try MeetingCaptureRecoveryStore.markActive(meetingID: remoteChildID, parentMeetingID: parentID,
+            sourceKind: .microphone, sourceLabel: nil, sessionStartSample: 0,
+            languageTag: "en-US", timezoneIdentifier: "UTC", directoryURL: remoteDirectory, rootURL: sourceRoot)
+        let incomingMarker = try Data(contentsOf: remoteDirectory.deletingLastPathComponent().appendingPathComponent("active-capture.json"))
+        let before = try await store.capture()
+        let original = try #require(before[key])
+        let authorization = MeetingCaptureCoordinator.captureCloudSyncNamespaceAuthorization()
+        let scope = MeetingCloudSyncProtection.begin(meetingIDs: [parentID])
+        defer { MeetingCloudSyncProtection.end(scope) }
+        #expect(authorization(childID))
+        #expect(!authorization(parentID))
+        let scoped = try await store.captureInventory(isMeetingAuthorized: authorization)
+        #expect(scoped.unavailableMeetingIDs == [childID])
+        #expect(scoped.files[key] == nil)
+        await #expect(throws: CloudFileError.changingFile) {
+            _ = try await store.load(original, isMeetingAuthorized: authorization)
+        }
+        await #expect(throws: CloudFileError.changingFile) {
+            try await store.apply(key: key, payload: nil, expectedDigest: original.digest,
+                isMeetingAuthorized: authorization)
+        }
+        await #expect(throws: CloudFileError.changingFile) {
+            try await store.apply(key: "file/Meetings/\(remoteChildID)/active-capture.json",
+                payload: incomingMarker, expectedDigest: nil, isMeetingAuthorized: authorization)
+        }
+        #expect(try Data(contentsOf: original.url) == bytes)
+        #expect(!FileManager.default.fileExists(atPath: meetingRoot.appendingPathComponent(remoteChildID).path))
+    }
+
+    @Test("A permanently excluded legacy routines key does not prevent completion of the authoritative inventory")
+    func staticLegacyExclusionDoesNotBecomePendingWork() async throws {
+        let fixture = try CloudSyncFixture()
+        defer { fixture.remove() }
+        let peer = try fixture.peer("legacy-exclusion")
+        let key = "file/LocalRoutines/routines.json"
+        let context = ModelContext(fixture.cloud)
+        context.insert(CloudDataRevision(itemKey: key, clock: 1,
+            installationID: UUID().uuidString, payload: Data("retained legacy routines".utf8)))
+        try context.save()
+        try await peer.engine.reconcile(digests: [:], temporarilyUnavailable: [key],
+            load: { _ in Issue.record("Excluded legacy content cannot publish"); return nil },
+            apply: { _, _ in Issue.record("Excluded legacy content cannot restore") })
+        #expect(peer.engine.didCompleteInventory)
+        #expect(peer.engine.deferredKeys.isEmpty)
+        #expect(peer.engine.journal.pendingApplies.isEmpty)
+        #expect(try ModelContext(fixture.cloud).fetchCount(FetchDescriptor<CloudDataRevision>()) == 1)
+    }
+
     @Test("Additive migration uses the persisted legacy bit, not its colliding getter or absent bytes")
     func additiveLegacyStoreMigrationUsesSQLDeletionProof() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("SIFTLegacyCloud-\(UUID())")

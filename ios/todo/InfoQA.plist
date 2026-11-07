@@ -7,15 +7,6 @@
 	<true/>
 	<key>NSAudioCaptureUsageDescription</key>
 	<string>SIFT records audio from the output device and meeting app you select, only after you choose to start recording.</string>
-	<key>GADApplicationIdentifier</key>
-	<string>ca-app-pub-3940256099942544~1458002511</string>
-	<key>SKAdNetworkItems</key>
-	<array>
-		<dict>
-			<key>SKAdNetworkIdentifier</key>
-			<string>cstr6suwn9.skadnetwork</string>
-		</dict>
-	</array>
 	<key>NSHealthShareUsageDescription</key>
 	<string>With your permission, SIFT reads recent workout and medication history to suggest routines on this device. Each category and source requires your approval; no health data is written.</string>
 	<key>NSHealthUpdateUsageDescription</key>

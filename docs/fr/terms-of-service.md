@@ -25,6 +25,12 @@ Les présentes conditions définissent les modalités d’utilisation de l’app
 
 SIFT est une app de productivité personnelle pour iOS/macOS qui classe et organise les tâches recueillies par e-mail, calendrier ou saisie manuelle, en utilisant par défaut des analyses et des règles exécutées sur l’appareil. L’utilisateur peut demander une analyse OpenAI au moyen d’une connexion officielle à ChatGPT et de consentements distincts pour chaque catégorie de données. Le Service est gratuit, développé et distribué à titre individuel par l’exploitant.
 
+### Service gratuit et version en développement
+
+- Toutes les fonctions de SIFT sont gratuites. Les abonnements, frais d’utilisation et de réseau des fournisseurs externes sont distincts.
+- La version actuelle en développement ne contient ni publicité ni achats intégrés.
+- Ceci ne confirme ni la sortie de l’app ni la publication des présentes conditions. Aucune date d’entrée en vigueur existante n’est modifiée et aucune nouvelle date n’est fixée.
+
 ---
 
 ## 2. Conditions d’utilisation

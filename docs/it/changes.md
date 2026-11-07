@@ -10,6 +10,13 @@ description: Nuove funzioni, miglioramenti e correzioni di ogni versione di SIFT
 
 # Novità
 
+<a id="version-1-0-16"></a>
+## 1.0.16
+
+### Rimozione della pubblicità
+
+- Rimossi annunci e controlli del consenso pubblicitario. Tutte le funzioni sono gratuite, senza acquisti in-app.
+
 <a id="version-1-0-15"></a>
 ## 1.0.15
 

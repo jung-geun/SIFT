@@ -635,3 +635,243 @@ struct EmailMessageAnalysisServiceTests {
     }
 
 }
+
+@MainActor
+@Suite("Independent local email automation", .serialized)
+struct EmailAutomationOrchestratorTests {
+    private func makeContainer() throws -> ModelContainer {
+        let schema = Schema([EmailMessage.self])
+        return try ModelContainer(for: schema, configurations: [
+            ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)
+        ])
+    }
+
+    private func makeDefaults() -> UserDefaults {
+        let defaults = UserDefaults(suiteName: "LocalEmailQueue-\(UUID().uuidString)")!
+        defaults.set(true, forKey: "pieroot.todo.emailAutoAnalysisEnabled")
+        defaults.set("user@gmail.com", forKey: "pieroot.todo.imap.account")
+        defaults.set("user@outlook.com", forKey: "pieroot.todo.outlook.account")
+        return defaults
+    }
+
+    private func insertEmail(
+        _ id: String, provider: MailProvider = .gmail, complete: Bool = true, in context: ModelContext
+    ) -> EmailMessage {
+        let email = EmailMessage(
+            id: id, subject: id, snippet: "Only a preview.", body: "Please review the complete plan for \(id).",
+            receivedAt: Date(), provider: provider, rawMessageID: id, isInInbox: true,
+            sourceAccountNamespace: provider == .gmail ? "user@gmail.com" : "user@outlook.com"
+        )
+        email.bodyContentVersion = complete ? 1 : 0
+        context.insert(email)
+        return email
+    }
+
+    @Test("a suspended Gmail action analysis does not block Outlook or newly hydrated local mail")
+    func independentWorkersAndQueuedHydration() async throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let defaults = makeDefaults()
+        let gmail = insertEmail("gmail", in: context)
+        let outlook = insertEmail("outlook", provider: .outlook, in: context)
+        let later = insertEmail("later", complete: false, in: context)
+        try context.save()
+        let suspended = SuspendedEmailSummaryProvider()
+        var calls: [String] = []
+        let service = EmailMessageAnalysisService(
+            foundationModelsSummaryProvider: { subject, sender, body, language in
+                calls.append(subject)
+                if subject == "gmail" {
+                    return try await suspended.summarize(subject: subject, sender: sender, body: body, language: language)
+                }
+                return EmailSummaryResult(summary: "\(subject) summary", keyPoints: [], actionItems: ["Review \(subject)"])
+            },
+            foundationModelsEnabledProvider: { true }, foundationModelsAvailabilityProvider: { true }
+        )
+        let orchestrator = EmailAutomationOrchestrator(
+            defaults: defaults, makeContext: { context }, analysisService: service,
+            accountAvailable: { _, _ in true }, batteryAllowsAnalysis: { true }
+        )
+        let run = Task { await orchestrator.runIfEligible(context: context) }
+        await suspended.waitUntilSuspended()
+        for _ in 0..<100 where outlook.analysisState != .analyzed { await Task.yield() }
+        #expect(outlook.analysisState == .analyzed)
+        #expect(gmail.analysisState == .analyzing)
+        #expect(orchestrator.isRunning)
+        #expect(!calls.contains("later"))
+        later.bodyContentVersion = 1
+        try context.save()
+        orchestrator.enqueue(provider: .gmail, namespace: "user@gmail.com")
+        suspended.resume(with: EmailSummaryResult(summary: "Gmail summary", keyPoints: [], actionItems: ["Review Gmail"]))
+        #expect(await run.value)
+        #expect(later.analysisState == .analyzed)
+        #expect(calls.sorted() == ["gmail", "later", "outlook"])
+        #expect(!orchestrator.isRunning)
+        #expect(!(await orchestrator.runIfEligible(context: context)))
+        #expect(calls.count == 3)
+        #expect(gmail.sourceAccountNamespace == "user@gmail.com")
+        #expect(outlook.sourceAccountNamespace == "user@outlook.com")
+        #expect(gmail.isRead == false && outlook.isRead == false)
+    }
+
+    @Test("automatic consent, account selection, background consent and lifecycle cancellation fence in-flight results",
+          arguments: ["automatic", "account", "background", "cancel"])
+    func inFlightPermissionFences(reason: String) async throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let defaults = makeDefaults()
+        defaults.set(true, forKey: "pieroot.todo.imap.backgroundEnabled")
+        let email = insertEmail("fenced", in: context)
+        try context.save()
+        let suspended = SuspendedEmailSummaryProvider()
+        let service = EmailMessageAnalysisService(
+            foundationModelsSummaryProvider: suspended.summarize,
+            foundationModelsEnabledProvider: { true }, foundationModelsAvailabilityProvider: { true }
+        )
+        let orchestrator = EmailAutomationOrchestrator(
+            defaults: defaults, makeContext: { context }, analysisService: service,
+            accountAvailable: { _, _ in true }, batteryAllowsAnalysis: { true }
+        )
+        let backgroundOnly = reason == "background"
+        let run = Task { await orchestrator.runIfEligible(context: context, backgroundOnly: backgroundOnly) }
+        await suspended.waitUntilSuspended()
+        switch reason {
+        case "automatic": defaults.set(false, forKey: "pieroot.todo.emailAutoAnalysisEnabled")
+        case "account": defaults.set("other@gmail.com", forKey: "pieroot.todo.imap.account")
+        case "background": defaults.set(false, forKey: "pieroot.todo.imap.backgroundEnabled")
+        default: orchestrator.stopForegroundProcessing()
+        }
+        suspended.resume(with: EmailSummaryResult(summary: "Must not publish", keyPoints: [], actionItems: ["Must not import"]))
+        #expect(!(await run.value))
+        #expect(email.analysisState == .unanalyzed)
+        #expect(email.analysisSummary.isEmpty && email.analysisActionItems.isEmpty)
+        #expect(email.bodyContentVersion == 1)
+        #expect(email.body.contains("complete plan"))
+        #expect(!orchestrator.isRunning)
+    }
+
+    @Test("OS background analysis is opt-in, bounded, local-only and resumes durable complete bodies")
+    func boundedBackgroundAnalysis() async throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let defaults = makeDefaults()
+        for index in 0..<12 { _ = insertEmail("complete-\(index)", in: context) }
+        let partial = insertEmail("partial", complete: false, in: context)
+        let other = insertEmail("other-account", in: context)
+        other.sourceAccountNamespace = "not-selected@gmail.com"
+        try context.save()
+        var calls = 0
+        let service = EmailMessageAnalysisService(
+            foundationModelsSummaryProvider: { _, _, _, _ in
+                calls += 1
+                return EmailSummaryResult(summary: "Local summary", keyPoints: [], actionItems: [])
+            },
+            foundationModelsEnabledProvider: { true }, foundationModelsAvailabilityProvider: { true }
+        )
+        let orchestrator = EmailAutomationOrchestrator(
+            defaults: defaults, makeContext: { context }, analysisService: service,
+            accountAvailable: { _, _ in true }, batteryAllowsAnalysis: { true }
+        )
+        #expect(!(await orchestrator.runIfEligible(context: context, backgroundOnly: true)))
+        #expect(calls == 0)
+        defaults.set(true, forKey: "pieroot.todo.imap.backgroundEnabled")
+        #expect(await orchestrator.runIfEligible(context: context, backgroundOnly: true))
+        #expect(calls == MailboxPagingPolicy.bodyPrefetchBatchSize)
+        #expect(await orchestrator.runIfEligible(context: context, backgroundOnly: true))
+        #expect(calls == 12)
+        #expect(partial.analysisState == .unanalyzed && other.analysisState == .unanalyzed)
+        defaults.set(false, forKey: "pieroot.todo.emailAutoAnalysisEnabled")
+        #expect(!(await orchestrator.runIfEligible(context: context)))
+    }
+}
+
+@MainActor
+extension EmailAutomationOrchestratorTests {
+    @Test("explicit local analysis preserves manual intent and durable freshness across restart")
+    func manualIntentAndDurableFreshness() async throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let defaults = makeDefaults()
+        defaults.set(false, forKey: "pieroot.todo.emailAutoAnalysisEnabled")
+        let email = insertEmail("manual", in: context)
+        try context.save()
+        var credentialAvailable = false
+        var calls = 0
+        let analysis = EmailMessageAnalysisService(
+            foundationModelsSummaryProvider: { _, _, _, _ in
+                calls += 1
+                return EmailSummaryResult(summary: "Exact local result", keyPoints: [], actionItems: ["Review the complete plan"])
+            },
+            foundationModelsEnabledProvider: { true }, foundationModelsAvailabilityProvider: { true }
+        )
+        let orchestrator = EmailAutomationOrchestrator(
+            defaults: defaults, makeContext: { context }, analysisService: analysis,
+            accountAvailable: { _, _ in credentialAvailable }, batteryAllowsAnalysis: { false }
+        )
+        #expect(await orchestrator.analyzeNow(provider: .gmail, namespace: "user@gmail.com") == 0)
+        #expect(calls == 0)
+        credentialAvailable = true
+        #expect(await orchestrator.analyzeNow(provider: .gmail, namespace: "other@gmail.com") == 0)
+        #expect(await orchestrator.analyzeNow(provider: .gmail, namespace: "user@gmail.com") == 1)
+        #expect(calls == 1)
+        #expect(email.analysisActionItems == ["Review the complete plan"])
+        #expect(!(await orchestrator.runIfEligible(context: context)))
+
+        defaults.set(true, forKey: "pieroot.todo.emailAutoAnalysisEnabled")
+        let restarted = EmailAutomationOrchestrator(
+            defaults: defaults, makeContext: { ModelContext(container) }, analysisService: analysis,
+            accountAvailable: { _, _ in true }, batteryAllowsAnalysis: { true }
+        )
+        #expect(!(await restarted.runIfEligible(context: context)))
+        #expect(calls == 1)
+        email.body = "The original source changed. Please review the revised complete plan."
+        try context.save()
+        #expect(await restarted.runIfEligible(context: context))
+        #expect(calls == 2)
+        #expect(!(await restarted.runIfEligible(context: context)))
+        #expect(calls == 2)
+    }
+}
+
+@MainActor
+extension EmailAutomationOrchestratorTests {
+    @Test("unchanged retryable failures are durably throttled while changed source remains immediately eligible")
+    func retryableFallbackDoesNotRepeatEveryRefresh() async throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let defaults = makeDefaults()
+        let email = insertEmail("retryable", in: context)
+        try context.save()
+        var calls = 0
+        var time = Date(timeIntervalSince1970: 10_000)
+        let service = EmailMessageAnalysisService(
+            foundationModelsSummaryProvider: { _, _, _, _ in
+                calls += 1
+                throw IntelligenceRoutingError.backendUnavailable(provider: .foundationModels, reason: RuleFallbackReason.unavailable.rawValue)
+            },
+            foundationModelsEnabledProvider: { true }, foundationModelsAvailabilityProvider: { true }
+        )
+        let first = EmailAutomationOrchestrator(
+            defaults: defaults, makeContext: { context }, analysisService: service,
+            accountAvailable: { _, _ in true }, batteryAllowsAnalysis: { true }, now: { time }
+        )
+        #expect(await first.runIfEligible(context: context))
+        #expect(email.analysisFailureReasonRaw == RuleFallbackReason.unavailable.rawValue)
+        time = time.addingTimeInterval(45)
+        #expect(!(await first.runIfEligible(context: context)))
+        #expect(calls == 1)
+        let restarted = EmailAutomationOrchestrator(
+            defaults: defaults, makeContext: { ModelContext(container) }, analysisService: service,
+            accountAvailable: { _, _ in true }, batteryAllowsAnalysis: { true }, now: { time }
+        )
+        #expect(!(await restarted.runIfEligible(context: context)))
+        #expect(calls == 1)
+        time = time.addingTimeInterval(5 * 60)
+        #expect(await restarted.runIfEligible(context: context))
+        #expect(calls == 2)
+        email.body = "A revised complete source. Please review the new plan."
+        try context.save()
+        #expect(await restarted.runIfEligible(context: context))
+        #expect(calls == 3)
+    }
+}

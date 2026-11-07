@@ -6,6 +6,73 @@ import Testing
 
 @Suite("Calendar service", .serialized)
 struct CalendarServiceTests {
+    @Test("store changes during a suspended sync coalesce into one fresh pass")
+    @MainActor
+    func suspendedSyncCoalescesWithoutDroppingChanges() async throws {
+        let context = try importContext()
+        let coalescer = CalendarSyncCoalescer()
+        let entered = CalendarSyncTestLatch()
+        let release = CalendarSyncTestLatch()
+        let secondSubmitted = CalendarSyncTestLatch()
+        let thirdSubmitted = CalendarSyncTestLatch()
+        var passes = 0
+        let first = Task {
+            await coalescer.run(context: context) {
+                passes += 1
+                if passes == 1 {
+                    entered.open()
+                    await release.wait()
+                }
+            }
+        }
+        await entered.wait()
+        let second = Task {
+            secondSubmitted.open()
+            await coalescer.run(context: context) { Issue.record("Joined request must not run a separate operation") }
+        }
+        let third = Task {
+            thirdSubmitted.open()
+            await coalescer.run(context: context) { Issue.record("Joined request must not run a separate operation") }
+        }
+        await secondSubmitted.wait()
+        await thirdSubmitted.wait()
+        #expect(passes == 1)
+        release.open()
+        await first.value
+        await second.value
+        await third.value
+        #expect(passes == 2)
+
+        await coalescer.run(context: context) { passes += 1 }
+        #expect(passes == 3)
+    }
+
+    @Test("a suspended context does not serialize unrelated calendar stores")
+    @MainActor
+    func calendarContextsProgressIndependently() async throws {
+        let blockedContext = try importContext()
+        let independentContext = try importContext()
+        let coalescer = CalendarSyncCoalescer()
+        let entered = CalendarSyncTestLatch()
+        let release = CalendarSyncTestLatch()
+        var blockedFinished = false
+        let blocked = Task {
+            await coalescer.run(context: blockedContext) {
+                entered.open()
+                await release.wait()
+                blockedFinished = true
+            }
+        }
+        await entered.wait()
+        var independentFinished = false
+        await coalescer.run(context: independentContext) { independentFinished = true }
+        #expect(independentFinished)
+        #expect(!blockedFinished)
+        release.open()
+        await blocked.value
+        #expect(blockedFinished)
+    }
+
     @Test("an explicit writable destination never follows the system default")
     @MainActor
     func explicitDestinationRemainsSelected() throws {
@@ -1470,5 +1537,23 @@ struct CalendarServiceTests {
         #expect(try context.fetch(FetchDescriptor<Todo>()).count == 1)
         #expect(legacy.calendarSourceID == "source")
         #expect(CalendarService.isTaskAnalysisTodo(legacy, selectedCalendarIDs: ["source"]))
+    }
+}
+
+@MainActor
+private final class CalendarSyncTestLatch {
+    private var opened = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        if opened { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func open() {
+        opened = true
+        let pending = waiters
+        waiters.removeAll()
+        for waiter in pending { waiter.resume() }
     }
 }

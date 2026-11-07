@@ -25,6 +25,12 @@ These Terms set out the conditions for using the SIFT app (the "Service"). By in
 
 SIFT is an iOS/macOS personal productivity app that, by default, uses on-device analysis and rules to classify and organize tasks collected from email, calendars, and manual entry. Users may request OpenAI analysis through an official ChatGPT connection and separate consent for each data category. It is a free service developed and distributed personally by the Operator.
 
+### Free service and development version
+
+- All SIFT app features are free. External-provider subscriptions, usage, and network charges are separate.
+- The current development version has no advertising or in-app purchases.
+- This is not confirmation of app release or publication of these terms. It changes no existing effective date and establishes no new one.
+
 ---
 
 ## 2. Conditions of use

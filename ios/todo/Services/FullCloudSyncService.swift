@@ -123,7 +123,10 @@ final class FullCloudConnectionSync: ObservableObject {
 
         if userInitiated {
             do {
-                try await KeychainStore.withUserInitiatedCredentialSync {
+                try await KeychainStore.withApprovedAuthentication(purpose: AppLanguage.localized(
+                    "security.keychain.syncPurpose",
+                    defaultValue: "Unlock saved account connections to sync them with iCloud. Cancel to leave protected connections unchanged.",
+                    language: .current)) {
                     for operation in self.operations {
                         do { try await run(operation) }
                         catch {
@@ -226,6 +229,247 @@ struct FullCloudSyncFailureState {
     }
 }
 
+/// Notifications advance this fence at receipt, before any MainActor hop.
+/// The pending identifier inventory is drained before cached bytes are captured.
+nonisolated final class FullCloudSaveFence: @unchecked Sendable {
+    struct Version: Sendable {
+        var entities = [String: UInt64]()
+        var unknown: UInt64 = 0
+    }
+    struct Pending: Sendable {
+        var identifiers = Set<PersistentIdentifier>()
+        var entities = Set<String>()
+        var needsFullCapture = false
+        var version = Version()
+        var hasChanges: Bool { needsFullCapture || !entities.isEmpty }
+    }
+    private let lock = NSLock()
+    private let entities: Set<String>
+    private var version = Version()
+    private var pending = Pending()
+    private var ignored = Set<ObjectIdentifier>()
+
+    init(entities: Set<String>) { self.entities = entities }
+
+    func ignore(_ contexts: Set<ObjectIdentifier>) { lock.withLock { ignored.formUnion(contexts) } }
+    func unignore(_ contexts: Set<ObjectIdentifier>) { lock.withLock { ignored.subtract(contexts) } }
+    func isIgnored(_ notification: Notification) -> Bool {
+        guard let context = notification.object as? ModelContext else { return false }
+        return lock.withLock { ignored.contains(ObjectIdentifier(context)) }
+    }
+
+    @discardableResult
+    func observe(_ notification: Notification) -> Bool {
+        lock.withLock {
+            if let context = notification.object as? ModelContext,
+               ignored.contains(ObjectIdentifier(context)) { return false }
+            let keys: [ModelContext.NotificationKey] = [.insertedIdentifiers, .updatedIdentifiers, .deletedIdentifiers]
+            var identifiers = Set<PersistentIdentifier>()
+            var understood = false
+            for key in keys {
+                let value = notification.userInfo?[key] ?? notification.userInfo?[key.rawValue]
+                if let ids = value as? Set<PersistentIdentifier> { identifiers.formUnion(ids); understood = true }
+                else if let ids = value as? [PersistentIdentifier] { identifiers.formUnion(ids); understood = true }
+                else if value != nil { understood = false; break }
+            }
+            let invalidated = notification.userInfo?[ModelContext.NotificationKey.invalidatedAllIdentifiers]
+                ?? notification.userInfo?[ModelContext.NotificationKey.invalidatedAllIdentifiers.rawValue]
+            if !understood || identifiers.isEmpty || invalidated.map({ ($0 as? Bool) != false }) == true {
+                if let context = notification.object as? ModelContext {
+                    let changed = Set(context.container.schema.entities.map(\.name)).intersection(entities)
+                    guard !changed.isEmpty else { return false }
+                    for name in changed { version.entities[name, default: 0] &+= 1 }
+                    pending.entities.formUnion(changed)
+                } else {
+                    version.unknown &+= 1
+                    pending.entities.formUnion(entities)
+                }
+                pending.needsFullCapture = true
+            } else {
+                var changed = Set(identifiers.map(\.entityName)).intersection(entities)
+                if changed.contains("Todo") { changed.formUnion(["TaskAuditEvent", "TaskBehaviorEvent"]) }
+                guard !changed.isEmpty else { return false }
+                for name in changed { version.entities[name, default: 0] &+= 1 }
+                pending.identifiers.formUnion(identifiers)
+                pending.entities.formUnion(changed)
+            }
+            return true
+        }
+    }
+
+    func snapshot() -> Version { lock.withLock { version } }
+    func drain() -> Pending {
+        lock.withLock {
+            var value = pending
+            value.version = version
+            pending = Pending()
+            return value
+        }
+    }
+    func isCurrent(key: String, snapshot: Version) -> Bool {
+        let name = String(key.prefix { $0 != "/" })
+        guard entities.contains(name) else { return true }
+        return lock.withLock {
+            version.unknown == snapshot.unknown
+                && version.entities[name, default: 0] == snapshot.entities[name, default: 0]
+        }
+    }
+    func reset() {
+        lock.withLock {
+            version.unknown &+= 1
+            pending = Pending()
+            ignored = []
+        }
+    }
+}
+
+nonisolated struct FullCloudFileScope: Sendable {
+    let graph: [String: Set<String>]
+    var heldMeetingIDs: Set<String>
+    var modelUnavailable: Bool
+    let namespaceAuthorization: @Sendable (String) -> Bool
+    var deletedMeetingIDs = Set<String>()
+
+    func authorizes(_ id: String, isFenced: Bool = false) -> Bool {
+        guard !isFenced || deletedMeetingIDs.contains(id) else { return false }
+        // Files alone cannot establish whether a namespace is live, deleted or
+        // an unimported child. Require a model graph or settled model tombstone.
+        let dependencies: Set<String>
+        if let known = graph[id] { dependencies = known }
+        else if deletedMeetingIDs.contains(id) { dependencies = [id] }
+        else { return false }
+        guard !modelUnavailable else { return false }
+        return !dependencies.contains(where: { heldMeetingIDs.contains($0) || !namespaceAuthorization($0) })
+    }
+
+    func hasUnresolvedInventory(_ inventory: CloudFileInventory) -> Bool {
+        !inventory.unavailableMeetingIDs.isEmpty
+            || inventory.fencedMeetingIDs.contains { !authorizes($0, isFenced: true) }
+    }
+
+    @MainActor
+    func holding(meetingKeys: Set<String>, deletedMeetingKeys: Set<String> = []) -> Self {
+        var result = self
+        for key in deletedMeetingKeys {
+            do {
+                guard let id = try CloudModelCodec.meetingID(for: key) else { continue }
+                result.deletedMeetingIDs.insert(id)
+            } catch {
+                result.modelUnavailable = true
+            }
+        }
+        for key in meetingKeys where CloudModelCodec.entityName(for: key) == "MeetingRecord" {
+            do {
+                guard let id = try CloudModelCodec.meetingID(for: key) else { continue }
+                result.heldMeetingIDs.formUnion(graph[id] ?? [id])
+            } catch {
+                result.modelUnavailable = true
+            }
+        }
+        return result
+    }
+
+    @MainActor
+    static func permitsModelParent(_ parent: String?, unsettledMeetingKeys: Set<String>) -> Bool {
+        guard let parent else { return true }
+        for key in unsettledMeetingKeys where CloudModelCodec.entityName(for: key) == "MeetingRecord" {
+            guard let id = try? CloudModelCodec.meetingID(for: key) else { return false }
+            if id == parent { return false }
+        }
+        return true
+    }
+}
+
+/// The aggregate detects task-list changes; routine generation detects reservation
+/// changes. Neither signature suppresses cloud conflict, deletion or replay work.
+@MainActor
+struct FullCloudTaskAcceptanceCheckpoint {
+    private struct Signature: Equatable {
+        let taskAggregate: String
+        let routineGeneration: UInt64
+    }
+    private var signature: Signature?
+
+    @discardableResult
+    mutating func reconcileIfChanged(taskAggregate: String, routineGeneration: () -> UInt64,
+                                    reconcile: () throws -> Void) rethrows -> Bool {
+        let current = Signature(taskAggregate: taskAggregate, routineGeneration: routineGeneration())
+        guard signature != current else { return false }
+        try reconcile()
+        signature = Signature(taskAggregate: taskAggregate, routineGeneration: routineGeneration())
+        return true
+    }
+
+    mutating func invalidate() { signature = nil }
+}
+
+nonisolated enum FullCloudSyncProgress {
+    static let taskEntities: Set<String> = ["Todo", "TaskAuditEvent", "TaskBehaviorEvent"]
+
+    static func tasksRestored(completedInventory: Bool, heldKeys: Set<String>, unavailableEntities: Set<String>,
+                              isCurrent: (String) -> Bool) -> Bool {
+        completedInventory && unavailableEntities.isDisjoint(with: taskEntities)
+            && !heldKeys.contains(where: { taskEntities.contains(String($0.prefix { $0 != "/" })) })
+            && taskEntities.allSatisfy { isCurrent($0 + "/") }
+    }
+
+    static func shouldContinueDependencies(enqueued: Bool, restored: Int, hasDeferredKeys: Bool) -> Bool {
+        hasDeferredKeys && (enqueued || restored > 0)
+    }
+}
+
+/// Save identifiers, not a process-wide epoch, fence independent model families.
+/// Missing/unknown notification metadata is deliberately an all-family change.
+@MainActor
+struct FullCloudModelChanges {
+    private(set) var generations = [String: UInt64]()
+
+    mutating func record(_ notification: Notification, cache: CloudModelCodec.CaptureCache) -> Bool {
+        if let context = notification.object as? ModelContext,
+           Set(context.container.schema.entities.map(\.name)).isDisjoint(with: CloudModelCodec.entityNames) {
+            return false // Shadow/transport stores are not canonical domain edits.
+        }
+        let keys: [ModelContext.NotificationKey] = [.insertedIdentifiers, .updatedIdentifiers, .deletedIdentifiers]
+        var ids = Set<PersistentIdentifier>()
+        var understood = false
+        for key in keys {
+            let value = notification.userInfo?[key] ?? notification.userInfo?[key.rawValue]
+            if let values = value as? Set<PersistentIdentifier> { ids.formUnion(values); understood = true }
+            else if let values = value as? [PersistentIdentifier] { ids.formUnion(values); understood = true }
+            else if value != nil { understood = false; ids = []; break }
+        }
+        let invalidated = notification.userInfo?[ModelContext.NotificationKey.invalidatedAllIdentifiers]
+            ?? notification.userInfo?[ModelContext.NotificationKey.invalidatedAllIdentifiers.rawValue]
+        let invalidatesAll = invalidated.map { ($0 as? Bool) != false } ?? false
+        if !understood || invalidatesAll || ids.isEmpty {
+            // Full recapture, but a known mail-only store cannot have changed
+            // task rows. Unknown store ownership still invalidates every family.
+            cache.invalidateAll()
+            var names = (notification.object as? ModelContext).map {
+                Set($0.container.schema.entities.map(\.name)).intersection(CloudModelCodec.entityNames)
+            } ?? CloudModelCodec.entityNames
+            if names.contains("Todo") { names.formUnion(["TaskAuditEvent", "TaskBehaviorEvent"]) }
+            for name in names { generations[name, default: 0] &+= 1 }
+            return true
+        }
+        cache.invalidate(identifiers: ids)
+        var names = Set(ids.map(\.entityName)).intersection(CloudModelCodec.entityNames)
+        if names.contains("Todo") { names.formUnion(["TaskAuditEvent", "TaskBehaviorEvent"]) }
+        for name in names { generations[name, default: 0] &+= 1 }
+        return !names.isEmpty
+    }
+
+    mutating func invalidateAll(cache: CloudModelCodec.CaptureCache) {
+        cache.invalidateAll()
+        for name in CloudModelCodec.entityNames { generations[name, default: 0] &+= 1 }
+    }
+
+    func isCurrent(key: String, snapshot: [String: UInt64]) -> Bool {
+        guard let name = CloudModelCodec.entityName(for: key) else { return true }
+        return generations[name, default: 0] == snapshot[name, default: 0]
+    }
+}
+
 @MainActor
 final class FullCloudSyncService: ObservableObject {
     static let shared = FullCloudSyncService()
@@ -247,6 +491,9 @@ final class FullCloudSyncService: ObservableObject {
     @Published private(set) var restoredItemCount = 0
     @Published private(set) var isRecordingDeferred = false
     @Published private(set) var hasFinishedInitialRestore = false
+    @Published private(set) var hasFinishedTaskRestore = false
+    private(set) var taskAggregateDigest: String?
+    private var taskAcceptanceCheckpoint = FullCloudTaskAcceptanceCheckpoint()
     @Published private(set) var conflicts = [CloudSyncConflict]()
     @Published private(set) var retainedConflicts = [CloudSyncConflict]()
     private var conflictArchive: CloudSyncConflictArchive?
@@ -270,8 +517,15 @@ final class FullCloudSyncService: ObservableObject {
     private var cachedModelDigests = [String: String]()
     private var cachedModelConflicts = Set<String>()
     private var cachedModelSnapshot = CloudModelCodec.Snapshot()
-    private var modelChangeVersion = 0
     private var rerunForLocalSave = false
+    private var dependencyContinuation = false
+    private var synchronizationPassSequence: UInt64 = 0
+    private var modelChanges = FullCloudModelChanges()
+    private let modelCaptureCache = CloudModelCodec.CaptureCache()
+    private var cachedMeetingNamespaceGraph = [String: Set<String>]()
+    private var capturedModelGenerations = [String: UInt64]()
+    private var unavailableModelEntities = Set<String>()
+    private var modelCaptureError: (any Error)?
     lazy var connectionSync = FullCloudConnectionSync(operations: [
         .init(family: .gmailIMAP) { Self.restoreSelection(try IMAPCredentialStore.applyFullSyncPolicy()) },
         .init(family: .outlookIMAP) { Self.restoreSelection(try OutlookIMAPCredentialStore.applyFullSyncPolicy()) },
@@ -289,7 +543,7 @@ final class FullCloudSyncService: ObservableObject {
     private var queuedSequence: UInt64 = 0
     private var lastEnqueueDate: Date?
     private var exportSequences = [UUID: UInt64]()
-    private var ignoredSaveContexts = Set<ObjectIdentifier>()
+    private let saveFence = FullCloudSaveFence(entities: CloudModelCodec.entityNames)
     private let fileStore: CloudFileStore
     private let root: URL
 
@@ -359,13 +613,17 @@ final class FullCloudSyncService: ObservableObject {
         guard let engine else { throw CloudSyncConflictError.syncUnavailable }
         guard !resolvingConflict else { throw CloudSyncConflictError.busy }
         let generation = accountGeneration
-        let localVersion = modelChangeVersion
+        let localVersions = modelChanges.generations
+        let savedVersion = saveFence.snapshot()
         let contexts = try reviewContexts()
         let snapshot = try reviewSnapshot(contexts)
         let reviewed = try await engine.modelConflicts(local: snapshot)
         let fresh = try reviewSnapshot(contexts)
-        guard generation == accountGeneration, localVersion == modelChangeVersion,
-              snapshot.versions.mapValues(Set.init) == fresh.versions.mapValues(Set.init) else {
+        guard generation == accountGeneration, reviewed.allSatisfy({ conflict in
+            modelChanges.isCurrent(key: conflict.itemKey, snapshot: localVersions)
+                && saveFence.isCurrent(key: conflict.itemKey, snapshot: savedVersion)
+                && Set(snapshot.versions[conflict.itemKey, default: []]) == Set(fresh.versions[conflict.itemKey, default: []])
+        }) else {
             throw CloudSyncConflictError.staleSelection
         }
         conflicts = reviewed
@@ -415,10 +673,11 @@ final class FullCloudSyncService: ObservableObject {
     func resolveConflict(_ conflict: CloudSyncConflict, selecting versionID: String,
                          save: @MainActor (ModelContext) throws -> Void = { try $0.save() }) async throws {
         guard !synchronizing, !resolvingConflict else { throw CloudSyncConflictError.busy }
-        guard !MeetingCaptureCoordinator.hasActiveCaptureForCloudSync else { throw CloudSyncConflictError.recordingActive }
+        guard !MeetingCaptureCoordinator.hasActiveMeetingWorkForCloudSync else { throw CloudSyncConflictError.recordingActive }
         guard let engine, let conflictArchive else { throw CloudSyncConflictError.syncUnavailable }
         let generation = accountGeneration
-        let localVersion = modelChangeVersion
+        let localVersions = modelChanges.generations
+        let savedVersion = saveFence.snapshot()
         let contexts = try reviewContexts()
         let requestedRetained = conflict.versions.filter { $0.origin == .retained }
         let history = try conflictArchive.load()
@@ -429,7 +688,8 @@ final class FullCloudSyncService: ObservableObject {
         resolvingConflict = true
         defer { resolvingConflict = false }
         let current = try await currentReview(key: conflict.itemKey, retained: requestedRetained, contexts: contexts)
-        guard generation == accountGeneration, localVersion == modelChangeVersion,
+        guard generation == accountGeneration, modelChanges.isCurrent(key: conflict.itemKey, snapshot: localVersions),
+              saveFence.isCurrent(key: conflict.itemKey, snapshot: savedVersion),
               current.fingerprint == conflict.fingerprint else {
             throw CloudSyncConflictError.staleSelection
         }
@@ -448,11 +708,13 @@ final class FullCloudSyncService: ObservableObject {
         else { isAuthorized = UserCloudSyncPolicy.captureAuthorization() }
         let valid = {
             generation == self.accountGeneration && isAuthorized()
-                && !MeetingCaptureCoordinator.hasActiveCaptureForCloudSync
+                && self.saveFence.isCurrent(key: conflict.itemKey, snapshot: savedVersion)
+                && self.modelChanges.isCurrent(key: conflict.itemKey, snapshot: localVersions)
+                && !MeetingCaptureCoordinator.hasActiveMeetingWorkForCloudSync
         }
         let ignored = Set([contexts.app, contexts.email, contexts.meeting].map(ObjectIdentifier.init))
-        ignoredSaveContexts.formUnion(ignored)
-        defer { ignoredSaveContexts.subtract(ignored) }
+        saveFence.ignore(ignored)
+        defer { saveFence.unignore(ignored) }
         var canonicalCommitted = false
         do {
             try engine.resolve(key: current.itemKey, payload: selected.payload,
@@ -467,10 +729,11 @@ final class FullCloudSyncService: ObservableObject {
             })
         } catch {
             modelDataDirty = true
+            modelChanges.invalidateAll(cache: modelCaptureCache)
             throw error
         }
         modelDataDirty = true
-        modelChangeVersion += 1
+        modelChanges.invalidateAll(cache: modelCaptureCache)
         conflicts.removeAll { $0.itemKey == current.itemKey }
         cachedModelConflicts.remove(current.itemKey)
         queuedSequence &+= 1
@@ -543,8 +806,10 @@ final class FullCloudSyncService: ObservableObject {
         defaultsSubscription = NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.schedule() }
+        let saveFence = self.saveFence
         saveSubscription = NotificationCenter.default.publisher(for: ModelContext.didSave)
-            .sink { [weak self] notification in
+            .sink { [weak self, saveFence] notification in
+                saveFence.observe(notification)
                 if Thread.isMainThread {
                     // Observe MainActor edits before a suspended restore resumes.
                     MainActor.assumeIsolated { self?.handleLocalSave(notification) }
@@ -570,9 +835,15 @@ final class FullCloudSyncService: ObservableObject {
     }
 
     private func handleLocalSave(_ notification: Notification) {
-        if let context = notification.object as? ModelContext,
-           ignoredSaveContexts.contains(ObjectIdentifier(context)) { return }
-        modelChangeVersion += 1
+        if saveFence.isIgnored(notification) {
+            if let context = notification.object as? ModelContext,
+               !Set(context.container.schema.entities.map(\.name)).isDisjoint(with: CloudModelCodec.entityNames) {
+                modelCaptureCache.invalidateAll()
+                modelDataDirty = true
+            }
+            return
+        }
+        guard modelChanges.record(notification, cache: modelCaptureCache) else { return }
         modelDataDirty = true
         if synchronizing { rerunForLocalSave = true }
         schedule()
@@ -605,20 +876,27 @@ final class FullCloudSyncService: ObservableObject {
         shadowImported = false
         legacyImported = false
         modelDataDirty = true
+        modelChanges.invalidateAll(cache: modelCaptureCache)
         cachedModelRecords = [:]
         cachedModelDigests = [:]
         cachedModelConflicts = []
         cachedModelSnapshot = CloudModelCodec.Snapshot()
         conflicts = []
         connectionSync.reset()
+        unavailableModelEntities = []
+        modelCaptureError = nil
         hasFinishedInitialRestore = false
+        hasFinishedTaskRestore = false
+        taskAggregateDigest = nil
+        taskAcceptanceCheckpoint.invalidate()
         failureState = FullCloudSyncFailureState()
         errorMessage = nil
         exportSequences.removeAll()
         isQueuedForCloud = false
         lastCloudExport = nil
         lastEnqueueDate = nil
-        ignoredSaveContexts.removeAll()
+        saveFence.reset()
+        dependencyContinuation = false
         // No key downgrade, shared deletion, signout or empty alternate store.
     }
 
@@ -643,12 +921,19 @@ final class FullCloudSyncService: ObservableObject {
             }
             do {
                 // The cancelled foreground pass still owns its contexts until
-                // it unwinds. Do not silently skip the one background drain.
+                // it unwinds. Continue only actual dependency progress within
+                // this same cancellable OS grant; never promise another wakeup.
                 while self?.synchronizing == true { try await Task.sleep(for: .milliseconds(100)) }
                 try Task.checkCancellation()
-                try await self?.synchronizeNow()
+            } catch { return }
+            while let self, UserCloudSyncPolicy.isRequested, !Task.isCancelled {
+                let sequence = self.synchronizationPassSequence
+                do { try await self.synchronizeNow() }
+                catch { if error is CancellationError || Task.isCancelled { break } }
+                guard identifier != .invalid, sequence != self.synchronizationPassSequence,
+                      self.dependencyContinuation else { break }
+                await Task.yield()
             }
-            catch { /* Cancellation, or a failure already published by synchronizeNow. */ }
         }
     }
 
@@ -663,11 +948,23 @@ final class FullCloudSyncService: ObservableObject {
         return UserCloudSyncPolicy.isEnabled && hasFinishedInitialRestore
     }
 
+    /// Calendar/task consumers do not depend on meeting audio or mail restore.
+    func waitForTaskRestore(timeout: TimeInterval = 12) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while UserCloudSyncPolicy.isRequested, !hasFinishedTaskRestore, Date() < deadline {
+            do { try await Task.sleep(for: .milliseconds(200)) }
+            catch { return false }
+        }
+        return UserCloudSyncPolicy.isEnabled && hasFinishedTaskRestore
+    }
+
     func synchronizeNow() async throws {
         guard UserCloudSyncPolicy.isRequested, !synchronizing, !resolvingConflict else { return }
         guard !Self.usesSyntheticEnvironment else { throw CancellationError() }
         let generation = accountGeneration
         var failureChannel = FullCloudSyncFailureState.Channel.preparation
+        dependencyContinuation = false
+        synchronizationPassSequence &+= 1
         synchronizing = true
         defer {
             synchronizing = false
@@ -762,7 +1059,7 @@ final class FullCloudSyncService: ObservableObject {
         loadConflictArchive()
         cloudContainer = model
         legacyContainer = legacy
-        ignoredSaveContexts.insert(ObjectIdentifier(cloudContext))
+        saveFence.ignore([ObjectIdentifier(cloudContext)])
         modelDataDirty = true
         // Do not publish fresh defaults ahead of an initial import. A durable
         // prior reconciliation permits offline edits on an established device.
@@ -786,75 +1083,226 @@ final class FullCloudSyncService: ObservableObject {
             throw FullCloudSyncError.persistentStoreUnavailable
         }
         isRecordingDeferred = MeetingCaptureCoordinator.hasActiveCaptureForCloudSync
-        guard !isRecordingDeferred else { return false }
         let app = ModelContext(data.container)
         let email = ModelContext(data.emailContainer)
         let meeting = ModelContext(data.meetingContainer)
         let restoreContextIDs = Set([app, email, meeting].map(ObjectIdentifier.init))
-        ignoredSaveContexts.formUnion(restoreContextIDs)
-        defer { ignoredSaveContexts.subtract(restoreContextIDs) }
+        saveFence.ignore(restoreContextIDs)
+        defer { saveFence.unignore(restoreContextIDs) }
         for context in [app, email, meeting] {
             context.autosaveEnabled = false
             context.author = "SIFTFullCloudRestore"
         }
-        let modelVersion = modelChangeVersion
+        let pendingSaves = saveFence.drain()
+        if pendingSaves.hasChanges {
+            if pendingSaves.needsFullCapture { modelCaptureCache.invalidateAll() }
+            else { modelCaptureCache.invalidate(identifiers: pendingSaves.identifiers) }
+            modelDataDirty = true
+        }
+        let savedVersion = pendingSaves.version
+        let modelVersions = modelChanges.generations
+        let initialProtectedIDs = MeetingCaptureCoordinator.cloudSyncProtectedMeetingIDs()
+        let initialUnscopedCapture = MeetingCaptureCoordinator.hasUnscopedCaptureForCloudSync
+        let fileCaptureAuthorization = MeetingCaptureCoordinator.captureCloudSyncAuthorization()
+        let namespaceAuthorization = MeetingCaptureCoordinator.captureCloudSyncNamespaceAuthorization()
         let accountVersion = accountGeneration
         let isAuthorized = UserCloudSyncPolicy.captureAuthorization()
         if modelDataDirty {
-            var snapshot = try CloudModelCodec.capture(app: app, email: email, meeting: meeting)
+            let changed = Set(CloudModelCodec.entityNames.filter {
+                modelVersions[$0, default: 0] != capturedModelGenerations[$0, default: 0]
+            }).union(unavailableModelEntities).union(pendingSaves.entities)
+            let selected = modelCaptureCache.requiresFullInventory || changed.isEmpty
+                ? CloudModelCodec.entityNames : changed
+            let captured = CloudModelCodec.captureAvailable(app: app, email: email, meeting: meeting,
+                previous: cachedModelSnapshot, entities: selected, cache: modelCaptureCache)
+            var snapshot = captured.snapshot
+            unavailableModelEntities = captured.unavailableEntities
+            modelCaptureError = captured.firstError
             if let legacyContainer {
-                let legacy = try CloudModelCodec.captureMain(ModelContext(legacyContainer))
-                for key in legacy.conflictingKeys where snapshot.records[key] == nil && engine.journal.items[key] == nil {
-                    snapshot.conflictingKeys.insert(key)
-                    if snapshot.versions[key] == nil {
-                        snapshot.versions[key] = legacy.versions[key]
-                        snapshot.origins[key] = .legacy
+                do {
+                    let legacy = try CloudModelCodec.captureMain(ModelContext(legacyContainer))
+                    for key in legacy.conflictingKeys where snapshot.records[key] == nil && engine.journal.items[key] == nil {
+                        guard let entity = CloudModelCodec.entityName(for: key),
+                              !unavailableModelEntities.contains(entity) else { continue }
+                        snapshot.conflictingKeys.insert(key)
+                        if snapshot.versions[key] == nil {
+                            snapshot.versions[key] = legacy.versions[key]
+                            snapshot.origins[key] = .legacy
+                        }
                     }
+                    for (key, payload) in legacy.records where snapshot.records[key] == nil
+                        && !snapshot.conflictingKeys.contains(key) && engine.journal.items[key] == nil {
+                        guard let entity = CloudModelCodec.entityName(for: key),
+                              !unavailableModelEntities.contains(entity) else { continue }
+                        try CloudModelCodec.apply(key: key, payload: payload, app: app, email: email, meeting: meeting)
+                        snapshot.records[key] = payload
+                        snapshot.versions[key] = [payload]
+                        snapshot.digests[key] = CloudFileStore.digest(payload)
+                    }
+                    if app.hasChanges { try app.save() }
+                } catch {
+                    app.rollback()
+                    // An unreadable initial legacy inventory cannot authorize
+                    // main-store deletions or claim task restore completion.
+                    unavailableModelEntities.formUnion(["Todo", "TaskAuditEvent", "TaskBehaviorEvent",
+                        "Persona", "MemoryAnalysis", "MailAnalysisLedgerRecord"])
+                    modelCaptureError = modelCaptureError ?? error
                 }
-                for (key, payload) in legacy.records where snapshot.records[key] == nil
-                    && !snapshot.conflictingKeys.contains(key) && engine.journal.items[key] == nil {
-                    try CloudModelCodec.apply(key: key, payload: payload, app: app, email: email, meeting: meeting)
-                    snapshot.records[key] = payload
-                    snapshot.versions[key] = [payload]
-                }
-                if app.hasChanges { try app.save() }
             }
             if snapshot.conflictingKeys != cachedModelConflicts, let key = snapshot.conflictingKeys.min() {
                 DiagnosticRecorder.shared.record(error: CloudModelCodec.CodecError.duplicateIdentity(key),
                     component: "sync.fullData", operation: "captureConflict")
             }
             cachedModelRecords = snapshot.records
-            cachedModelDigests = snapshot.records.mapValues(CloudFileStore.digest)
+            cachedModelDigests = snapshot.digests
             cachedModelConflicts = snapshot.conflictingKeys
+            if selected.contains("MeetingRecord") {
+                cachedMeetingNamespaceGraph = try CloudModelCodec.meetingNamespaceGraph(snapshot)
+            }
             cachedModelSnapshot = snapshot
-            modelDataDirty = false
+            capturedModelGenerations = modelVersions
+            if !unavailableModelEntities.contains("Todo") {
+                taskAggregateDigest = snapshot.taskAggregateDigest
+            }
+            modelDataDirty = !unavailableModelEntities.isEmpty
         }
+        let namespaceGraph = cachedMeetingNamespaceGraph
         // Cloud envelope metadata can change without local edits. Reuse the
         // dirty-gated portable snapshot instead of re-encoding all mail bodies
         // and meeting transcripts on every maintenance pass.
-        let reviewed = try await engine.modelConflicts(local: cachedModelSnapshot)
-        guard modelVersion == modelChangeVersion, accountVersion == accountGeneration else { throw CancellationError() }
+        let reviewed = try await engine.modelConflicts(local: cachedModelSnapshot, isTemporarilyUnavailable: { key in
+            CloudModelCodec.entityName(for: key).map { self.unavailableModelEntities.contains($0) } == true
+                || !self.modelChanges.isCurrent(key: key, snapshot: modelVersions)
+                || !self.saveFence.isCurrent(key: key, snapshot: savedVersion)
+        })
+        guard accountVersion == accountGeneration, isAuthorized() else { throw CancellationError() }
         conflicts = reviewed
         let heldConflictKeys = cachedModelConflicts.union(reviewed.map(\.itemKey)).union(engine.unavailableConflictKeys)
+        let heldMeetingIDs = try Set(heldConflictKeys.flatMap { key -> Set<String> in
+            guard let id = try CloudModelCodec.meetingID(for: key) else { return [] }
+            return namespaceGraph[id] ?? [id]
+        })
+        // File presence/absence is not model ownership. Unknown namespaces wait
+        // for an authoritative graph; settled model tombstones still authorize
+        // real deletion propagation without accepting refused live assets.
+        let fileScope = FullCloudFileScope(graph: namespaceGraph, heldMeetingIDs: heldMeetingIDs,
+            modelUnavailable: unavailableModelEntities.contains("MeetingRecord"),
+            namespaceAuthorization: namespaceAuthorization)
+            .holding(meetingKeys: [], deletedMeetingKeys: engine.settledMeetingTombstones)
+        let fileScopeAuthorization: @Sendable (String) -> Bool = { fileScope.authorizes($0) }
         var records = cachedModelRecords
         let preferences = try CloudPreferenceStore.capture()
         records.merge(preferences) { _, value in value }
         let routineStore = RoutineStore.shared
+        func reconcileAcceptancesIfChanged(in context: ModelContext) throws {
+            guard let aggregate = self.taskAggregateDigest else { return }
+            try self.taskAcceptanceCheckpoint.reconcileIfChanged(taskAggregate: aggregate,
+                routineGeneration: { routineStore.changeGeneration }) {
+                try routineStore.reconcileAcceptances(todos: context.fetch(FetchDescriptor<Todo>()))
+            }
+        }
         // Routine acceptance must not choose an arbitrary local task version.
         let canReconcileAcceptances = !heldConflictKeys.contains { $0.hasPrefix("Todo/") }
+            && modelChanges.isCurrent(key: "Todo/", snapshot: modelVersions)
+            && saveFence.isCurrent(key: "Todo/", snapshot: savedVersion)
+            && !unavailableModelEntities.contains("Todo")
         if canReconcileAcceptances {
-            try routineStore.reconcileAcceptances(todos: app.fetch(FetchDescriptor<Todo>()))
+            try reconcileAcceptancesIfChanged(in: app)
         }
         var routineRecords = try routineStore.captureCloudRecords()
         var routineGeneration = routineStore.changeGeneration
-        let files = try await fileStore.capture(isAuthorized: isAuthorized)
+        var fileInventory = CloudFileInventory()
+        var fileInventoryUnavailable = false
+        var fileCaptureError: (any Error)?
+        do {
+            fileInventory = try await fileStore.captureInventory(isAuthorized: isAuthorized,
+                isMeetingAuthorized: fileScopeAuthorization)
+            fileCaptureError = fileInventory.firstError
+        } catch {
+            guard isAuthorized(), !Task.isCancelled else { throw CancellationError() }
+            fileInventoryUnavailable = true
+            fileCaptureError = error
+        }
+        let files = fileInventory.files
+        var meetingGraphChanged = false
+        var runtimeUnavailableFileIDs = Set<String>()
+        var dependencyKeys = Set<String>()
+        var deletionKeys = Set<String>()
+        var dependencyScope = fileScope
+        func currentFileScope() -> FullCloudFileScope {
+            if dependencyKeys != engine.unsettledMeetingKeys || deletionKeys != engine.settledMeetingTombstones {
+                dependencyKeys = engine.unsettledMeetingKeys
+                deletionKeys = engine.settledMeetingTombstones
+                dependencyScope = fileScope.holding(meetingKeys: dependencyKeys, deletedMeetingKeys: deletionKeys)
+            }
+            return dependencyScope
+        }
+        func hasUnresolvedFileInventory() -> Bool {
+            if fileInventoryUnavailable || !fileInventory.unavailableMeetingIDs.isEmpty
+                || !runtimeUnavailableFileIDs.isEmpty { return true }
+            return currentFileScope().hasUnresolvedInventory(fileInventory)
+        }
+        let modelSourceFence = self.saveFence
+        let fileDataAuthorized: @Sendable () -> Bool = {
+            isAuthorized() && modelSourceFence.isCurrent(key: "MeetingRecord/", snapshot: savedVersion)
+        }
+        func isKeyCurrent(_ key: String) -> Bool {
+            self.modelChanges.isCurrent(key: key, snapshot: modelVersions)
+                && self.saveFence.isCurrent(key: key, snapshot: savedVersion)
+                && !(CloudModelCodec.entityName(for: key).map { self.unavailableModelEntities.contains($0) } ?? false)
+                && (!RoutineStore.isCloudRecordKey(key) || routineGeneration == routineStore.changeGeneration)
+        }
+        func isCaptureProtected(_ key: String) -> Bool {
+            if key.hasPrefix(CloudFileStore.prefix) {
+                guard let id = CloudFileStore.meetingID(for: key) else {
+                    return fileInventoryUnavailable || meetingGraphChanged
+                }
+                let dependencyScope = currentFileScope()
+                if dependencyScope.deletedMeetingIDs.contains(id), files[key] != nil { return true }
+                return fileInventoryUnavailable || meetingGraphChanged
+                    || !self.modelChanges.isCurrent(key: "MeetingRecord/", snapshot: modelVersions)
+                    || !self.saveFence.isCurrent(key: "MeetingRecord/", snapshot: savedVersion)
+                    || fileInventory.unavailableMeetingIDs.contains(id) || runtimeUnavailableFileIDs.contains(id)
+                    || !dependencyScope.authorizes(id, isFenced: fileInventory.fencedMeetingIDs.contains(id))
+                    || fileInventory.namespaceDependencies[id, default: []].contains(where: { !dependencyScope.authorizes($0) })
+            }
+            let active = initialUnscopedCapture || MeetingCaptureCoordinator.hasUnscopedCaptureForCloudSync
+            if let id = try? CloudModelCodec.meetingID(for: key) {
+                let dependencies = namespaceGraph[id] ?? [id]
+                return active || dependencies.contains(where: {
+                    initialProtectedIDs.contains($0) || !namespaceAuthorization($0)
+                }) || (namespaceGraph[id] == nil && !fileCaptureAuthorization())
+            }
+            // Derived meeting-wide vocabularies/observations have no root key.
+            let meetingFamilies: Set<String> = ["MeetingGlossaryTerm", "VocabularyStoreMetadata",
+                "VocabularySourceState", "VocabularyObservation"]
+            return CloudModelCodec.entityName(for: key).map { meetingFamilies.contains($0) } == true
+                && (!fileCaptureAuthorization() || MeetingCaptureCoordinator.hasActiveMeetingWorkForCloudSync)
+        }
         guard UserCloudSyncPolicy.isEnabled, !Task.isCancelled else { throw CancellationError() }
         var digests = cachedModelDigests
         digests.merge(preferences.mapValues(CloudFileStore.digest)) { _, value in value }
         digests.merge(routineRecords.mapValues(CloudFileStore.digest)) { _, value in value }
         digests.merge(files.mapValues(\.digest)) { _, value in value }
         var restored = 0
+        var restoredTodoRecords = false
+        var postRestoreTasksUnavailable = false
         defer {
+            if isAuthorized(), !Task.isCancelled, accountVersion == accountGeneration {
+                dependencyContinuation = FullCloudSyncProgress.shouldContinueDependencies(
+                    enqueued: engine.didEnqueueChanges, restored: restored,
+                    hasDeferredKeys: !engine.deferredKeys.isEmpty || hasUnresolvedFileInventory())
+                if dependencyContinuation { rerunForLocalSave = true }
+            }
+            if !postRestoreTasksUnavailable, isAuthorized(), !Task.isCancelled, accountVersion == accountGeneration,
+               FullCloudSyncProgress.tasksRestored(completedInventory: engine.didCompleteInventory,
+                   heldKeys: heldConflictKeys.union(engine.deferredKeys), unavailableEntities: unavailableModelEntities,
+                   isCurrent: {
+                       modelChanges.isCurrent(key: $0, snapshot: modelVersions)
+                           && saveFence.isCurrent(key: $0, snapshot: savedVersion)
+                   }) {
+                hasFinishedTaskRestore = true
+            }
             if restored > 0 {
                 restoredItemCount += restored
                 rerunForLocalSave = true
@@ -863,9 +1311,7 @@ final class FullCloudSyncService: ObservableObject {
                 NotificationCenter.default.post(name: UserCloudSyncPolicy.didRestoreNotification, object: nil)
             }
         }
-        let heldMeetingIDs = try Set(heldConflictKeys.compactMap { key in
-            try CloudModelCodec.meetingID(for: key).map { Substring($0) }
-        })
+        let heldFileMeetingIDs = heldMeetingIDs
         let meetingFilePrefix = "file/Meetings/"
         let meetingFilePrefixCount = meetingFilePrefix.count
         try await engine.reconcile(digests: digests,
@@ -873,25 +1319,30 @@ final class FullCloudSyncService: ObservableObject {
             isTemporarilyUnavailable: { key in
                 guard !heldMeetingIDs.isEmpty, key.hasPrefix(meetingFilePrefix) else { return false }
                 let meetingID = key.dropFirst(meetingFilePrefixCount).prefix { $0 != "/" }
-                return heldMeetingIDs.contains(meetingID)
+                return heldFileMeetingIDs.contains(String(meetingID))
             }, isValid: {
-            UserCloudSyncPolicy.isEnabled && modelVersion == self.modelChangeVersion
-                && accountVersion == self.accountGeneration
-                && routineGeneration == routineStore.changeGeneration
-                && !MeetingCaptureCoordinator.hasActiveCaptureForCloudSync
+            UserCloudSyncPolicy.isEnabled && isAuthorized() && accountVersion == self.accountGeneration
+        }, isKeyValid: { key in
+            isKeyCurrent(key) && !isCaptureProtected(key)
         }, didEnqueue: {
             self.queuedSequence &+= 1
             self.lastEnqueueDate = Date()
             self.isQueuedForCloud = true
         }, load: { key in
-            guard UserCloudSyncPolicy.isEnabled, !Task.isCancelled,
-                  modelVersion == self.modelChangeVersion, accountVersion == self.accountGeneration,
-                  routineGeneration == routineStore.changeGeneration else { throw CancellationError() }
+            guard UserCloudSyncPolicy.isEnabled, isAuthorized(), !Task.isCancelled,
+                  accountVersion == self.accountGeneration else { throw CancellationError() }
             if let file = files[key] {
-                let payload = try await self.fileStore.load(file, isAuthorized: isAuthorized)
-                guard UserCloudSyncPolicy.isEnabled, !Task.isCancelled,
-                      modelVersion == self.modelChangeVersion, accountVersion == self.accountGeneration,
-                      routineGeneration == routineStore.changeGeneration else { throw CancellationError() }
+                let payload: Data
+                do {
+                    let scope = currentFileScope()
+                    payload = try await self.fileStore.load(file, isAuthorized: fileDataAuthorized,
+                        isMeetingAuthorized: { scope.authorizes($0) })
+                } catch CloudFileError.changingFile {
+                    if let id = CloudFileStore.meetingID(for: key) { runtimeUnavailableFileIDs.insert(id) }
+                    throw CloudFileError.changingFile
+                }
+                guard UserCloudSyncPolicy.isEnabled, isAuthorized(), !Task.isCancelled,
+                      accountVersion == self.accountGeneration else { throw CancellationError() }
                 return payload
             }
             if RoutineStore.isCloudRecordKey(key) {
@@ -902,11 +1353,14 @@ final class FullCloudSyncService: ObservableObject {
             if CloudPreferenceStore.isPreferenceKey(key) {
                 try CloudPreferenceStore.validateSnapshot(key: key, expectedDigest: digests[key])
             }
+            if let info = try CloudModelCodec.meetingNamespaceInfo(key: key, payload: records[key]),
+               !FullCloudFileScope.permitsModelParent(info.parent, unsettledMeetingKeys: engine.unsettledMeetingKeys) {
+                throw CloudFileError.changingFile
+            }
             return records[key]
         }, apply: { key, payload in
-            guard UserCloudSyncPolicy.isEnabled, !Task.isCancelled,
-                  modelVersion == self.modelChangeVersion, accountVersion == self.accountGeneration,
-                  routineGeneration == routineStore.changeGeneration else { throw CancellationError() }
+            guard UserCloudSyncPolicy.isEnabled, isAuthorized(), !Task.isCancelled,
+                  accountVersion == self.accountGeneration else { throw CancellationError() }
             if RoutineStore.isCloudRecordKey(key) {
                 try routineStore.applyCloudRecord(key: key, payload: payload)
                 routineGeneration = routineStore.changeGeneration
@@ -915,19 +1369,61 @@ final class FullCloudSyncService: ObservableObject {
             } else if CloudPreferenceStore.isPreferenceKey(key) {
                 try CloudPreferenceStore.apply(key: key, payload: payload, expectedDigest: digests[key])
             } else if key.hasPrefix(CloudFileStore.prefix) {
-                guard !MeetingCaptureCoordinator.hasActiveCaptureForCloudSync else { throw CancellationError() }
-                try await self.fileStore.apply(key: key, payload: payload, expectedDigest: files[key]?.digest,
-                    isAuthorized: isAuthorized)
+                guard !isCaptureProtected(key) else { throw CancellationError() }
+                do {
+                    let scope = currentFileScope()
+                    if let id = CloudFileStore.meetingID(for: key), payload != nil,
+                       scope.deletedMeetingIDs.contains(id) { throw CloudFileError.changingFile }
+                    let result = try await self.fileStore.apply(key: key, payload: payload, expectedDigest: files[key]?.digest,
+                        isAuthorized: fileDataAuthorized, isMeetingAuthorized: { scope.authorizes($0) })
+                    guard result == .applied else { throw CloudFileError.changingFile }
+                } catch CloudFileError.changingFile {
+                    if let id = CloudFileStore.meetingID(for: key) { runtimeUnavailableFileIDs.insert(id) }
+                    throw CloudFileError.changingFile
+                }
             } else {
+                if let info = try CloudModelCodec.meetingNamespaceInfo(key: key, payload: payload ?? records[key]),
+                   (!FullCloudFileScope.permitsModelParent(info.parent, unsettledMeetingKeys: engine.unsettledMeetingKeys)
+                    || info.ids.contains(where: { !namespaceAuthorization($0) })) {
+                    throw CloudFileError.changingFile
+                }
                 try self.applyModelRecord(key: key, payload: payload, app: app, email: email, meeting: meeting,
                     isAuthorized: isAuthorized)
+                if try CloudModelCodec.meetingID(for: key) != nil { meetingGraphChanged = true }
+            }
+            if key.hasPrefix("Todo/") {
+                restoredTodoRecords = true
+                self.taskAcceptanceCheckpoint.invalidate()
             }
             restored += 1
         })
-        if canReconcileAcceptances {
-            try routineStore.reconcileAcceptances(todos: app.fetch(FetchDescriptor<Todo>()))
+        if canReconcileAcceptances, modelChanges.isCurrent(key: "Todo/", snapshot: modelVersions),
+           saveFence.isCurrent(key: "Todo/", snapshot: savedVersion) {
+            var acceptanceContext = app
+            if restoredTodoRecords {
+                postRestoreTasksUnavailable = true
+                // Remote task changes happened after the first aggregate capture.
+                // Re-read the complete task inventory before marking its signature.
+                let fresh = ModelContext(data.container)
+                fresh.autosaveEnabled = false
+                let tasks = try CloudModelCodec.capture(app: fresh, email: email, meeting: meeting, entities: ["Todo"])
+                if tasks.conflictingKeys.isEmpty,
+                   modelChanges.isCurrent(key: "Todo/", snapshot: modelVersions),
+                   saveFence.isCurrent(key: "Todo/", snapshot: savedVersion) {
+                    taskAggregateDigest = tasks.taskAggregateDigest
+                    acceptanceContext = fresh
+                    postRestoreTasksUnavailable = false
+                } else {
+                    modelDataDirty = true
+                    rerunForLocalSave = true
+                }
+            }
+            if !postRestoreTasksUnavailable { try reconcileAcceptancesIfChanged(in: acceptanceContext) }
         }
-        return heldConflictKeys.isEmpty
+        if let fileCaptureError { throw fileCaptureError }
+        if let modelCaptureError { throw modelCaptureError }
+        return !postRestoreTasksUnavailable && heldConflictKeys.isEmpty && engine.deferredKeys.isEmpty
+            && !isRecordingDeferred && !hasUnresolvedFileInventory() && fileCaptureAuthorization()
     }
 
     func applyModelRecord(key: String, payload: Data?, app: ModelContext,
@@ -974,6 +1470,7 @@ final class FullCloudSyncService: ObservableObject {
         // Also invalidate when later protected-file cleanup fails. A committed
         // remote row must never be re-published from the pre-restore cache.
         modelDataDirty = true
+        modelCaptureCache.invalidateAll()
         for id in deletedIDs where (try? MeetingCanonicalID.validateMeetingID(id)) != nil {
             try MeetingDeletionFence.removeDeletedContent(meetingID: id, rootURL: meetingRootURL,
                 isAuthorized: isAuthorized)
@@ -1003,10 +1500,11 @@ final class FullCloudSyncService: ObservableObject {
 
     private func schedule() {
         guard UserCloudSyncPolicy.isRequested, isRunning, !synchronizing else { return }
-        pendingRun?.cancel()
+        guard pendingRun == nil else { return }
         pendingRun = Task.detached { @MainActor [weak self] in
             do {
                 try await Task.sleep(for: .milliseconds(750))
+                self?.pendingRun = nil
                 try await self?.synchronizeNow()
             } catch { /* Cancellation, or a failure already published by synchronizeNow. */ }
         }
@@ -1049,6 +1547,7 @@ final class FullCloudSyncService: ObservableObject {
             if event.storeIdentifier == shadowStoreID { shadowImported = true }
             if event.storeIdentifier == legacyStoreID { legacyImported = true }
             modelDataDirty = true
+            modelChanges.invalidateAll(cache: modelCaptureCache)
             schedule()
         }
     }

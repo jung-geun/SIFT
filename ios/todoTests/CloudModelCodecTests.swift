@@ -42,6 +42,415 @@ struct CloudModelCodecTests {
             try meeting.save()
         }
     }
+    @Test("Identifier-level capture preserves wire bytes and task aggregate across mail edits, but tracks every task field and deletion")
+    func incrementalInventoriesPreserveUnchangedFamilies() throws {
+        let stores = try Stores()
+        let records = seed(stores)
+        try stores.save()
+        let cache = CloudModelCodec.CaptureCache()
+        var snapshot = try CloudModelCodec.capture(app: stores.app, email: stores.email,
+            meeting: stores.meeting, cache: cache)
+        #expect(snapshot.records == (try stores.capture()))
+        #expect(snapshot.digests == snapshot.records.mapValues(CloudFileStore.digest))
+        let initialAggregate = snapshot.taskAggregateDigest
+        let originalTasks = snapshot.records.filter { $0.key.hasPrefix("Todo/") }
+        let oldTaskDate = records.todo.updatedAt
+
+        records.email.body = "Only the independently saved mail body changes"
+        try stores.email.save()
+        cache.invalidate(identifiers: [records.email.persistentModelID])
+        let mailInventory = try CloudModelCodec.capture(app: stores.app, email: stores.email,
+            meeting: stores.meeting, entities: ["EmailMessage"], cache: cache)
+        snapshot.replace(entities: ["EmailMessage"], with: mailInventory)
+        #expect(snapshot.taskAggregateDigest == initialAggregate)
+        #expect(snapshot.records.filter { $0.key.hasPrefix("Todo/") } == originalTasks)
+        #expect(snapshot.records == (try stores.capture()))
+
+        // No updatedAt heuristic: a changed domain field alone invalidates the hash.
+        records.todo.notes = "Task detail edited without changing its timestamp"
+        try stores.app.save()
+        #expect(records.todo.updatedAt == oldTaskDate)
+        cache.invalidate(identifiers: [records.todo.persistentModelID])
+        let taskInventory = try CloudModelCodec.capture(app: stores.app, email: stores.email,
+            meeting: stores.meeting, entities: ["Todo", "TaskAuditEvent", "TaskBehaviorEvent"], cache: cache)
+        snapshot.replace(entities: ["Todo", "TaskAuditEvent", "TaskBehaviorEvent"], with: taskInventory)
+        #expect(snapshot.taskAggregateDigest != initialAggregate)
+        #expect(snapshot.records == (try stores.capture()))
+
+        let key = "Todo/" + records.todo.id.uuidString.lowercased()
+        let deletedID = records.todo.persistentModelID
+        stores.app.delete(records.todo)
+        try stores.app.save()
+        cache.invalidate(identifiers: [deletedID])
+        let deletedInventory = try CloudModelCodec.capture(app: stores.app, email: stores.email,
+            meeting: stores.meeting, entities: ["Todo", "TaskAuditEvent", "TaskBehaviorEvent"], cache: cache)
+        snapshot.replace(entities: ["Todo", "TaskAuditEvent", "TaskBehaviorEvent"], with: deletedInventory)
+        #expect(snapshot.records[key] == nil)
+        #expect(snapshot.digests[key] == nil)
+        #expect(snapshot.records == (try stores.capture()))
+    }
+
+    @Test("Incremental duplicate inventories hold all versions and recover only after authoritative duplicate removal")
+    func incrementalDuplicateInventoriesRetainConflicts() throws {
+        let stores = try Stores()
+        let original = Todo(title: "Original task")
+        stores.app.insert(original)
+        try stores.save()
+        let cache = CloudModelCodec.CaptureCache()
+        let first = try CloudModelCodec.capture(app: stores.app, email: stores.email,
+            meeting: stores.meeting, cache: cache)
+        let duplicate = Todo(title: "Different version")
+        duplicate.id = original.id
+        stores.app.insert(duplicate)
+        try stores.app.save()
+        cache.invalidate(identifiers: [duplicate.persistentModelID])
+        let conflicted = try CloudModelCodec.capture(app: stores.app, email: stores.email,
+            meeting: stores.meeting, cache: cache)
+        let key = "Todo/" + original.id.uuidString.lowercased()
+        #expect(conflicted.records[key] == nil)
+        #expect(conflicted.digests[key] == nil)
+        #expect(conflicted.conflictingKeys == [key])
+        #expect(conflicted.versions[key]?.count == 2)
+        #expect(conflicted.taskAggregateDigest != first.taskAggregateDigest)
+        let duplicateID = duplicate.persistentModelID
+        stores.app.delete(duplicate)
+        try stores.app.save()
+        cache.invalidate(identifiers: [duplicateID])
+        let recovered = try CloudModelCodec.capture(app: stores.app, email: stores.email,
+            meeting: stores.meeting, cache: cache)
+        #expect(recovered.conflictingKeys.isEmpty)
+        #expect(recovered.records == first.records)
+        #expect(recovered.taskAggregateDigest == first.taskAggregateDigest)
+    }
+
+    @Test("Unknown save metadata invalidates every cached family instead of trusting stale task bytes")
+    func unknownNotificationFallsBackToFullCapture() throws {
+        let stores = try Stores()
+        let records = seed(stores)
+        try stores.save()
+        let cache = CloudModelCodec.CaptureCache()
+        let before = try CloudModelCodec.capture(app: stores.app, email: stores.email,
+            meeting: stores.meeting, cache: cache)
+        var changes = FullCloudModelChanges()
+        let generation = changes.generations
+        records.todo.title = "Edit whose notification format is unknown"
+        try stores.app.save()
+        let recorded = changes.record(Notification(name: ModelContext.didSave, object: stores.app,
+            userInfo: ["unrecognized": "metadata"]), cache: cache)
+        #expect(recorded)
+        #expect(cache.requiresFullInventory)
+        #expect(!changes.isCurrent(key: "Todo/", snapshot: generation))
+        let after = try CloudModelCodec.capture(app: stores.app, email: stores.email,
+            meeting: stores.meeting, cache: cache)
+        #expect(after.records == (try stores.capture()))
+        #expect(after.taskAggregateDigest != before.taskAggregateDigest)
+    }
+
+    @Test("Task health changes invalidate linked event caches rather than exporting excluded cached bytes")
+    func incrementalHealthExclusionRefreshesLinkedEvents() throws {
+        let stores = try Stores()
+        let records = seed(stores)
+        try stores.save()
+        let cache = CloudModelCodec.CaptureCache()
+        let before = try CloudModelCodec.capture(app: stores.app, email: stores.email,
+            meeting: stores.meeting, cache: cache)
+        records.todo.sourceRef = "health:private-source"
+        try stores.app.save()
+        cache.invalidate(identifiers: [records.todo.persistentModelID])
+        let after = try CloudModelCodec.capture(app: stores.app, email: stores.email,
+            meeting: stores.meeting, cache: cache)
+        #expect(after.records == (try stores.capture()))
+        #expect(after.records.count == before.records.count - 3)
+        #expect(!after.records.keys.contains { $0.hasPrefix("Todo/") || $0.hasPrefix("TaskAuditEvent/")
+            || $0.hasPrefix("TaskBehaviorEvent/") })
+    }
+
+    @Test("Meeting namespace graph links root manifests, child-only parents and every held duplicate version")
+    func meetingNamespaceGraphRetainsWholeOriginalFamily() throws {
+        let stores = try Stores()
+        let rootID = UUID().uuidString.lowercased()
+        let childID = UUID().uuidString.lowercased()
+        let manifestOnlyID = UUID().uuidString.lowercased()
+        let alternateParentID = UUID().uuidString.lowercased()
+        let unrelatedID = UUID().uuidString.lowercased()
+        let root = MeetingRecord()
+        root.meetingID = rootID
+        root.audioTrackIDs = [manifestOnlyID]
+        let child = MeetingRecord()
+        child.meetingID = childID
+        child.parentMeetingID = rootID
+        let duplicate = MeetingRecord()
+        duplicate.meetingID = childID
+        duplicate.parentMeetingID = alternateParentID
+        let unrelated = MeetingRecord()
+        unrelated.meetingID = unrelatedID
+        for row in [root, child, duplicate, unrelated] { stores.meeting.insert(row) }
+        try stores.save()
+        let snapshot = try CloudModelCodec.capture(app: stores.app, email: stores.email, meeting: stores.meeting)
+        #expect(snapshot.conflictingKeys.count == 1)
+        let graph = try CloudModelCodec.meetingNamespaceGraph(snapshot)
+        let family: Set<String> = [rootID, childID, manifestOnlyID, alternateParentID]
+        for id in family { #expect(graph[id] == family) }
+        #expect(graph[unrelatedID] == [unrelatedID])
+        let authorization = MeetingCaptureCoordinator.captureCloudSyncNamespaceAuthorization()
+        let scope = MeetingCloudSyncProtection.begin(meetingIDs: [rootID])
+        defer { MeetingCloudSyncProtection.end(scope) }
+        for id in family {
+            #expect(graph[id]?.allSatisfy(authorization) == false)
+        }
+        #expect(graph[unrelatedID]?.allSatisfy(authorization) == true)
+    }
+
+    @Test("An invalid mail inventory remains unavailable with its old bytes while a valid task family advances")
+    func failedFamilyCaptureNeverMeansDeletion() throws {
+        let stores = try Stores()
+        let records = seed(stores)
+        try stores.save()
+        let cache = CloudModelCodec.CaptureCache()
+        let before = try CloudModelCodec.capture(app: stores.app, email: stores.email,
+            meeting: stores.meeting, cache: cache)
+        let taskKey = try #require(before.records.keys.first { $0.hasPrefix("Todo/") })
+        let mailKey = try #require(before.records.keys.first { $0.hasPrefix("EmailMessage/") })
+        let validMailID = records.email.id
+        records.email.id = ""
+        records.todo.notes = "Independent task edit survives malformed mail identity"
+        try stores.save()
+        cache.invalidate(identifiers: [records.email.persistentModelID, records.todo.persistentModelID])
+        let captured = CloudModelCodec.captureAvailable(app: stores.app, email: stores.email,
+            meeting: stores.meeting, previous: before, entities: CloudModelCodec.entityNames, cache: cache)
+        #expect(captured.unavailableEntities == ["EmailMessage"])
+        #expect(captured.firstError != nil)
+        #expect(captured.snapshot.records[mailKey] == before.records[mailKey])
+        #expect(captured.snapshot.digests[mailKey] == before.digests[mailKey])
+        #expect(captured.snapshot.records[taskKey] != before.records[taskKey])
+        #expect(captured.snapshot.taskAggregateDigest != before.taskAggregateDigest)
+        #expect(CloudModelCodec.captureFamilies.reduce(into: Set<String>(), { $0.formUnion($1) })
+            == CloudModelCodec.entityNames)
+        records.email.id = validMailID
+        try stores.email.save()
+        cache.invalidate(identifiers: [records.email.persistentModelID])
+        let recovered = CloudModelCodec.captureAvailable(app: stores.app, email: stores.email,
+            meeting: stores.meeting, previous: captured.snapshot, entities: ["EmailMessage"], cache: cache)
+        #expect(recovered.unavailableEntities.isEmpty)
+        #expect(recovered.firstError == nil)
+        #expect(recovered.snapshot.records == (try stores.capture()))
+    }
+
+    @Test("Actual SQL batch deletion plus metadata save recaptures the complete vocabulary family")
+    func batchDeletionKeepsMembershipAuthoritative() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("SIFTBatchInventory-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let schema = AppDataContainer.meetingSchema
+        let container = try ModelContainer(for: schema, configurations: [
+            ModelConfiguration(schema: schema, url: root.appendingPathComponent("meeting.store"), cloudKitDatabase: .none)])
+        let meeting = ModelContext(container)
+        meeting.autosaveEnabled = false
+        let term = MeetingGlossaryTerm(canonical: "retained until authoritative delete")
+        let source = VocabularySourceState()
+        source.sourceKey = "source-key"
+        let observation = VocabularyObservation()
+        let metadata = VocabularyStoreMetadata()
+        metadata.storeKey = "metadata-key"
+        meeting.insert(term); meeting.insert(source); meeting.insert(observation); meeting.insert(metadata)
+        try meeting.save()
+        let stores = try Stores()
+        let cache = CloudModelCodec.CaptureCache()
+        let before = try CloudModelCodec.capture(app: stores.app, email: stores.email, meeting: ModelContext(container), cache: cache)
+        let deletedKeys = Set(before.records.keys.filter { !$0.hasPrefix("VocabularyStoreMetadata/") })
+        #expect(deletedKeys.count == 3)
+        let fence = FullCloudSaveFence(entities: CloudModelCodec.entityNames)
+        let observer = NotificationCenter.default.addObserver(forName: ModelContext.didSave,
+            object: meeting, queue: nil) { note in fence.observe(note) }
+        defer { NotificationCenter.default.removeObserver(observer) }
+        try meeting.delete(model: VocabularyObservation.self)
+        try meeting.delete(model: VocabularySourceState.self)
+        try meeting.delete(model: MeetingGlossaryTerm.self)
+        metadata.lastCompletedBackfillAt = Date()
+        try meeting.save()
+        let pending = fence.drain()
+        #expect(pending.hasChanges)
+        #expect(pending.entities.contains("VocabularyStoreMetadata"))
+        if pending.needsFullCapture { cache.invalidateAll() }
+        else { cache.invalidate(identifiers: pending.identifiers) }
+        let captured = CloudModelCodec.captureAvailable(app: stores.app, email: stores.email,
+            meeting: ModelContext(container), previous: before, entities: pending.entities, cache: cache)
+        #expect(captured.unavailableEntities.isEmpty)
+        #expect(captured.firstError == nil)
+        #expect(deletedKeys.isDisjoint(with: captured.snapshot.records.keys))
+        #expect(captured.snapshot.records.count == 1)
+        #expect(captured.snapshot.records.keys.first?.hasPrefix("VocabularyStoreMetadata/") == true)
+    }
+
+    @Test("The task aggregate actually gates acceptance work without skipping task edits, deletion, routine changes or failed retries")
+    func aggregateDrivesAcceptanceChangeDetection() throws {
+        enum ExpectedFailure: Error { case interrupted }
+        let stores = try Stores()
+        let todo = Todo(title: "Tracked task")
+        let mail = EmailMessage(id: "independent-mail")
+        stores.app.insert(todo)
+        stores.email.insert(mail)
+        try stores.save()
+        func aggregate() throws -> String {
+            try CloudModelCodec.capture(app: stores.app, email: stores.email, meeting: stores.meeting).taskAggregateDigest
+        }
+        var checkpoint = FullCloudTaskAcceptanceCheckpoint()
+        var routineGeneration: UInt64 = 0
+        var scans = 0
+        let initial = try aggregate()
+        #expect(checkpoint.reconcileIfChanged(taskAggregate: initial, routineGeneration: { routineGeneration }) {
+            scans += 1
+            routineGeneration &+= 1 // Reconciliation itself may save routine state.
+        })
+        #expect(!checkpoint.reconcileIfChanged(taskAggregate: initial, routineGeneration: { routineGeneration }) {
+            scans += 1
+        })
+        mail.body = "A mail-only save must not rescan every task"
+        try stores.email.save()
+        let mailOnly = try aggregate()
+        #expect(mailOnly == initial)
+        #expect(!checkpoint.reconcileIfChanged(taskAggregate: mailOnly, routineGeneration: { routineGeneration }) {
+            scans += 1
+        })
+        todo.notes = "Changed task details without an updatedAt heuristic"
+        try stores.app.save()
+        let edited = try aggregate()
+        #expect(edited != initial)
+        #expect(checkpoint.reconcileIfChanged(taskAggregate: edited, routineGeneration: { routineGeneration }) {
+            scans += 1
+        })
+        routineGeneration &+= 1
+        #expect(checkpoint.reconcileIfChanged(taskAggregate: edited, routineGeneration: { routineGeneration }) {
+            scans += 1
+        })
+        stores.app.delete(todo)
+        try stores.app.save()
+        let deleted = try aggregate()
+        #expect(deleted != edited)
+        #expect(throws: ExpectedFailure.interrupted) {
+            try checkpoint.reconcileIfChanged(taskAggregate: deleted, routineGeneration: { routineGeneration }) {
+                throw ExpectedFailure.interrupted
+            }
+        }
+        #expect(checkpoint.reconcileIfChanged(taskAggregate: deleted, routineGeneration: { routineGeneration }) {
+            scans += 1
+        })
+        #expect(scans == 4)
+        checkpoint.invalidate() // A remote Todo apply invalidates the prior source signature.
+        #expect(checkpoint.reconcileIfChanged(taskAggregate: deleted, routineGeneration: { routineGeneration }) {
+            scans += 1
+        })
+        #expect(scans == 5)
+    }
+
+
+    @Test("Invalid content-version metadata holds real mail and ledger restores until the migration marker is valid",
+          arguments: ["clock", "installation", "tombstone"])
+    func invalidPreferenceMetadataHoldsDependentMail(mode: String) async throws {
+        let source = try Stores(), target = try Stores()
+        let records = seed(source)
+        let account = "synthetic-migration-account"
+        records.email.providerRawValue = MailProvider.gmail.rawValue
+        records.email.sourceAccountNamespace = account
+        records.email.body = "Complete remote original body"
+        records.email.htmlBody = "<p>Complete remote original body</p>"
+        records.email.analysisStateRaw = EmailAnalysisState.analyzed.rawValue
+        records.email.analysisSummary = "Remote analysis must not be reset by an obsolete migration"
+        try source.save()
+        let portable = try source.capture()
+        let emailKey = try #require(portable.keys.first { $0.hasPrefix("EmailMessage/") })
+        let ledgerKey = try #require(portable.keys.first { $0.hasPrefix("MailAnalysisLedgerRecord/") })
+        let taskKey = "Todo/" + records.todo.id.uuidString.lowercased()
+        let local = EmailMessage(id: records.email.id)
+        local.providerRawValue = MailProvider.gmail.rawValue
+        local.sourceAccountNamespace = account
+        local.body = "Existing local original must stay untouched"
+        local.htmlBody = "<p>Existing local original</p>"
+        local.analysisSummary = "Existing local analysis"
+        target.email.insert(local)
+        let ledger = MailAnalysisLedgerRecord(fingerprintData: records.ledger.fingerprintData,
+            revision: 0, stateRawValue: "local-ledger-must-stay")
+        ledger.syncIdentity = records.ledger.syncIdentity
+        target.app.insert(ledger)
+        try target.save()
+        let suite = "SIFT-InvalidMarker-\(UUID())"
+        let sourceDefaults = try #require(UserDefaults(suiteName: suite + "-source"))
+        let targetDefaults = try #require(UserDefaults(suiteName: suite + "-target"))
+        defer {
+            sourceDefaults.removePersistentDomain(forName: suite + "-source")
+            targetDefaults.removePersistentDomain(forName: suite + "-target")
+        }
+        let versionKey = "pieroot.todo.gmailIMAP.contentVersion." + account
+        sourceDefaults.set(GmailIMAPContentMigration.currentVersion, forKey: versionKey)
+        let preferenceKey = CloudPreferenceStore.prefix + versionKey
+        let marker = try #require(CloudPreferenceStore.capture(defaults: sourceDefaults)[preferenceKey])
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("SIFTInvalidMarker-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let schema = Schema([CloudDataRevision.self])
+        let cloud = try ModelContainer(for: schema, configurations: [
+            ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)])
+        let context = ModelContext(cloud)
+        context.autosaveEnabled = false
+        let installation = UUID().uuidString
+        let revision = CloudDataRevision(itemKey: preferenceKey, clock: 5, installationID: installation, payload: marker)
+        switch mode {
+        case "clock": revision.logicalClock = 0
+        case "installation": revision.installationID = "invalid-installation"
+        default: revision.isTombstone = true // Live bytes/digest cannot be a tombstone.
+        }
+        context.insert(revision)
+        for item in [emailKey, ledgerKey, taskKey] {
+            context.insert(CloudDataRevision(itemKey: item, clock: 1, installationID: installation, payload: portable[item]))
+        }
+        try context.save()
+        let journalURL = root.appendingPathComponent("journal.json")
+        var engine = try FullCloudSyncEngine(cloud: ModelContext(cloud), installationID: UUID().uuidString, journalURL: journalURL)
+        var restoredMail = Set<String>()
+        func reconcile() async throws {
+            let snapshot = try target.capture()
+            let preferences = try CloudPreferenceStore.capture(defaults: targetDefaults)
+            var local = snapshot
+            local.merge(preferences) { _, value in value }
+            try await engine.reconcile(digests: local.mapValues(CloudFileStore.digest), load: { local[$0] },
+                apply: { item, payload in
+                    if CloudPreferenceStore.isPreferenceKey(item) {
+                        try CloudPreferenceStore.apply(key: item, payload: payload,
+                            expectedDigest: preferences[item].map(CloudFileStore.digest), defaults: targetDefaults)
+                    } else {
+                        if item == emailKey || item == ledgerKey {
+                            #expect(targetDefaults.integer(forKey: versionKey) == GmailIMAPContentMigration.currentVersion)
+                            restoredMail.insert(item)
+                        }
+                        try target.apply(item, payload)
+                        try target.save()
+                    }
+                })
+        }
+        await #expect(throws: FullCloudSyncError.invalidRevision) { try await reconcile() }
+        #expect(targetDefaults.integer(forKey: versionKey) != GmailIMAPContentMigration.currentVersion)
+        #expect(local.body == "Existing local original must stay untouched")
+        #expect(local.htmlBody == "<p>Existing local original</p>")
+        #expect(local.analysisSummary == "Existing local analysis")
+        #expect(ledger.stateRawValue == "local-ledger-must-stay")
+        #expect(restoredMail.isEmpty)
+        #expect(engine.journal.items[emailKey] == nil && engine.journal.items[ledgerKey] == nil)
+        #expect(engine.journal.pendingApplies[emailKey] == nil && engine.journal.pendingApplies[ledgerKey] == nil)
+        #expect(engine.journal.items[taskKey] != nil)
+        #expect(try target.app.fetch(FetchDescriptor<Todo>()).first?.title == records.todo.title)
+        revision.logicalClock = 5
+        revision.installationID = installation
+        revision.isTombstone = false
+        try context.save()
+        engine = try FullCloudSyncEngine(cloud: ModelContext(cloud), installationID: UUID().uuidString, journalURL: journalURL)
+        try await reconcile()
+        #expect(restoredMail == [emailKey, ledgerKey])
+        #expect(local.body == records.email.body && local.htmlBody == records.email.htmlBody)
+        #expect(local.analysisSummary == records.email.analysisSummary)
+        #expect(ledger.stateRawValue == records.ledger.stateRawValue)
+        // This call returns at the version guard, before any Keychain/ledger access.
+        #expect(try !GmailIMAPContentMigration.migrateIfNeeded(account: account, context: target.email, defaults: targetDefaults))
+        #expect(local.body == records.email.body && local.analysisSummary == records.email.analysisSummary)
+    }
 
     private struct Records {
         let todo: Todo

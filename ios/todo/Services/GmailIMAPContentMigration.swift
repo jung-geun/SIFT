@@ -3,9 +3,9 @@ import SwiftData
 
 /// Invalidates Gmail IMAP-derived content when parsing behavior changes.
 ///
-/// Rewritten rows are saved, both dependent cursors are cleared, and only then is
-/// the per-account version stamped. This ordering keeps the migration retryable if
-/// the process terminates after saving but before the version marker is committed.
+/// Rewritten rows are saved, the discovery cursor and any legacy ingestion cursor
+/// are cleared, and only then is the version stamped. A termination before that
+/// stamp safely retries the migration.
 @MainActor
 enum GmailIMAPContentMigration {
     static let currentVersion = 2
@@ -54,8 +54,7 @@ enum GmailIMAPContentMigration {
             try context.save()
             MailboxUpdateCursorStore(defaults: defaults)
                 .clearCursor(for: .gmail, namespace: canonicalAccount)
-            GmailIMAPIngestionCursorStore(defaults: defaults)
-                .clearCursor(for: canonicalAccount)
+            defaults.removeObject(forKey: "pieroot.todo.gmailIMAP.ingestionCursor.\(canonicalAccount)")
         }
         defaults.set(currentVersion, forKey: versionKey)
         return !rows.isEmpty

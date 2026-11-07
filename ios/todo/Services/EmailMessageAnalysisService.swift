@@ -259,12 +259,24 @@ final class EmailMessageAnalysisService {
         self.foundationModelsAvailabilityProvider = foundationModelsAvailabilityProvider ?? Self.foundationModelsAvailable
     }
 
+    func needsAnalysis(_ email: EmailMessage) -> Bool {
+        !EmailAnalysisContract.isCurrentAnalysis(email) || shouldRetryRuleFallback(email)
+    }
+
+    /// A real availability/opt-in transition may retry immediately; an unchanged
+    /// retryable fallback must not invoke the same provider on every mailbox tick.
+    var retryEligibilityVersion: Int {
+        (foundationModelsEnabledProvider() ? 2 : 0) + (foundationModelsAvailabilityProvider() ? 1 : 0)
+    }
+
     func analyze(
         _ email: EmailMessage,
         context: ModelContext,
-        language: AppLanguage = .current
+        language: AppLanguage = .current,
+        isAuthorized: () -> Bool = { true }
     ) async throws {
         try Task.checkCancellation()
+        guard isAuthorized() else { throw CancellationError() }
         let key = EmailMessageKey(email)
         let originalModelID = email.persistentModelID
         guard activeKeys.insert(key).inserted else { return }
@@ -325,6 +337,8 @@ final class EmailMessageAnalysisService {
                 language: language
             )
             try Task.checkCancellation()
+            // Selection and consent can change while the local model is suspended.
+            guard isAuthorized() else { throw CancellationError() }
             guard let currentEmail = try resolvedEmail(matching: key, in: context) else {
                 return
             }

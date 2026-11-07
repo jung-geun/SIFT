@@ -66,6 +66,8 @@ nonisolated enum CloudPreferenceStore {
             "pieroot.todo.iCloud", "pieroot.todo.cloudSync.",
             "pieroot.todo.storage.", "pieroot.todo.testCloud.",
             "pieroot.todo.restoredDevicePreference.",
+            // Retired pre-release support data must remain local, never enter cloud preferences.
+            "pieroot.todo.support.",
             "pieroot.todo.imap.activeSlot.", "pieroot.todo.imap.rejectedCredential.",
             "pieroot.todo.outlook.imap.activeSlot.", "pieroot.todo.outlook.imap.rejectedCredential.",
             "pieroot.todo.imap.explicitlyDeleted.", "pieroot.todo.imap.portableReceipt.",

@@ -88,6 +88,42 @@ enum CalendarRecurrenceScope: Sendable, Equatable {
     case futureEvents
     case allEvents
 }
+/// A store-change received during an awaited pass requests one fresh pass instead
+/// of disappearing behind a busy flag. Each context remains on MainActor and
+/// joins only its own work; unrelated stores never share managed model objects.
+@MainActor
+final class CalendarSyncCoalescer {
+    private final class Flight {
+        var pending = false
+        var task: Task<Void, Never>?
+    }
+
+    private var flights: [ObjectIdentifier: Flight] = [:]
+
+    func run(
+        context: ModelContext,
+        operation: @escaping @MainActor () async -> Void
+    ) async {
+        let key = ObjectIdentifier(context)
+        if let flight = flights[key], let task = flight.task {
+            flight.pending = true
+            await task.value
+            return
+        }
+        let flight = Flight()
+        flights[key] = flight
+        let task = Task { @MainActor in
+            repeat {
+                flight.pending = false
+                await operation()
+            } while flight.pending
+            flights.removeValue(forKey: key)
+        }
+        flight.task = task
+        await task.value
+    }
+}
+
 /// EventKit을 통해 iCloud·Google 캘린더를 읽고 TODO 마감을 캘린더에 등록.
 ///
 /// 사용자가 기기 설정 > 계정에서 캘린더 계정을 추가하면 EKEventStore에 자동 포함.
@@ -109,7 +145,7 @@ final class CalendarService {
     private(set) var isAuthorized = false
     private var unresolvedEventIDs = Set<String>()
     private let unresolvedEventIDsLock = NSLock()
-    private var isSyncingCalendarWithTodos = false
+    private let syncCoalescer = CalendarSyncCoalescer()
 
     private func cachedUnresolvedEventID(_ identifier: String) -> Bool {
         unresolvedEventIDsLock.lock()
@@ -1001,7 +1037,9 @@ extension CalendarService {
         await syncCalendarTodos(context: context)
         // A selection change during async notification reconciliation must not
         // put the newly selected sources behind the previous weekly cooldown.
-        if selection == taskAnalysisCalendarIDs {
+        if selection == taskAnalysisCalendarIDs, !Task.isCancelled,
+           !UserCloudSyncPolicy.isRequested || (UserCloudSyncPolicy.isEnabled && FullCloudSyncService.shared.hasFinishedTaskRestore),
+           EKEventStore.authorizationStatus(for: .event) == .fullAccess {
             UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: Self.weeklyImportKey)
         }
     }
@@ -1017,17 +1055,24 @@ extension CalendarService {
     @discardableResult
     func syncCalendarTodos(context: ModelContext) async -> Bool {
         guard isAuthorized else { return false }
+        // EventKit uses its own actor/store. Only immutable summaries cross back;
+        // no SwiftData context or live EKEvent escapes its owning executor.
+        guard let snapshot = await CalendarVisibleEventReader.shared.importSnapshot(now: Date()),
+              !Task.isCancelled,
+              EKEventStore.authorizationStatus(for: .event) == .fullAccess,
+              !UserCloudSyncPolicy.isRequested
+                || (UserCloudSyncPolicy.isEnabled && FullCloudSyncService.shared.hasFinishedTaskRestore) else { return false }
         let todos = (try? context.fetch(FetchDescriptor<Todo>())) ?? []
         let linksChanged = reconcileStaleCalendarReferences(in: todos)
         if linksChanged { try? context.save() }
-        let availableIDs = Set(store.calendars(for: .event).map(\.calendarIdentifier))
         let changed = await syncCalendarTodos(
             context: context,
-            events: upcomingEvents(days: 30),
-            recoveryEvents: upcomingEvents(days: 366).filter { $0.marker != nil },
-            now: Date(),
-            selectedCalendarIDs: taskAnalysisCalendarIDs.intersection(availableIDs),
-            availableCalendarIDs: availableIDs
+            events: snapshot.events,
+            recoveryEvents: snapshot.recoveryEvents,
+            now: snapshot.now,
+            // Read consent AFTER the actor hop, immediately before model writes.
+            selectedCalendarIDs: taskAnalysisCalendarIDs.intersection(snapshot.availableCalendarIDs),
+            availableCalendarIDs: snapshot.availableCalendarIDs
         )
         return linksChanged || changed
     }
@@ -1432,9 +1477,16 @@ extension CalendarService {
     /// 어플과 캘린더의 일정을 양방향으로 동기화하고, 충돌 시 최근 수정된 내용을 우선하여 갱신합니다.
     @MainActor
     func syncCalendarWithTodos(context: ModelContext) async {
-        guard isAuthorized, !isSyncingCalendarWithTodos else { return }
-        isSyncingCalendarWithTodos = true
-        defer { isSyncingCalendarWithTodos = false }
+        await syncCoalescer.run(context: context) { [self] in
+            await performCalendarSync(context: context)
+        }
+    }
+
+    @MainActor
+    private func performCalendarSync(context: ModelContext) async {
+        guard isAuthorized,
+              !UserCloudSyncPolicy.isRequested
+                || (UserCloudSyncPolicy.isEnabled && FullCloudSyncService.shared.hasFinishedTaskRestore) else { return }
 
         // EventKit invalidates its snapshots when it posts a store-change
         // notification. Resetting/refreshing here can post another notification
@@ -1944,6 +1996,39 @@ extension CalendarService {
 private actor CalendarVisibleEventReader {
     static let shared = CalendarVisibleEventReader()
     private let store = EKEventStore()
+
+    struct ImportSnapshot: Sendable {
+        let now: Date
+        let availableCalendarIDs: Set<String>
+        let events: [CalendarService.CalendarEventSummary]
+        let recoveryEvents: [CalendarService.CalendarEventSummary]
+    }
+
+    /// Nil means permission/cancellation, not an empty source scan. Callers must
+    /// never interpret that state as permission to prune missing calendar tasks.
+    func importSnapshot(now: Date) -> ImportSnapshot? {
+        guard !Task.isCancelled,
+              EKEventStore.authorizationStatus(for: .event) == .fullAccess,
+              let end = Calendar.current.date(byAdding: .day, value: 30, to: now),
+              let recoveryEnd = Calendar.current.date(byAdding: .day, value: 366, to: now) else { return nil }
+        let calendars = store.calendars(for: .event)
+        let availableIDs = Set(calendars.map(\.calendarIdentifier))
+        guard !calendars.isEmpty else {
+            return ImportSnapshot(now: now, availableCalendarIDs: [], events: [], recoveryEvents: [])
+        }
+        let events = store.events(matching: store.predicateForEvents(withStart: now, end: end, calendars: calendars))
+            .map(CalendarService.summary(for:)).sorted { $0.startDate < $1.startDate }
+        let recoveryEvents = store.events(matching: store.predicateForEvents(withStart: now, end: recoveryEnd, calendars: calendars))
+            .compactMap { event -> CalendarService.CalendarEventSummary? in
+                guard CalendarEventMarker.parse(event.url) != nil else { return nil }
+                return CalendarService.summary(for: event)
+            }
+            .sorted { $0.startDate < $1.startDate }
+        guard !Task.isCancelled,
+              EKEventStore.authorizationStatus(for: .event) == .fullAccess else { return nil }
+        return ImportSnapshot(now: now, availableCalendarIDs: availableIDs,
+                              events: events, recoveryEvents: recoveryEvents)
+    }
 
     func events(from start: Date, to end: Date, disabledIDs: Set<String>) -> [CalendarService.CalendarEventSummary] {
         guard !Task.isCancelled,

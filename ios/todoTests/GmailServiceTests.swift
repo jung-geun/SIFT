@@ -1720,13 +1720,13 @@ struct GmailServiceTests {
             try KeychainStore.setChecked(service: service, account: "string", value: "prior")
             try KeychainStore.setDeviceOnly(service: service, account: "binary", data: Data([1]), access: .foregroundUserPresence)
             KeychainStore.setWriteFailureForTesting(service: service, status: errSecInteractionNotAllowed)
-            #expect(throws: KeychainStoreError.security(errSecInteractionNotAllowed)) {
+            #expect(throws: KeychainStoreError.authenticationRequired) {
                 try KeychainStore.setChecked(service: service, account: "string", value: "replacement")
             }
-            #expect(throws: KeychainStoreError.security(errSecInteractionNotAllowed)) {
+            #expect(throws: KeychainStoreError.authenticationRequired) {
                 try KeychainStore.setDeviceOnly(service: service, account: "binary", data: Data([2]), access: .backgroundAfterFirstUnlock)
             }
-            #expect(throws: KeychainStoreError.security(errSecInteractionNotAllowed)) {
+            #expect(throws: KeychainStoreError.authenticationRequired) {
                 try KeychainStore.setDeviceOnly(service: service, account: "binary", data: Data([3]))
             }
             #expect(try KeychainStore.getChecked(service: service, account: "string") == "prior")
@@ -1747,7 +1747,7 @@ struct GmailServiceTests {
                 (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!,
                  Data(#"{"access_token":"must-not-partially-commit","expires_in":3600}"#.utf8))
             }
-            await #expect(throws: KeychainStoreError.security(errSecInteractionNotAllowed)) { try await sut.fetchRecentMessages() }
+            await #expect(throws: KeychainStoreError.authenticationRequired) { try await sut.fetchRecentMessages() }
             #expect(KeychainStore.get(service: "pieroot.todo.gmail", account: "oauth_tokens") == before)
         }
     }
@@ -1918,7 +1918,7 @@ struct GmailServiceTests {
             defer { KeychainStore.setWriteFailureForTesting(service: "pieroot.todo.gmail", status: nil); resetSharedState() }
             seedGmailTokens()
             KeychainStore.setWriteFailureForTesting(service: "pieroot.todo.gmail", status: errSecInteractionNotAllowed)
-            await #expect(throws: KeychainStoreError.security(errSecInteractionNotAllowed)) { try await sut.fetchRecentMessages() }
+            await #expect(throws: KeychainStoreError.authenticationRequired) { try await sut.fetchRecentMessages() }
             #expect(KeychainStore.get(service: "pieroot.todo.gmail", account: "access_token") == "valid-access")
             #expect(KeychainStore.get(service: "pieroot.todo.gmail", account: "refresh_token") == "valid-refresh")
             #expect(KeychainStore.get(service: "pieroot.todo.gmail", account: "oauth_tokens") == nil)

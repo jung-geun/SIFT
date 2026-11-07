@@ -277,15 +277,31 @@ struct CloudReconcileDurabilityTests {
         #expect(engine.didEnqueueChanges)
         #expect(try fixture.records().map(\.itemKey) == ["Todo/a"])
         let disk = try fixture.readJournal()
-        #expect(disk.pendingPublications.count == 2)
-        let a = try #require(disk.pendingPublications["Todo/a"])
+        // Independent success is now checkpointed even though another key failed.
+        // The failed key must retain its original write-ahead identity.
+        #expect(disk.pendingPublications.count == 1)
+        #expect(disk.pendingPublications["Todo/a"] == nil)
+        #expect(disk.items["Todo/b"] == nil)
+        let a = try #require(disk.items["Todo/a"])
         let b = try #require(disk.pendingPublications["Todo/b"])
+        let committed = try #require(try fixture.records().first { $0.itemKey == "Todo/a" })
+        #expect(a.revisionID == committed.revisionID)
+        #expect(a.logicalClock == committed.logicalClock)
+        #expect(a.installationID == committed.installationID)
+        #expect(a.digest == CloudFileStore.digest(values["Todo/a"]!))
+        #expect(b.digest == CloudFileStore.digest(values["Todo/b"]!))
         let restarted = try fixture.engine()
         try await restarted.reconcile(digests: values.mapValues(CloudFileStore.digest), load: { key in
             #expect(key == "Todo/b")
             return values[key]
         }, apply: { _, _ in })
         #expect(Set(try fixture.records().map(\.revisionID)) == Set([a.revisionID, b.revisionID]))
+        #expect(try fixture.records().count == 2)
+        #expect(restarted.journal.pendingPublications.isEmpty)
+        #expect(restarted.journal.items["Todo/a"] == a)
+        #expect(restarted.journal.items["Todo/b"] == b)
+        #expect(try Dictionary(uniqueKeysWithValues: fixture.records().map { ($0.itemKey, $0.payload) })
+            == values.mapValues(Optional.some))
     }
 
     @Test("A held meeting namespace retains remote-only audio and pending recovery while unrelated data syncs",

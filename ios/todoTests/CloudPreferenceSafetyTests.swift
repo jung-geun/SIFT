@@ -70,4 +70,42 @@ struct CloudPreferenceSafetyTests {
             #expect(try CloudPreferenceValue(try #require(defaults.object(forKey: key))) == value)
         }
     }
+
+    @Test("Retired local support identifiers and keepsakes never enter cloud preferences")
+    func retiredSupportDataIsNotPortable() throws {
+        let suite = "SIFTCloudRetiredSupport-\(UUID())"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(["123456"], forKey: "pieroot.todo.support.coffeeTransactions")
+        defaults.set(4, forKey: "pieroot.todo.support.starlightStamps")
+        let snapshot = try CloudPreferenceStore.capture(defaults: defaults)
+        #expect(snapshot[CloudPreferenceStore.prefix + "pieroot.todo.support.coffeeTransactions"] == nil)
+        #expect(snapshot[CloudPreferenceStore.prefix + "pieroot.todo.support.starlightStamps"] == nil)
+    }
+}
+
+@Suite("CloudSyncMonitor completion deduplication")
+@MainActor
+struct CloudSyncMonitorDeduplicationTests {
+    @Test("Identical true-nil completion emissions from idle do not re-enter completed phase")
+    func monitorDoesNotReenterCompletedFromIdle() async throws {
+        let previousSync = UserDefaults.standard.bool(forKey: UserCloudSyncPolicy.syncKey)
+        let previousAccount = UserDefaults.standard.string(forKey: UserCloudSyncPolicy.accountKey)
+        let previousConsent = UserDefaults.standard.integer(forKey: UserCloudSyncPolicy.consentKey)
+        defer {
+            UserDefaults.standard.set(previousSync, forKey: UserCloudSyncPolicy.syncKey)
+            UserDefaults.standard.set(previousAccount, forKey: UserCloudSyncPolicy.accountKey)
+            UserDefaults.standard.set(previousConsent, forKey: UserCloudSyncPolicy.consentKey)
+        }
+        UserDefaults.standard.set(true, forKey: UserCloudSyncPolicy.syncKey)
+        UserDefaults.standard.set("test-account", forKey: UserCloudSyncPolicy.accountKey)
+        UserDefaults.standard.set(UserCloudSyncPolicy.consentVersion, forKey: UserCloudSyncPolicy.consentKey)
+
+        let monitor = CloudSyncMonitor()
+        #expect(monitor.phase == .idle)
+        monitor.startObserving(initialCount: 0)
+        #expect(monitor.phase == .importing)
+        monitor.stopObserving()
+        #expect(monitor.phase == .idle)
+    }
 }

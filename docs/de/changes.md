@@ -10,6 +10,13 @@ description: Neue Funktionen, Verbesserungen und Fehlerbehebungen in den einzeln
 
 # Änderungen
 
+<a id="version-1-0-16"></a>
+## 1.0.16
+
+### Werbung entfernt
+
+- Werbung und Steuerelemente zur Werbeeinwilligung wurden entfernt. Alle App-Funktionen sind ohne In-App-Käufe kostenlos nutzbar.
+
 <a id="version-1-0-15"></a>
 ## 1.0.15
 

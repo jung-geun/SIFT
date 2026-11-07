@@ -2,14 +2,14 @@ import Foundation
 import SwiftData
 
 
-/// Owns durable, account-scoped "newer mail" sync cursors for Gmail.
+/// Owns durable, account-scoped "newer mail" sync cursors for Gmail and Outlook.
 ///
-/// This coordinator is deliberately separate from the UI's older-page continuation
-/// (`MailboxPagingState.nextCursor`, driven from `MailTabView`) and from Gmail's
-/// background-analysis ingestion cursor (`GmailIMAPIngestionCursorStore`, driven from
-/// `GmailIMAPIngestionService`). It keeps local mailbox metadata and a bounded
-/// backlog of complete bodies current independently of AI analysis: on a 5-minute
-/// foreground poll, on scroll-to-top, and on opportunistic OS background refresh.
+/// The durable discovery cursor is separate from the UI's older-page continuation
+/// (`MailboxPagingState.nextCursor`, driven from `MailTabView`). Local action
+/// analysis consumes durable complete bodies, never a second network cursor.
+/// This coordinator keeps local mailbox metadata and a bounded
+/// backlog of complete bodies current independently of AI analysis: on independent
+/// 45-second foreground lanes and opportunistic, OS-bounded background refresh.
 ///
 /// A durable per-provider cursor is only advanced after every local commit for that
 /// page succeeds, so a crash, save failure, or thrown provider error always leaves the
@@ -22,15 +22,33 @@ final class MailboxIncrementalSyncCoordinator {
     private let localStore: MailboxLocalStore
     private let makeContext: () -> ModelContext
     private let resolveProvider: (MailProvider) -> any MailboxPagingProvider
-    private let ensureReady: (MailProvider, String, Bool) async -> Bool
+    private let ensureReady: (MailProvider, String, Bool) async throws -> Bool
     private let defaults: UserDefaults
     private let now: () -> Date
 
     private let sessionGeneration: (MailProvider) async -> Int
     private var lastBodyAttempt: [String: Date] = [:]
-    private var inFlight: Set<MailProvider> = []
+    private enum Lane: Hashable { case discovery, bodies, readiness }
+    private struct LaneKey: Hashable {
+        let provider: MailProvider
+        let lane: Lane
+    }
+    private struct Turn {
+        let id: UUID
+        let namespace: String
+        let backgroundOnly: Bool
+        let task: Task<Bool, Never>
+    }
+    private var turns: [LaneKey: Turn] = [:]
+    private struct ReadinessFailure {
+        let count: Int
+        let retryAt: Date
+        let sessionGeneration: Int
+    }
+    private var readinessFailures: [String: ReadinessFailure] = [:]
     private var lastAttempt: [String: Date] = [:]
-    private var pollTask: Task<Void, Never>?
+    private var pollTasks: [Task<Void, Never>] = []
+    private let enqueueAnalysis: (MailProvider, String) -> Void
     private var syncGeneration: [MailProvider: Int] = [:]
 
     init(
@@ -38,12 +56,13 @@ final class MailboxIncrementalSyncCoordinator {
         localStore: MailboxLocalStore? = nil,
         makeContext: (() -> ModelContext)? = nil,
         resolveProvider: ((MailProvider) -> any MailboxPagingProvider)? = nil,
-        ensureReady: ((MailProvider, String, Bool) async -> Bool)? = nil,
+        ensureReady: ((MailProvider, String, Bool) async throws -> Bool)? = nil,
         sessionGeneration: ((MailProvider) async -> Int)? = nil,
         defaults: UserDefaults = .standard,
+        enqueueAnalysis: ((MailProvider, String) -> Void)? = nil,
         now: @escaping () -> Date = Date.init
     ) {
-        self.cursorStore = cursorStore ?? .live
+        self.cursorStore = cursorStore ?? MailboxUpdateCursorStore(defaults: defaults)
         self.localStore = localStore ?? .live
         self.makeContext = makeContext ?? { ModelContext(AppDataContainer.shared.emailContainer) }
         self.resolveProvider = resolveProvider ?? MailboxProviderRegistry.provider(for:)
@@ -56,26 +75,46 @@ final class MailboxIncrementalSyncCoordinator {
         }
         self.defaults = defaults
         self.now = now
+        self.enqueueAnalysis = enqueueAnalysis ?? { provider, namespace in
+            EmailAutomationOrchestrator.shared.enqueue(provider: provider, namespace: namespace)
+        }
     }
 
     // MARK: - Polling lifecycle
 
     /// Idempotent: a second call while a poll task is already running is a no-op.
     func startPolling() {
-        guard pollTask == nil else { return }
-        pollTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            while !Task.isCancelled {
-                await self.syncAvailableProviders()
-                guard !Task.isCancelled else { break }
-                try? await Task.sleep(for: .seconds(MailboxPagingPolicy.pollInterval))
+        guard pollTasks.isEmpty else { return }
+        for provider in [MailProvider.gmail, .outlook] {
+            // A slow account or body download cannot delay another account's
+            // discovery cadence. Each lane coalesces only its own work.
+            for hydrateBodies in [false, true] {
+                pollTasks.append(Task { @MainActor [weak self] in
+                    while !Task.isCancelled {
+                        guard let self else { return }
+                        if hydrateBodies {
+                            _ = await self.prefetchBodies(provider: provider)
+                        } else {
+                            _ = await self.discover(
+                                provider: provider,
+                                minimumInterval: MailboxPagingPolicy.updatesMinimumInterval
+                            )
+                            if let namespace = self.namespace(for: provider) {
+                                self.enqueueAnalysis(provider, namespace)
+                            }
+                        }
+                        guard !Task.isCancelled else { return }
+                        try? await Task.sleep(for: .seconds(MailboxPagingPolicy.pollInterval))
+                    }
+                })
             }
         }
     }
 
     func stopPolling() {
-        pollTask?.cancel()
-        pollTask = nil
+        for task in pollTasks { task.cancel() }
+        pollTasks.removeAll()
+        EmailAutomationOrchestrator.shared.stopForegroundProcessing()
     }
 
     // MARK: - Sync entry points
@@ -83,9 +122,20 @@ final class MailboxIncrementalSyncCoordinator {
     @discardableResult
     func syncAvailableProviders(backgroundOnly: Bool = false) async -> Bool {
         guard !Task.isCancelled else { return false }
-        let gmailOK = await sync(provider: .gmail, minimumInterval: MailboxPagingPolicy.updatesMinimumInterval, backgroundOnly: backgroundOnly)
-        let outlookOK = await sync(provider: .outlook, minimumInterval: MailboxPagingPolicy.updatesMinimumInterval, backgroundOnly: backgroundOnly)
-        return gmailOK || outlookOK
+        return await withTaskGroup(of: Bool.self) { group in
+            for provider in [MailProvider.gmail, .outlook] {
+                group.addTask { @MainActor in
+                    await self.sync(
+                        provider: provider,
+                        minimumInterval: MailboxPagingPolicy.updatesMinimumInterval,
+                        backgroundOnly: backgroundOnly
+                    )
+                }
+            }
+            var succeeded = false
+            for await result in group { succeeded = result || succeeded }
+            return succeeded
+        }
     }
 
     @discardableResult
@@ -94,20 +144,48 @@ final class MailboxIncrementalSyncCoordinator {
         minimumInterval: TimeInterval = 0,
         backgroundOnly: Bool = false
     ) async -> Bool {
+        let discovered = await discover(
+            provider: provider, minimumInterval: minimumInterval, backgroundOnly: backgroundOnly
+        )
+        // Already cached mail remains eligible even if discovery is offline.
+        let hydrated = await prefetchBodies(provider: provider, backgroundOnly: backgroundOnly)
+        return discovered && hydrated
+    }
+
+    @discardableResult
+    func discover(
+        provider: MailProvider,
+        minimumInterval: TimeInterval = 0,
+        backgroundOnly: Bool = false
+    ) async -> Bool {
+        if !backgroundOnly, minimumInterval <= 0, let namespace = namespace(for: provider) {
+            // An explicit foreground refresh may retry a corrected credential
+            // immediately, without changing scheduled-account backoff.
+            readinessFailures.removeValue(forKey: "\(provider.rawValue):\(namespace)")
+        }
+        return await coalesce(provider: provider, lane: .discovery, backgroundOnly: backgroundOnly) {
+            await self.discoverNow(
+                provider: provider, minimumInterval: minimumInterval, backgroundOnly: backgroundOnly
+            )
+        }
+    }
+
+    private func discoverNow(
+        provider: MailProvider,
+        minimumInterval: TimeInterval,
+        backgroundOnly: Bool
+    ) async -> Bool {
         guard let namespace = namespace(for: provider) else { return false }
-        guard !inFlight.contains(provider) else { return false }
         let attemptKey = "\(provider.rawValue):\(namespace)"
         guard minimumInterval <= 0
             || lastAttempt[attemptKey] == nil
             || now().timeIntervalSince(lastAttempt[attemptKey]!) >= minimumInterval
-        else { return false }
+        else { return true }
         let generation = syncGeneration[provider, default: 0]
 
-        inFlight.insert(provider)
         lastAttempt[attemptKey] = now()
-        defer { inFlight.remove(provider) }
 
-        guard await ensureReady(provider, namespace, backgroundOnly),
+        guard await ready(provider, namespace: namespace, backgroundOnly: backgroundOnly),
               isCurrent(provider: provider, namespace: namespace, generation: generation)
         else { return false }
 
@@ -131,7 +209,7 @@ final class MailboxIncrementalSyncCoordinator {
                     throw GmailIMAPError.credentialRejected
             }
             }
-        guard await ensureReady(provider, namespace, backgroundOnly),
+        guard await ready(provider, namespace: namespace, backgroundOnly: backgroundOnly),
               isCurrent(provider: provider, namespace: namespace, generation: generation)
         else { return false }
         do {
@@ -157,29 +235,27 @@ final class MailboxIncrementalSyncCoordinator {
                     context: context
                 )
             }
-            try await prefetchBodyBatch(
-                provider: provider,
-                namespace: namespace,
-                generation: generation,
-                context: context,
-                backgroundOnly: backgroundOnly
-            )
+            if !backgroundOnly { enqueueAnalysis(provider, namespace) }
             return isCurrent(provider: provider, namespace: namespace, generation: generation)
         } catch {
             return false
         }
     }
 
-    /// Also used after a UI head-page commit. Shares the provider's sync turn so
-    /// manual refresh and scheduled prefetch cannot start duplicate body batches.
+    /// A separate per-account hydration turn: metadata discovery never waits for
+    /// a suspended body download, while duplicate body batches remain coalesced.
     @discardableResult
     func prefetchBodies(provider: MailProvider, backgroundOnly: Bool = false) async -> Bool {
-        guard let namespace = namespace(for: provider), !inFlight.contains(provider) else { return false }
+        await coalesce(provider: provider, lane: .bodies, backgroundOnly: backgroundOnly) {
+            await self.prefetchBodiesNow(provider: provider, backgroundOnly: backgroundOnly)
+        }
+    }
+
+    private func prefetchBodiesNow(provider: MailProvider, backgroundOnly: Bool) async -> Bool {
+        guard let namespace = namespace(for: provider) else { return false }
         let generation = syncGeneration[provider, default: 0]
-        inFlight.insert(provider)
-        defer { inFlight.remove(provider) }
         do {
-            guard await ensureReady(provider, namespace, backgroundOnly),
+            guard await ready(provider, namespace: namespace, backgroundOnly: backgroundOnly),
                   isCurrent(provider: provider, namespace: namespace, generation: generation)
             else { return false }
             try await prefetchBodyBatch(
@@ -192,6 +268,87 @@ final class MailboxIncrementalSyncCoordinator {
             return isCurrent(provider: provider, namespace: namespace, generation: generation)
         } catch {
             return false
+        }
+    }
+
+    /// Duplicate manual/scheduled callers await the same result instead of
+    /// reporting a false failure merely because that lane is already working.
+    private func coalesce(
+        provider: MailProvider,
+        lane: Lane,
+        backgroundOnly: Bool,
+        operation: @escaping @MainActor () async -> Bool
+    ) async -> Bool {
+        guard !Task.isCancelled, let namespace = namespace(for: provider) else { return false }
+        let key = LaneKey(provider: provider, lane: lane)
+        while let existing = turns[key] {
+            if existing.namespace == namespace && existing.backgroundOnly == backgroundOnly {
+                return await awaitTurn(existing.task)
+            }
+            // A background caller cannot borrow a foreground permission context.
+            existing.task.cancel()
+            _ = await awaitTurn(existing.task)
+            if turns[key]?.id == existing.id { turns.removeValue(forKey: key) }
+        }
+        guard !Task.isCancelled, self.namespace(for: provider) == namespace else { return false }
+        let id = UUID()
+        let task = Task { @MainActor in await operation() }
+        turns[key] = Turn(id: id, namespace: namespace, backgroundOnly: backgroundOnly, task: task)
+        let result = await awaitTurn(task)
+        if turns[key]?.id == id { turns.removeValue(forKey: key) }
+        return result
+    }
+
+    private func awaitTurn(_ task: Task<Bool, Never>) async -> Bool {
+        await withTaskCancellationHandler {
+            await task.value && !Task.isCancelled
+        } onCancel: {
+            task.cancel()
+        }
+    }
+
+    /// Authentication is shared by both account lanes. Only Outlook's existing
+    /// authentication-rejection error receives exponential backoff. Transient
+    /// failures coalesce for one short interval, then retry at the next poll.
+    private func ready(_ provider: MailProvider, namespace: String, backgroundOnly: Bool) async -> Bool {
+        await coalesce(provider: provider, lane: .readiness, backgroundOnly: backgroundOnly) {
+            let key = "\(provider.rawValue):\(namespace)"
+            let session = await self.sessionGeneration(provider)
+            if let failure = self.readinessFailures[key] {
+                if failure.sessionGeneration != session {
+                    // An explicit successful reconnect establishes a new session.
+                    self.readinessFailures.removeValue(forKey: key)
+                } else if self.now() < failure.retryAt {
+                    return false
+                }
+            }
+            let ready: Bool
+            var rejectedCredential = false
+            do {
+                ready = try await self.ensureReady(provider, namespace, backgroundOnly)
+            } catch {
+                ready = false
+                rejectedCredential = provider == .outlook
+                    && (error as? OutlookIMAPError) == .authenticationFailed
+            }
+            guard !Task.isCancelled, self.namespace(for: provider) == namespace else { return false }
+            if ready {
+                self.readinessFailures.removeValue(forKey: key)
+            } else {
+                let backgroundKey = provider == .gmail
+                    ? "pieroot.todo.imap.backgroundEnabled" : "pieroot.todo.outlook.backgroundEnabled"
+                // A missing background opt-in is not a failed credential.
+                guard !backgroundOnly || self.defaults.bool(forKey: backgroundKey) else { return false }
+                let count = rejectedCredential ? min(7, (self.readinessFailures[key]?.count ?? 0) + 1) : 0
+                let delay = rejectedCredential
+                    ? min(3600, 60 * Double(1 << (count - 1)))
+                    : MailboxPagingPolicy.updatesMinimumInterval
+                self.readinessFailures[key] = ReadinessFailure(
+                    count: count, retryAt: self.now().addingTimeInterval(delay),
+                    sessionGeneration: await self.sessionGeneration(provider)
+                )
+            }
+            return ready
         }
     }
 
@@ -227,7 +384,7 @@ final class MailboxIncrementalSyncCoordinator {
         for email in candidates {
             guard isCurrent(provider: provider, namespace: namespace, generation: generation),
                   await sessionGeneration(provider) == session,
-                  await ensureReady(provider, namespace, backgroundOnly),
+                  await ready(provider, namespace: namespace, backgroundOnly: backgroundOnly),
                   isCurrent(provider: provider, namespace: namespace, generation: generation),
                   await sessionGeneration(provider) == session
             else { throw CancellationError() }
@@ -238,14 +395,19 @@ final class MailboxIncrementalSyncCoordinator {
                 let content = try await mailbox.fetchMessageContent(messageID: key.providerMessageID)
                 guard isCurrent(provider: provider, namespace: namespace, generation: generation),
                       await sessionGeneration(provider) == session,
-                      await ensureReady(provider, namespace, backgroundOnly),
+                      await ready(provider, namespace: namespace, backgroundOnly: backgroundOnly),
                       isCurrent(provider: provider, namespace: namespace, generation: generation),
                       await sessionGeneration(provider) == session,
                       EmailMessageKey(email) == key, email.isInInbox
                 else { throw CancellationError() }
                 try localStore.updateContent(content, for: email, in: context)
+                if !backgroundOnly { enqueueAnalysis(provider, namespace) }
             } catch GmailIMAPError.noSelectableTextPart {
                 // An attachment-only message must not block readable backlog rows.
+                continue
+            } catch IMAPTextBodyError.tooLarge {
+                continue
+            } catch IMAPTextBodyError.noReadableText {
                 continue
             } catch GmailIMAPError.credentialRejected {
                 IMAPCredentialStore.markCredentialRejected(for: namespace)
@@ -392,6 +554,7 @@ final class MailboxIncrementalSyncCoordinator {
         let attemptKey = "\(provider.rawValue):\(namespace)"
         lastAttempt.removeValue(forKey: attemptKey)
         lastBodyAttempt.removeValue(forKey: attemptKey)
+        readinessFailures.removeValue(forKey: attemptKey)
     }
 
 
@@ -423,18 +586,14 @@ final class MailboxIncrementalSyncCoordinator {
 
     /// Gmail: reject an out-of-app run unless the user opted into background access;
     /// otherwise authenticate if needed.
-    nonisolated static let liveReadiness: (MailProvider, String, Bool) async -> Bool = { provider, namespace, backgroundOnly in
-        do {
-            try await KeychainStore.withoutAuthenticationUI {
-                try await MailboxProviderRegistry.ensureReady(
-                    for: provider,
-                    namespace: namespace,
-                    backgroundOnly: backgroundOnly
-                )
-            }
-            return true
-        } catch {
-            return false
+    nonisolated static let liveReadiness: (MailProvider, String, Bool) async throws -> Bool = { provider, namespace, backgroundOnly in
+        try await KeychainStore.withoutAuthenticationUI {
+            try await MailboxProviderRegistry.ensureReady(
+                for: provider,
+                namespace: namespace,
+                backgroundOnly: backgroundOnly
+            )
         }
+        return true
     }
 }

@@ -25,6 +25,12 @@ Diese Bedingungen regeln die Nutzung der SIFT-App (nachfolgend „Dienst“). Mi
 
 SIFT ist eine persönliche Produktivitäts-App für iOS/macOS, die aus E-Mails, Kalendern und manuellen Eingaben erfasste Aufgaben standardmäßig mithilfe geräteinterner Analysen und Regeln einordnet und organisiert. Nutzer können über die offizielle ChatGPT-Verbindung und mit gesonderter Zustimmung für die jeweilige Datenart OpenAI-Analysen anfordern. Der Dienst wird vom Betreiber privat entwickelt und kostenlos bereitgestellt.
 
+### Kostenloser Dienst und Entwicklungsversion
+
+- Alle SIFT-App-Funktionen sind kostenlos. Abonnements, Nutzungs- und Netzgebühren externer Anbieter fallen gesondert an.
+- Die aktuelle Entwicklungsversion enthält weder Werbung noch In-App-Käufe.
+- Dies bestätigt weder die App-Veröffentlichung noch die Veröffentlichung dieser Bedingungen. Bestehende Gültigkeitsdaten bleiben unverändert; ein neues Datum wird nicht festgelegt.
+
 ---
 
 ## 2. Nutzungsbedingungen

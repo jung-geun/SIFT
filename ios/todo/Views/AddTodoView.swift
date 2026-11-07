@@ -37,7 +37,6 @@ struct AddTodoView: View {
     @Environment(\.verticalSizeClass) private var verticalSizeClass
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Query(sort: \Persona.updatedAt, order: .reverse) private var personas: [Persona]
 
     @ObservedObject var draft: AddTodoDraft
     @State private var calendarSources: [CalendarService.CalendarSourceGroup] = []
@@ -458,14 +457,6 @@ struct AddTodoView: View {
             let document = VocabularySourceDocumentBuilder.todo(todo)
             Task { await observer.observeDocument(document, false) }
         }
-
-        // 수동 추가 즉시 온디바이스 AFM 약한 정렬 (비차단, ANE 실행)
-        // 수동 우선순위 지정 시 QuickSortService.analyzeOnAdd 내부 guard에서 자동 생략
-        let ctx = PersonaContext(
-            types: personas.first?.personaTypes ?? [],
-            description: personas.first?.descriptionText ?? ""
-        )
-        Task { await QuickSortService.analyzeOnAdd(todo, persona: ctx, context: modelContext) }
 
         if !draft.showCalendarError { dismiss() }
     }

@@ -244,13 +244,13 @@ struct HMACIdentityLifecycleTests {
             try KeychainStore.setDeviceOnly(service: vocabularyService, account: primaryAccount, data: original)
             let store = VocabularyHMACKeyStore()
             KeychainStore.setReadFailureForTesting(service: vocabularyService, status: errSecInteractionNotAllowed)
-            await #expect(throws: KeychainStoreError.security(errSecInteractionNotAllowed)) { _ = try await store.readOrCreate() }
+            await #expect(throws: KeychainStoreError.authenticationRequired) { _ = try await store.readOrCreate() }
             KeychainStore.setReadFailureForTesting(service: vocabularyService, status: nil)
             #expect(try KeychainStore.getDeviceOnly(service: vocabularyService, account: primaryAccount) == original)
             _ = try await store.readOrCreate()
             enableFullSync()
             KeychainStore.setWriteFailureForTesting(service: vocabularyService, status: errSecAuthFailed)
-            await #expect(throws: KeychainStoreError.security(errSecAuthFailed)) { try await store.applyFullSyncPolicy() }
+            await #expect(throws: KeychainStoreError.authenticationRequired) { try await store.applyFullSyncPolicy() }
             KeychainStore.setWriteFailureForTesting(service: vocabularyService, status: nil)
             #expect(try KeychainStore.getDeviceOnly(service: vocabularyService, account: primaryAccount) == original)
             #expect(try KeychainStore.synchronizableAccounts(service: vocabularyService).isEmpty)
@@ -307,7 +307,7 @@ struct HMACIdentityLifecycleTests {
             let encoded = original.base64EncodedString()
             try KeychainStore.setDeviceOnly(service: ledgerService, account: "key", data: Data(encoded.utf8))
             KeychainStore.setReadFailureForTesting(service: ledgerService, status: errSecInteractionNotAllowed)
-            #expect(throws: KeychainStoreError.security(errSecInteractionNotAllowed)) { _ = try MailAnalysisLedgerKeyStore.key() }
+            #expect(throws: KeychainStoreError.authenticationRequired) { _ = try MailAnalysisLedgerKeyStore.key() }
             KeychainStore.setReadFailureForTesting(service: ledgerService, status: nil)
             #expect(try KeychainStore.getDeviceOnly(service: ledgerService, account: "key") == Data(encoded.utf8))
             #expect(try KeychainStore.getDeviceOnly(service: ledgerService, account: primaryAccount) == nil)
@@ -329,13 +329,13 @@ struct HMACIdentityLifecycleTests {
             let encoded = original.base64EncodedString()
             try KeychainStore.setDeviceOnly(service: ledgerService, account: "key", data: Data(encoded.utf8))
             KeychainStore.setWriteFailureForTesting(service: ledgerService, status: errSecAuthFailed)
-            #expect(throws: KeychainStoreError.security(errSecAuthFailed)) { _ = try MailAnalysisLedgerKeyStore.key() }
+            #expect(throws: KeychainStoreError.authenticationRequired) { _ = try MailAnalysisLedgerKeyStore.key() }
             #expect(try KeychainStore.getDeviceOnly(service: ledgerService, account: "key") == Data(encoded.utf8))
             KeychainStore.setWriteFailureForTesting(service: ledgerService, status: nil)
             #expect(try bytes(MailAnalysisLedgerKeyStore.key()) == original)
             enableFullSync()
             KeychainStore.setWriteFailureForTesting(service: ledgerService, status: errSecAuthFailed)
-            #expect(throws: KeychainStoreError.security(errSecAuthFailed)) { try MailAnalysisLedgerKeyStore.applyFullSyncPolicy() }
+            #expect(throws: KeychainStoreError.authenticationRequired) { try MailAnalysisLedgerKeyStore.applyFullSyncPolicy() }
             KeychainStore.setWriteFailureForTesting(service: ledgerService, status: nil)
             #expect(try KeychainStore.getDeviceOnly(service: ledgerService, account: primaryAccount) == original)
             #expect(try KeychainStore.getDeviceOnly(service: ledgerService, account: "key") == Data(encoded.utf8))

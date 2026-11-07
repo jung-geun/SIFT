@@ -336,8 +336,6 @@ struct TodoListView: View {
     let globalSearchEmailContainer: ModelContainer?
     let globalSearchMeetingContainer: ModelContainer?
     let globalSearchMailAccess: MailboxCachedProviderAccess?
-    /// Root-owned onboarding/tutorial, selected-tab, and foreground eligibility.
-    let isAdPlacementEligible: Bool
 
     @State private var showAddTodo = false
     @State private var addTodoDraft = AddTodoDraft()
@@ -370,14 +368,12 @@ struct TodoListView: View {
         globalSearchAppContainer: ModelContainer? = nil,
         globalSearchEmailContainer: ModelContainer? = nil,
         globalSearchMeetingContainer: ModelContainer? = nil,
-        globalSearchMailAccess: MailboxCachedProviderAccess? = nil,
-        isAdPlacementEligible: Bool = false
+        globalSearchMailAccess: MailboxCachedProviderAccess? = nil
     ) {
         self.globalSearchAppContainer = globalSearchAppContainer
         self.globalSearchEmailContainer = globalSearchEmailContainer
         self.globalSearchMeetingContainer = globalSearchMeetingContainer
         self.globalSearchMailAccess = globalSearchMailAccess
-        self.isAdPlacementEligible = isAdPlacementEligible
     }
     // MARK: - iCloud Sync (앱 레벨에서 주입받음 — todoApp.swift의 @StateObject)
     @EnvironmentObject private var syncMonitor: CloudSyncMonitor
@@ -677,7 +673,6 @@ struct TodoListView: View {
         VStack(spacing: 0) {
             #if !targetEnvironment(macCatalyst)
             boardCategoryBar
-            taskBanner
             #endif
             TodoBoardView(
                 todos: todos,
@@ -784,17 +779,9 @@ struct TodoListView: View {
     private var todoList: some View {
         VStack(spacing: 0) {
             filterBar
-            taskBanner
             todoRows
         }
         .background(AppTheme.canvas)
-    }
-
-    @ViewBuilder
-    private var taskBanner: some View {
-        #if !targetEnvironment(macCatalyst)
-        BannerAdStrip(isEligible: isAdPlacementEligible && globalSearchText.isEmpty)
-        #endif
     }
 
     private var todoRows: some View {
@@ -932,7 +919,9 @@ struct TodoListView: View {
             }
             .frame(width: 28)
             VStack(alignment: .leading, spacing: 6) {
-                Text(prioritizingStatusText)
+                Text(showPrioritizingIndicator
+                    ? prioritizingStatusText
+                    : AppLanguage.localized("메일 내용 분석 중…", defaultValue: "메일 내용 분석 중…", language: .current))
                     .font(.subheadline.weight(.medium))
                     .fixedSize(horizontal: false, vertical: true)
                 Text(

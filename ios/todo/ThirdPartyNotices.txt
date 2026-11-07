@@ -9,32 +9,6 @@ every component or optional feature is active in this iOS app.
 
 
 ===== SIFT-LICENSE-SECTION =====
-Google Mobile Ads 13.11.0 / User Messaging Platform 3.1.0
-
-Google SDK binaries are not relicensed under SIFT's Apache-2.0 license.
-Google Mobile Ads SDK use is subject to the terms governing AdMob:
-https://developers.google.com/admob/terms
-https://adsense.google.com/adsense/terms
-
-The Swift Package Manager wrapper sources are Copyright 2021 Google LLC.
-They are licensed under the Apache License, Version 2.0; the complete
-Apache-2.0 license text appears in the SIFT LICENSE section below.
-Sources:
-https://github.com/googleads/swift-package-manager-google-mobile-ads/tree/13.11.0
-https://github.com/googleads/swift-package-manager-google-user-messaging-platform/tree/3.1.0
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use these wrapper sources except in compliance with the License.
-You may obtain a copy of the License at
-http://www.apache.org/licenses/LICENSE-2.0
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-
-
-===== SIFT-LICENSE-SECTION =====
 SIFT — LICENSE
 
 

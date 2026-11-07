@@ -36,12 +36,18 @@ enum MailboxProviderRegistry {
         namespace: String,
         backgroundOnly: Bool = false
     ) async throws {
-        if backgroundOnly {
-            try await KeychainStore.withoutAuthenticationUI {
-                try await ensureSession(for: provider, namespace: namespace, backgroundOnly: true)
+        do {
+            if backgroundOnly {
+                try await KeychainStore.withoutAuthenticationUI {
+                    try await ensureSession(for: provider, namespace: namespace, backgroundOnly: true)
+                }
+            } else {
+                try await ensureSession(for: provider, namespace: namespace, backgroundOnly: false)
             }
-        } else {
-            try await ensureSession(for: provider, namespace: namespace, backgroundOnly: false)
+            MailCredentialApprovalCenter.shared.resolveMailApproval(provider: provider, namespace: namespace)
+        } catch KeychainStoreError.authenticationRequired {
+            MailCredentialApprovalCenter.shared.requireMailApproval(provider: provider, namespace: namespace)
+            throw KeychainStoreError.authenticationRequired
         }
     }
 
