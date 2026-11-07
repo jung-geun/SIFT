@@ -544,7 +544,8 @@ final class FullCloudSyncEngine {
                 let hasCompetingPeers = Set(peers.map { checkpoint($0).digest ?? "deleted" }).count > 1
                 let localCompetesWithRemote = local != nil && local != checkpoint(remote).digest
                     && (baseline == nil || (local != baseline?.digest && newer(remote, than: baseline!)))
-                if (hasCompetingPeers || localCompetesWithRemote), peers.allSatisfy({ !$0.isTombstone }) {
+                if (hasCompetingPeers || localCompetesWithRemote), peers.allSatisfy({ !$0.isTombstone }),
+                   local != nil || baseline == nil {
                     do {
                         var candidates = [Data]()
                         var peerByDigest = [String: CloudDataRevision]()

@@ -609,32 +609,26 @@ final class EmailService: NSObject, MailboxPagingProvider {
             token: token
         )
 
-        let syncedEmails = await MainActor.run {
-            let context = ModelContext(AppDataContainer.shared.emailContainer)
-            return (try? context.fetch(FetchDescriptor<EmailMessage>())) ?? []
-        }
+        let emailContext = await MainActor.run { ModelContext(AppDataContainer.shared.emailContainer) }
         let ingestionEngine = EmailIngestionEngine()
         var todos: [Todo] = []
         var successfullyAnalyzedIDs: [String] = []
         for message in messages {
             do {
-                let synced = syncedEmails.first { email in
-                    email.provider == message.provider
-                        && (message.sourceAccountNamespace.isEmpty
-                            || email.sourceAccountNamespace == message.sourceAccountNamespace)
-                        && (email.providerMessageID == message.id
-                            || (!message.providerMessageID.isEmpty && email.providerMessageID == message.providerMessageID)
-                            || (!message.messageID.isEmpty && email.providerGlobalMessageID == message.messageID))
-                        && EmailAnalysisContract.matchesAnalysis(
-                            email,
-                            subject: message.subject,
-                            body: message.body
-                        )
+                let synced: SyncedMailAnalysis? = await MainActor.run {
+                    let providerRaw = message.provider.rawValue
+                    let messageID = message.providerMessageID.isEmpty ? message.id : message.providerMessageID
+                    let rows = (try? emailContext.fetch(FetchDescriptor<EmailMessage>(
+                        predicate: #Predicate { $0.providerRawValue == providerRaw && $0.rawMessageID == messageID }
+                    ))) ?? []
+                    let namespace = message.sourceAccountNamespace.lowercased()
+                    return rows.first { namespace.isEmpty || $0.sourceAccountNamespace.lowercased() == namespace }
+                        .flatMap { SyncedMailAnalysis($0, subject: message.subject, body: message.body) }
                 }
                 todos += try await ingestionEngine.extractTodos(
                     from: message,
                     allowFoundationModels: allowFoundationModels,
-                    existingEmail: synced
+                    existingAnalysis: synced
                 )
                 successfullyAnalyzedIDs.append(message.id)
             } catch is CancellationError {

@@ -961,9 +961,11 @@ final class FullCloudSyncService: ObservableObject {
         worker = Task.detached { @MainActor [weak self] in
             while let self, !Task.isCancelled, UserCloudSyncPolicy.isRequested {
                 // synchronizeNow publishes its failure once, with its actual phase.
-                _ = try? await self.runPeriodicTickIfNeeded {
+                let ran = (try? await self.runPeriodicTickIfNeeded {
                     try await self.synchronizeNow()
-                }
+                }) ?? true
+                // Idle ticks skip the full pass; still poll credential changes that arrive via iCloud Keychain.
+                if !ran, UserCloudSyncPolicy.isEnabled { _ = await self.connectionSync.reconcile() }
                 do { try await Task.sleep(for: Self.periodicTickInterval) }
                 catch { break }
             }

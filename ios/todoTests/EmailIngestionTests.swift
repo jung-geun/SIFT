@@ -203,81 +203,73 @@ struct EmailIngestionTests {
             )
         })
 
-        // 1. Analyze and apply twice on Store A -> single Todo per action, preserved review triage.
-        let firstExtractA = try await engine.extractTodos(from: message)
-        let secondExtractA = try await engine.extractTodos(from: message)
+        // 1. Two devices with different local IMAP UIDs share the same provider-stable
+        // X-GM-MSGID and an already synced complete-body analysis -> no model call, same IDs.
+        func syncedEmail(uid: String) -> EmailMessage {
+            let row = EmailMessage(
+                id: "gmail-imap:8881", threadID: message.threadID, subject: message.subject,
+                from: message.from, snippet: message.snippet, body: message.body,
+                receivedAt: message.receivedAt, provider: .gmail, rawMessageID: uid,
+                providerGlobalMessageID: "8881", labelIDs: ["INBOX"], isInInbox: true,
+                sourceAccountNamespace: "user@gmail.com"
+            )
+            row.analysisState = .analyzed
+            row.analysisVersion = EmailAnalysisContract.summaryContractVersion
+            row.analysisSummary = "Quarterly release sign-off requested."
+            row.analysisKeyPoints = ["Checklist verification"]
+            row.analysisActionItems = ["Verify the release checklist", "Confirm staging sign-off"]
+            row.analyzedBodyFingerprint = EmailAnalysisContract.fingerprint(subject: row.subject, body: row.body)
+            return row
+        }
+        func device(uid: String, namespace: String) -> GmailMessage {
+            GmailMessage(
+                id: message.id, threadID: message.threadID, messageID: message.messageID,
+                subject: message.subject, from: message.from, snippet: message.snippet,
+                body: message.body, htmlBody: nil, receivedAt: message.receivedAt,
+                labelIds: message.labelIds, isBulk: false, provider: .gmail,
+                providerMessageID: uid, sourceAccountNamespace: namespace
+            )
+        }
+        let messageA = device(uid: "101", namespace: "user@gmail.com")
+        let messageB = device(uid: "999", namespace: "USER@GMAIL.COM")
+        let analysisA = try #require(SyncedMailAnalysis(syncedEmail(uid: "101"), subject: messageA.subject, body: messageA.body))
+        let analysisB = try #require(SyncedMailAnalysis(syncedEmail(uid: "999"), subject: messageB.subject, body: messageB.body))
+        let firstExtractA = try await engine.extractTodos(from: messageA, existingAnalysis: analysisA)
+        let secondExtractA = try await engine.extractTodos(from: messageA, existingAnalysis: analysisA)
+        let extractB = try await engine.extractTodos(from: messageB, existingAnalysis: analysisB)
+        #expect(modelCalls == 0)
         #expect(firstExtractA.map(\.id) == secondExtractA.map(\.id))
-        #expect(firstExtractA.allSatisfy { $0.triage == .review })
+        #expect(firstExtractA.map(\.id) == extractB.map(\.id))
+        #expect(Set(firstExtractA.map(\.id)).count == 2)
+        #expect(firstExtractA.allSatisfy { $0.triage == .review && $0.sourceAccountNamespace == "user@gmail.com" })
+        // Reordered actions do not change an action's identity.
+        let reorderedRow = syncedEmail(uid: "101")
+        reorderedRow.analysisActionItems = ["Confirm staging sign-off", "Verify the release checklist"]
+        let reorderedAnalysis = try #require(SyncedMailAnalysis(reorderedRow, subject: messageA.subject, body: messageA.body))
+        let reorderedSynced = try await engine.extractTodos(from: messageA, existingAnalysis: reorderedAnalysis)
+        #expect(reorderedSynced.map(\.title) == firstExtractA.map(\.title).reversed())
+        #expect(Set(reorderedSynced.map(\.id)) == Set(firstExtractA.map(\.id)))
 
-        let applyA1 = EmailService.shared.applyExtractedItems(
-            todos: firstExtractA,
-            events: [],
-            to: contextA
-        )
-        let applyA2 = EmailService.shared.applyExtractedItems(
-            todos: secondExtractA,
-            events: [],
-            to: contextA
-        )
+        // 2. Applying twice on A stores one review Todo per action.
+        let applyA1 = EmailService.shared.applyExtractedItems(todos: firstExtractA, events: [], to: contextA)
+        let applyA2 = EmailService.shared.applyExtractedItems(todos: secondExtractA, events: [], to: contextA)
         try contextA.save()
-        #expect(applyA1.todoCount == 2)
-        #expect(applyA2.todoCount == 0)
+        #expect(applyA1.todoCount == 2 && applyA2.todoCount == 0)
         #expect(try contextA.fetch(FetchDescriptor<Todo>()).count == 2)
 
-        // 2. Analyze independently on Store B (even with a different IMAP UID) -> identical Todo UUIDs;
-        // CloudModelCodec merge/apply converges to 2 total Todos instead of 4.
-        let reindexedMessageB = GmailMessage(
-            id: message.id,
-            threadID: message.threadID,
-            messageID: message.messageID,
-            subject: message.subject,
-            from: message.from,
-            snippet: message.snippet,
-            body: message.body,
-            htmlBody: nil,
-            receivedAt: message.receivedAt,
-            labelIds: message.labelIds,
-            isBulk: false,
-            provider: .gmail,
-            providerMessageID: "999",
-            sourceAccountNamespace: "USER@GMAIL.COM"
-        )
-        let syncedEmailB = EmailMessage(
-            id: "gmail-imap:8881",
-            threadID: message.threadID,
-            subject: message.subject,
-            from: message.from,
-            snippet: message.snippet,
-            body: message.body,
-            receivedAt: message.receivedAt,
-            provider: .gmail,
-            rawMessageID: "999",
-            providerGlobalMessageID: "8881",
-            labelIDs: ["INBOX"],
-            isInInbox: true,
-            sourceAccountNamespace: "user@gmail.com"
-        )
-        syncedEmailB.analysisState = .analyzed
-        syncedEmailB.analysisVersion = EmailAnalysisContract.summaryContractVersion
-        syncedEmailB.analysisSummary = "Quarterly release sign-off requested."
-        syncedEmailB.analysisKeyPoints = ["Checklist verification"]
-        syncedEmailB.analysisActionItems = ["Verify the release checklist", "Confirm staging sign-off"]
-        syncedEmailB.analyzedBodyFingerprint = EmailAnalysisContract.fingerprint(
-            subject: syncedEmailB.subject,
-            body: syncedEmailB.body
-        )
-        let callsBeforeSyncedSkip = modelCalls
-        let extractB = try await engine.extractTodos(from: reindexedMessageB, existingEmail: syncedEmailB)
-        #expect(modelCalls == callsBeforeSyncedSkip)
-        #expect(extractB.map(\.id) == firstExtractA.map(\.id))
-        _ = EmailService.shared.applyExtractedItems(todos: extractB, events: [], to: contextB)
+        // 3. After A's Todos sync into B, B's independent extraction of the same message
+        // cannot duplicate them. Truly simultaneous offline creation still publishes
+        // competing payloads for FullCloudSync review rather than being back-dated to match.
+        try CloudModelCodec.mergeMainStore(from: contextA, into: contextB)
         try contextB.save()
-
-        try CloudModelCodec.mergeMainStore(from: contextB, into: contextA)
-        try contextA.save()
-        let mergedTodos = try contextA.fetch(FetchDescriptor<Todo>())
+        let applyB = EmailService.shared.applyExtractedItems(todos: extractB, events: [], to: contextB)
+        try contextB.save()
+        #expect(applyB.todoCount == 0)
+        let mergedTodos = try contextB.fetch(FetchDescriptor<Todo>())
         #expect(mergedTodos.count == 2)
+        #expect(Set(mergedTodos.map(\.id)) == Set(firstExtractA.map(\.id)))
         #expect(mergedTodos.allSatisfy { $0.triage == .review })
+        #expect(firstExtractA.allSatisfy { $0.createdAt > message.receivedAt })
 
         // 3. Existing legacy random-UUID Todo keeps its ID and suppresses duplicate insertion by provenance.
         let containerLegacy = try makeInMemoryContainer()
@@ -296,7 +288,7 @@ struct EmailIngestionTests {
         legacyContext.insert(legacyTodo)
         try legacyContext.save()
 
-        let freshCandidates = try await engine.extractTodos(from: message)
+        let freshCandidates = try await engine.extractTodos(from: message, existingAnalysis: analysisA)
         let legacyApply = EmailService.shared.applyExtractedItems(
             todos: freshCandidates,
             events: [],
