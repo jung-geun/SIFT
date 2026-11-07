@@ -558,7 +558,7 @@ struct MailboxIncrementalSyncCoordinatorTests {
         // Call 2 at time T=10s (< 30s) -> throttled
         currentTime = Date(timeIntervalSince1970: 1_000_010)
         let r2 = await coordinator.sync(provider: .gmail, minimumInterval: 30)
-        #expect(r2 == false)
+        #expect(r2 == true) // Healthy throttling is not a synchronization failure.
         #expect(gmailProvider.fetchInboxUpdatesCalls.count == 1)
 
         // Call 3 at time T=35s (>= 30s) -> allowed
@@ -574,13 +574,14 @@ struct MailboxIncrementalSyncCoordinatorTests {
         }
         await gmailProvider.waitUntilSuspended()
 
-        let r5 = await coordinator.sync(provider: .gmail, minimumInterval: 0)
-        #expect(r5 == false)
+        let task5 = Task { await coordinator.sync(provider: .gmail, minimumInterval: 0) }
+        for _ in 0..<10 { await Task.yield() }
         #expect(gmailProvider.fetchInboxUpdatesCalls.count == 3)
 
         gmailProvider.resumeUpdate(with: MailboxPage(messages: [], nextCursor: nil, newestCursor: "42:103"))
         let r4 = await task4.value
         #expect(r4 == true)
+        #expect(await task5.value)
         #expect(gmailProvider.fetchInboxUpdatesCalls.count == 3)
         #expect(cursorStore.cursor(for: .gmail, namespace: "user@gmail.com") == "42:103")
     }
@@ -653,7 +654,7 @@ extension MailboxIncrementalSyncCoordinatorTests {
         #expect(try context.fetch(FetchDescriptor<EmailMessage>()).allSatisfy(\.hasCompleteBody))
     }
 
-    @Test("concurrent manual and scheduled body requests share one sequential batch")
+    @Test("body batches coalesce while the same account's discovery continues independently")
     func bodyBatchCoalescesConcurrentRequests() async throws {
         let defaults = makeDefaults()
         defaults.set("user@gmail.com", forKey: "pieroot.todo.imap.account")
@@ -669,11 +670,16 @@ extension MailboxIncrementalSyncCoordinatorTests {
         )
         let first = Task { await coordinator.prefetchBodies(provider: .gmail) }
         await provider.waitUntilContentSuspended()
-        #expect(!(await coordinator.sync(provider: .gmail, backgroundOnly: true)))
-        #expect(!(await coordinator.prefetchBodies(provider: .gmail)))
+        #expect(await coordinator.discover(provider: .gmail))
+        #expect(provider.fetchInboxPageCalls.count == 1)
+        let scheduled = Task { await coordinator.sync(provider: .gmail) }
+        let duplicate = Task { await coordinator.prefetchBodies(provider: .gmail) }
+        for _ in 0..<10 { await Task.yield() }
         #expect(provider.contentCalls == ["12"])
         provider.resumeContent()
         #expect(await first.value)
+        #expect(await scheduled.value)
+        #expect(await duplicate.value)
         #expect(provider.contentCalls.count == MailboxPagingPolicy.bodyPrefetchBatchSize)
     }
 
@@ -817,5 +823,250 @@ extension MailboxIncrementalSyncCoordinatorTests {
         let failedRows = try ModelContext(container).fetch(FetchDescriptor<EmailMessage>())
             .filter { (Int($0.providerMessageID) ?? 0) >= 10 }
         #expect(failedRows.allSatisfy { $0.lastBodyFetchAttemptAt > .distantPast && !$0.hasCompleteBody })
+    }
+
+    @Test("a suspended Gmail account does not delay Outlook discovery or complete-body hydration")
+    func accountsProgressIndependently() async throws {
+        let defaults = makeDefaults()
+        defaults.set("user@gmail.com", forKey: "pieroot.todo.imap.account")
+        defaults.set("user@outlook.com", forKey: "pieroot.todo.outlook.account")
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let cursors = MailboxUpdateCursorStore(defaults: defaults)
+        cursors.setCursor("g:1", for: .gmail, namespace: "user@gmail.com")
+        cursors.setCursor("o:1", for: .outlook, namespace: "user@outlook.com")
+        let gmail = ScriptedPagingProvider(provider: .gmail)
+        gmail.suspendNextUpdate = true
+        let outlook = ScriptedPagingProvider(provider: .outlook)
+        outlook.suspendNextContent = true
+        let metadata = MailboxMessageMetadata(
+            provider: .outlook, providerMessageID: "2", sourceAccountNamespace: "user@outlook.com",
+            threadID: "", subject: "Outlook", from: "", snippet: "Preview", receivedAt: Date(),
+            isRead: false, isInInbox: true, gmailLabelIDs: [],
+            outlookInferenceClassificationRawValue: "", providerCategoryNames: [], providerFolderID: "INBOX"
+        )
+        outlook.updateResponses = [MailboxPage(messages: [metadata], nextCursor: nil, newestCursor: "o:2")]
+        outlook.contentResponses["2"] = MailboxMessageContent(metadata: metadata, body: "Complete Outlook body.", htmlBody: "")
+        var analysisAccounts: [String] = []
+        let coordinator = MailboxIncrementalSyncCoordinator(
+            cursorStore: cursors, localStore: MailboxLocalStore(defaults: defaults, saveContext: { try $0.save() }),
+            makeContext: { context }, resolveProvider: { $0 == .gmail ? gmail : outlook },
+            ensureReady: { _, _, _ in true }, defaults: defaults,
+            enqueueAnalysis: { _, namespace in analysisAccounts.append(namespace) }
+        )
+        let task = Task { await coordinator.syncAvailableProviders() }
+        await gmail.waitUntilSuspended()
+        // Observe actual progress while Gmail remains suspended, then await
+        // durable hydration, not merely the provider's fetch-start counter.
+        await outlook.waitUntilContentSuspended()
+        #expect(outlook.contentCalls == ["2"])
+        outlook.resumeContent()
+        #expect(await coordinator.prefetchBodies(provider: .outlook))
+        #expect(cursors.cursor(for: .outlook, namespace: "user@outlook.com") == "o:2")
+        #expect(try context.fetch(FetchDescriptor<EmailMessage>()).first?.body == "Complete Outlook body.")
+        #expect(analysisAccounts.contains("user@outlook.com"))
+        #expect(gmail.trashMessageIDs.isEmpty && outlook.trashMessageIDs.isEmpty)
+        gmail.resumeUpdate(throwing: URLError(.notConnectedToInternet))
+        #expect(await task.value)
+        #expect(cursors.cursor(for: .gmail, namespace: "user@gmail.com") == "g:1")
+    }
+
+    @Test("complete-body hydration still progresses when metadata discovery fails")
+    func discoveryFailureDoesNotStarveBodies() async throws {
+        let defaults = makeDefaults()
+        defaults.set("user@gmail.com", forKey: "pieroot.todo.imap.account")
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        // This fixture represents an already-upgraded cache. A parser migration
+        // legitimately invalidates pre-migration cursors before discovery.
+        try GmailIMAPContentMigration.migrateIfNeeded(
+            account: "user@gmail.com", context: context, defaults: defaults
+        )
+        try insertBodyBacklog(2, in: context)
+        let cursors = MailboxUpdateCursorStore(defaults: defaults)
+        cursors.setCursor("g:1", for: .gmail, namespace: "user@gmail.com")
+        let gmail = ScriptedPagingProvider(provider: .gmail)
+        gmail.updateError = URLError(.timedOut)
+        let coordinator = MailboxIncrementalSyncCoordinator(
+            cursorStore: cursors, localStore: MailboxLocalStore(defaults: defaults, saveContext: { try $0.save() }),
+            makeContext: { context }, resolveProvider: { _ in gmail },
+            ensureReady: { _, _, _ in true }, defaults: defaults, enqueueAnalysis: { _, _ in }
+        )
+        #expect(!(await coordinator.sync(provider: .gmail)))
+        #expect(gmail.contentCalls == ["2", "1"])
+        #expect(try context.fetch(FetchDescriptor<EmailMessage>()).allSatisfy(\.hasCompleteBody))
+        #expect(cursors.cursor(for: .gmail, namespace: "user@gmail.com") == "g:1")
+        #expect(gmail.trashMessageIDs.isEmpty)
+        #expect((30...60).contains(MailboxPagingPolicy.pollInterval))
+        #expect(MailboxPagingPolicy.backgroundRefreshInterval >= 15 * 60)
+    }
+}
+
+@MainActor
+extension MailboxIncrementalSyncCoordinatorTests {
+    @Test("both account lanes share one authentication attempt and a rejected account backs off independently")
+    func sharedReadinessAndAccountBackoff() async throws {
+        let defaults = makeDefaults()
+        defaults.set("user@gmail.com", forKey: "pieroot.todo.imap.account")
+        defaults.set("user@outlook.com", forKey: "pieroot.todo.outlook.account")
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let gmail = ScriptedPagingProvider(provider: .gmail)
+        let outlook = ScriptedPagingProvider(provider: .outlook)
+        var attempts = 0
+        var continuation: CheckedContinuation<Bool, Error>?
+        var suspend = true
+        var outlookReady = false
+        var session = 1
+        var time = Date(timeIntervalSince1970: 10_000)
+        let coordinator = MailboxIncrementalSyncCoordinator(
+            localStore: MailboxLocalStore(defaults: defaults, saveContext: { try $0.save() }),
+            makeContext: { context }, resolveProvider: { $0 == .gmail ? gmail : outlook },
+            ensureReady: { provider, _, _ in
+                if provider == .gmail { return true }
+                attempts += 1
+                if suspend {
+                    suspend = false
+                    return try await withCheckedThrowingContinuation { continuation = $0 }
+                }
+                guard outlookReady else { throw OutlookIMAPError.authenticationFailed }
+                return true
+            },
+            sessionGeneration: { _ in session }, defaults: defaults,
+            enqueueAnalysis: { _, _ in }, now: { time }
+        )
+        let discovery = Task { await coordinator.discover(provider: .outlook) }
+        let bodies = Task { await coordinator.prefetchBodies(provider: .outlook) }
+        for _ in 0..<100 where continuation == nil { await Task.yield() }
+        #expect(continuation != nil)
+        #expect(attempts == 1)
+        continuation?.resume(throwing: OutlookIMAPError.authenticationFailed)
+        #expect(!(await discovery.value))
+        #expect(!(await bodies.value))
+        for _ in 0..<40 {
+            time = time.addingTimeInterval(MailboxPagingPolicy.pollInterval)
+            #expect(await coordinator.syncAvailableProviders())
+        }
+        #expect(attempts <= 6)
+        #expect(gmail.fetchInboxPageCalls.count == 1)
+        #expect(gmail.fetchInboxUpdatesCalls.count == 40)
+        #expect(outlook.fetchInboxPageCalls.isEmpty && outlook.contentCalls.isEmpty)
+        // A successful explicit reconnect changes the session generation, so it
+        // need not wait out a previous credential's account-local backoff.
+        let rejectedAttempts = attempts
+        outlookReady = true
+        session += 1
+        #expect(await coordinator.prefetchBodies(provider: .outlook))
+        #expect(attempts == rejectedAttempts + 1)
+    }
+}
+
+@MainActor
+extension MailboxIncrementalSyncCoordinatorTests {
+    @Test("omitted cursor stores use the coordinator's injected preference domain")
+    func implicitCursorStoreRespectsInjectedDefaults() async throws {
+        let firstDefaults = makeDefaults()
+        let secondDefaults = makeDefaults()
+        for defaults in [firstDefaults, secondDefaults] {
+            defaults.set("user@gmail.com", forKey: "pieroot.todo.imap.account")
+        }
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        MailboxUpdateCursorStore(defaults: firstDefaults)
+            .setCursor("first:1", for: .gmail, namespace: "user@gmail.com")
+        let firstProvider = ScriptedPagingProvider(provider: .gmail)
+        let secondProvider = ScriptedPagingProvider(provider: .gmail)
+        let first = MailboxIncrementalSyncCoordinator(
+            localStore: MailboxLocalStore(defaults: firstDefaults, saveContext: { try $0.save() }),
+            makeContext: { context }, resolveProvider: { _ in firstProvider },
+            ensureReady: { _, _, _ in true }, defaults: firstDefaults, enqueueAnalysis: { _, _ in }
+        )
+        let second = MailboxIncrementalSyncCoordinator(
+            localStore: MailboxLocalStore(defaults: secondDefaults, saveContext: { try $0.save() }),
+            makeContext: { context }, resolveProvider: { _ in secondProvider },
+            ensureReady: { _, _, _ in true }, defaults: secondDefaults, enqueueAnalysis: { _, _ in }
+        )
+        #expect(await first.discover(provider: .gmail))
+        #expect(firstProvider.fetchInboxPageCalls.isEmpty)
+        #expect(firstProvider.fetchInboxUpdatesCalls == ["first:1"])
+        #expect(await second.discover(provider: .gmail))
+        #expect(secondProvider.fetchInboxPageCalls.count == 1)
+        #expect(MailboxUpdateCursorStore(defaults: firstDefaults)
+            .cursor(for: .gmail, namespace: "user@gmail.com") == "first:1")
+        #expect(MailboxUpdateCursorStore(defaults: secondDefaults)
+            .cursor(for: .gmail, namespace: "user@gmail.com") == "baseline:1")
+    }
+}
+
+@MainActor
+extension MailboxIncrementalSyncCoordinatorTests {
+    @Test("transient offline or approval failures recover on the next foreground poll, not an exponential deadline",
+          arguments: ["network", "approval"])
+    func transientReadinessRecoversAtForegroundCadence(reason: String) async throws {
+        let defaults = makeDefaults()
+        defaults.set("user@outlook.com", forKey: "pieroot.todo.outlook.account")
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let provider = ScriptedPagingProvider(provider: .outlook)
+        var available = false
+        var attempts = 0
+        var time = Date(timeIntervalSince1970: 10_000)
+        let coordinator = MailboxIncrementalSyncCoordinator(
+            localStore: MailboxLocalStore(defaults: defaults, saveContext: { try $0.save() }),
+            makeContext: { context }, resolveProvider: { _ in provider },
+            ensureReady: { _, _, _ in
+                attempts += 1
+                guard available else {
+                    if reason == "approval" { throw KeychainStoreError.authenticationRequired }
+                    throw URLError(.notConnectedToInternet)
+                }
+                return true
+            },
+            sessionGeneration: { _ in 1 }, defaults: defaults,
+            enqueueAnalysis: { _, _ in }, now: { time }
+        )
+        for _ in 0..<40 {
+            #expect(!(await coordinator.syncAvailableProviders()))
+            time = time.addingTimeInterval(MailboxPagingPolicy.pollInterval)
+        }
+        #expect(attempts == 40) // One failed attempt shared across both lanes per tick.
+        available = true
+        #expect(await coordinator.syncAvailableProviders())
+        #expect(provider.fetchInboxPageCalls.count == 1)
+        #expect(provider.fetchInboxUpdatesCalls.count == 1)
+        #expect(MailboxUpdateCursorStore(defaults: defaults)
+            .cursor(for: .outlook, namespace: "user@outlook.com") == "baseline:1")
+    }
+
+    @Test("an explicit foreground refresh can retry corrected credentials during rejection backoff")
+    func explicitRefreshBypassesRejectionBackoff() async throws {
+        let defaults = makeDefaults()
+        defaults.set("user@outlook.com", forKey: "pieroot.todo.outlook.account")
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let provider = ScriptedPagingProvider(provider: .outlook)
+        var corrected = false
+        var attempts = 0
+        var time = Date(timeIntervalSince1970: 10_000)
+        let coordinator = MailboxIncrementalSyncCoordinator(
+            localStore: MailboxLocalStore(defaults: defaults, saveContext: { try $0.save() }),
+            makeContext: { context }, resolveProvider: { _ in provider },
+            ensureReady: { _, _, _ in
+                attempts += 1
+                guard corrected else { throw OutlookIMAPError.authenticationFailed }
+                return true
+            },
+            sessionGeneration: { _ in 1 }, defaults: defaults,
+            enqueueAnalysis: { _, _ in }, now: { time }
+        )
+        #expect(!(await coordinator.syncAvailableProviders()))
+        #expect(attempts == 1)
+        time = time.addingTimeInterval(MailboxPagingPolicy.pollInterval)
+        #expect(!(await coordinator.syncAvailableProviders()))
+        #expect(attempts == 1)
+        corrected = true
+        #expect(await coordinator.sync(provider: .outlook))
+        #expect(attempts > 1)
+        #expect(provider.fetchInboxPageCalls.count == 1)
     }
 }

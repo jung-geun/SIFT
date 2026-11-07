@@ -1208,6 +1208,11 @@ struct MeetingView: View {
             await coordinator.failFinalization(error)
             return
         }
+        // Keep the parent and ALL source namespaces protected across queued
+        // post-capture passes, including the gap after capture finalization.
+        let cloudProtection = MeetingCloudSyncProtection.begin(
+            meetingIDs: Set([parent.meetingID] + records.map(\.meetingID)))
+        defer { MeetingCloudSyncProtection.end(cloudProtection) }
         // Capture the persisted provisional bases before any suspended analyzer
         // can race a manual edit. A changed child is superseded independently.
         let bases = Dictionary(uniqueKeysWithValues: records.map { ($0.meetingID, $0.resultData) })

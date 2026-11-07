@@ -28,7 +28,9 @@ final class CloudSyncMonitor: ObservableObject {
         importedCount = 0
         phase = .importing
         let service = FullCloudSyncService.shared
-        subscription = service.$hasFinishedInitialRestore.combineLatest(service.$errorMessage)
+        subscription = service.$hasFinishedInitialRestore
+            .combineLatest(service.$errorMessage)
+            .removeDuplicates(by: { $0.0 == $1.0 && $0.1 == $1.1 })
             .receive(on: RunLoop.main)
             .sink { [weak self] finished, error in
                 guard let self else { return }
@@ -65,7 +67,7 @@ final class CloudSyncMonitor: ObservableObject {
     }
 
     private func finishImport() {
-        guard phase != .completed else { return }
+        guard phase == .importing else { return }
         completionTask?.cancel()
         withAnimation { phase = .completed }
         completionTask = Task {

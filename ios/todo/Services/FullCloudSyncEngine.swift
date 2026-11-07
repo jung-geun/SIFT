@@ -193,6 +193,16 @@ final class FullCloudSyncEngine {
     private(set) var storeIdentifier: String?
     private(set) var didEnqueueChanges = false
     private(set) var unavailableConflictKeys = Set<String>()
+    /// Skipped keys retain their journal intents; this pass is not globally complete.
+    private(set) var deferredKeys = Set<String>()
+    private(set) var didCompleteInventory = false
+    /// Models must settle before their original-file namespaces can be reconciled.
+    /// Kept for the entire pass, including after a successful model apply, so no
+    /// file deletion intent can be planned from the pre-restore inventory.
+    private(set) var unsettledMeetingKeys = Set<String>()
+    // Acknowledged tombstones also permit the next pass's read-only inventory;
+    // unsettledMeetingKeys always overrides them before file mutations.
+    private(set) var settledMeetingTombstones = Set<String>()
     private var journalDirty = false
 
     private enum Operation {
@@ -214,7 +224,8 @@ final class FullCloudSyncEngine {
 
     /// Review only actual competing model edits. Ordinary incoming updates and
     /// an initial cloud restore are not conflicts merely because bytes differ.
-    func modelConflicts(local: CloudModelCodec.Snapshot) async throws -> [CloudSyncConflict] {
+    func modelConflicts(local: CloudModelCodec.Snapshot,
+                        isTemporarilyUnavailable: (String) -> Bool = { _ in false }) async throws -> [CloudSyncConflict] {
         unavailableConflictKeys = []
         var descriptor = FetchDescriptor<CloudDataRevision>()
         descriptor.propertiesToFetch = [\.revisionID, \.itemKey, \.logicalClock, \.installationID, \.isTombstone, \.contentDigest]
@@ -222,10 +233,14 @@ final class FullCloudSyncEngine {
         let groups = Dictionary(grouping: rows, by: \.itemKey)
         var result = [CloudSyncConflict]()
         for key in Set(groups.keys).union(local.conflictingKeys).sorted() {
+            if isTemporarilyUnavailable(key) {
+                unavailableConflictKeys.insert(key)
+                continue
+            }
             let revisions = groups[key, default: []]
             let latest = revisions.max { newer($1, than: checkpoint($0)) }
             let baseline = journal.items[key]
-            let localDigest = local.records[key].map(CloudFileStore.digest)
+            let localDigest = local.digests[key] ?? local.records[key].map(CloudFileStore.digest)
             let pending = journal.pendingPublications[key]
             let concurrent = latest.map {
                 baseline != nil && localDigest != baseline?.digest && localDigest != checkpoint($0).digest
@@ -371,13 +386,28 @@ final class FullCloudSyncEngine {
     @discardableResult
     func reconcile(digests: [String: String], temporarilyUnavailable: Set<String> = [],
                    isTemporarilyUnavailable: (String) -> Bool = { _ in false },
-                   isValid: () -> Bool = { true }, didEnqueue: (() -> Void)? = nil,
+                   isValid: () -> Bool = { true }, isKeyValid: (String) -> Bool = { _ in true },
+                   didEnqueue: (() -> Void)? = nil,
                    load: (String) async throws -> Data?,
                    apply: (String, Data?) async throws -> Void) async throws -> Int {
+        var preferenceUnavailable = false
+        var firstItemError: (any Error)?
+        var invalidKeys = Set<String>()
         func isUnavailable(_ key: String) -> Bool {
-            temporarilyUnavailable.contains(key) || isTemporarilyUnavailable(key)
+            let dependsOnPreferences = key.hasPrefix("EmailMessage/") || key.hasPrefix("MailAnalysisLedgerRecord/")
+            let deferred = !isKeyValid(key) || invalidKeys.contains(key)
+                || (preferenceUnavailable && dependsOnPreferences)
+            if deferred {
+                deferredKeys.insert(key)
+                if CloudModelCodec.entityName(for: key) == "MeetingRecord" { unsettledMeetingKeys.insert(key) }
+            }
+            return deferred || temporarilyUnavailable.contains(key) || isTemporarilyUnavailable(key)
         }
         didEnqueueChanges = false
+        deferredKeys = []
+        didCompleteInventory = false
+        unsettledMeetingKeys = []
+        settledMeetingTombstones = []
         var missingPayloadKeys = Set<String>()
         try checkCurrent(isValid)
         var descriptor = FetchDescriptor<CloudDataRevision>()
@@ -394,7 +424,10 @@ final class FullCloudSyncEngine {
             storeIdentifier = revision.persistentModelID.storeIdentifier
             guard revision.logicalClock > 0, UUID(uuidString: revision.installationID) != nil,
                   !revision.itemKey.isEmpty, !revision.isTombstone || revision.contentDigest.isEmpty else {
-                throw FullCloudSyncError.invalidRevision
+                invalidKeys.insert(revision.itemKey)
+                firstItemError = firstItemError ?? FullCloudSyncError.invalidRevision
+                if CloudPreferenceStore.isPreferenceKey(revision.itemKey) { preferenceUnavailable = true }
+                continue
             }
             maximumClock = max(maximumClock, revision.logicalClock)
             revisionsByKey[revision.itemKey, default: []].append(revision)
@@ -403,6 +436,16 @@ final class FullCloudSyncEngine {
         }
         guard maximumClock < Int64.max else { throw FullCloudSyncError.clockOverflow }
         let nextClock = maximumClock + 1
+        let meetingKeys = Set(digests.keys).union(journal.items.keys).union(latest.keys)
+            .union(journal.pendingApplies.keys).union(journal.pendingPublications.keys).union(invalidKeys)
+        for key in meetingKeys where CloudModelCodec.entityName(for: key) == "MeetingRecord" {
+            let baseline = journal.items[key]
+            let remote = latest[key].map(checkpoint)
+            if isUnavailable(key) || baseline == nil || remote != baseline || digests[key] != baseline?.digest
+                || journal.pendingApplies[key] != nil || journal.pendingPublications[key] != nil {
+                unsettledMeetingKeys.insert(key)
+            } else if baseline?.digest == nil { settledMeetingTombstones.insert(key) }
+        }
         try await repairLegacyTombstones(revisions, isUnavailable: isUnavailable, isValid: isValid, didEnqueue: didEnqueue)
 
         var completingApplies = [String: CloudDataRevision]()
@@ -432,11 +475,21 @@ final class FullCloudSyncEngine {
                 do {
                     _ = try await materialize(saved, needsPayload: false)
                     try checkCurrent(isValid)
+                    if isUnavailable(key) { continue }
                 } catch FullCloudSyncError.revisionValidation(.missingPayload) {
-                    guard !CloudPreferenceStore.isPreferenceKey(key) else {
-                        throw FullCloudSyncError.revisionValidation(.missingPayload)
-                    }
+                    if CloudPreferenceStore.isPreferenceKey(key) { preferenceUnavailable = true }
                     missingPayloadKeys.insert(key)
+                    if CloudModelCodec.entityName(for: key) == "MeetingRecord" { unsettledMeetingKeys.insert(key) }
+                    continue
+                } catch {
+                    if error is CancellationError {
+                        guard !Task.isCancelled, isValid(), isUnavailable(key) else { throw error }
+                    } else {
+                        guard isValid(), !Task.isCancelled else { throw error }
+                        firstItemError = firstItemError ?? error
+                        invalidKeys.insert(key)
+                    }
+                    if CloudPreferenceStore.isPreferenceKey(key) { preferenceUnavailable = true }
                     continue
                 }
                 remember(key, pending)
@@ -445,7 +498,8 @@ final class FullCloudSyncEngine {
             }
         }
 
-        let allKeys = Set(digests.keys).union(journal.items.keys).union(latest.keys).union(journal.pendingPublications.keys)
+        let allKeys = Set(digests.keys).union(journal.items.keys).union(latest.keys)
+            .union(journal.pendingPublications.keys).union(invalidKeys)
         // Representation markers precede mail bodies that depend on them.
         let orderedKeys = allKeys.sorted { first, second in
             let a = CloudPreferenceStore.isPreferenceKey(first)
@@ -518,6 +572,27 @@ final class FullCloudSyncEngine {
         func commitPublications() throws {
             guard !publications.isEmpty else { return }
             try checkCurrent(isValid)
+            if publications.contains(where: { isUnavailable($0.key) }) {
+                // Rebuild only the bounded uncommitted batch. Never discard an
+                // independent task because another source changed while hashing.
+                let valid = publications.compactMap { publication -> (String, CloudSyncCheckpoint, Data?)? in
+                    guard !isUnavailable(publication.key) else { return nil }
+                    return (publication.key, publication.checkpoint, publication.revision.payload)
+                }
+                cloud.rollback()
+                publications.removeAll(keepingCapacity: true)
+                payloadBytes = 0
+                for (key, intended, data) in valid {
+                    let revision = CloudDataRevision(itemKey: key, clock: intended.logicalClock,
+                        installationID: intended.installationID, payload: data, digest: intended.digest ?? "")
+                    revision.revisionID = intended.revisionID
+                    cloud.insert(revision)
+                    for old in revisionsByKey[key, default: []] { cloud.delete(old) }
+                    publications.append((key, intended, revision))
+                    payloadBytes += data?.count ?? 0
+                }
+                guard !publications.isEmpty else { return }
+            }
             do { try cloud.save() }
             catch { publicationSaveFailed = true; throw error }
             storeIdentifier = publications.last?.revision.persistentModelID.storeIdentifier
@@ -535,6 +610,7 @@ final class FullCloudSyncEngine {
         do {
             for key in orderedKeys {
                 try checkCurrent(isValid)
+                guard !isUnavailable(key) else { continue }
                 guard let operation = operations[key] else { continue }
                 do {
                     switch operation {
@@ -543,8 +619,10 @@ final class FullCloudSyncEngine {
                         let target = checkpoint(remote)
                         let payload = try await materialize(remote)
                         try checkCurrent(isValid)
+                        if isUnavailable(key) { continue }
                         try await apply(key, payload)
                         try checkCurrent(isValid)
+                        if isUnavailable(key) { continue }
                         restored += 1
                         remember(key, target)
                         journal.pendingApplies.removeValue(forKey: key)
@@ -553,9 +631,11 @@ final class FullCloudSyncEngine {
                         if let remote = latest[key] {
                             _ = try await materialize(remote, needsPayload: false)
                             try checkCurrent(isValid)
+                            if isUnavailable(key) { continue }
                         }
                         let data = try await load(key)
                         try checkCurrent(isValid)
+                        if isUnavailable(key) { continue }
                         let hashing = Task.detached { try data.map(CloudRevisionPayloadReader.digest) }
                         let digest = try await withTaskCancellationHandler {
                             try await hashing.value
@@ -563,6 +643,7 @@ final class FullCloudSyncEngine {
                             hashing.cancel()
                         }
                         try checkCurrent(isValid)
+                        if isUnavailable(key) { continue }
                         guard digest == intended.digest else { throw CloudFileError.changingFile }
                         let size = data?.count ?? 0
                         if !publications.isEmpty, size > payloadLimit - payloadBytes {
@@ -585,6 +666,7 @@ final class FullCloudSyncEngine {
                     case .inspect(let remote, let adopt):
                         _ = try await materialize(remote, needsPayload: false)
                         try checkCurrent(isValid)
+                        if isUnavailable(key) { continue }
                         if adopt { remember(key, checkpoint(remote)) }
                     }
                 } catch FullCloudSyncError.revisionValidation(.missingPayload) {
@@ -592,14 +674,32 @@ final class FullCloudSyncEngine {
                     // local bytes nor starve independent keys later in the pass.
                     // Preference markers can govern decoding of subsequent mail
                     // bodies, so their failure still stops dependent work.
-                    guard !CloudPreferenceStore.isPreferenceKey(key) else {
-                        throw FullCloudSyncError.revisionValidation(.missingPayload)
-                    }
+                    if CloudPreferenceStore.isPreferenceKey(key) { preferenceUnavailable = true }
                     missingPayloadKeys.insert(key)
+                    if CloudModelCodec.entityName(for: key) == "MeetingRecord" { unsettledMeetingKeys.insert(key) }
+                } catch CloudFileError.changingFile {
+                    // Keep the write-ahead intent for a fresh inventory/retry.
+                    // Other families can still enqueue and apply in this pass.
+                    deferredKeys.insert(key)
+                    if CloudModelCodec.entityName(for: key) == "MeetingRecord" { unsettledMeetingKeys.insert(key) }
+                } catch {
+                    // Authorization/cancellation and store failure remain global.
+                    // A changed key may throw CancellationError from its actor
+                    // fence without cancelling independent canonical families.
+                    if error is CancellationError {
+                        guard !Task.isCancelled, isValid(), isUnavailable(key) else { throw error }
+                    } else {
+                        guard !publicationSaveFailed, isValid(), !Task.isCancelled else { throw error }
+                        firstItemError = firstItemError ?? error
+                    }
+                    if CloudPreferenceStore.isPreferenceKey(key) { preferenceUnavailable = true }
+                    deferredKeys.insert(key)
+                    if CloudModelCodec.entityName(for: key) == "MeetingRecord" { unsettledMeetingKeys.insert(key) }
                 }
             }
             try commitPublications()
-            for key in orderedKeys where !isUnavailable(key) && !missingPayloadKeys.contains(key) {
+            for key in orderedKeys where !isUnavailable(key) && !missingPayloadKeys.contains(key)
+                    && !deferredKeys.contains(key) {
                 if case .publish? = operations[key] { continue }
                 guard let remote = latest[key] else { continue }
                 for old in revisionsByKey[key, default: []] where old !== remote {
@@ -615,9 +715,14 @@ final class FullCloudSyncEngine {
             }
             try checkCurrent(isValid)
             try persistJournal()
-            // Other keys can make durable progress, but this is not a completed
-            // reconciliation and must not clear the service's real error.
+            // Dynamic generation changes may arrive during the final suspension,
+            // including for keys that needed no operation in this snapshot.
+            for key in orderedKeys { _ = isUnavailable(key) }
+            // Missing assets are an error, not successful reconciliation.
+            deferredKeys.formUnion(missingPayloadKeys)
+            didCompleteInventory = true
             if !missingPayloadKeys.isEmpty { throw FullCloudSyncError.revisionValidation(.missingPayload) }
+            if let firstItemError { throw firstItemError }
             return restored
         } catch {
             // A changing/unreadable later source must not starve valid earlier
@@ -708,7 +813,7 @@ final class FullCloudSyncEngine {
 
     private func planApply(_ key: String, remote: CloudDataRevision, source: String?, operations: inout [String: Operation]) {
         let target = checkpoint(remote)
-        if source == target.digest {
+        if source == target.digest, CloudModelCodec.entityName(for: key) != "MeetingRecord" {
             operations[key] = .inspect(remote, adopt: true)
         } else {
             journal.pendingApplies[key] = CloudSyncPendingApply(sourceDigest: source, target: target)
@@ -728,6 +833,10 @@ final class FullCloudSyncEngine {
     }
 
     private func remember(_ key: String, _ value: CloudSyncCheckpoint) {
+        if CloudModelCodec.entityName(for: key) == "MeetingRecord" {
+            if value.digest == nil { settledMeetingTombstones.insert(key) }
+            else { settledMeetingTombstones.remove(key) }
+        }
         guard journal.items[key] != value else { return }
         journal.items[key] = value
         journalDirty = true

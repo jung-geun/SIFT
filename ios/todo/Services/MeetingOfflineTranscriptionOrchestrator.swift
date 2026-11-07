@@ -71,6 +71,8 @@ struct MeetingOfflineTranscriptionOrchestrator {
     ) async throws -> Outcome {
         let id = record.meetingID
         guard Self.runs[id] == nil else { throw Failure.busy }
+        let cloudProtection = MeetingCloudSyncProtection.begin(record: record)
+        defer { MeetingCloudSyncProtection.end(cloudProtection) }
         let sourceSnapshot = expectedSource ?? record.persistenceSnapshot()
         let decoderLanguageTag = languageTag ?? (sourceSnapshot.automaticLanguageDetection ? nil : sourceSnapshot.languageTag)
         reporter?.startTranscribing(totalMilliseconds: (record.audioManifest?.totalSamples ?? 0) / 16)

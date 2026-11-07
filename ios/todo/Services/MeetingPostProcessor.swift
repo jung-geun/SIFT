@@ -221,6 +221,8 @@ enum MeetingPostProcessor {
         reporter: MeetingProcessingReporter? = nil,
         dependencies: Dependencies? = nil
     ) async throws -> Result {
+        let cloudProtection = MeetingCloudSyncProtection.begin(record: record)
+        defer { MeetingCloudSyncProtection.end(cloudProtection) }
         let dependencies = dependencies ?? .empty
         let languages = ProcessingLanguages(record: record)
         let sourceLanguageTag = languages.sourceLanguageTag

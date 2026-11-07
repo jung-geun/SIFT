@@ -384,6 +384,8 @@ enum MeetingDiarizationPostProcessor {
         guard record.diarizationData == nil || record.diarization != nil else { return .unreadablePayload }
         let meetingID = record.meetingID
         guard runs[meetingID] == nil else { return .busy }
+        let cloudProtection = MeetingCloudSyncProtection.begin(record: record)
+        defer { MeetingCloudSyncProtection.end(cloudProtection) }
         let manifestDigest = try MeetingDiarizationFingerprint.manifest(manifest)
         // Never rebind another recording's persisted identities to this audio.
         guard record.diarization.map({ $0.manifestDigest == manifestDigest }) ?? true else { return .superseded }

@@ -8,8 +8,23 @@ nonisolated struct CloudFileSnapshot: Sendable {
     let byteCount: Int
 }
 
+nonisolated struct CloudFileInventory: Sendable {
+    var files = [String: CloudFileSnapshot]()
+    var authoritativeMeetingIDs = Set<String>()
+    var unavailableMeetingIDs = Set<String>()
+    /// Omitted bytes are deletion evidence only with a settled model tombstone.
+    var fencedMeetingIDs = Set<String>()
+    var namespaceDependencies = [String: Set<String>]()
+    var firstError: (any Error)?
+}
+
 nonisolated enum CloudFileError: Error {
     case invalidPath, changingFile, oversizedFile
+}
+
+nonisolated enum CloudFileApplyResult: Sendable, Equatable {
+    case applied
+    case awaitingModelRestore
 }
 
 /// Only app-owned original content enters iCloud. Model downloads, health history,
@@ -18,6 +33,13 @@ actor CloudFileStore {
     nonisolated static let prefix = "file/"
     private let root: URL
     private var cached = [String: (size: Int, modified: Date, digest: String)]()
+    nonisolated static func meetingID(for key: String) -> String? {
+        guard key.hasPrefix(prefix) else { return nil }
+        let path = String(key.dropFirst(prefix.count))
+        guard isPortablePath(path) else { return nil }
+        return String(path.split(separator: "/")[1])
+    }
+
 
     init(root: URL) { self.root = root.standardizedFileURL.resolvingSymlinksInPath() }
 
@@ -37,67 +59,115 @@ actor CloudFileStore {
     }
 
     func capture(includeMeetings: Bool = true,
-                 isAuthorized: @Sendable () -> Bool = { true }) throws -> [String: CloudFileSnapshot] {
+                 isAuthorized: @escaping @Sendable () -> Bool = { true }) throws -> [String: CloudFileSnapshot] {
+        let inventory = try captureInventory(includeMeetings: includeMeetings, isAuthorized: isAuthorized)
+        if let error = inventory.firstError { throw error }
+        return inventory.files
+    }
+
+    /// Each namespace is an authoritative inventory or explicitly unavailable.
+    /// Never expose a partly enumerated directory as proof of local deletion.
+    func captureInventory(includeMeetings: Bool = true,
+                          isAuthorized: @escaping @Sendable () -> Bool = { true },
+                          isMeetingAuthorized: @escaping @Sendable (String) -> Bool = { _ in true }) throws -> CloudFileInventory {
         try Self.checkAuthorization(isAuthorized)
         let manager = FileManager.default
-        var paths = [String]()
+        var inventory = CloudFileInventory()
         let meetings = try safeLocation(for: "Meetings")
-        if includeMeetings, try Self.exists(meetings) {
-            let directories = try manager.contentsOfDirectory(at: meetings, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+        guard includeMeetings, try Self.exists(meetings) else { return inventory }
+        let directories = try manager.contentsOfDirectory(at: meetings,
+            includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+        for directory in directories where UUID(uuidString: directory.lastPathComponent) != nil {
             try Self.checkAuthorization(isAuthorized)
-            for directory in directories where UUID(uuidString: directory.lastPathComponent) != nil {
-                try Self.checkAuthorization(isAuthorized)
+            let id = directory.lastPathComponent
+            guard isMeetingAuthorized(id) else {
+                inventory.unavailableMeetingIDs.insert(id)
+                continue
+            }
+            do {
+                let authorization = try namespaceAuthorization(id, isAuthorized: isAuthorized,
+                    isMeetingAuthorized: isMeetingAuthorized)
+                let namespaceAuthorized = authorization.check
                 let values = try directory.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
-                guard values.isDirectory == true, values.isSymbolicLink != true else { continue }
-                let id = directory.lastPathComponent
-                guard try !isDeletedMeeting(id, isAuthorized: isAuthorized) else { continue }
+                guard values.isDirectory == true, values.isSymbolicLink != true else {
+                    throw CloudFileError.invalidPath
+                }
+                guard try !isDeletedMeeting(id, parents: authorization.parents, isAuthorized: namespaceAuthorized) else {
+                    inventory.authoritativeMeetingIDs.insert(id)
+                    inventory.fencedMeetingIDs.insert(id)
+                    continue
+                }
+                var paths = [String]()
                 for name in ["active-capture.json", "capture-recovery.json"] {
-                    try Self.checkAuthorization(isAuthorized)
+                    try Self.checkAuthorization(namespaceAuthorized)
                     let path = "Meetings/\(id)/\(name)"
                     if try Self.exists(location(for: path)) { paths.append(path) }
                 }
                 let audio = try safeLocation(for: "Meetings/\(id)/audio")
                 if try Self.exists(audio) {
                     let files = try manager.contentsOfDirectory(at: audio, includingPropertiesForKeys: nil)
-                    try Self.checkAuthorization(isAuthorized)
                     for file in files {
-                        try Self.checkAuthorization(isAuthorized)
+                        try Self.checkAuthorization(namespaceAuthorized)
                         let path = "Meetings/\(id)/audio/\(file.lastPathComponent)"
                         if Self.isPortablePath(path) { paths.append(path) }
                     }
                 }
-            }
-        }
-        var result = [String: CloudFileSnapshot]()
-        for path in paths {
-            try Self.checkAuthorization(isAuthorized)
-            let url = try location(for: path)
-            let before = try url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey])
-            guard before.isRegularFile == true, let size = before.fileSize, let modified = before.contentModificationDate else {
-                throw CloudFileError.invalidPath
-            }
-            // A 10-minute, 16 kHz mono FLAC part is below CloudKit's asset limit.
-            guard size < 50 * 1_024 * 1_024 else { throw CloudFileError.oversizedFile }
-            let digest: String
-            if let known = cached[path], known.size == size, known.modified == modified {
-                digest = known.digest
-            } else {
-                digest = try Self.digest(file: url, isAuthorized: isAuthorized)
-                let after = try url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+                var namespace = [String: CloudFileSnapshot]()
+                for path in paths {
+                    try Self.checkAuthorization(namespaceAuthorized)
+                    let url = try location(for: path)
+                    let before = try url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey])
+                    guard before.isRegularFile == true, let size = before.fileSize,
+                          let modified = before.contentModificationDate else { throw CloudFileError.invalidPath }
+                    guard size < 50 * 1_024 * 1_024 else { throw CloudFileError.oversizedFile }
+                    let digest: String
+                    if let known = cached[path], known.size == size, known.modified == modified {
+                        digest = known.digest
+                    } else {
+                        digest = try Self.digest(file: url, isAuthorized: namespaceAuthorized)
+                        let after = try url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+                        try Self.checkAuthorization(namespaceAuthorized)
+                        guard after.fileSize == size, after.contentModificationDate == modified else {
+                            throw CloudFileError.changingFile
+                        }
+                        cached[path] = (size, modified, digest)
+                    }
+                    let key = Self.prefix + path
+                    namespace[key] = CloudFileSnapshot(key: key, url: url, digest: digest, byteCount: size)
+                }
+                try Self.checkAuthorization(namespaceAuthorized)
+                inventory.namespaceDependencies[id] = authorization.parents.union([id])
+                inventory.files.merge(namespace) { _, new in new }
+                inventory.authoritativeMeetingIDs.insert(id)
+            } catch {
                 try Self.checkAuthorization(isAuthorized)
-                guard after.fileSize == size, after.contentModificationDate == modified else { throw CloudFileError.changingFile }
-                cached[path] = (size, modified, digest)
+                inventory.unavailableMeetingIDs.insert(id)
+                if !(error is CancellationError) { inventory.firstError = inventory.firstError ?? error }
             }
-            let key = Self.prefix + path
-            result[key] = CloudFileSnapshot(key: key, url: url, digest: digest, byteCount: size)
         }
         try Self.checkAuthorization(isAuthorized)
-        return result
+        return inventory
     }
 
+    @discardableResult
     func apply(key: String, payload: Data?, expectedDigest: String?,
-               isAuthorized: @Sendable () -> Bool = { true }) throws {
-        try Self.checkAuthorization(isAuthorized)
+               isAuthorized: @escaping @Sendable () -> Bool = { true },
+               isMeetingAuthorized: @escaping @Sendable (String) -> Bool = { _ in true }) throws -> CloudFileApplyResult {
+        do {
+            return try applyAuthorized(key: key, payload: payload, expectedDigest: expectedDigest,
+                isAuthorized: isAuthorized, isMeetingAuthorized: isMeetingAuthorized)
+        } catch is CancellationError {
+            try Self.checkAuthorization(isAuthorized)
+            // Only this namespace changed. Account revocation/task cancellation
+            // still throws above; unrelated cloud keys may continue.
+            throw CloudFileError.changingFile
+        }
+    }
+
+    private func applyAuthorized(key: String, payload: Data?, expectedDigest: String?,
+                                 isAuthorized accountAuthorized: @escaping @Sendable () -> Bool,
+                                 isMeetingAuthorized: @escaping @Sendable (String) -> Bool) throws -> CloudFileApplyResult {
+        try Self.checkAuthorization(accountAuthorized)
         guard key.hasPrefix(Self.prefix) else { throw CloudFileError.invalidPath }
         let path = String(key.dropFirst(Self.prefix.count))
         let url = try location(for: path)
@@ -106,13 +176,22 @@ actor CloudFileStore {
         let parent = try payload.flatMap { data in
             path.hasSuffix(".json") ? try MeetingDeletionFence.markerParent(data, meetingID: id) : nil
         }
+        let authorization = try namespaceAuthorization(id, incomingParent: parent,
+            isAuthorized: accountAuthorized, isMeetingAuthorized: isMeetingAuthorized)
+        let isAuthorized = authorization.check
         try Self.checkAuthorization(isAuthorized)
-        if try discardIfDeleted(id, parent: parent, isAuthorized: isAuthorized) { return }
+        if try discardIfDeleted(id, parent: parent, parents: authorization.parents,
+            removeContent: payload == nil, isAuthorized: isAuthorized) {
+            return payload == nil ? .applied : .awaitingModelRestore
+        }
         let exists = try Self.exists(url)
         let current = exists ? try Self.digest(file: url, isAuthorized: isAuthorized) : nil
         try Self.checkAuthorization(isAuthorized)
         guard current == expectedDigest else { throw CloudFileError.changingFile }
-        if try discardIfDeleted(id, parent: parent, isAuthorized: isAuthorized) { return }
+        if try discardIfDeleted(id, parent: parent, parents: authorization.parents,
+            removeContent: payload == nil, isAuthorized: isAuthorized) {
+            return payload == nil ? .applied : .awaitingModelRestore
+        }
         if let payload {
             guard payload.count < 50 * 1_024 * 1_024 else { throw CloudFileError.oversizedFile }
             let directory = url.deletingLastPathComponent()
@@ -122,7 +201,8 @@ actor CloudFileStore {
             // Re-resolve immediately before mutation; source and destination
             // metadata must never follow an intermediate symlink outside root.
             _ = try location(for: path)
-            if try discardIfDeleted(id, parent: parent, isAuthorized: isAuthorized) { return }
+            if try discardIfDeleted(id, parent: parent, parents: authorization.parents,
+                removeContent: false, isAuthorized: isAuthorized) { return .awaitingModelRestore }
             try Self.checkAuthorization(isAuthorized)
             try payload.write(to: url, options: [.atomic, .completeFileProtection])
             var directoryURL = directory
@@ -136,17 +216,33 @@ actor CloudFileStore {
             try FileManager.default.removeItem(at: url)
         }
         cached.removeValue(forKey: path)
+        return .applied
     }
 
     func load(_ snapshot: CloudFileSnapshot,
-              isAuthorized: @Sendable () -> Bool = { true }) throws -> Data {
-        try Self.checkAuthorization(isAuthorized)
+              isAuthorized: @escaping @Sendable () -> Bool = { true },
+              isMeetingAuthorized: @escaping @Sendable (String) -> Bool = { _ in true }) throws -> Data {
+        do {
+            return try loadAuthorized(snapshot, isAuthorized: isAuthorized, isMeetingAuthorized: isMeetingAuthorized)
+        } catch is CancellationError {
+            try Self.checkAuthorization(isAuthorized)
+            throw CloudFileError.changingFile
+        }
+    }
+
+    private func loadAuthorized(_ snapshot: CloudFileSnapshot,
+                                isAuthorized accountAuthorized: @escaping @Sendable () -> Bool,
+                                isMeetingAuthorized: @escaping @Sendable (String) -> Bool) throws -> Data {
+        try Self.checkAuthorization(accountAuthorized)
         guard snapshot.key.hasPrefix(Self.prefix) else { throw CloudFileError.invalidPath }
         let path = String(snapshot.key.dropFirst(Self.prefix.count))
         let url = try location(for: path)
         guard url.path == snapshot.url.standardizedFileURL.path else { throw CloudFileError.invalidPath }
         let id = String(path.split(separator: "/")[1])
-        guard try !isDeletedMeeting(id, isAuthorized: isAuthorized) else { throw CancellationError() }
+        let authorization = try namespaceAuthorization(id, isAuthorized: accountAuthorized,
+            isMeetingAuthorized: isMeetingAuthorized)
+        let isAuthorized = authorization.check
+        guard try !isDeletedMeeting(id, parents: authorization.parents, isAuthorized: isAuthorized) else { throw CancellationError() }
         let data = try Data(contentsOf: url, options: [.mappedIfSafe])
         try Self.checkAuthorization(isAuthorized)
         let digest = try data.withUnsafeBytes { bytes -> String in
@@ -188,36 +284,62 @@ actor CloudFileStore {
         return url
     }
 
-    private func discardIfDeleted(_ id: String, parent: String?, isAuthorized: @Sendable () -> Bool) throws -> Bool {
+    private func discardIfDeleted(_ id: String, parent: String?, parents: Set<String>,
+                                  removeContent: Bool, isAuthorized: @Sendable () -> Bool) throws -> Bool {
         let meetingRoot = try safeLocation(for: "Meetings")
         if try !MeetingDeletionFence.isDeleted(meetingID: id, rootURL: meetingRoot) {
             guard try MeetingDeletionFence.isDeleted(meetingID: id, parentMeetingID: parent, rootURL: meetingRoot)
-                || isDeletedMeeting(id, isAuthorized: isAuthorized) else { return false }
+                || isDeletedMeeting(id, parents: parents, isAuthorized: isAuthorized) else { return false }
             // Only inherit a parent's fence for a previously unknown child.
             // Never rewrite an existing own fence: an authoritative record
             // restore may concurrently clear it while this actor is reading.
             try Self.checkAuthorization(isAuthorized)
             try MeetingDeletionFence.recordDeletion(meetingID: id, rootURL: meetingRoot, isAuthorized: isAuthorized)
         }
+        // A refused live asset is not an authoritative deletion operation.
+        // Preserve original bytes and let the caller keep its apply intent pending.
+        guard removeContent else { return true }
         try Self.checkAuthorization(isAuthorized)
         try MeetingDeletionFence.removeDeletedContent(meetingID: id, rootURL: meetingRoot, isAuthorized: isAuthorized)
         return true
     }
 
-    private func isDeletedMeeting(_ id: String, isAuthorized: @Sendable () -> Bool) throws -> Bool {
+    private func isDeletedMeeting(_ id: String, parents: Set<String>,
+                                  isAuthorized: @Sendable () -> Bool) throws -> Bool {
         try Self.checkAuthorization(isAuthorized)
         let meetingRoot = try safeLocation(for: "Meetings")
         if try MeetingDeletionFence.isDeleted(meetingID: id, rootURL: meetingRoot) { return true }
-        for name in ["active-capture.json", "capture-recovery.json"] {
+        for parent in parents {
             try Self.checkAuthorization(isAuthorized)
-            let marker = try location(for: "Meetings/\(id)/\(name)")
-            guard try Self.exists(marker) else { continue }
-            let data = try Data(contentsOf: marker)
-            try Self.checkAuthorization(isAuthorized)
-            let parent = try MeetingDeletionFence.markerParent(data, meetingID: id)
             if try MeetingDeletionFence.isDeleted(meetingID: id, parentMeetingID: parent, rootURL: meetingRoot) { return true }
         }
         return false
+    }
+
+    /// Marker-only children may be missing a model row on a joining device.
+    /// Their stored or incoming parent must be fenced inside this file actor too.
+    private func namespaceAuthorization(_ id: String, incomingParent: String? = nil,
+        isAuthorized: @escaping @Sendable () -> Bool,
+        isMeetingAuthorized: @escaping @Sendable (String) -> Bool
+    ) throws -> (check: @Sendable () -> Bool, parents: Set<String>) {
+        let ownAuthorized: @Sendable () -> Bool = { isAuthorized() && isMeetingAuthorized(id) }
+        try Self.checkAuthorization(ownAuthorized)
+        var parents = Set<String>()
+        if let incomingParent { parents.insert(incomingParent) }
+        for name in ["active-capture.json", "capture-recovery.json"] {
+            let marker = try location(for: "Meetings/\(id)/\(name)")
+            guard try Self.exists(marker) else { continue }
+            try Self.checkAuthorization(ownAuthorized)
+            let data = try Data(contentsOf: marker)
+            try Self.checkAuthorization(ownAuthorized)
+            if let parent = try MeetingDeletionFence.markerParent(data, meetingID: id) { parents.insert(parent) }
+        }
+        let parentIDs = parents
+        let check: @Sendable () -> Bool = {
+            ownAuthorized() && parentIDs.allSatisfy(isMeetingAuthorized)
+        }
+        try Self.checkAuthorization(check)
+        return (check, parentIDs)
     }
 
     private nonisolated static func checkAuthorization(_ isAuthorized: @Sendable () -> Bool) throws {

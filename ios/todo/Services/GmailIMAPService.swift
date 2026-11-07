@@ -18,8 +18,6 @@ nonisolated enum GmailIMAPError: LocalizedError, Equatable, Sendable {
     case mutationUnsupported
     case messageIdentityUnavailable
     case unsupportedExtension
-    case analysisFailed
-    case analysisLeased
     case noSelectableTextPart
     case transport(String)
     var errorDescription: String? {
@@ -44,10 +42,6 @@ nonisolated enum GmailIMAPError: LocalizedError, Equatable, Sendable {
             return AppLanguage.localized("error.mail.gmailIMAP.messageIdentityUnavailable", defaultValue: "This cached Gmail message needs a mailbox refresh before it can be changed.", language: language)
         case .unsupportedExtension:
             return AppLanguage.localized("error.mail.gmailIMAP.unsupportedExtension", defaultValue: "Gmail IMAP does not advertise X-GM-EXT-1.", language: language)
-        case .analysisFailed:
-            return AppLanguage.localized("error.mail.gmailIMAP.analysisFailed", defaultValue: "Gmail message analysis did not complete.", language: language)
-        case .analysisLeased:
-            return AppLanguage.localized("error.mail.gmailIMAP.analysisLeased", defaultValue: "Gmail message analysis is already in progress.", language: language)
         case .noSelectableTextPart:
             return AppLanguage.localized("error.mail.gmailIMAP.noSelectableTextPart", defaultValue: "No readable text content found in this message.", language: language)
         case .transport(let message):

@@ -190,60 +190,17 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterD
 
 
 
-    // MARK: - 주기적 메일 캐시 및 일일 분석
+    // MARK: - Opportunistic background mail refresh
 
     @MainActor @discardableResult
     private func refreshBackgroundMail() async -> Bool {
-        // Local metadata + bounded complete-body caching runs independently of AI.
         let mailboxCacheOK = await MailboxIncrementalSyncCoordinator.shared.syncAvailableProviders(backgroundOnly: true)
         guard !Task.isCancelled else { return false }
-
-        // 메일 자동 분석 토글 — 배경(BGTask) 경로 독립 게이트 (마스터 onDeviceLLMEnabled와 무관)
-        // register(defaults:)로 기본값 true 보장 → 기존 사용자 동작 그대로 유지
-        guard UserDefaults.standard.bool(forKey: "pieroot.todo.emailAutoAnalysisEnabled") else { return mailboxCacheOK }
-
-        let rawAccount = UserDefaults.standard.string(forKey: "pieroot.todo.imap.account") ?? ""
-        let imapBackgroundEnabled = UserDefaults.standard.bool(forKey: "pieroot.todo.imap.backgroundEnabled")
-        guard !Task.isCancelled else { return false }
-        guard let imapAccount = IMAPCredentialStore.canonicalAccount(rawAccount),
-              imapBackgroundEnabled,
-              IMAPCredentialStore.hasCredential(for: imapAccount),
-              !IMAPCredentialStore.isCredentialRejected(for: imapAccount)
-        else { return mailboxCacheOK }
-        let attemptKey = "pieroot.todo.email.backgroundAnalysisAttempt.\(imapAccount)"
-        guard MailboxPagingPolicy.backgroundAnalysisIsDue(
-            hour: UserDefaults.standard.integer(forKey: "pieroot.todo.emailRefreshHour"),
-            lastAttempt: UserDefaults.standard.object(forKey: attemptKey) as? Date
-        ) else { return mailboxCacheOK }
-        // The previous daily scheduler also made one attempt per day. Preserve
-        // that energy/analysis policy while allowing frequent body-only refreshes.
-        UserDefaults.standard.set(Date(), forKey: attemptKey)
-
-        var didSucceed = false
-        var failures: [String] = []
-
-        if !imapAccount.isEmpty && imapBackgroundEnabled {
-            do {
-                let emailContext = ModelContext(AppDataContainer.shared.emailContainer)
-                _ = try await GmailIMAPIngestionService(emailContext: emailContext)
-                    .sync(account: imapAccount, backgroundEnabled: true)
-                didSucceed = true
-            } catch {
-                DiagnosticRecorder.shared.record(
-                    error: error,
-                    component: "mail.gmail",
-                    operation: "backgroundFetch"
-                )
-                if case GmailIMAPError.credentialRejected = error {
-                    IMAPCredentialStore.markCredentialRejected(for: imapAccount)
-                }
-                print("[GmailIMAP] background fetch failed: \(error.localizedDescription)")
-                failures.append("gmail-imap")
-            }
-        }
-
-        if didSucceed { return true }
-        return (failures.isEmpty == false ? false : didSucceed) || mailboxCacheOK
+        let analysisOK = await EmailAutomationOrchestrator.shared.runIfEligible(
+            context: ModelContext(AppDataContainer.shared.emailContainer),
+            backgroundOnly: true
+        )
+        return !Task.isCancelled && (mailboxCacheOK || analysisOK)
     }
 
     // MARK: - Foreground 알림 표시
@@ -644,6 +601,7 @@ struct todoApp: App {
                 appDelegate.modelContext = ctx
                 todoApp.deduplicatePersonas(context: ctx)
                 todoApp.deduplicateCalendarTodos(context: ctx)
+                QuickSortService.shared.start(context: ctx)
 
                 CalendarService.shared.restoreAuthorizationIfGranted()
                 unexpectedTerminationRecovery.enterForeground()
@@ -675,13 +633,13 @@ struct todoApp: App {
                     MailboxIncrementalSyncCoordinator.shared.startPolling()
                 }
                 Task {
-                    if UserCloudSyncPolicy.isRequested, !(await syncMonitor.waitForCompletion()) { return }
+                    if UserCloudSyncPolicy.isRequested, !(await FullCloudSyncService.shared.waitForTaskRestore()) { return }
                     await CalendarService.shared.runWeeklyImportIfDue(context: ctx)
                 }
                 Task {
                     // iCloud 동기화가 진행 중이면 완료 후 캘린더 동기화
                     // (iCloud에 먼저 도착한 캘린더 이벤트를 Todo 없는 신규로 오인하는 경쟁 조건 방지)
-                    if UserCloudSyncPolicy.isRequested, !(await syncMonitor.waitForCompletion()) { return }
+                    if UserCloudSyncPolicy.isRequested, !(await FullCloudSyncService.shared.waitForTaskRestore()) { return }
                     await CalendarService.shared.syncCalendarWithTodos(context: ctx)
                     await CalendarService.shared.cleanupOldCompletedTodos(context: ctx)
                 }
@@ -691,23 +649,33 @@ struct todoApp: App {
                 appDelegate.modelContext = appData.container.mainContext
                 todoApp.deduplicatePersonas(context: appData.container.mainContext)
                 todoApp.deduplicateCalendarTodos(context: appData.container.mainContext)
+                QuickSortService.shared.start(context: appData.container.mainContext)
             }
             .onReceive(NotificationCenter.default.publisher(for: .EKEventStoreChanged)
                 .debounce(for: .milliseconds(150), scheduler: RunLoop.main)) { _ in
                 if let ctx = appDelegate.modelContext {
                     Task {
-                        if UserCloudSyncPolicy.isRequested, !(await syncMonitor.waitForCompletion()) { return }
+                        if UserCloudSyncPolicy.isRequested, !(await FullCloudSyncService.shared.waitForTaskRestore()) { return }
                         await CalendarService.shared.syncCalendarWithTodos(context: ctx)
                     }
                 }
             }
             .onReceive(NotificationCenter.default.publisher(for: .calendarTaskAnalysisSourcesChanged)) { _ in
                 Task {
-                    if UserCloudSyncPolicy.isRequested, !(await syncMonitor.waitForCompletion()) { return }
+                    if UserCloudSyncPolicy.isRequested, !(await FullCloudSyncService.shared.waitForTaskRestore()) { return }
                     guard let ctx = appDelegate.modelContext else { return }
                     // Apply source consent immediately, without the weekly cooldown
                     // or the outbound export side effects of a full two-way sync.
                     await CalendarService.shared.syncCalendarTodos(context: ctx)
+                }
+            }
+            .onReceive(FullCloudSyncService.shared.$hasFinishedTaskRestore.removeDuplicates()) { finished in
+                guard finished, UserCloudSyncPolicy.isRequested,
+                      scenePhase == .active, let ctx = appDelegate.modelContext else { return }
+                Task {
+                    await CalendarService.shared.runWeeklyImportIfDue(context: ctx)
+                    await CalendarService.shared.syncCalendarWithTodos(context: ctx)
+                    await CalendarService.shared.cleanupOldCompletedTodos(context: ctx)
                 }
             }
             .onReceive(NotificationCenter.default.publisher(for: .gmailAuthChanged)) { _ in
@@ -807,11 +775,11 @@ struct todoApp: App {
                             }
                         }
                         Task {
-                            if UserCloudSyncPolicy.isRequested, !(await syncMonitor.waitForCompletion()) { return }
+                            if UserCloudSyncPolicy.isRequested, !(await FullCloudSyncService.shared.waitForTaskRestore()) { return }
                             await CalendarService.shared.runWeeklyImportIfDue(context: ctx)
                         }
                         Task {
-                            if UserCloudSyncPolicy.isRequested, !(await syncMonitor.waitForCompletion()) { return }
+                            if UserCloudSyncPolicy.isRequested, !(await FullCloudSyncService.shared.waitForTaskRestore()) { return }
                             await CalendarService.shared.syncCalendarWithTodos(context: ctx)
                             await CalendarService.shared.cleanupOldCompletedTodos(context: ctx)
                         }

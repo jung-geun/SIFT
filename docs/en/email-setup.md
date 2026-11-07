@@ -51,7 +51,7 @@ View your inbox in the **Mail** tab. To fetch new mail immediately, press and ho
 - **Automatic Background Mail Fetch** is off by default. If you enable it, the saved app password can be used while the device is locked after it has been unlocked once. Review the stated security risks before choosing this option.
 - **Automatic email analysis** is a separate setting that suggests tasks only from Needs Review/Action items in the full body. If there are no such items, no tasks are suggested automatically; you can enter and save one manually.
 - Message lists and full bodies are saved on the device when the app becomes active and periodically, independently of the automatic analysis setting. Background fetching applies only to approved accounts. iOS determines when it can run, so no fixed interval is guaranteed.
-- You can adjust Gmail's **Daily analysis time**. Background AI analysis for an approved Gmail account is attempted once a day after that time; the same daily analysis is not guaranteed for Outlook. The analysis-period setting does not limit the current IMAP list or body collection range.
+- When automatic analysis is enabled, complete cached bodies are processed separately on the device. Background analysis applies only to approved accounts, and iOS decides when it runs. The analysis period does not limit IMAP list or body collection.
 
 **Marking emails as read and moving them to the trash also affects the original Gmail messages.** Loading the list alone does not mark them as read; the app requests that an unread message be marked as read after its body has been retrieved. Even if marking it as read fails, you can still view the body already received. Moving an email to the trash also affects the original message.
 

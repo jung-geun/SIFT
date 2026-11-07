@@ -412,21 +412,8 @@ struct MailboxPagingState: Equatable {
 enum MailboxPagingPolicy {
     nonisolated static let pageSize = 100
     nonisolated static let updatesMinimumInterval: TimeInterval = 30
-    nonisolated static let pollInterval: TimeInterval = 5 * 60
+    nonisolated static let pollInterval: TimeInterval = 45
     nonisolated static let backgroundRefreshInterval: TimeInterval = 15 * 60
     nonisolated static let maxUpdateDrainPages = 10
     nonisolated static let bodyPrefetchBatchSize = 8
-
-    /// Frequent cache refreshes must not also rerun the opted-in daily AI pass.
-    nonisolated static func backgroundAnalysisIsDue(
-        hour: Int,
-        lastAttempt: Date?,
-        now: Date = Date(),
-        calendar: Calendar = .current
-    ) -> Bool {
-        guard let target = calendar.date(
-            bySettingHour: max(0, min(23, hour)), minute: 0, second: 0, of: now
-        ), now >= target else { return false }
-        return lastAttempt.map { !calendar.isDate($0, inSameDayAs: now) } ?? true
-    }
 }

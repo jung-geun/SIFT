@@ -34,6 +34,139 @@ struct MeetingProofreadTests {
         try context.save()
         return (context, record)
     }
+    @Test("cloud protection retains each independently processing source and its parent")
+    @MainActor
+    func cloudProtectionNestsWithoutReleasingOtherSources() {
+        let parent = UUID().uuidString
+        let microphone = UUID().uuidString
+        let application = UUID().uuidString
+        let first = MeetingCloudSyncProtection.begin(meetingIDs: [parent, microphone])
+        let second = MeetingCloudSyncProtection.begin(meetingIDs: [parent, application])
+        #expect(MeetingCaptureCoordinator.cloudSyncProtectedMeetingIDs().isSuperset(of: [parent, microphone, application]))
+        MeetingCloudSyncProtection.end(first)
+        #expect(!MeetingCaptureCoordinator.cloudSyncProtectedMeetingIDs().contains(microphone))
+        #expect(MeetingCaptureCoordinator.cloudSyncProtectedMeetingIDs().isSuperset(of: [parent, application]))
+        MeetingCloudSyncProtection.end(second)
+        #expect(MeetingCaptureCoordinator.cloudSyncProtectedMeetingIDs().isDisjoint(with: [parent, microphone, application]))
+    }
+
+    @Test("file authorization cannot revive after a transient meeting mutation")
+    func cloudFileAuthorizationFencesOwnershipTransitions() {
+        let fence = MeetingCloudSyncFence()
+        let id = UUID().uuidString
+        let unrelated = UUID().uuidString
+        let unrelatedBefore = fence.authorization(for: unrelated)
+        let before = fence.authorization(for: id)
+        #expect(before())
+        fence.update(protectedIDs: [id], unscoped: false)
+        #expect(!before())
+        #expect(unrelatedBefore())
+        #expect(!fence.authorization(for: id)())
+        #expect(fence.authorization(for: unrelated)())
+        let during = fence.authorization(for: unrelated)
+        fence.update(protectedIDs: [], unscoped: false)
+        #expect(!before())
+        #expect(during())
+        #expect(unrelatedBefore())
+        #expect(fence.authorization(for: id)())
+    }
+
+    @Test("actor-discovered namespaces remain independent and fence transient ownership")
+    func cloudNamespaceAuthorizationScopesDiscoveredIDs() {
+        let fence = MeetingCloudSyncFence()
+        let authorize = fence.namespaceAuthorization()
+        // This ID is discovered only after the authorization snapshot, as with
+        // a remote-only audio namespace encountered inside CloudFileStore.
+        let remoteOnly = UUID().uuidString
+        let unrelated = UUID().uuidString
+        #expect(authorize(remoteOnly))
+        fence.update(protectedIDs: [unrelated], unscoped: false)
+        #expect(authorize(remoteOnly))
+        #expect(!authorize(unrelated))
+        let during = fence.namespaceAuthorization()
+        fence.update(protectedIDs: [], unscoped: false)
+        #expect(authorize(remoteOnly))
+        #expect(during(remoteOnly))
+        #expect(!authorize(unrelated))
+        #expect(!during(unrelated))
+
+        fence.update(protectedIDs: [remoteOnly], unscoped: false)
+        #expect(!authorize(remoteOnly))
+        fence.update(protectedIDs: [], unscoped: false)
+        #expect(!authorize(remoteOnly))
+        #expect(fence.namespaceAuthorization()(remoteOnly))
+
+        let fresh = fence.namespaceAuthorization()
+        fence.update(protectedIDs: [], unscoped: true)
+        #expect(!fresh(UUID().uuidString))
+        fence.update(protectedIDs: [], unscoped: false)
+        #expect(!fresh(UUID().uuidString))
+    }
+
+    @Test("postprocessing ownership does not masquerade as active recording")
+    @MainActor
+    func processingScopeDoesNotSetCaptureFlag() {
+        let id = UUID().uuidString
+        let captureWasActive = MeetingCaptureCoordinator.hasActiveCaptureForCloudSync
+        let token = MeetingCloudSyncProtection.begin(meetingIDs: [id])
+        #expect(MeetingCaptureCoordinator.cloudSyncProtectedMeetingIDs().contains(id))
+        #expect(MeetingCaptureCoordinator.hasActiveMeetingWorkForCloudSync)
+        #expect(MeetingCaptureCoordinator.hasActiveCaptureForCloudSync == captureWasActive)
+        MeetingCloudSyncProtection.end(token)
+    }
+
+    @Test("unknown processing ownership holds the whole meeting family")
+    @MainActor
+    func unscopedCloudWorkNeverAuthorizesAMeetingWrite() {
+        let id = UUID().uuidString
+        let fence = MeetingCloudSyncFence()
+        let before = fence.authorization(for: id)
+        #expect(before())
+        fence.update(protectedIDs: [], unscoped: true)
+        fence.update(protectedIDs: [], unscoped: false)
+        #expect(!before())
+        #expect(fence.authorization(for: id)())
+        let token = MeetingCloudSyncProtection.begin(meetingIDs: [])
+        #expect(MeetingCaptureCoordinator.hasUnscopedCaptureForCloudSync)
+        #expect(!MeetingCaptureCoordinator.captureCloudSyncAuthorization(for: UUID().uuidString)())
+        #expect(!MeetingCaptureCoordinator.captureCloudSyncAuthorization()())
+        MeetingCloudSyncProtection.end(token)
+    }
+
+    @Test("a suspended summary protects its source and parent until failure exits")
+    @MainActor
+    func suspendedProcessingReleasesCloudProtectionOnFailure() async throws {
+        let (context, record) = try persistedMeeting()
+        let id = record.meetingID
+        let parent = UUID().uuidString
+        record.parentMeetingID = parent
+        try context.save()
+        let original = record.persistenceSnapshot()
+        let gate = SuspendedProofreadEngine()
+        let dependencies = MeetingPostProcessor.Dependencies(
+            snapshot: { .empty },
+            refine: { _, input, _, _, _, _ in .skipped(.disabled, result: input) },
+            analyze: { _, _, _, _, _, _, _, _ in
+                await gate.pause()
+                throw ProofreadTestError.saveFailed
+            },
+            save: { try $0.save() },
+            learnCorrections: { _, _ in }
+        )
+        let processing = Task {
+            try await MeetingPostProcessor.refineAndAnalyze(
+                record: record, context: context, allowRefine: false, allowModelLoad: false,
+                dependencies: dependencies)
+        }
+        await gate.waitUntilPaused()
+        #expect(MeetingCaptureCoordinator.cloudSyncProtectedMeetingIDs().isSuperset(of: [id, parent]))
+        #expect(!MeetingCaptureCoordinator.captureCloudSyncAuthorization(for: id)())
+        await gate.resume()
+        await #expect(throws: ProofreadTestError.saveFailed) { try await processing.value }
+        #expect(record.persistenceSnapshot() == original)
+        #expect(MeetingCaptureCoordinator.cloudSyncProtectedMeetingIDs().isDisjoint(with: [id, parent]))
+    }
+
 
     @Test("바뀐 구간만 교정 목록에 포함")
     func onlyChangedSegments() {

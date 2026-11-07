@@ -23,12 +23,72 @@ enum CloudModelCodec {
         var conflictingKeys = Set<String>()
         var versions = [String: [Data]]()
         var origins = [String: CloudSyncConflictVersion.Origin]()
+        var digests = [String: String]()
+        var meetingNamespaces = [String: Set<String>]()
+
+        /// Local-only aggregate; CloudKit continues to receive individual v1 envelopes.
+        var taskAggregateDigest: String {
+            var hash = SHA256()
+            for key in digests.keys.filter({ $0.hasPrefix("Todo/") }).sorted() {
+                hash.update(data: Data((key + "\u{0}" + digests[key]! + "\n").utf8))
+            }
+            // Conflicted identities must not look like an empty/deleted task set.
+            for key in conflictingKeys.filter({ $0.hasPrefix("Todo/") }).sorted() {
+                hash.update(data: Data((key + "\u{0}conflict\n").utf8))
+                for data in versions[key, default: []].sorted(by: { $0.lexicographicallyPrecedes($1) }) {
+                    hash.update(data: Data(CloudFileStore.digest(data).utf8))
+                }
+            }
+            return hash.finalize().map { String(format: "%02x", $0) }.joined()
+        }
+
+        /// Replace complete entity inventories, never an arbitrary subset of rows.
+        mutating func replace(entities: Set<String>, with inventory: Snapshot) {
+            func retained(_ key: String) -> Bool {
+                !entities.contains(String(key.prefix { $0 != "/" }))
+            }
+            records = records.filter { retained($0.key) }
+            digests = digests.filter { retained($0.key) }
+            versions = versions.filter { retained($0.key) }
+            origins = origins.filter { retained($0.key) }
+            meetingNamespaces = meetingNamespaces.filter { retained($0.key) }
+            conflictingKeys = conflictingKeys.filter(retained)
+            records.merge(inventory.records) { _, new in new }
+            digests.merge(inventory.digests) { _, new in new }
+            versions.merge(inventory.versions) { _, new in new }
+            origins.merge(inventory.origins) { _, new in new }
+            meetingNamespaces.merge(inventory.meetingNamespaces) { _, new in new }
+            conflictingKeys.formUnion(inventory.conflictingKeys)
+        }
 
         /// Strict export/migration consumers must reject a partial snapshot.
         func validatedRecords() throws -> [String: Data] {
             if let key = conflictingKeys.min() { throw CodecError.duplicateIdentity(key) }
             return records
         }
+    }
+
+    /// Cached bytes are reusable only after an authoritative inventory fetch and
+    /// an observed identifier-level save stream. Unknown invalidation clears it.
+    final class CaptureCache {
+        fileprivate struct Item {
+            let key: String
+            let payload: Data
+            let digest: String
+        }
+        fileprivate var items = [String: [PersistentIdentifier: Item]]()
+        var requiresFullInventory: Bool { items.isEmpty }
+
+        func invalidate(identifiers: Set<PersistentIdentifier>) {
+            for id in identifiers { items[id.entityName]?.removeValue(forKey: id) }
+            // Health exclusion is a cross-entity dependency.
+            if identifiers.contains(where: { $0.entityName == "Todo" }) {
+                items.removeValue(forKey: "TaskAuditEvent")
+                items.removeValue(forKey: "TaskBehaviorEvent")
+            }
+        }
+
+        func invalidateAll() { items.removeAll() }
     }
 
     private struct Envelope: Codable {
@@ -187,24 +247,47 @@ enum CloudModelCodec {
 
         func erased() -> AnyEntity {
             AnyEntity(name: name, validIdentity: validIdentity, validateSchema: validateSchema,
-                capture: { context, excludedTodoIDs, encoder in
+                capture: { context, excludedTodoIDs, encoder, cache in
                     var result = Snapshot()
+                    var inventory = [PersistentIdentifier: CaptureCache.Item]()
                     for model in try context.fetch(FetchDescriptor<Model>()) {
                         if let todo = model as? Todo, todo.isHealthRelated { continue }
                         if let audit = model as? TaskAuditEvent, excludedTodoIDs.contains(audit.todoID) { continue }
                         if let behavior = model as? TaskBehaviorEvent, excludedTodoIDs.contains(behavior.todoID) { continue }
                         let key = try key(model)
-                        let data = try encoder.encode(envelope(model, encoder: encoder))
+                        if let meeting = model as? MeetingRecord {
+                            var ids = Set(meeting.audioTrackIDs)
+                            ids.insert(meeting.meetingID)
+                            if let parent = meeting.parentMeetingID { ids.insert(parent) }
+                            result.meetingNamespaces[key, default: []].formUnion(ids)
+                        }
+                        let id = model.persistentModelID
+                        let cached = cache?.items[name]?[id]
+                        let data: Data
+                        let digest: String
+                        if let cached, cached.key == key {
+                            data = cached.payload
+                            digest = cached.digest
+                        } else {
+                            data = try encoder.encode(envelope(model, encoder: encoder))
+                            digest = CloudFileStore.digest(data)
+                        }
+                        inventory[id] = CaptureCache.Item(key: key, payload: data, digest: digest)
                         if !result.versions[key, default: []].contains(data) {
                             result.versions[key, default: []].append(data)
                         }
                         if result.versions[key, default: []].count > 1 {
                             // Unavailable is not deleted. Retain every portable
                             // version for explicit review, including a third copy.
+                            result.digests.removeValue(forKey: key)
                             result.records.removeValue(forKey: key)
                             result.conflictingKeys.insert(key)
-                        } else { result.records[key] = data }
+                        } else {
+                            result.records[key] = data
+                            result.digests[key] = digest
+                        }
                     }
+                    cache?.items[name] = inventory
                     return result
                 }, canonicalize: { envelope, encoder, decoder in
                     try encoder.encode(self.envelope(decode(envelope, decoder: decoder), encoder: encoder))
@@ -276,7 +359,7 @@ enum CloudModelCodec {
         let name: String
         let validIdentity: (String) -> Bool
         let validateSchema: () throws -> Void
-        let capture: (ModelContext, Set<UUID>, JSONEncoder) throws -> Snapshot
+        let capture: (ModelContext, Set<UUID>, JSONEncoder, CaptureCache?) throws -> Snapshot
         let canonicalize: (Envelope, JSONEncoder, JSONDecoder) throws -> Data
         let apply: (String, Envelope?, ModelContext, ModelContext, JSONDecoder, Bool) throws -> Void
     }
@@ -337,15 +420,105 @@ enum CloudModelCodec {
         return try decodedStringIdentity(String(parts[1]), count: 1)[0]
     }
 
+    struct MeetingNamespaceInfo {
+        let ids: Set<String>
+        let parent: String?
+    }
+
+    static func meetingNamespaceInfo(key: String, payload: Data?) throws -> MeetingNamespaceInfo? {
+        guard let id = try meetingID(for: key) else { return nil }
+        guard let payload else { return MeetingNamespaceInfo(ids: [id], parent: nil) }
+        let envelope = try decoder().decode(Envelope.self, from: payload)
+        guard envelope.entity + "/" + envelope.identity == key else { throw CodecError.identityMismatch(key) }
+        guard envelope.version == 1, let tracks = envelope.fields["audioTrackIDs"],
+              let parent = envelope.fields["parentMeetingID"] else { throw CodecError.malformedPayload(key) }
+        var ids = Set(try decoder().decode([String].self, from: tracks))
+        ids.insert(id)
+        let parentID = try decoder().decode(String?.self, from: parent)
+        if let parentID { ids.insert(parentID) }
+        return MeetingNamespaceInfo(ids: ids, parent: parentID)
+    }
+
+    /// Link both parent references and root track manifests; older restored rows
+    /// can contain only one side. All connected original namespaces are fenced.
+    static func meetingNamespaceGraph(_ snapshot: Snapshot) throws -> [String: Set<String>] {
+        var edges = [String: Set<String>]()
+        for key in Set(snapshot.records.keys).union(snapshot.versions.keys) where key.hasPrefix("MeetingRecord/") {
+            var ids = snapshot.meetingNamespaces[key, default: []]
+            if ids.isEmpty {
+                let versions = snapshot.versions[key] ?? snapshot.records[key].map { [$0] } ?? []
+                for payload in versions {
+                    ids.formUnion(try meetingNamespaceInfo(key: key, payload: payload)?.ids ?? [])
+                }
+            }
+            for id in ids { edges[id, default: []].formUnion(ids) }
+        }
+        var result = [String: Set<String>]()
+        var visited = Set<String>()
+        for id in edges.keys where !visited.contains(id) {
+            var component = Set<String>()
+            var pending = [id]
+            while let next = pending.popLast() {
+                guard component.insert(next).inserted else { continue }
+                pending.append(contentsOf: edges[next, default: []].subtracting(component))
+            }
+            visited.formUnion(component)
+            for member in component { result[member] = component }
+        }
+        return result
+    }
+
     private static let mainEntities = [todos.erased(), personas.erased(), audits.erased(),
         behaviors.erased(), analyses.erased(), ledgers.erased()]
     private static let emailEntities = [emails.erased()]
     private static let meetingEntities = [meetings.erased(), glossary.erased(), metadata.erased(),
         sources.erased(), observations.erased()]
+    static let captureFamilies: [Set<String>] = [
+        ["Todo", "TaskAuditEvent", "TaskBehaviorEvent"], ["Persona"], ["MemoryAnalysis"],
+        ["MailAnalysisLedgerRecord"], ["EmailMessage"], ["MeetingRecord"],
+        ["MeetingGlossaryTerm", "VocabularyStoreMetadata", "VocabularySourceState", "VocabularyObservation"]
+    ]
+    private static let captureFamiliesCoverSchema =
+        captureFamilies.reduce(into: Set<String>(), { $0.formUnion($1) }) == entityNames
+    struct CaptureResult {
+        var snapshot: Snapshot
+        var unavailableEntities = Set<String>()
+        var firstError: (any Error)?
+    }
 
-    static func isModelKey(_ key: String) -> Bool {
+    /// A failed family keeps its previous inventory unavailable, never absent.
+    /// Callers must hold every key in unavailableEntities, including remote-only keys.
+    static func captureAvailable(app: ModelContext, email: ModelContext, meeting: ModelContext,
+        previous: Snapshot, entities: Set<String>, cache: CaptureCache
+    ) -> CaptureResult {
+        var result = CaptureResult(snapshot: previous)
+        guard captureFamiliesCoverSchema else {
+            result.unavailableEntities = entityNames
+            result.firstError = CodecError.unsupportedSchema("capture families")
+            return result
+        }
+        for family in captureFamilies where !family.isDisjoint(with: entities) {
+            do {
+                let inventory = try capture(app: app, email: email, meeting: meeting, entities: family, cache: cache)
+                result.snapshot.replace(entities: family, with: inventory)
+            } catch {
+                result.unavailableEntities.formUnion(family)
+                result.firstError = result.firstError ?? error
+            }
+        }
+        return result
+    }
+
+
+
+    static let entityNames = Set((mainEntities + emailEntities + meetingEntities).map(\.name))
+
+    static func entityName(for key: String) -> String? {
         let name = String(key.prefix { $0 != "/" })
-        return (mainEntities + emailEntities + meetingEntities).contains { $0.name == name }
+        return entityNames.contains(name) ? name : nil
+    }
+    static func isModelKey(_ key: String) -> Bool {
+        entityName(for: key) != nil
     }
 
     private static func validate(_ entities: [AnyEntity], in context: ModelContext) throws {
@@ -362,21 +535,33 @@ enum CloudModelCodec {
         try capture(groups: [(mainEntities, app)], app: app)
     }
 
-    static func capture(app: ModelContext, email: ModelContext, meeting: ModelContext) throws -> Snapshot {
-        try capture(groups: [(mainEntities, app), (emailEntities, email), (meetingEntities, meeting)], app: app)
+    static func capture(app: ModelContext, email: ModelContext, meeting: ModelContext,
+                        entities: Set<String>? = nil, cache: CaptureCache? = nil) throws -> Snapshot {
+        try capture(groups: [(mainEntities, app), (emailEntities, email), (meetingEntities, meeting)],
+            app: app, entities: entities, cache: cache)
     }
 
-    private static func capture(groups: [([AnyEntity], ModelContext)], app: ModelContext) throws -> Snapshot {
-        for (entities, context) in groups { try validate(entities, in: context) }
-        let healthIDs = Set(try app.fetch(FetchDescriptor<Todo>()).filter(\.isHealthRelated).map(\.id))
+    private static func capture(groups: [([AnyEntity], ModelContext)], app: ModelContext,
+                                entities selected: Set<String>? = nil, cache: CaptureCache? = nil) throws -> Snapshot {
+        for (entities, context) in groups {
+            try validate(entities.filter { selected?.contains($0.name) ?? true }, in: context)
+        }
+        let needsHealthIDs = groups.contains { entities, _ in
+            entities.contains { (selected?.contains($0.name) ?? true)
+                && ($0.name == "TaskAuditEvent" || $0.name == "TaskBehaviorEvent") }
+        }
+        let healthIDs = needsHealthIDs
+            ? Set(try app.fetch(FetchDescriptor<Todo>()).filter(\.isHealthRelated).map(\.id)) : []
         let encoder = encoder()
         var result = Snapshot()
         for (entities, context) in groups {
-            for entity in entities {
-                let snapshot = try entity.capture(context, healthIDs, encoder)
+            for entity in entities where selected?.contains(entity.name) ?? true {
+                let snapshot = try entity.capture(context, healthIDs, encoder, cache)
                 result.records.merge(snapshot.records) { _, value in value }
                 result.conflictingKeys.formUnion(snapshot.conflictingKeys)
                 result.versions.merge(snapshot.versions) { first, second in first + second }
+                result.digests.merge(snapshot.digests) { _, value in value }
+                result.meetingNamespaces.merge(snapshot.meetingNamespaces) { $0.union($1) }
             }
         }
         return result

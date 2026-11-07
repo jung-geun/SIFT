@@ -167,6 +167,7 @@ enum TaskBehaviorRecorder {
         event.afterManualPriority = todo.manualPriority
         event.afterComputedPriority = todo.computedPriorityScore
         context.insert(event)
+        QuickSortService.shared.recordInsertion(todo, in: context)
     }
 
     static func recordCompletionChange(

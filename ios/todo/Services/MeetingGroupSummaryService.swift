@@ -146,6 +146,9 @@ enum MeetingGroupSummaryService {
     ) async throws -> Bool {
         try Task.checkCancellation()
         let tracks = try MeetingAudioTrackStore.tracks(for: parent, in: context)
+        let cloudProtection = MeetingCloudSyncProtection.begin(
+            meetingIDs: Set([parent.meetingID] + tracks.map(\.meetingID)))
+        defer { MeetingCloudSyncProtection.end(cloudProtection) }
         guard tracks.allSatisfy({ $0.status == .ready && $0.result != nil }) else { throw Failure.notReady }
         let snapshot = Snapshot(parent: parent, tracks: tracks)
         let fingerprint = try sourceFingerprint(parent: parent, tracks: tracks)

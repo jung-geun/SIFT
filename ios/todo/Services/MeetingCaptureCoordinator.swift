@@ -276,20 +276,171 @@ nonisolated final class MeetingAppAudioInputSink: @unchecked Sendable {
     }
 }
 
-@MainActor
-final class MeetingCaptureCoordinator: ObservableObject {
-    private static let syncParticipants = NSHashTable<MeetingCaptureCoordinator>.weakObjects()
-    static var hasActiveCaptureForCloudSync: Bool {
-        syncParticipants.allObjects.contains { coordinator in
-            if coordinator.starting { return true }
-            switch coordinator.status {
-            case .recording, .paused, .stopping, .finalizingTranscript, .extractingActions: return true
-            default: return false
+/// File actors validate live ownership without accessing MainActor models.
+/// Per-meeting epochs catch transient ownership of that meeting without coupling
+/// it to another meeting. Unscoped work invalidates every namespace.
+nonisolated final class MeetingCloudSyncFence: @unchecked Sendable {
+    static let shared = MeetingCloudSyncFence()
+    private let lock = NSLock()
+    private var protectedIDs = Set<String>()
+    private var unscoped = false
+    private var epochs: [String: UInt64] = [:]
+    private var unscopedEpoch: UInt64 = 0
+    private var inventoryEpoch: UInt64 = 0
+
+    func update(protectedIDs next: Set<String>, unscoped nextUnscoped: Bool) {
+        lock.withLock {
+            guard next != protectedIDs || nextUnscoped != unscoped else { return }
+            inventoryEpoch &+= 1
+            // Store the global revision at each ID transition. An actor can
+            // later authorize a newly discovered ID against one scalar snapshot,
+            // without copying the complete epoch dictionary.
+            for id in protectedIDs where !next.contains(id) { epochs[id] = inventoryEpoch }
+            for id in next where !protectedIDs.contains(id) { epochs[id] = inventoryEpoch }
+            if unscoped != nextUnscoped { unscopedEpoch &+= 1 }
+            protectedIDs = next
+            unscoped = nextUnscoped
+        }
+    }
+
+    func authorization(for meetingID: String?) -> @Sendable () -> Bool {
+        lock.withLock {
+            if let meetingID {
+                let allowed = !unscoped && !protectedIDs.contains(meetingID)
+                let captured = epochs[meetingID, default: 0]
+                let capturedUnscoped = unscopedEpoch
+                return { [self] in
+                    allowed && lock.withLock {
+                        !unscoped && !protectedIDs.contains(meetingID)
+                            && epochs[meetingID, default: 0] == captured
+                            && unscopedEpoch == capturedUnscoped
+                    }
+                }
+            }
+            let allowed = !unscoped && protectedIDs.isEmpty
+            let captured = inventoryEpoch
+            return { [self] in
+                allowed && lock.withLock { !unscoped && protectedIDs.isEmpty && inventoryEpoch == captured }
             }
         }
     }
 
-    @Published private(set) var status: MeetingStatus = .ready
+    func namespaceAuthorization() -> @Sendable (String) -> Bool {
+        lock.withLock {
+            let allowed = !unscoped
+            let captured = inventoryEpoch
+            let capturedUnscoped = unscopedEpoch
+            return { [self] meetingID in
+                allowed && lock.withLock {
+                    !unscoped && !protectedIDs.contains(meetingID)
+                        && epochs[meetingID, default: 0] <= captured
+                        && unscopedEpoch == capturedUnscoped
+                }
+            }
+        }
+    }
+}
+
+/// Scoped ownership of meeting models and their original-audio namespaces while
+/// an async processing pass is suspended. Tokens are independent and nest safely:
+/// finishing one source must not release another source or its parent.
+@MainActor
+enum MeetingCloudSyncProtection {
+    private static var scopes: [UUID: Set<String>] = [:]
+
+    static var meetingIDs: Set<String> {
+        scopes.values.reduce(into: Set<String>()) { $0.formUnion($1) }
+    }
+
+    static var hasUnscopedWork: Bool { scopes.values.contains(where: \.isEmpty) }
+    static var hasActiveWork: Bool { !scopes.isEmpty }
+
+    static func begin(meetingIDs: Set<String>) -> UUID {
+        let token = UUID()
+        var ids = meetingIDs
+        ids.remove("")
+        scopes[token] = ids
+        MeetingCaptureCoordinator.refreshCloudSyncProtection()
+        return token
+    }
+
+    static func begin(record: MeetingRecord) -> UUID {
+        var ids = Set(record.audioTrackIDs)
+        ids.insert(record.meetingID)
+        if let parent = record.parentMeetingID { ids.insert(parent) }
+        return begin(meetingIDs: ids)
+    }
+
+    static func end(_ token: UUID) {
+        scopes.removeValue(forKey: token)
+        MeetingCaptureCoordinator.refreshCloudSyncProtection()
+    }
+}
+
+@MainActor
+final class MeetingCaptureCoordinator: ObservableObject {
+    private static let syncParticipants = NSHashTable<MeetingCaptureCoordinator>.weakObjects()
+    private var protectsCloudSync: Bool {
+        if starting { return true }
+        switch status {
+        case .recording, .paused, .stopping, .finalizingTranscript, .extractingActions: return true
+        default: return false
+        }
+    }
+
+    /// Every source keeps its own record/audio namespace; never substitute the
+    /// parent ID for its microphone, application or output-device children.
+    static func cloudSyncProtectedMeetingIDs() -> Set<String> {
+        var ids = MeetingCloudSyncProtection.meetingIDs
+        for coordinator in syncParticipants.allObjects where coordinator.protectsCloudSync {
+            if let root = coordinator.activeMeetingID, !root.isEmpty { ids.insert(root) }
+            ids.formUnion(coordinator.trackOrder)
+        }
+        return ids
+    }
+
+    /// During permission/picker preflight the root may not exist yet. Cloud must
+    /// conservatively defer the meeting family, but can still process tasks/mail.
+    static var hasUnscopedCaptureForCloudSync: Bool {
+        MeetingCloudSyncProtection.hasUnscopedWork || syncParticipants.allObjects.contains {
+            $0.protectsCloudSync && ($0.activeMeetingID?.isEmpty != false)
+        }
+    }
+
+    static var hasActiveCaptureForCloudSync: Bool {
+        syncParticipants.allObjects.contains(where: \.protectsCloudSync)
+    }
+
+    static var hasActiveMeetingWorkForCloudSync: Bool {
+        MeetingCloudSyncProtection.hasActiveWork || hasActiveCaptureForCloudSync
+    }
+
+    fileprivate static func refreshCloudSyncProtection() {
+        MeetingCloudSyncFence.shared.update(
+            protectedIDs: cloudSyncProtectedMeetingIDs(), unscoped: hasUnscopedCaptureForCloudSync)
+    }
+
+    /// Capture on MainActor, validate on any executor immediately before I/O.
+    /// Nil protects the whole file inventory; a concrete ID scopes a model/file
+    /// namespace. A new scope cannot revive an authorization after it finishes.
+    static func captureCloudSyncAuthorization(for meetingID: String? = nil) -> @Sendable () -> Bool {
+        refreshCloudSyncProtection()
+        return MeetingCloudSyncFence.shared.authorization(for: meetingID)
+    }
+
+    /// File actors discover local and remote-only namespace IDs after this
+    /// snapshot. Each discovered ID is fenced independently, including a new ID
+    /// that entered and left capture/processing before the actor checks it.
+    static func captureCloudSyncNamespaceAuthorization() -> @Sendable (String) -> Bool {
+        refreshCloudSyncProtection()
+        return MeetingCloudSyncFence.shared.namespaceAuthorization()
+    }
+
+    @Published private(set) var status: MeetingStatus = .ready {
+        didSet {
+            if status != oldValue { Self.refreshCloudSyncProtection() }
+        }
+    }
     @Published private(set) var elapsedMediaMs: Int64 = 0
     @Published private(set) var failure: String?
     @Published private(set) var recordedAudioSamples: Int64 = 0
@@ -335,7 +486,11 @@ final class MeetingCaptureCoordinator: ObservableObject {
     private var microphoneTapInstalled = false
     private var microphoneChangeGeneration = 0
     private var changingMicrophone = false
-    private var starting = false
+    private var starting = false {
+        didSet {
+            if starting != oldValue { Self.refreshCloudSyncProtection() }
+        }
+    }
     private var captureGeneration = UUID()
     private var voiceProcessingRequested = false
     private var preferredMicrophoneRouteID: String?
@@ -387,7 +542,11 @@ final class MeetingCaptureCoordinator: ObservableObject {
     private let terminationGate = MeetingCaptureTerminationGate<Void>()
     private var canonicalPipeline: MeetingAudioSourceRouter?
     private var tracks: [String: MeetingCaptureTrackSession] = [:]
-    private var trackOrder: [String] = []
+    private var trackOrder: [String] = [] {
+        didSet {
+            if trackOrder != oldValue { Self.refreshCloudSyncProtection() }
+        }
+    }
     private var activeSourceTracks: [MeetingAudioSourceRouter.Source: String] = [:]
     private let recordingActivityOwnerID = UUID()
     private var recordingMeterTask: Task<Void, Never>?
@@ -398,7 +557,11 @@ final class MeetingCaptureCoordinator: ObservableObject {
     private var sourceRetirements: [MeetingAudioSourceRouter.Source: Task<Void, Never>] = [:]
     private var trackFinalizations: [String: Task<Void, Never>] = [:]
     private var thermalObserver: NSObjectProtocol?
-    private var activeMeetingID: String?
+    private var activeMeetingID: String? {
+        didSet {
+            if activeMeetingID != oldValue { Self.refreshCloudSyncProtection() }
+        }
+    }
     private var activeLanguageTag = ""
     private var activeSummaryLanguageTag: String?
     private(set) var recordingDefersTranscription = false

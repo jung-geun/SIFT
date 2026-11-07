@@ -919,7 +919,9 @@ struct TodoListView: View {
             }
             .frame(width: 28)
             VStack(alignment: .leading, spacing: 6) {
-                Text(prioritizingStatusText)
+                Text(showPrioritizingIndicator
+                    ? prioritizingStatusText
+                    : AppLanguage.localized("메일 내용 분석 중…", defaultValue: "메일 내용 분석 중…", language: .current))
                     .font(.subheadline.weight(.medium))
                     .fixedSize(horizontal: false, vertical: true)
                 Text(

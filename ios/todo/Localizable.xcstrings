@@ -44766,49 +44766,49 @@
         "de" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Die Liste und vollständigen Nachrichtentexte werden regelmäßig unabhängig von der KI-Analyse zwischengespeichert. Der Hintergrundabruf gilt nur für erlaubte Konten; iOS bestimmt den Ausführungszeitpunkt. Die automatische Analyse wird einmal täglich nach der gewählten Uhrzeit versucht."
+            "value" : "Die Liste und vollständigen Nachrichtentexte werden unabhängig von der KI-Analyse regelmäßig gespeichert. Abruf und Analyse im Hintergrund gelten nur für erlaubte Konten; iOS bestimmt den Ausführungszeitpunkt."
           }
         },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "The inbox list and complete bodies are cached periodically, independently of AI analysis. Background fetching applies only to accounts you have allowed; iOS decides when it runs. Automatic analysis is attempted once a day after the selected time."
+            "value" : "The inbox list and complete bodies are cached periodically, independently of AI analysis. Background fetching and analysis apply only to allowed accounts; iOS decides when they run."
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "La lista y los cuerpos completos se guardan periódicamente, independientemente del análisis con IA. La descarga en segundo plano solo se aplica a las cuentas autorizadas; iOS decide cuándo se ejecuta. El análisis automático se intenta una vez al día después de la hora seleccionada."
+            "value" : "La lista y los cuerpos completos se guardan periódicamente, independientemente del análisis con IA. La descarga y el análisis en segundo plano solo se aplican a las cuentas autorizadas; iOS decide cuándo se ejecutan."
           }
         },
         "fr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "La liste et le texte complet des messages sont mis en cache régulièrement, indépendamment de l’analyse IA. La récupération en arrière-plan concerne uniquement les comptes autorisés ; iOS décide de son exécution. L’analyse automatique est tentée une fois par jour après l’heure choisie."
+            "value" : "La liste et le texte complet des messages sont mis en cache régulièrement, indépendamment de l’analyse IA. La récupération et l’analyse en arrière-plan concernent uniquement les comptes autorisés ; iOS décide de leur exécution."
           }
         },
         "it" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "L’elenco e i testi completi vengono salvati periodicamente, indipendentemente dall’analisi IA. Il recupero in background riguarda solo gli account autorizzati; iOS ne decide l’esecuzione. L’analisi automatica viene tentata una volta al giorno dopo l’orario scelto."
+            "value" : "L’elenco e i testi completi vengono salvati periodicamente, indipendentemente dall’analisi IA. Il recupero e l’analisi in background riguardano solo gli account autorizzati; iOS ne decide l’esecuzione."
           }
         },
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "一覧と本文全体はAI分析とは別に定期保存されます。バックグラウンド取得は許可したアカウントのみが対象で、実行時刻はiOSが決定します。自動分析は設定時刻以降に1日1回試行します。"
+            "value" : "一覧と本文全体はAI分析とは別に定期保存されます。バックグラウンドでの取得と分析は許可したアカウントのみが対象で、実行時刻はiOSが決定します。"
           }
         },
         "ko" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "목록과 전체 본문은 분석 설정과 별개로 주기적으로 저장합니다. 백그라운드 수집은 허용한 계정에만 적용되며 iOS가 실행 시각을 결정합니다. 자동 분석은 설정한 시각 이후 하루 한 번 시도합니다."
+            "value" : "목록과 전체 본문은 분석 설정과 별개로 주기적으로 저장합니다. 백그라운드 수집과 분석은 허용한 계정에만 적용되며 iOS가 실행 시각을 결정합니다."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "收件箱列表和完整正文会定期缓存，与AI分析设置无关。后台收取仅适用于您已允许的账户，运行时间由iOS决定。自动分析每天在所选时间之后尝试一次。"
+            "value" : "收件箱列表和完整正文会定期缓存，与AI分析设置无关。后台收取和分析仅适用于您已允许的账户，运行时间由iOS决定。"
           }
         }
       }

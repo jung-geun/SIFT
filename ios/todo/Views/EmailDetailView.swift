@@ -22,7 +22,7 @@ struct EmailDetailView: View {
     @State private var isValidatingOutlook = false
     @State private var gmailConnectionFailure: String?
     @State private var outlookConnectionFailure: String?
-    @State private var isFetchingEmails = false
+    @State private var fetchingProviders: Set<MailProvider> = []
     @State private var imapEmail = ""
     @State private var imapPassword = ""
     @State private var outlookEmail = ""
@@ -137,10 +137,6 @@ struct EmailDetailView: View {
         emailLookbackDaysBinding.wrappedValue
     }
 
-    private var emailRefreshHour: Int {
-        get { SettingsStore.shared.get("pieroot.todo.emailRefreshHour", defaultValue: 7) }
-        nonmutating set { saveSetting(key: "pieroot.todo.emailRefreshHour", value: newValue) }
-    }
 
     var body: some View {
         Form {
@@ -330,7 +326,7 @@ struct EmailDetailView: View {
                     }
                 }
 
-                if isGmailAuthenticated {
+                if isAnyMailAuthenticated {
                     VStack(alignment: .leading, spacing: 4) {
                         Toggle("메일 자동 분석", isOn: settingsBinding(key: "pieroot.todo.emailAutoAnalysisEnabled", defaultValue: true))
                     }
@@ -340,17 +336,9 @@ struct EmailDetailView: View {
                     DisclosureGroup(isExpanded: $showEmailPeriod) {
 
                         VStack(alignment: .leading, spacing: 4) {
-                            Picker(AppLanguage.localized("mail.background.analysisHour", defaultValue: "자동 분석 시각", language: .current), selection: settingsBinding(key: "pieroot.todo.emailRefreshHour", defaultValue: 7) { _ in
-                                scheduleEmailRefresh()
-                            }) {
-                                ForEach(0..<24, id: \.self) { h in
-                                    Text(Self.hourLabel(h)).tag(h)
-                                }
-                            }
-                            .pickerStyle(.menu)
                             Text(AppLanguage.localized(
                                 "mail.background.cacheExplanation",
-                                defaultValue: "목록과 전체 본문은 분석 설정과 별개로 주기적으로 저장합니다. 백그라운드 수집은 허용한 계정에만 적용되며 iOS가 실행 시각을 결정합니다. 자동 분석은 설정한 시각 이후 하루 한 번 시도합니다.",
+                                defaultValue: "목록과 전체 본문은 분석 설정과 별개로 주기적으로 저장합니다. 백그라운드 수집과 분석은 허용한 계정에만 적용되며 iOS가 실행 시각을 결정합니다.",
                                 language: .current
                             ))
                             .font(.caption)
@@ -640,22 +628,6 @@ struct EmailDetailView: View {
         )
     }
 
-    private static func hourLabel(_ h: Int) -> String {
-        switch h {
-        case 0:
-            return AppLanguage.localized("mail.hour.midnight", defaultValue: "자정 00:00", language: .current, comment: "Mail refresh hour.")
-        case 12:
-            return AppLanguage.localized("mail.hour.noon", defaultValue: "정오 12:00", language: .current, comment: "Mail refresh hour.")
-        default:
-            let formatter = DateFormatter()
-            formatter.locale = AppLanguage.current.locale
-            formatter.setLocalizedDateFormatFromTemplate("j")
-            let calendar = Calendar(identifier: .gregorian)
-            let date = calendar.date(from: DateComponents(year: 2001, month: 1, day: 1, hour: h))!
-            let clock = String(format: "%02d:00", h)
-            return "\(formatter.string(from: date)) (\(clock))"
-        }
-    }
 
 
     private static func credentialText(_ key: String, _ fallback: String) -> String {
@@ -746,7 +718,7 @@ struct EmailDetailView: View {
         case .gmail:
             try IMAPCredentialStore.delete(for: account)
             MailboxIncrementalSyncCoordinator.shared.forgetCursor(for: .gmail, rawAccount: account)
-            GmailIMAPIngestionCursorStore().clearCursor(for: account)
+            UserDefaults.standard.removeObject(forKey: "pieroot.todo.gmailIMAP.ingestionCursor.\(account.lowercased())")
             imapAccount = ""
             imapEmail = ""
             imapPassword = ""
@@ -906,11 +878,10 @@ struct EmailDetailView: View {
     }
 
     private func fetchEmailsNow(for provider: MailProvider) async {
-        guard !isFetchingEmails else { return }
-        isFetchingEmails = true
-        defer { isFetchingEmails = false }
+        guard fetchingProviders.insert(provider).inserted else { return }
+        defer { fetchingProviders.remove(provider) }
 
-        let emailContext = AppDataContainer.shared.emailContainer.mainContext
+        let account = selectedAccount(for: provider)
         var todoCount = 0
         let eventCount = 0
         var failures: [String] = []
@@ -919,14 +890,13 @@ struct EmailDetailView: View {
         switch provider {
         case .gmail:
             if isGmailAuthenticated {
-                do {
-                    let account = imapAccount.isEmpty ? imapEmail : imapAccount
-                    let result = try await GmailIMAPIngestionService(emailContext: emailContext)
-                        .sync(account: account, backgroundEnabled: imapBackgroundEnabled)
-                    todoCount += result.analyzedCount
-                    didSucceed = true
-                } catch {
-                    failures.append("Gmail IMAP: \(error.localizedDescription)")
+                let synced = await MailboxIncrementalSyncCoordinator.shared.sync(provider: .gmail)
+                guard !Task.isCancelled, selectedAccount(for: provider) == account else { return }
+                todoCount = await EmailAutomationOrchestrator.shared.analyzeNow(provider: .gmail, namespace: account)
+                guard !Task.isCancelled, selectedAccount(for: provider) == account else { return }
+                didSucceed = synced
+                if !synced {
+                    failures.append(AppLanguage.localized("오류", defaultValue: "오류", language: .current, comment: "Error"))
                 }
             }
             if didSucceed {
@@ -941,6 +911,9 @@ struct EmailDetailView: View {
         case .outlook:
             if isOutlookAuthenticated {
                 let ok = await MailboxIncrementalSyncCoordinator.shared.sync(provider: .outlook)
+                guard !Task.isCancelled, selectedAccount(for: provider) == account else { return }
+                _ = await EmailAutomationOrchestrator.shared.analyzeNow(provider: .outlook, namespace: account)
+                guard !Task.isCancelled, selectedAccount(for: provider) == account else { return }
                 if ok {
                     didSucceed = true
                     lastEmailFetchTimestamp = Date().timeIntervalSince1970
