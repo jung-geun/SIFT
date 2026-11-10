@@ -32,6 +32,36 @@ final class TodoLifecycleUITests: SIFTUITestCase {
         }
     }
 
+    func testDragDownDismissDiscardsUnsavedChanges() throws {
+        launch()
+        let source = "드래그 원본"
+        let changed = "드래그로 닫으면 안 됨"
+
+        step("검증용 할 일 만들기") {
+            tap(app.buttons["todo.addButton"], message: "할 일 추가 버튼이 없습니다.")
+            let title = app.textFields["todo.add.titleField"]
+            tap(title, message: "제목 필드가 없습니다.")
+            title.typeText(source)
+            tap(app.buttons["todo.add.saveButton"], message: "할 일 저장 버튼이 없습니다.")
+            require(taskTitle(source), message: "생성한 할 일이 목록에 없습니다.")
+        }
+
+        step("수정 후 아래로 끌어 닫기") {
+            tap(taskTitle(source), message: "생성한 할 일을 찾지 못했습니다.")
+            replaceText(in: app.textFields["todo.detail.titleField"], with: changed)
+            let bar = app.navigationBars.firstMatch
+            require(bar, message: "시트의 내비게이션 바가 없습니다.")
+            let start = bar.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.97))
+            start.press(forDuration: 0.1, thenDragTo: end)
+        }
+
+        step("저장되지 않고 원래 제목이 남는지 확인") {
+            require(taskTitle(source), message: "드래그로 닫은 뒤 원래 제목이 없습니다.")
+            XCTAssertFalse(taskTitle(changed).exists, "드래그로 닫았는데 수정 내용이 저장됐습니다.")
+        }
+    }
+
     func testBoardMenuEditsRemainAvailableInListView() throws {
         launch(.init(additionalArguments: [
             "-pieroot.todo.board.showActive", "YES",

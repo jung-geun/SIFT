@@ -6,6 +6,32 @@ import UIKit
 
 // MARK: - Todo Row
 
+/// Presents the to-do editor modally. Catalyst dismisses on outside clicks; iOS and iPad use a sheet.
+private struct TodoEditorPresentation: ViewModifier {
+    @Binding var editingTodo: Todo?
+
+    private var isPresented: Binding<Bool> {
+        Binding(get: { editingTodo != nil }, set: { if !$0 { editingTodo = nil } })
+    }
+
+    func body(content: Content) -> some View {
+        #if targetEnvironment(macCatalyst)
+        content.outsideDismissSheet(isPresented: isPresented) { editor }
+        #else
+        content.sheet(isPresented: isPresented) { editor }
+        #endif
+    }
+
+    @ViewBuilder
+    private var editor: some View {
+        if let todo = editingTodo {
+            NavigationStack {
+                TodoDetailView(todo: todo)
+            }
+        }
+    }
+}
+
 /// Opens a to-do in the modal editor. Rows and board cards call this instead of pushing.
 struct OpenTodoAction {
     let open: (Todo) -> Void
@@ -705,19 +731,11 @@ struct TodoListView: View {
         } message: {
             Text(saveError ?? "")
         }
-        // Edits open as a modal sheet. Dragging it down discards unsaved draft edits,
-        // which is the same as cancelling: nothing reaches the store until Save.
+        // Edits open as a modal. Dragging the sheet down (iOS, iPad) or clicking outside it (Mac)
+        // discards unsaved draft edits, the same as Cancel: nothing reaches the store until Save.
+        // iPad uses a sheet, not a popover: a popover is too small for the full editor form.
         .environment(\.openTodo, OpenTodoAction { editingTodo = $0 })
-        .sheet(isPresented: Binding(
-            get: { editingTodo != nil },
-            set: { if !$0 { editingTodo = nil } }
-        )) {
-            if let todo = editingTodo {
-                NavigationStack {
-                    TodoDetailView(todo: todo)
-                }
-            }
-        }
+        .modifier(TodoEditorPresentation(editingTodo: $editingTodo))
     }
 
     // MARK: - Subviews
