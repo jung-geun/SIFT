@@ -105,6 +105,8 @@ enum CloudModelCodec {
         let encode: (Model, JSONEncoder) throws -> Data?
         let decode: (Model, Data, JSONDecoder) throws -> Void
         let copy: (Model, Model) -> Void
+        /// Restore-only copy. Defaults to `copy`; neutral-wire fields never overwrite local data with neutral values.
+        var restoreCopy: (Model, Model) -> Void
         let decodeMissing: ((Model) -> Void)?
         let preservesLocalValueOnRestore: Bool
 
@@ -115,7 +117,28 @@ enum CloudModelCodec {
                 model[keyPath: path] = try decoder.decode(Value.self, from: data)
             }
             copy = { source, destination in destination[keyPath: path] = source[keyPath: path] }
+            restoreCopy = copy
             decodeMissing = defaultValue.map { value in { model in model[keyPath: path] = value } }
+            preservesLocalValueOnRestore = false
+        }
+
+        /// The key is always on the wire with a neutral value, so published clients keep decoding it.
+        /// A restore never replaces this device's non-neutral value with the neutral remote one.
+        init<Value: Codable & Equatable>(neutralWire name: String, _ path: ReferenceWritableKeyPath<Model, Value>,
+                                         neutral: Value) {
+            self.name = name
+            encode = { _, encoder in try encoder.encode(neutral) }
+            decode = { model, data, decoder in
+                _ = try decoder.decode(Value.self, from: data)
+                model[keyPath: path] = neutral
+            }
+            copy = { source, destination in destination[keyPath: path] = source[keyPath: path] }
+            restoreCopy = { source, destination in
+                let incoming = source[keyPath: path]
+                guard incoming != neutral else { return }
+                destination[keyPath: path] = incoming
+            }
+            decodeMissing = { model in model[keyPath: path] = neutral }
             preservesLocalValueOnRestore = false
         }
 
@@ -131,6 +154,7 @@ enum CloudModelCodec {
                 model[keyPath: path] = try decoder.decode(Value.self, from: data)
             }
             copy = { source, destination in destination[keyPath: path] = source[keyPath: path] }
+            restoreCopy = copy
             decodeMissing = { model in model[keyPath: path] = defaultValue }
             preservesLocalValueOnRestore = false
         }
@@ -148,6 +172,7 @@ enum CloudModelCodec {
                 model[keyPath: path] = defaultValue
             }
             copy = { source, destination in destination[keyPath: path] = source[keyPath: path] }
+            restoreCopy = copy
             decodeMissing = { model in model[keyPath: path] = defaultValue }
         }
     }
@@ -232,13 +257,13 @@ enum CloudModelCodec {
             // cannot invalidate a complete provider fetch on this device.
             let localBodyVersion: Int?
             if let incoming = decoded as? EmailMessage, let local = existing as? EmailMessage,
-               incoming.body == local.body, incoming.htmlBody == local.htmlBody {
+               incoming.body == local.body {
                 localBodyVersion = local.bodyContentVersion
             } else {
                 localBodyVersion = nil
             }
             for field in fields where !field.preservesLocalValueOnRestore {
-                field.copy(decoded, existing)
+                field.restoreCopy(decoded, existing)
             }
             if let localBodyVersion, let local = existing as? EmailMessage {
                 local.bodyContentVersion = localBodyVersion
@@ -469,13 +494,13 @@ enum CloudModelCodec {
     }
 
     private static let mainEntities = [todos.erased(), personas.erased(), audits.erased(),
-        behaviors.erased(), analyses.erased(), ledgers.erased()]
+        behaviors.erased(), analyses.erased(), ledgers.erased(), memos.erased()]
     private static let emailEntities = [emails.erased()]
     private static let meetingEntities = [meetings.erased(), glossary.erased(), metadata.erased(),
         sources.erased(), observations.erased()]
     static let captureFamilies: [Set<String>] = [
         ["Todo", "TaskAuditEvent", "TaskBehaviorEvent"], ["Persona"], ["MemoryAnalysis"],
-        ["MailAnalysisLedgerRecord"], ["EmailMessage"], ["MeetingRecord"],
+        ["MailAnalysisLedgerRecord"], ["EmailMessage"], ["MeetingRecord"], ["Memo"],
         ["MeetingGlossaryTerm", "VocabularyStoreMetadata", "VocabularySourceState", "VocabularyObservation"]
     ]
     private static let captureFamiliesCoverSchema =
@@ -856,6 +881,11 @@ enum CloudModelCodec {
             .init("id", \.id), .init("descriptionText", \.descriptionText),
             .init("personaTypeRaw", \.personaTypeRaw), .init("updatedAt", \.updatedAt)
         ])
+    private static let memos = Entity<Memo>(name: "Memo", make: { Memo() }, identity: { uuid($0.id) },
+        validIdentity: validUUID, fields: [
+            .init("id", \.id), .init("text", \.text),
+            .init("createdAt", \.createdAt), .init("updatedAt", \.updatedAt)
+        ])
     private static let audits = Entity<TaskAuditEvent>(name: "TaskAuditEvent", make: { TaskAuditEvent(from: Todo()) },
         identity: { uuid($0.id) }, validIdentity: validUUID, fields: [
             .init("id", \.id), .init("todoID", \.todoID), .init("createdAt", \.createdAt),
@@ -902,7 +932,10 @@ enum CloudModelCodec {
             return try stringIdentity([model.providerRawValue, model.sourceAccountNamespace, model.id])
         }, validIdentity: { validStringIdentity($0, count: 3) }, fields: [
             .init("id", \.id), .init("threadID", \.threadID), .init("subject", \.subject), .init("from", \.from),
-            .init("snippet", \.snippet), .init("body", \.body), .init("htmlBody", \.htmlBody),
+            .init("snippet", \.snippet), .init("body", \.body),
+            // Rendering cache, re-fetchable from the provider. The key stays on the wire for
+            // published clients, but the value is always null and restores never overwrite local HTML.
+            .init(neutralWire: "htmlBody", \.htmlBody, neutral: nil),
             .init(deviceLocal: "bodyContentVersion", \.bodyContentVersion, defaultValue: 0, omitFromEnvelope: true),
             .init("receivedAt", \.receivedAt), .init("isRead", \.isRead), .init("providerRawValue", \.providerRawValue),
             .init(deviceLocal: "hasBeenViewedInApp", \.hasBeenViewedInApp, defaultValue: true,

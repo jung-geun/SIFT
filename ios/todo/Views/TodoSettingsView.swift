@@ -55,6 +55,18 @@ struct TodoSettingsView: View {
         Form {
             notificationSection
 
+            #if targetEnvironment(macCatalyst)
+            Section {
+                NavigationLink(destination: MCPSettingsView()) {
+                    Label(
+                        AppLanguage.localized("mcp.settings.title", defaultValue: "MCP 연결", language: .current, comment: "MCP settings title."),
+                        systemImage: "link"
+                    )
+                }
+                .accessibilityIdentifier("todo.settings.mcp")
+            }
+            #endif
+
             Section {
                 if !selectableProviders.isEmpty {
                     Picker(copy("todo.settings.priority.provider", korean: "정렬에 사용할 AI", english: "AI for Sorting"), selection: selectedProviderBinding) {

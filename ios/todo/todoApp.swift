@@ -601,7 +601,13 @@ struct todoApp: App {
                 appDelegate.modelContext = ctx
                 todoApp.deduplicatePersonas(context: ctx)
                 todoApp.deduplicateCalendarTodos(context: ctx)
+                _ = try? TaskHistoryRetention.prune(in: ctx)
                 QuickSortService.shared.start(context: ctx)
+                #if targetEnvironment(macCatalyst)
+                if UserDefaults.standard.bool(forKey: "pieroot.todo.mcp.enabled") {
+                    TodoMCPServer.shared.start(container: appData.container)
+                }
+                #endif
 
                 CalendarService.shared.restoreAuthorizationIfGranted()
                 unexpectedTerminationRecovery.enterForeground()

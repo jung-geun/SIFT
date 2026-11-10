@@ -442,9 +442,11 @@ struct CloudModelCodecTests {
         revision.isTombstone = false
         try context.save()
         engine = try FullCloudSyncEngine(cloud: ModelContext(cloud), installationID: UUID().uuidString, journalURL: journalURL)
+        let localHTMLBeforeRestore = local.htmlBody
         try await reconcile()
         #expect(restoredMail == [emailKey, ledgerKey])
-        #expect(local.body == records.email.body && local.htmlBody == records.email.htmlBody)
+        // HTML is a device-local rendering cache: restore keeps this device's copy, never the remote one.
+        #expect(local.body == records.email.body && local.htmlBody == localHTMLBeforeRestore)
         #expect(local.analysisSummary == records.email.analysisSummary)
         #expect(ledger.stateRawValue == records.ledger.stateRawValue)
         // This call returns at the version guard, before any Keychain/ledger access.
