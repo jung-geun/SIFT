@@ -171,6 +171,16 @@
         "Solange die App geöffnet ist, werden neue E-Mails und Inhalte etwa alle 45 Sekunden abgerufen und jedes Gerät analysiert Handlungspunkte; fehlgeschlagene Analysen werden mit wachsenden Abständen wiederholt.",
         "Behoben: Der Hinweis „Lokale Daten wiederhergestellt“ wiederholte sich, und das Banner „KI sortiert Prioritäten…“ erschien während der E-Mail-Analyse."
       ]
+    },
+    "1.0.17": {
+      "summary": "Neu sind Tag-Filter und Aufgabenvorschläge aus Notizen, eine optionale MCP-Verbindung auf dem Mac und weniger iCloud-Synchronisationsvolumen.",
+      "details": [
+        "Filtern Sie Aufgaben in Liste und Board nach Tag.",
+        "Notizen können mit der On-Device-KI Aufgaben vorschlagen. Es werden nur die ausgewählten Vorschläge hinzugefügt, und Vorschläge mit demselben Titel wie eine vorhandene Aufgabe werden als Duplikat markiert.",
+        "Aktivieren Sie auf dem Mac in den Einstellungen die MCP-Verbindung, damit lokale KI-Werkzeuge Aufgaben auf diesem Gerät abrufen, hinzufügen, ändern und abschließen können. Sie ist standardmäßig aus und benötigt ein Token.",
+        "Es werden weniger Daten an iCloud gesendet: HTML-Inhalte von E-Mails bleiben auf jedem Gerät, und Verlaufs- und Prüfprotokolle älter als 120 Tage werden automatisch bereinigt.",
+        "Eine manuelle KI-Sortierung, die nicht mehr antwortet, endet nach 10 Minuten mit einem Fehler, und die E-Mail-Analyse zeigt kein Sortierbanner mehr an."
+      ]
     }
   }
 }

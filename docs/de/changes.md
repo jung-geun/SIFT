@@ -10,6 +10,17 @@ description: Neue Funktionen, Verbesserungen und Fehlerbehebungen in den einzeln
 
 # Änderungen
 
+<a id="version-1-0-17"></a>
+## 1.0.17
+
+### Aufgaben, Notizen, Verbindung und Synchronisation
+
+- Filtern Sie Aufgaben in Liste und Board nach Tag.
+- Notizen können mit der On-Device-KI Aufgaben vorschlagen. Es werden nur die ausgewählten Vorschläge hinzugefügt, und Vorschläge mit demselben Titel wie eine vorhandene Aufgabe werden als Duplikat markiert.
+- Aktivieren Sie auf dem Mac in den Einstellungen die MCP-Verbindung, damit lokale KI-Werkzeuge Aufgaben auf diesem Gerät abrufen, hinzufügen, ändern und abschließen können. Sie ist standardmäßig aus und benötigt ein Token.
+- Es werden weniger Daten an iCloud gesendet: HTML-Inhalte von E-Mails bleiben auf jedem Gerät, und Verlaufs- und Prüfprotokolle älter als 120 Tage werden automatisch bereinigt.
+- Eine manuelle KI-Sortierung, die nicht mehr antwortet, endet nach 10 Minuten mit einem Fehler, und die E-Mail-Analyse zeigt kein Sortierbanner mehr an.
+
 <a id="version-1-0-16"></a>
 ## 1.0.16
 

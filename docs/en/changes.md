@@ -10,6 +10,17 @@ description: New features, improvements, and fixes in each version of SIFT.
 
 # What's new
 
+<a id="version-1-0-17"></a>
+## 1.0.17
+
+### To-dos, memos, connections and sync
+
+- Filter to-dos by tag in the list and board views.
+- Memos can suggest to-dos with on-device AI. Only the suggestions you select are added, and suggestions matching an existing to-do are marked as duplicates.
+- On Mac, turn on MCP connection in settings to let local AI tools list, add, update, and complete to-dos on this device. It is off by default and requires a token.
+- Less data goes to iCloud: HTML mail bodies stay on each device, and behavior and audit history older than 120 days is cleaned up automatically.
+- A manual AI sort that stops responding ends with an error after 10 minutes, and mail analysis no longer shows the sorting banner.
+
 <a id="version-1-0-16"></a>
 ## 1.0.16
 

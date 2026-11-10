@@ -171,6 +171,16 @@
         "Con la app abierta, el correo nuevo y sus contenidos se revisan cada 45 segundos aproximadamente y cada dispositivo analiza las acciones; los análisis fallidos se reintentan con intervalos crecientes.",
         "Se corrigió la repetición del aviso «Datos locales restaurados» y el banner «Ordenando prioridades con IA…» durante el análisis del correo."
       ]
+    },
+    "1.0.17": {
+      "summary": "Se añaden filtros por etiqueta y sugerencias de tareas desde notas, una conexión MCP opcional en Mac y menos volumen de sincronización con iCloud.",
+      "details": [
+        "Filtra las tareas por etiqueta en la lista y en el tablero.",
+        "Las notas pueden sugerir tareas con la IA del dispositivo. Solo se añaden las sugerencias que elijas, y las que coinciden con una tarea existente se marcan como duplicadas.",
+        "En Mac, activa la conexión MCP en los ajustes para que las herramientas de IA locales puedan consultar, añadir, editar y completar tareas en este dispositivo. Está desactivada por defecto y requiere un token.",
+        "Se envían menos datos a iCloud: los cuerpos HTML de los correos se quedan en cada dispositivo, y el historial de acciones y auditorías de más de 120 días se limpia automáticamente.",
+        "Una ordenación manual con IA que deja de responder termina con un error a los 10 minutos, y el análisis de correos ya no muestra el banner de ordenación."
+      ]
     }
   }
 }

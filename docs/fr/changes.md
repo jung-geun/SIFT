@@ -10,6 +10,17 @@ description: Nouvelles fonctions, améliorations et corrections de SIFT, version
 
 # Nouveautés
 
+<a id="version-1-0-17"></a>
+## 1.0.17
+
+### Tâches, notes, connexion et synchronisation
+
+- Filtrez les tâches par étiquette dans la liste et dans le tableau.
+- Les notes peuvent proposer des tâches grâce à l'IA sur l'appareil. Seules les suggestions choisies sont ajoutées, et celles qui correspondent à une tâche existante sont marquées comme doublons.
+- Sur Mac, activez la connexion MCP dans les réglages pour permettre aux outils IA locaux de consulter, ajouter, modifier et terminer les tâches de cet appareil. Elle est désactivée par défaut et nécessite un jeton.
+- Moins de données sont envoyées à iCloud : les corps HTML des e-mails restent sur chaque appareil, et l'historique des actions et des audits de plus de 120 jours est nettoyé automatiquement.
+- Un tri IA manuel qui ne répond plus se termine par une erreur au bout de 10 minutes, et l'analyse des e-mails n'affiche plus la bannière de tri.
+
 <a id="version-1-0-16"></a>
 ## 1.0.16
 
