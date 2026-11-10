@@ -23,7 +23,8 @@ final class TodoSwipeActionsUITests: SIFTUITestCase {
     }
 
     private func todoRow(_ title: String) -> XCUIElement {
-        app.cells.containing(.staticText, identifier: title).firstMatch
+        // Rows expose the title as a label, not as an accessibility identifier.
+        app.cells.containing(NSPredicate(format: "label == %@", title)).firstMatch
     }
 
     private var completeAction: XCUIElement {
