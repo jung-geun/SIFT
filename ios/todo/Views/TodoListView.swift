@@ -6,7 +6,25 @@ import UIKit
 
 // MARK: - Todo Row
 
+/// Opens a to-do in the modal editor. Rows and board cards call this instead of pushing.
+struct OpenTodoAction {
+    let open: (Todo) -> Void
+    func callAsFunction(_ todo: Todo) { open(todo) }
+}
+
+private struct OpenTodoKey: EnvironmentKey {
+    static let defaultValue = OpenTodoAction { _ in }
+}
+
+extension EnvironmentValues {
+    var openTodo: OpenTodoAction {
+        get { self[OpenTodoKey.self] }
+        set { self[OpenTodoKey.self] = newValue }
+    }
+}
+
 private struct TodoRowView: View {
+    @Environment(\.openTodo) private var openTodo
     let todo: Todo
     var onToggleComplete: (() -> Void)? = nil
     var onDelete: (() -> Void)? = nil
@@ -22,11 +40,12 @@ private struct TodoRowView: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
-            NavigationLink(value: todo) {
+            Button {
+                openTodo(todo)
+            } label: {
                 primaryContent
             }
             .buttonStyle(.plain)
-            .navigationLinkIndicatorVisibility(.hidden)
             .accessibilityIdentifier("todo.row.open.\(todo.id.uuidString)")
 
             #if targetEnvironment(macCatalyst)
@@ -341,6 +360,7 @@ struct TodoListView: View {
     @State private var addTodoDraft = AddTodoDraft()
     @State private var filter: TodoFilter = .active
     @State private var selectedTag: String?
+    @State private var editingTodo: Todo?
     @State private var isPrioritizing = false
     @State private var showPrioritizingIndicator = false
     @State private var prioritizingStatusText = AppLanguage.localized(
@@ -513,9 +533,6 @@ struct TodoListView: View {
                         comment: "Global search prompt."
                     ))
                 )
-                .navigationDestination(for: Todo.self) { todo in
-                    TodoDetailView(todo: todo)
-                }
                 .overlay {
                     if let globalSearchAppContainer,
                        let globalSearchEmailContainer,
@@ -687,6 +704,19 @@ struct TodoListView: View {
             }
         } message: {
             Text(saveError ?? "")
+        }
+        // Edits open as a modal sheet. Dragging it down discards unsaved draft edits,
+        // which is the same as cancelling: nothing reaches the store until Save.
+        .environment(\.openTodo, OpenTodoAction { editingTodo = $0 })
+        .sheet(isPresented: Binding(
+            get: { editingTodo != nil },
+            set: { if !$0 { editingTodo = nil } }
+        )) {
+            if let todo = editingTodo {
+                NavigationStack {
+                    TodoDetailView(todo: todo)
+                }
+            }
         }
     }
 

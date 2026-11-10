@@ -104,7 +104,7 @@ struct TodoDetailView: View {
         ))
         .navigationBarTitleDisplayMode(.inline)
         .navigationBarBackButtonHidden(true)
-        .interactiveDismissDisabled(hasPendingChanges)
+        // Drag-down dismissal is allowed: edits live in `draft` until Save, so closing reverts them.
         .toolbar {
             #if targetEnvironment(macCatalyst)
             ToolbarItemGroup(placement: .topBarTrailing) {
