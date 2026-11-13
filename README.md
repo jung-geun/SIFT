@@ -392,7 +392,7 @@ Cloudflare Workers Free와 별도 0 USD Zero Trust Free 구독을 실제 계정 
 3. 버전 태그가 올라오면 `.github/workflows/release.yml`이 태그·노트를 확인하고 GitHub Release를 만듭니다. 누락·불일치·이미 존재하는 다른 내용은 덮어쓰거나 자동 생성하지 않고 실패합니다.
 4. 성공 후 `.github/workflows/pages.yml`을 직접 호출해 공개된 정식 릴리스만 읽고 `/changes.html`을 서버에서 렌더링·배포합니다. `GITHUB_TOKEN`으로 생성한 Release 이벤트에 의존하지 않으며 공개 페이지에 GitHub 인증이나 브라우저 JavaScript가 필요하지 않습니다.
 
-`v*`와 숫자로 시작하는 태그는 **기존 TestFlight 워크플로도 실행**합니다. 릴리스 문서를 확인하려고 임의의 버전 태그를 만들지 마세요. 이미 기록된 `1.0.5`는 확인된 기존 커밋에 한해서만 과거 노트 보완을 허용하며, `gh workflow run release.yml --ref main -f tag=1.0.5`로 새 태그 없이 발행합니다.
+`v*`와 숫자로 시작하는 태그는 `.github/workflows/deploy.yml`을 실행해 iOS와 Mac Catalyst 아카이브를 자동 서명으로 App Store Connect에 업로드합니다. 업로드는 테스터 그룹 배포, 심사 제출 또는 App Store 공개를 자동으로 수행하지 않습니다. 릴리스 문서를 확인하려고 임의의 버전 태그를 만들지 마세요. 이미 기록된 `1.0.5`는 확인된 기존 커밋에 한해서만 과거 노트 보완을 허용하며, `gh workflow run release.yml --ref main -f tag=1.0.5`로 새 태그 없이 발행합니다.
 
 Pages의 빌드 소스는 GitHub Actions입니다. `github-pages` 환경은 `main` 브랜치와 버전 태그의 배포를 허용해야 합니다. 공개 빌드는 `docs/internal`, 소개 이미지·도표 제작 파일과 개발 전용 문서를 제외합니다. 회귀 검사는 `python3 -m unittest discover -s scripts/tests -p 'test_release_notes.py' -v`이며 Pages 빌드에서도 실행합니다.
 
