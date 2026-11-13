@@ -1,17 +1,13 @@
-# GitHub Actions CD — TestFlight 자동 배포
+# GitHub Actions CD — App Store Connect build uploads
 #
-# 트리거: main 브랜치 태그(v*) 또는 수동 실행(workflow_dispatch)
+# Triggers: version tags (v* or numeric SemVer tags) or manual dispatch.
 #
-# 필수 GitHub Secrets:
-#   BUILD_CERTIFICATE_BASE64       - 배포 인증서 .p12 (base64)
-#   P12_PASSWORD                   - .p12 비밀번호
-#   BUILD_PROVISION_PROFILE_BASE64 - App Store 프로비저닝 프로파일 .mobileprovision (base64)
-#   KEYCHAIN_PASSWORD              - 임시 키체인 비밀번호 (임의 문자열)
-#   APP_STORE_CONNECT_API_KEY_ID   - App Store Connect API 키 ID
-#   APP_STORE_CONNECT_API_ISSUER_ID - App Store Connect 발급자 ID
-#   APP_STORE_CONNECT_API_KEY_BASE64 - .p8 키 파일 (base64)
+# Required GitHub Actions secrets:
+#   APP_STORE_CONNECT_API_KEY_ID
+#   APP_STORE_CONNECT_API_ISSUER_ID
+#   APP_STORE_CONNECT_API_KEY_BASE64
 
-name: Deploy to TestFlight
+name: Upload release builds to App Store Connect
 
 on:
   workflow_dispatch:
@@ -22,7 +18,7 @@ on:
 
 jobs:
   deploy:
-    runs-on: macos-15
+    runs-on: macos-26
 
     steps:
       - uses: actions/checkout@v4
@@ -35,104 +31,96 @@ jobs:
       - name: Print Xcode version
         run: xcodebuild -version
 
-      # ─── 인증서 및 프로비저닝 프로파일 설치 ───────────────────────
-
-      - name: Install certificate and provisioning profile
-        env:
-          BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
-          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
-          BUILD_PROVISION_PROFILE_BASE64: ${{ secrets.BUILD_PROVISION_PROFILE_BASE64 }}
-          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
-        run: |
-          CERTIFICATE_PATH=$RUNNER_TEMP/build_certificate.p12
-          PP_PATH=$RUNNER_TEMP/build_pp.mobileprovision
-          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
-
-          # 인증서·프로파일 디코딩
-          echo -n "$BUILD_CERTIFICATE_BASE64" | base64 --decode -o $CERTIFICATE_PATH
-          echo -n "$BUILD_PROVISION_PROFILE_BASE64" | base64 --decode -o $PP_PATH
-
-          # 임시 키체인 생성
-          security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
-          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
-
-          # 인증서 임포트
-          security import $CERTIFICATE_PATH \
-            -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
-          security set-key-partition-list \
-            -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
-          security list-keychain -d user -s $KEYCHAIN_PATH
-
-          # 프로비저닝 프로파일 설치
-          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
-          cp $PP_PATH ~/Library/MobileDevice/Provisioning\ Profiles
-
-      # ─── 아카이브 ──────────────────────────────────────────────────
-
-      - name: Archive
-        run: |
-          xcodebuild archive \
-            -project ios/todo.xcodeproj \
-            -scheme todo \
-            -destination 'generic/platform=iOS' \
-            -archivePath $RUNNER_TEMP/todo.xcarchive \
-            CODE_SIGN_STYLE=Manual \
-            | xcpretty || xcodebuild archive \
-            -project ios/todo.xcodeproj \
-            -scheme todo \
-            -destination 'generic/platform=iOS' \
-            -archivePath $RUNNER_TEMP/todo.xcarchive \
-            CODE_SIGN_STYLE=Manual
-
-      # ─── IPA 내보내기 ──────────────────────────────────────────────
-
-      - name: Export IPA
-        run: |
-          cat > $RUNNER_TEMP/ExportOptions.plist << 'EOF'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-              <key>method</key>
-              <string>app-store</string>
-              <key>teamID</key>
-              <string>VQXGRP23X5</string>
-              <key>uploadSymbols</key>
-              <true/>
-              <key>compileBitcode</key>
-              <false/>
-          </dict>
-          </plist>
-          EOF
-
-          xcodebuild -exportArchive \
-            -archivePath $RUNNER_TEMP/todo.xcarchive \
-            -exportOptionsPlist $RUNNER_TEMP/ExportOptions.plist \
-            -exportPath $RUNNER_TEMP/build
-
-      # ─── TestFlight 업로드 ─────────────────────────────────────────
-
-      - name: Upload to TestFlight
+      - name: Prepare App Store Connect signing
         env:
           APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
           APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
           APP_STORE_CONNECT_API_KEY_BASE64: ${{ secrets.APP_STORE_CONNECT_API_KEY_BASE64 }}
         run: |
-          API_KEY_PATH=$RUNNER_TEMP/AuthKey.p8
-          echo -n "$APP_STORE_CONNECT_API_KEY_BASE64" | base64 --decode -o $API_KEY_PATH
+          set -euo pipefail
+          umask 077
+          API_KEY_PATH="$RUNNER_TEMP/AuthKey.p8"
+          printf '%s' "$APP_STORE_CONNECT_API_KEY_BASE64" | base64 --decode > "$API_KEY_PATH"
 
-          xcrun altool --upload-app \
-            --type ios \
-            --file "$(find $RUNNER_TEMP/build -name '*.ipa' | head -1)" \
-            --apiKey "$APP_STORE_CONNECT_API_KEY_ID" \
-            --apiIssuer "$APP_STORE_CONNECT_API_ISSUER_ID" \
-            --private-key-path $API_KEY_PATH \
-            --verbose
+          cat > "$RUNNER_TEMP/ExportOptions.plist" <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>method</key>
+              <string>app-store-connect</string>
+              <key>destination</key>
+              <string>upload</string>
+              <key>teamID</key>
+              <string>VQXGRP23X5</string>
+              <key>uploadSymbols</key>
+              <true/>
+          </dict>
+          </plist>
+          EOF
 
-      # ─── 정리 (항상 실행) ──────────────────────────────────────────
-
-      - name: Clean up keychain
-        if: ${{ always() }}
+      - name: Archive and upload iOS build
+        env:
+          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
         run: |
-          security delete-keychain $RUNNER_TEMP/app-signing.keychain-db || true
+          set -euo pipefail
+          API_KEY_PATH="$RUNNER_TEMP/AuthKey.p8"
+          AUTH_ARGS=(
+            -allowProvisioningUpdates
+            -authenticationKeyPath "$API_KEY_PATH"
+            -authenticationKeyID "$APP_STORE_CONNECT_API_KEY_ID"
+            -authenticationKeyIssuerID "$APP_STORE_CONNECT_API_ISSUER_ID"
+          )
+
+          xcodebuild archive \
+            -project ios/todo.xcodeproj \
+            -scheme todo \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/todo-ios.xcarchive" \
+            "${AUTH_ARGS[@]}" \
+            CODE_SIGN_STYLE=Automatic
+
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/todo-ios.xcarchive" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" \
+            -exportPath "$RUNNER_TEMP/ios-export" \
+            "${AUTH_ARGS[@]}"
+
+      - name: Archive and upload Mac Catalyst build
+        env:
+          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          API_KEY_PATH="$RUNNER_TEMP/AuthKey.p8"
+          AUTH_ARGS=(
+            -allowProvisioningUpdates
+            -authenticationKeyPath "$API_KEY_PATH"
+            -authenticationKeyID "$APP_STORE_CONNECT_API_KEY_ID"
+            -authenticationKeyIssuerID "$APP_STORE_CONNECT_API_ISSUER_ID"
+          )
+
+          xcodebuild archive \
+            -project ios/todo.xcodeproj \
+            -scheme todo \
+            -destination 'generic/platform=macOS,variant=Mac Catalyst' \
+            -archivePath "$RUNNER_TEMP/todo-catalyst.xcarchive" \
+            "${AUTH_ARGS[@]}" \
+            CODE_SIGN_STYLE=Automatic
+
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/todo-catalyst.xcarchive" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" \
+            -exportPath "$RUNNER_TEMP/catalyst-export" \
+            "${AUTH_ARGS[@]}"
+
+      # ─── Remove temporary signing material ──────────────────────────
+
+      - name: Clean up signing key
+        if: ${{ always() }}
+        run: rm -f "$RUNNER_TEMP/AuthKey.p8" "$RUNNER_TEMP/ExportOptions.plist"
+
+      - name: Clean up archives
+        if: ${{ always() }}
+        run: rm -rf "$RUNNER_TEMP/todo-ios.xcarchive" "$RUNNER_TEMP/todo-catalyst.xcarchive" "$RUNNER_TEMP/ios-export" "$RUNNER_TEMP/catalyst-export"
