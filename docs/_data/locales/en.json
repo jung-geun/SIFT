@@ -171,6 +171,16 @@
         "While the app is open, new mail and bodies are checked about every 45 seconds and each device analyzes action items; failed analyses are retried with growing intervals.",
         "Fixed the \"Local data restored\" notice repeating and the \"Sorting priorities with AI…\" banner showing during mail analysis."
       ]
+    },
+    "1.0.17": {
+      "summary": "Added tag filters and memo task suggestions, an optional Mac MCP connection, and lower iCloud sync volume.",
+      "details": [
+        "Filter to-dos by tag in the list and board views.",
+        "Memos can suggest to-dos with on-device AI. Only the suggestions you select are added, and suggestions matching an existing to-do are marked as duplicates.",
+        "On Mac, turn on MCP connection in settings to let local AI tools list, add, update, and complete to-dos on this device. It is off by default and requires a token.",
+        "Less data goes to iCloud: HTML mail bodies stay on each device, and behavior and audit history older than 120 days is cleaned up automatically.",
+        "A manual AI sort that stops responding ends with an error after 10 minutes, and mail analysis no longer shows the sorting banner."
+      ]
     }
   }
 }

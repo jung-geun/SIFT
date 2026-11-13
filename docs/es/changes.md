@@ -10,6 +10,17 @@ description: Nuevas funciones, mejoras y correcciones de errores de cada versió
 
 # Novedades
 
+<a id="version-1-0-17"></a>
+## 1.0.17
+
+### Tareas, notas, conexión y sincronización
+
+- Filtra las tareas por etiqueta en la lista y en el tablero.
+- Las notas pueden sugerir tareas con la IA del dispositivo. Solo se añaden las sugerencias que elijas, y las que coinciden con una tarea existente se marcan como duplicadas.
+- En Mac, activa la conexión MCP en los ajustes para que las herramientas de IA locales puedan consultar, añadir, editar y completar tareas en este dispositivo. Está desactivada por defecto y requiere un token.
+- Se envían menos datos a iCloud: los cuerpos HTML de los correos se quedan en cada dispositivo, y el historial de acciones y auditorías de más de 120 días se limpia automáticamente.
+- Una ordenación manual con IA que deja de responder termina con un error a los 10 minutos, y el análisis de correos ya no muestra el banner de ordenación.
+
 <a id="version-1-0-16"></a>
 ## 1.0.16
 

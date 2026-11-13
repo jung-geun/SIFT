@@ -55,6 +55,7 @@ struct TodoBoardCardView: View {
     @State private var cardSize: CGSize = .zero
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.openTodo) private var openTodo
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -86,7 +87,9 @@ struct TodoBoardCardView: View {
     private var cardSurface: some View {
         // Keep navigation and the action menu as sibling controls, not nested buttons.
         HStack(alignment: .top, spacing: 0) {
-            NavigationLink(value: todo) {
+            Button {
+                openTodo(todo)
+            } label: {
                 VStack(alignment: .leading, spacing: AppTheme.Spacing.compact) {
                     Text(todo.title.isEmpty
                          ? AppLanguage.localized("todo.noTitle", defaultValue: "(제목 없음)", language: .current, comment: "Untitled to-do placeholder.")
@@ -175,7 +178,9 @@ struct TodoBoardCardView: View {
 
     @ViewBuilder
     private var cardMenuActions: some View {
-        NavigationLink(value: todo) {
+        Button {
+            openTodo(todo)
+        } label: {
             Label(
                 AppLanguage.localized("action.details", defaultValue: "세부 정보", language: .current, comment: "Open to-do details for viewing and editing."),
                 systemImage: "info.circle"

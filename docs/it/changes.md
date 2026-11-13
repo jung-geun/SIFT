@@ -10,6 +10,17 @@ description: Nuove funzioni, miglioramenti e correzioni di ogni versione di SIFT
 
 # Novità
 
+<a id="version-1-0-17"></a>
+## 1.0.17
+
+### Attività, note, connessione e sincronizzazione
+
+- Filtra le attività per tag nell'elenco e nella bacheca.
+- Le note possono suggerire attività con l'IA sul dispositivo. Vengono aggiunti solo i suggerimenti scelti e quelli uguali a un'attività esistente sono segnalati come duplicati.
+- Su Mac, attiva la connessione MCP nelle impostazioni per consentire agli strumenti IA locali di leggere, aggiungere, modificare e completare le attività su questo dispositivo. È disattivata per impostazione predefinita e richiede un token.
+- Verso iCloud vengono inviati meno dati: i corpi HTML delle email restano su ciascun dispositivo e la cronologia di azioni e controlli più vecchia di 120 giorni viene ripulita automaticamente.
+- Un ordinamento IA manuale che non risponde termina con un errore dopo 10 minuti, e l'analisi delle email non mostra più il banner di ordinamento.
+
 <a id="version-1-0-16"></a>
 ## 1.0.16
 

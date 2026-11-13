@@ -13,7 +13,7 @@ description: Informationen zur Erhebung, Nutzung, Speicherung, Übertragung und 
 **App-Name**: SIFT: To-Do List  
 **Betreiber**: jung-geun (unabhängiger Entwickler)  
 **Kontakt**: pieroot.02@gmail.com  
-**Geplanter Gültigkeitsbeginn**: 12. November 2026 (Ankündigung dieser Änderung: 4. November 2026; frühere Änderung geplant für: 9. November 2026; zuvor gültig ab: 27. Oktober 2026; erstmals gültig ab: 31. Juli 2026)
+**Geplanter Gültigkeitsbeginn**: 20. November 2026 (Ankündigung dieser Änderung: 13. November 2026; frühere Änderung geplant für: 12. November 2026; davor geplante Änderung: 9. November 2026; zuvor gültig ab: 27. Oktober 2026; erstmals gültig ab: 31. Juli 2026)
 
 ---
 
@@ -29,7 +29,9 @@ SIFT legt Wert auf den Schutz Ihrer personenbezogenen Daten. Diese Erklärung er
 
 **Hinweis zur geplanten Änderung vom 12. November 2026**: Am 4. November 2026 kündigen wir neu die regelmäßige Speicherung von E-Mail-Listen und vollständigen Texten sowie den Hintergrundabruf für auf jedem Gerät erlaubte Konten an (Abschnitt 1-3), Aufgabenvorschläge ausschließlich aus erforderlichen Aktionen im vollständigen Text (Abschnitt 1-5) und die geräteinterne Aufbewahrung der Originalversionen vor der Lösung von Synchronisierungskonflikten mit ausdrücklich gewählter Wiederherstellung (Abschnitte 2 und 5). Nach der tatsächlichen Veröffentlichung werden mindestens 7 Tage eingehalten. Version 1.0.15 wird zur manuellen Veröffentlichung eingereicht und nicht vor dem 12. November 2026 um 00:00 KST freigegeben. Die getrennten Einwilligungen für externe Übertragung, vollständige iCloud-Speicherung und Hintergrundzugriff bleiben unverändert.
 
-**Entwicklungsversion ohne Werbung oder In-App-Käufe**: Die aktuelle Entwicklungsversion enthält weder Werbung noch In-App-Käufe; alle SIFT-App-Funktionen sind kostenlos. Abonnements, Nutzungs- und Netzgebühren externer Anbieter fallen gesondert an. Dies bestätigt weder die App-Veröffentlichung noch die Veröffentlichung dieser Richtlinie. Die oben genannten bisherigen Ankündigungs- und geplanten Gültigkeitsdaten bleiben unverändert; ein neues Datum wird nicht festgelegt.
+**Am 13. November 2026 angekündigt — gültig ab 20. November 2026 (Version 1.0.17)**: (1) Mac-MCP-Verbindungen sind standardmäßig deaktiviert. Bei Aktivierung verwenden token-authentifizierte lokale Werkzeuge ausschließlich 127.0.0.1 auf demselben Gerät. (2) Aufgabenaktivitätsprotokolle werden 120 Tage nach der Aktivität aufbewahrt; Löschprüfprotokolle 120 Tage nach der Löschung. Danach werden beide automatisch vom Gerät und aus iCloud entfernt. (3) E-Mail-HTML-Inhalte sind von der iCloud-Synchronisierung ausgeschlossen und verbleiben auf dem Gerät. Nach dem Upgrade können bestehende E-Mails mit HTML einmal erneut gespeichert werden, um den Synchronisierungsstand abzugleichen. (4) KI-Aufgabenvorschläge aus Memo-Inhalten werden auf dem Gerät verarbeitet; Memo-Inhalte werden nicht an externe KI-Anbieter gesendet. Version 1.0.17 wird nicht vor dem Gültigkeitsdatum öffentlich veröffentlicht.
+
+**Entwicklungsversion ohne Werbung oder In-App-Käufe**: Die aktuelle Entwicklungsversion enthält weder Werbung noch In-App-Käufe; alle SIFT-App-Funktionen sind kostenlos. Abonnements, Nutzungs- und Netzgebühren externer Anbieter fallen gesondert an. Dieser Hinweis ändert keine der oben genannten Ankündigungs- oder geplanten Gültigkeitsdaten.
 
 ---
 
@@ -197,6 +199,7 @@ Im Einzelnen:
 | OpenAI-Zugangsdaten / Registrierung und host ID zur erneuten Verbindung | Zugangsdaten bis zur Abmeldung; Wiederverbindungsdaten bis zum Löschen aller Verbindungsdaten | Löschen lokaler und synchronisierter Verbindungsinformationen aus der Keychain und Versuch des entfernten Widerrufs; host ID bleibt gerätespezifisch |
 | iCloud-Daten | Bis zum Löschen/Synchronisieren in der App oder Löschen im appbezogenen Speicher des Apple-Kontos | Zum Beenden der Replikation vollständige Speicherung in der App ausschalten; entfernte Daten gesondert in der iCloud-Speicherverwaltung des OS löschen; Ausschalten allein löscht keine entfernten Daten |
 | Lokale App-Daten | Bei App-Löschung oder direkter Löschung durch den Nutzer | Löschen aus dem Gerätespeicher |
+| Aufgabenaktivitäts- und Löschprüfprotokolle | 120 Tage nach Aktivität; Löschprotokolle 120 Tage nach Löschung | Automatische Löschung vom Gerät und aus iCloud |
 | Lokale Diagnoseprotokolle mit Nutzerzustimmung | Bis zum Widerruf der Zustimmung oder Löschen in der App | Löschen des lokalen Diagnosespeichers |
 | Gesendete Fehlerberichte, Funktionsvorschläge, Diagnoseanhänge und betriebliche Notizen | 30 Tage nach Eingang; frühere Löschung durch den Betreiber möglich | Regelmäßige Löschung aus dem privaten Eingangsfach (Verzögerungen bei Anbieterstörungen oder verspäteten Routineaufträgen möglich) |
 | Tägliche HMAC-Schlüssel zur Netzwerkbegrenzung | Höchstens 2 Tage | Regelmäßige Löschung |
@@ -251,4 +254,4 @@ Bei Fragen, Beschwerden oder Meldungen zur Datenschutzerklärung wenden Sie sich
 
 ---
 
-*Zuletzt aktualisiert: 4. November 2026 — diese zusätzliche Änderung ist für den 12. November 2026 vorgesehen, getrennt von der am 1. November angekündigten und für den 9. November geplanten Änderung und der zuvor geltenden Erklärung.*
+*Zuletzt aktualisiert: 13. November 2026 — die Änderung für Version 1.0.17 wurde am 13. November angekündigt und ist für den 20. November 2026 vorgesehen. Frühere Änderungen siehe Hinweise oben.*

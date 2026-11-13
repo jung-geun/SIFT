@@ -6,7 +6,51 @@ import UIKit
 
 // MARK: - Todo Row
 
+/// Presents the to-do editor modally. Catalyst dismisses on outside clicks; iOS and iPad use a sheet.
+private struct TodoEditorPresentation: ViewModifier {
+    @Binding var editingTodo: Todo?
+
+    private var isPresented: Binding<Bool> {
+        Binding(get: { editingTodo != nil }, set: { if !$0 { editingTodo = nil } })
+    }
+
+    func body(content: Content) -> some View {
+        #if targetEnvironment(macCatalyst)
+        content.outsideDismissSheet(isPresented: isPresented) { editor }
+        #else
+        content.sheet(isPresented: isPresented) { editor }
+        #endif
+    }
+
+    @ViewBuilder
+    private var editor: some View {
+        if let todo = editingTodo {
+            NavigationStack {
+                TodoDetailView(todo: todo)
+            }
+        }
+    }
+}
+
+/// Opens a to-do in the modal editor. Rows and board cards call this instead of pushing.
+struct OpenTodoAction {
+    let open: (Todo) -> Void
+    func callAsFunction(_ todo: Todo) { open(todo) }
+}
+
+private struct OpenTodoKey: EnvironmentKey {
+    static let defaultValue = OpenTodoAction { _ in }
+}
+
+extension EnvironmentValues {
+    var openTodo: OpenTodoAction {
+        get { self[OpenTodoKey.self] }
+        set { self[OpenTodoKey.self] = newValue }
+    }
+}
+
 private struct TodoRowView: View {
+    @Environment(\.openTodo) private var openTodo
     let todo: Todo
     var onToggleComplete: (() -> Void)? = nil
     var onDelete: (() -> Void)? = nil
@@ -22,11 +66,12 @@ private struct TodoRowView: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
-            NavigationLink(value: todo) {
+            Button {
+                openTodo(todo)
+            } label: {
                 primaryContent
             }
             .buttonStyle(.plain)
-            .navigationLinkIndicatorVisibility(.hidden)
             .accessibilityIdentifier("todo.row.open.\(todo.id.uuidString)")
 
             #if targetEnvironment(macCatalyst)
@@ -315,7 +360,6 @@ struct TodoListView: View {
     @Query private var behaviorEvents: [TaskBehaviorEvent]
     @Query private var memoryAnalyses: [MemoryAnalysis]
 
-    @ObservedObject private var emailAutomation = EmailAutomationOrchestrator.shared
     @AppStorage("pieroot.todo.hasOnboarded") private var hasOnboarded = false
     @AppStorage("pieroot.todo.hasCompletedTutorial") private var hasCompletedTutorial = false
     @AppStorage("pieroot.todo.iCloudSyncEnabled") private var iCloudSyncEnabled = false
@@ -338,8 +382,11 @@ struct TodoListView: View {
     let globalSearchMailAccess: MailboxCachedProviderAccess?
 
     @State private var showAddTodo = false
+    @State private var showMemos = false
     @State private var addTodoDraft = AddTodoDraft()
     @State private var filter: TodoFilter = .active
+    @State private var selectedTag: String?
+    @State private var editingTodo: Todo?
     @State private var isPrioritizing = false
     @State private var showPrioritizingIndicator = false
     @State private var prioritizingStatusText = AppLanguage.localized(
@@ -440,7 +487,23 @@ struct TodoListView: View {
         }
     }
 
+    /// Tag filter applies on top of the status filter, so tag views keep each status's rules.
     var filteredTodos: [Todo] {
+        Self.applyingTag(selectedTag, to: baseFilteredTodos)
+    }
+
+    /// Pure tag predicate: nil keeps every todo; otherwise only exact tag matches remain.
+    static func applyingTag(_ tag: String?, to todos: [Todo]) -> [Todo] {
+        guard let tag else { return todos }
+        return todos.filter { $0.tags.contains(tag) }
+    }
+
+    /// Distinct tags across all todos, sorted for stable chip order.
+    private var allTagNames: [String] {
+        Set(todos.flatMap(\.tags).filter { !$0.isEmpty }).sorted()
+    }
+
+    private var baseFilteredTodos: [Todo] {
         switch filter {
         case .all:
             // 등록 대기열(review) 제외 — review 탭에서 별도 확인
@@ -496,9 +559,6 @@ struct TodoListView: View {
                         comment: "Global search prompt."
                     ))
                 )
-                .navigationDestination(for: Todo.self) { todo in
-                    TodoDetailView(todo: todo)
-                }
                 .overlay {
                     if let globalSearchAppContainer,
                        let globalSearchEmailContainer,
@@ -533,7 +593,7 @@ struct TodoListView: View {
                             iCloudSyncBanner
                                 .transition(reduceMotion ? .identity : .opacity)
                         }
-                        if showPrioritizingIndicator || emailAutomation.isRunning {
+                        if showPrioritizingIndicator {
                             prioritizingBanner
                         }
                     }
@@ -632,6 +692,12 @@ struct TodoListView: View {
                 }
             }
         }
+        .sheet(isPresented: $showMemos) {
+            MemoListView(
+                existingTodoTitles: todos.filter { !$0.isCompleted }.map(\.title),
+                onRegister: { registerMemoSuggestions($0) }
+            )
+        }
         .sheet(isPresented: $showPostSyncPersonaSetup, onDismiss: {
             guard hasOnboarded, !hasCompletedTutorial else { return }
             DispatchQueue.main.async {
@@ -665,6 +731,11 @@ struct TodoListView: View {
         } message: {
             Text(saveError ?? "")
         }
+        // Edits open as a modal. Dragging the sheet down (iOS, iPad) or clicking outside it (Mac)
+        // discards unsaved draft edits, the same as Cancel: nothing reaches the store until Save.
+        // iPad uses a sheet, not a popover: a popover is too small for the full editor form.
+        .environment(\.openTodo, OpenTodoAction { editingTodo = $0 })
+        .modifier(TodoEditorPresentation(editingTodo: $editingTodo))
     }
 
     // MARK: - Subviews
@@ -674,8 +745,9 @@ struct TodoListView: View {
             #if !targetEnvironment(macCatalyst)
             boardCategoryBar
             #endif
+            tagFilterRow
             TodoBoardView(
-                todos: todos,
+                todos: Self.applyingTag(selectedTag, to: todos),
                 showActiveColumn: $showActiveColumn,
                 showOverdueColumn: $showOverdueColumn,
                 showReviewColumn: $showReviewColumn,
@@ -737,15 +809,51 @@ struct TodoListView: View {
     #endif
 
     private var filterBar: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                ForEach(TodoFilter.allCases, id: \.self) { f in
-                    filterChip(f)
+        VStack(spacing: 0) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(TodoFilter.allCases, id: \.self) { f in
+                        filterChip(f)
+                    }
                 }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
+            tagFilterRow
         }
+    }
+
+    /// Shared by list and board so both layouts expose the same tag view.
+    @ViewBuilder
+    private var tagFilterRow: some View {
+        if !allTagNames.isEmpty || selectedTag != nil {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    tagChip(nil)
+                    ForEach(allTagNames, id: \.self) { tag in
+                        tagChip(tag)
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 8)
+            }
+        }
+    }
+
+    private func tagChip(_ tag: String?) -> some View {
+        let isSelected = selectedTag == tag
+        return Button {
+            withAnimation(AppTheme.motion(reduceMotion: reduceMotion)) { selectedTag = tag }
+        } label: {
+            Text(tag.map { "#\($0)" } ?? AppLanguage.localized("todo.tag.all", defaultValue: "모든 태그", language: .current, comment: "Clears the tag filter."))
+                .font(.caption.weight(isSelected ? .semibold : .regular))
+                .frame(minHeight: 28)
+        }
+        .buttonStyle(.bordered)
+        .buttonBorderShape(.capsule)
+        .tint(isSelected ? AppTheme.accent : .secondary)
+        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+        .accessibilityIdentifier("todo.tagFilter.\(tag ?? "all")")
     }
 
     private func filterChip(_ f: TodoFilter) -> some View {
@@ -919,9 +1027,7 @@ struct TodoListView: View {
             }
             .frame(width: 28)
             VStack(alignment: .leading, spacing: 6) {
-                Text(showPrioritizingIndicator
-                    ? prioritizingStatusText
-                    : AppLanguage.localized("메일 내용 분석 중…", defaultValue: "메일 내용 분석 중…", language: .current))
+                Text(prioritizingStatusText)
                     .font(.subheadline.weight(.medium))
                     .fixedSize(horizontal: false, vertical: true)
                 Text(
@@ -1142,6 +1248,18 @@ struct TodoListView: View {
                 .accessibilityIdentifier("todo.prioritizeButton")
                 #endif
             }
+        }
+        ToolbarItem(placement: .topBarTrailing) {
+            Button {
+                showMemos = true
+            } label: {
+                Label(
+                    AppLanguage.localized("memo.list.title", defaultValue: "메모", language: .current, comment: "Memo list entry in the to-do toolbar."),
+                    systemImage: "note.text"
+                )
+                .labelStyle(.iconOnly)
+            }
+            .accessibilityIdentifier("todo.memoButton")
         }
         ToolbarItem(placement: .topBarTrailing) {
             Button {
@@ -1384,6 +1502,17 @@ struct TodoListView: View {
         }
     }
 
+    /// Creates Todos only for titles the user approved in the memo suggestion sheet.
+    private func registerMemoSuggestions(_ titles: [String]) {
+        for title in titles {
+            let todo = Todo(title: title, source: .manual)
+            modelContext.insert(todo)
+            TaskBehaviorRecorder.recordCreation(of: todo, actor: .user, in: modelContext)
+        }
+        do { try modelContext.save() }
+        catch { saveError = error.localizedDescription }
+    }
+
     private func applyPriorityResult(_ result: PriorityResult, in activeTodos: [Todo]) {
         guard let candidate = activeTodos.first(where: { $0.id == result.todoID }) else { return }
         let previousScore = candidate.computedPriorityScore
@@ -1446,45 +1575,50 @@ struct TodoListView: View {
         )
         let analysisSelection = CalendarService.taskAnalysisCalendarIDs()
         let events = CalendarService.shared.taskAnalysisEvents()
-
+        let passFinished = PassFlag()
         var appliedResultIDs = Set<UUID>()
         let service = RoutedIntelligenceEngine()
         let results: [PriorityResult]
         do {
-            results = try await service.prioritize(
-                todos: activeTodos,
-                events: events,
-                persona: persona,
-                progress: { event in
-                    guard CalendarService.taskAnalysisCalendarIDs() == analysisSelection else { return }
-                    switch event {
-                    case .preparing(let total, let provider):
-                        prioritizingProgressValue = total > 0 ? 0 : nil
-                        prioritizingStatusText = String(format: AppLanguage.localized("todo.ai.preparing", defaultValue: "%@ 준비 중…", language: .current, comment: "AI prioritization progress."), provider)
-                    case .requesting(let index, let total, let title, let provider):
-                        prioritizingProgressValue = total > 0 ? Double(max(0, index - 1)) / Double(total) : nil
-                        prioritizingStatusText = String(format: AppLanguage.localized("todo.ai.requesting", defaultValue: "%@ 요청 %d/%d: %@", language: .current, comment: "AI prioritization progress."), provider, index, total, title)
-                    case .received(let index, let total, let title, let provider):
-                        prioritizingProgressValue = total > 0 ? Double(index) / Double(total) : nil
-                        prioritizingStatusText = String(format: AppLanguage.localized("todo.ai.received", defaultValue: "%@ 응답 %d/%d: %@", language: .current, comment: "AI prioritization progress."), provider, index, total, title)
-                    case .fallback(let from, let to, let reason):
-                        prioritizingStatusText = String(format: AppLanguage.localized("todo.ai.fallback", defaultValue: "%@ 실패 → %@: %@", language: .current, comment: "AI prioritization progress."), from, to, reason)
-                    case .applying(let index, let total, let title):
-                        prioritizingProgressValue = total > 0 ? Double(index) / Double(total) : nil
-                        prioritizingStatusText = String(format: AppLanguage.localized("todo.ai.applying", defaultValue: "결과 적용 %d/%d: %@", language: .current, comment: "AI prioritization progress."), index, total, title)
-                    case .result(let result, let index, let total, let title):
-                        prioritizingProgressValue = total > 0 ? Double(index) / Double(total) : nil
-                        prioritizingStatusText = String(format: AppLanguage.localized("todo.ai.result", defaultValue: "%@ 반영 %d/%d: %@", language: .current, comment: "AI prioritization progress."), result.engine.displayName(language: .current), index, total, title)
-                        if !appliedResultIDs.contains(result.todoID) {
-                            applyPriorityResult(result, in: activeTodos)
-                            appliedResultIDs.insert(result.todoID)
+            // A hung local model must not keep the banner alive; late callbacks are dropped.
+            results = try await AsyncDeadline.run(Self.prioritizeDeadline) {
+                try await service.prioritize(
+                    todos: activeTodos,
+                    events: events,
+                    persona: persona,
+                    progress: { event in
+                        guard !passFinished.value else { return }
+                        guard CalendarService.taskAnalysisCalendarIDs() == analysisSelection else { return }
+                        switch event {
+                        case .preparing(let total, let provider):
+                            prioritizingProgressValue = total > 0 ? 0 : nil
+                            prioritizingStatusText = String(format: AppLanguage.localized("todo.ai.preparing", defaultValue: "%@ 준비 중…", language: .current, comment: "AI prioritization progress."), provider)
+                        case .requesting(let index, let total, let title, let provider):
+                            prioritizingProgressValue = total > 0 ? Double(max(0, index - 1)) / Double(total) : nil
+                            prioritizingStatusText = String(format: AppLanguage.localized("todo.ai.requesting", defaultValue: "%@ 요청 %d/%d: %@", language: .current, comment: "AI prioritization progress."), provider, index, total, title)
+                        case .received(let index, let total, let title, let provider):
+                            prioritizingProgressValue = total > 0 ? Double(index) / Double(total) : nil
+                            prioritizingStatusText = String(format: AppLanguage.localized("todo.ai.received", defaultValue: "%@ 응답 %d/%d: %@", language: .current, comment: "AI prioritization progress."), provider, index, total, title)
+                        case .fallback(let from, let to, let reason):
+                            prioritizingStatusText = String(format: AppLanguage.localized("todo.ai.fallback", defaultValue: "%@ 실패 → %@: %@", language: .current, comment: "AI prioritization progress."), from, to, reason)
+                        case .applying(let index, let total, let title):
+                            prioritizingProgressValue = total > 0 ? Double(index) / Double(total) : nil
+                            prioritizingStatusText = String(format: AppLanguage.localized("todo.ai.applying", defaultValue: "결과 적용 %d/%d: %@", language: .current, comment: "AI prioritization progress."), index, total, title)
+                        case .result(let result, let index, let total, let title):
+                            prioritizingProgressValue = total > 0 ? Double(index) / Double(total) : nil
+                            prioritizingStatusText = String(format: AppLanguage.localized("todo.ai.result", defaultValue: "%@ 반영 %d/%d: %@", language: .current, comment: "AI prioritization progress."), result.engine.displayName(language: .current), index, total, title)
+                            if !appliedResultIDs.contains(result.todoID) {
+                                applyPriorityResult(result, in: activeTodos)
+                                appliedResultIDs.insert(result.todoID)
+                            }
+                        case .completed(let finalProvider, let total):
+                            prioritizingProgressValue = total > 0 ? 1 : nil
+                            prioritizingStatusText = String(format: AppLanguage.localized("todo.ai.completed", defaultValue: "%@ 완료 (%d개)", language: .current, comment: "AI prioritization progress."), finalProvider, total)
                         }
-                    case .completed(let finalProvider, let total):
-                        prioritizingProgressValue = total > 0 ? 1 : nil
-                        prioritizingStatusText = String(format: AppLanguage.localized("todo.ai.completed", defaultValue: "%@ 완료 (%d개)", language: .current, comment: "AI prioritization progress."), finalProvider, total)
                     }
-                }
-            )
+                )
+            }
+            passFinished.value = true
             guard CalendarService.taskAnalysisCalendarIDs() == analysisSelection else { return }
             for result in results where !appliedResultIDs.contains(result.todoID) {
                 applyPriorityResult(result, in: activeTodos)
@@ -1493,12 +1627,17 @@ struct TodoListView: View {
             // Finish only after streamed and final results survive app termination.
             try modelContext.save()
         } catch is CancellationError {
+            passFinished.value = true
             return
         } catch {
+            passFinished.value = true
             showAFMError = true
             return
         }
     }
+
+    /// Upper bound for one whole prioritization pass, including every per-item model call.
+    private static let prioritizeDeadline: Duration = .seconds(600)
 }
 
 #Preview {

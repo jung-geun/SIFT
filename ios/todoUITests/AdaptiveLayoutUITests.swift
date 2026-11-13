@@ -43,7 +43,7 @@ final class AdaptiveLayoutUITests: SIFTUITestCase {
 
         step("저장된 할 일을 세로 화면에서 열고 수정 중 다시 회전") {
             rotate(to: .portrait)
-            tap(app.staticTexts[originalTitle], message: "회전 후 저장된 할 일을 열 수 없습니다.")
+            tap(app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", originalTitle)).firstMatch, message: "회전 후 저장된 할 일을 열 수 없습니다.")
             let title = app.textFields["todo.detail.titleField"]
             tap(title, message: "상세 제목 입력란이 없습니다.")
             title.typeText(suffix)
@@ -55,7 +55,7 @@ final class AdaptiveLayoutUITests: SIFTUITestCase {
 
         step("다시 세로 화면에서 저장 결과 확인") {
             rotate(to: .portrait)
-            tap(app.staticTexts[originalTitle + suffix], message: "수정한 할 일이 목록에 없습니다.")
+            tap(app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", originalTitle + suffix)).firstMatch, message: "수정한 할 일이 목록에 없습니다.")
             XCTAssertEqual(
                 app.textFields["todo.detail.titleField"].value as? String,
                 originalTitle + suffix,

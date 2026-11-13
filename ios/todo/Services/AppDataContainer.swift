@@ -155,7 +155,8 @@ final class AppDataContainer: ObservableObject {
         TaskAuditEvent.self,
         TaskBehaviorEvent.self,
         MemoryAnalysis.self,
-        MailAnalysisLedgerRecord.self
+        MailAnalysisLedgerRecord.self,
+        Memo.self
     ])
 
     // MARK: - Email Container (local storage, no automatic CloudKit mirror)

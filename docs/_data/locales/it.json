@@ -171,6 +171,16 @@
         "Con l’app aperta, nuova posta e contenuti vengono controllati circa ogni 45 secondi e ogni dispositivo analizza le azioni; le analisi non riuscite vengono ritentate a intervalli crescenti.",
         "Corretta la ripetizione dell’avviso «Dati locali ripristinati» e del banner «Ordinamento priorità con IA…» durante l’analisi della posta."
       ]
+    },
+    "1.0.17": {
+      "summary": "Aggiunti filtri per tag e suggerimenti di attività dalle note, connessione MCP facoltativa su Mac e minore volume di sincronizzazione iCloud.",
+      "details": [
+        "Filtra le attività per tag nell'elenco e nella bacheca.",
+        "Le note possono suggerire attività con l'IA sul dispositivo. Vengono aggiunti solo i suggerimenti scelti e quelli uguali a un'attività esistente sono segnalati come duplicati.",
+        "Su Mac, attiva la connessione MCP nelle impostazioni per consentire agli strumenti IA locali di leggere, aggiungere, modificare e completare le attività su questo dispositivo. È disattivata per impostazione predefinita e richiede un token.",
+        "Verso iCloud vengono inviati meno dati: i corpi HTML delle email restano su ciascun dispositivo e la cronologia di azioni e controlli più vecchia di 120 giorni viene ripulita automaticamente.",
+        "Un ordinamento IA manuale che non risponde termina con un errore dopo 10 minuti, e l'analisi delle email non mostra più il banner di ordinamento."
+      ]
     }
   }
 }

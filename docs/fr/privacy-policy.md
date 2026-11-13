@@ -13,7 +13,7 @@ description: Informations recueillies par SIFT, finalités, stockage, transmissi
 **Nom de l’app** : SIFT: To-Do List  
 **Exploitant** : jung-geun (développeur indépendant)  
 **Contact** : pieroot.02@gmail.com  
-**Entrée en vigueur prévue** : 12 novembre 2026 (annonce de cette révision : 4 novembre 2026 ; révision antérieure prévue pour : 9 novembre 2026 ; entrée en vigueur précédente : 27 octobre 2026 ; entrée en vigueur initiale : 31 juillet 2026)
+**Entrée en vigueur prévue** : 20 novembre 2026 (annonce de cette révision : 13 novembre 2026 ; révision précédente prévue pour : 12 novembre 2026 ; révision antérieure prévue pour : 9 novembre 2026 ; entrée en vigueur précédente : 27 octobre 2026 ; entrée en vigueur initiale : 31 juillet 2026)
 
 ---
 
@@ -29,7 +29,9 @@ SIFT accorde de l’importance à vos données personnelles. La présente politi
 
 **Avis de révision prévue le 12 novembre 2026** : Le 4 novembre 2026, nous annonçons pour la première fois la conservation périodique des listes et corps complets des e-mails et leur collecte en arrière-plan pour les comptes autorisés sur chaque appareil (section 1-3), les propositions de tâches fondées uniquement sur les actions nécessaires identifiées dans les corps complets (section 1-5), ainsi que la conservation locale des versions originales avant résolution d’un conflit de synchronisation et leur restauration choisie par l’utilisateur (sections 2 et 5). Au moins 7 jours seront respectés après la publication effective. La version 1.0.15 sera soumise pour une publication manuelle et ne sera pas publiée avant le 12 novembre 2026 à 00:00 KST. Les consentements distincts pour l’envoi externe, le stockage intégral dans iCloud et l’accès en arrière-plan restent inchangés.
 
-**Version en développement sans publicité ni achats intégrés** : La version actuelle en développement ne contient ni publicité ni achats intégrés, et toutes les fonctions de SIFT sont gratuites. Les abonnements, frais d’utilisation et de réseau des fournisseurs externes sont distincts. Ceci ne confirme ni la sortie de l’app ni la publication de la politique. Les avis et dates d’entrée en vigueur prévus ci-dessus restent inchangés et aucune nouvelle date n’est fixée.
+**Avis publié le 13 novembre 2026 — entrée en vigueur le 20 novembre 2026 (version 1.0.17)** : (1) La connexion MCP sur Mac est désactivée par défaut ; lorsqu’elle est activée, les outils locaux authentifiés par jeton n’utilisent que 127.0.0.1 sur le même appareil. (2) Les historiques d’activité des tâches sont conservés 120 jours après l’action ; les journaux d’audit de suppression, 120 jours après la suppression, puis les deux sont automatiquement supprimés de l’appareil et d’iCloud. (3) Les corps HTML des e-mails sont exclus de la synchronisation iCloud et restent sur chaque appareil. Après la mise à niveau, les e-mails déjà enregistrés avec du HTML peuvent être enregistrés une fois de plus pour converger l’état de synchronisation. (4) Les suggestions de tâches générées par l’IA à partir des mémos sont traitées sur l’appareil ; le contenu des mémos n’est pas envoyé à des fournisseurs d’IA externes. La version 1.0.17 ne sera pas publiée avant la date d’entrée en vigueur.
+
+**Version en développement sans publicité ni achats intégrés** : La version actuelle en développement ne contient ni publicité ni achats intégrés, et toutes les fonctions de SIFT sont gratuites. Les abonnements, frais d’utilisation et de réseau des fournisseurs externes sont distincts. Cet avis ne modifie ni les dates d’annonce ni les dates d’entrée en vigueur prévues ci-dessus.
 
 ---
 
@@ -197,6 +199,7 @@ Plus précisément :
 | Identifiants OpenAI / enregistrement de reconnexion et host ID | Identifiants supprimés à la déconnexion ; enregistrements de reconnexion conservés jusqu’à leur suppression complète | Suppression des informations de connexion locales et synchronisées dans Keychain, et tentative de révocation à distance ; host ID propre à l’appareil |
 | Données iCloud | Jusqu’à leur suppression/synchronisation dans l’app ou leur suppression dans le stockage par app du compte Apple | Désactiver le stockage intégral de l’app pour arrêter la réplication ; supprimer séparément les données distantes dans la gestion du stockage iCloud du système ; la désactivation seule ne les efface pas |
 | Données locales de l’app | Jusqu’à la suppression de l’app ou à leur suppression directe par l’utilisateur | Suppression dans le stockage de l’appareil |
+| Historique d’activité des tâches et journaux d’audit des suppressions | 120 jours après l’action ; les journaux de suppression, 120 jours après la suppression | Suppression automatique de l’appareil et d’iCloud |
 | Journaux locaux de diagnostic avec consentement | Jusqu’au retrait du consentement ou à leur suppression par l’utilisateur dans l’app | Suppression du stockage local de diagnostic de l’appareil |
 | Signalements d’erreurs, suggestions, diagnostics joints et notes de traitement envoyés | 30 jours après réception ; suppression anticipée possible par l’exploitant | Suppression périodique de la boîte de réception privée (retard possible en cas de panne du fournisseur ou de retard d’une tâche planifiée) |
 | Clés quotidiennes HMAC de limitation réseau | 2 jours maximum | Suppression périodique |
@@ -251,4 +254,4 @@ Pour toute question, réclamation ou tout signalement concernant cette politique
 
 ---
 
-*Dernière mise à jour : 4 novembre 2026 — cette révision supplémentaire est prévue pour le 12 novembre 2026, séparément de la révision annoncée le 1er novembre et prévue pour le 9 novembre et de la politique précédemment en vigueur.*
+*Dernière mise à jour : 13 novembre 2026 — la révision 1.0.17 a été annoncée le 13 novembre et doit entrer en vigueur le 20 novembre 2026. Voir les avis ci-dessus pour les révisions antérieures.*
