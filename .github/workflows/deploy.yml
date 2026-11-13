@@ -18,7 +18,7 @@ on:
 
 jobs:
   deploy:
-    runs-on: macos-26
+    runs-on: xcode-27
 
     steps:
       - uses: actions/checkout@v4
@@ -30,6 +30,12 @@ jobs:
 
       - name: Print Xcode version
         run: xcodebuild -version
+
+      - name: Install Metal compiler component
+        run: xcodebuild -downloadComponent MetalToolchain
+
+      - name: Verify package resolution integrity
+        run: sh ci_scripts/ci_pre_xcodebuild.sh
 
       - name: Prepare App Store Connect signing
         env:
