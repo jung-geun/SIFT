@@ -13,7 +13,7 @@ description: How SIFT collects, uses, stores, transmits, and deletes information
 **App name**: SIFT: To-Do List  
 **Operator**: jung-geun (independent developer)  
 **Contact**: pieroot.02@gmail.com  
-**Scheduled effective date**: November 12, 2026 (this revision announced: November 4, 2026; earlier revision scheduled for: November 9, 2026; previous effective date: October 27, 2026; initial effective date: July 31, 2026)
+**Scheduled effective date**: November 20, 2026 (this revision announced: November 13, 2026; previous revision scheduled for: November 12, 2026; earlier revision scheduled for: November 9, 2026; previous effective date: October 27, 2026; initial effective date: July 31, 2026)
 
 ---
 
@@ -28,8 +28,9 @@ SIFT values your personal information. This policy clearly explains what informa
 **Release-date correction — November 4, 2026**: The public App Store record shows that 1.0.14 was released on November 2, 2026, contrary to the notice above promising release on or after November 9. This correction does not mean the notice period was met or retroactively expand existing consent.
 
 **Notice of the revision scheduled for November 12, 2026**: On November 4, 2026, we newly announce periodic storage of email lists and complete bodies and background collection for accounts permitted on each device (Section 1-3), task proposals based only on required actions identified in complete bodies (Section 1-5), and on-device retention of original versions before sync-conflict resolution and user-selected restoration (Sections 2 and 5). We will allow at least 7 days after actual publication. Version 1.0.15 will be submitted for manual release and will not be released before November 12, 2026 at 00:00 KST. Existing separate consent boundaries for external transmission, full iCloud storage, and background access remain unchanged.
+**Notice announced November 13, 2026; effective November 20, 2026 (version 1.0.17)**: (1) Mac MCP connections are off by default; when enabled, token-authenticated local tools use only 127.0.0.1 on the same device. (2) Task activity records are retained for 120 days after activity; deletion audit records for 120 days after deletion, then both are automatically removed from the device and iCloud. (3) Email HTML bodies are excluded from iCloud sync and remain on each device. Existing email records containing HTML may be saved once after upgrade to converge sync state. (4) AI task suggestions from memo content are processed on-device; memo content is not sent to external AI providers. Version 1.0.17 will not be publicly released before the effective date.
 
-**Development version without advertising or in-app purchases**: The current development version has no advertising or in-app purchases, and all SIFT app features are free. External-provider subscriptions, usage, and network charges are separate. This is not confirmation of app release or policy publication. It changes none of the existing notice or scheduled effective dates above and establishes no new date.
+**Development version without advertising or in-app purchases**: The current development version has no advertising or in-app purchases, and all SIFT app features are free. External-provider subscriptions, usage, and network charges are separate. This notice does not change the announcement or scheduled effective dates above.
 
 ---
 
@@ -198,6 +199,7 @@ Specifically:
 | OpenAI credentials / registration and host ID for reconnection | Credentials deleted on sign-out; reconnection records retained until all are deleted | Delete local/synced connection information in Keychain and attempt remote revocation; host ID is device-only |
 | iCloud data | Until deleted and synced in the app, or deleted in app-specific storage under the Apple account | To stop replication, turn off full storage in the app; delete remote materials separately through OS iCloud storage management. Turning it off alone does not delete remote materials |
 | Local app data | Until app deletion or explicit user deletion | Delete from device storage |
+| Task activity and deletion audit records | 120 days after activity; deletion records 120 days after deletion | Automatically deleted from the device and iCloud |
 | User-consented local diagnostic logs | Until consent is withdrawn or the user deletes them in the app | Delete the on-device local diagnostic store |
 | Submitted error reports, feature suggestions, diagnostic attachments, and operational notes | 30 days after receipt; the Operator may delete earlier | Scheduled deletion from the private inbox (may be delayed by provider outages or delayed scheduled jobs) |
 | Daily HMAC network rate-limit keys | Up to 2 days | Scheduled deletion |
@@ -252,4 +254,4 @@ For questions, complaints, or reports about this privacy policy, please contact:
 
 ---
 
-*Last updated: November 4, 2026 — this additional revision is scheduled for November 12, 2026, separately from the revision announced November 1 and scheduled for November 9 and the previously effective policy.*
+*Last updated: November 13, 2026 — the version 1.0.17 revision was announced November 13 and is scheduled to take effect November 20, 2026. See notices above for earlier revisions.*

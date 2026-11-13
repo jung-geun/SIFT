@@ -13,7 +13,7 @@ description: Informazioni sui dati raccolti e utilizzati da SIFT, sulla loro con
 **Nome dell’app**: SIFT: To-Do List  
 **Gestore**: jung-geun (sviluppatore indipendente)  
 **Contatto**: pieroot.02@gmail.com  
-**Entrata in vigore prevista**: 12 novembre 2026 (annuncio di questa revisione: 4 novembre 2026; revisione precedente prevista per: 9 novembre 2026; precedente entrata in vigore: 27 ottobre 2026; prima entrata in vigore: 31 luglio 2026)
+**Entrata in vigore prevista**: 20 novembre 2026 (annuncio di questa revisione: 13 novembre 2026; revisione precedente prevista per: 12 novembre 2026; revisione antecedente prevista per: 9 novembre 2026; precedente entrata in vigore: 27 ottobre 2026; prima entrata in vigore: 31 luglio 2026)
 
 ---
 
@@ -28,8 +28,9 @@ SIFT attribuisce grande importanza alla privacy degli utenti. La presente inform
 **Correzione della data di pubblicazione — 4 novembre 2026**: Il registro pubblico dell’App Store mostra che la versione 1.0.14 è stata pubblicata il 2 novembre 2026, contrariamente all’avviso precedente che prometteva la pubblicazione dal 9 novembre. Questa correzione non significa che il periodo di preavviso sia stato rispettato e non estende retroattivamente i consensi esistenti.
 
 **Avviso sulla revisione prevista per il 12 novembre 2026**: Il 4 novembre 2026 annunciamo per la prima volta il salvataggio periodico degli elenchi e dei corpi completi delle email e la raccolta in background per gli account autorizzati su ciascun dispositivo (sezione 1-3), le proposte di attività basate solo sulle azioni necessarie identificate nei corpi completi (sezione 1-5), e la conservazione sul dispositivo delle versioni originali prima della risoluzione dei conflitti di sincronizzazione con ripristino scelto dall’utente (sezioni 2 e 5). Saranno rispettati almeno 7 giorni dalla pubblicazione effettiva. La versione 1.0.15 sarà inviata per la pubblicazione manuale e non sarà pubblicata prima del 12 novembre 2026 alle 00:00 KST. Restano invariati i consensi separati per invio esterno, salvataggio completo su iCloud e accesso in background.
+**Avviso pubblicato il 13 novembre 2026 — entrata in vigore il 20 novembre 2026 (versione 1.0.17)**: (1) La connessione MCP su Mac è disattivata per impostazione predefinita; se attivata, gli strumenti locali autenticati con token usano solo 127.0.0.1 sullo stesso dispositivo. (2) I registri delle azioni delle attività vengono conservati per 120 giorni dall’azione; i registri di audit delle eliminazioni per 120 giorni dalla cancellazione, poi entrambi vengono eliminati automaticamente dal dispositivo e da iCloud. (3) I corpi HTML delle email sono esclusi dalla sincronizzazione iCloud e restano sul dispositivo. Dopo l’aggiornamento, le email già archiviate con HTML possono essere salvate di nuovo una volta per convergere lo stato di sincronizzazione. (4) I suggerimenti di attività AI basati sui memo sono elaborati sul dispositivo; il contenuto dei memo non viene inviato a fornitori AI esterni. La versione 1.0.17 non sarà pubblicata prima della data di entrata in vigore.
 
-**Versione in sviluppo senza pubblicità né acquisti in-app**: La versione attuale in sviluppo non contiene pubblicità né acquisti in-app e tutte le funzioni SIFT sono gratuite. Abbonamenti, utilizzo e costi di rete dei fornitori esterni sono separati. Ciò non conferma il rilascio dell’app né la pubblicazione dell’informativa. Gli avvisi e le date di entrata in vigore previsti sopra restano invariati e non viene stabilita una nuova data.
+**Versione in sviluppo senza pubblicità né acquisti in-app**: La versione attuale in sviluppo non contiene pubblicità né acquisti in-app e tutte le funzioni SIFT sono gratuite. Abbonamenti, utilizzo e costi di rete dei fornitori esterni sono separati. Questo avviso non modifica le date di annuncio o di entrata in vigore previste sopra.
 
 ---
 
@@ -197,6 +198,7 @@ In particolare:
 | Credenziali OpenAI / registrazione per il ricollegamento e host ID | Credenziali eliminate al logout; cronologia di ricollegamento fino all’eliminazione completa | Eliminazione delle informazioni di collegamento locali e sincronizzate dal Keychain e tentativo di revoca remota; host ID esclusivo del dispositivo |
 | Dati iCloud | Fino all’eliminazione e sincronizzazione dall’app o all’eliminazione dall’archiviazione per app dell’account Apple | Per interrompere le repliche, disattivare il salvataggio completo nell’app; eliminare separatamente i dati remoti nella gestione dello spazio iCloud del sistema operativo. La sola disattivazione non elimina i dati remoti |
 | Dati locali dell’app | All’eliminazione dell’app o all’eliminazione diretta dell’utente | Eliminazione dall’archivio del dispositivo |
+| Registri delle attività e audit delle eliminazioni delle attività | 120 giorni dall’attività; i registri di eliminazione 120 giorni dalla cancellazione | Eliminazione automatica dal dispositivo e da iCloud |
 | Log diagnostici locali con consenso dell’utente | Fino alla revoca del consenso o all’eliminazione nell’app da parte dell’utente | Eliminazione dall’archivio diagnostico locale del dispositivo |
 | Segnalazioni di errore, proposte di funzioni, allegati diagnostici e note operative inviati | 30 giorni dalla ricezione, con possibilità di eliminazione anticipata del gestore | Eliminazione programmata dalla casella privata (possibili ritardi per guasti del fornitore o ritardi delle attività pianificate) |
 | Chiavi giornaliere HMAC per limitazioni di rete | Massimo 2 giorni | Eliminazione programmata |
@@ -251,4 +253,4 @@ Per domande, reclami o segnalazioni sull’informativa sulla privacy, contattare
 
 ---
 
-*Ultimo aggiornamento: 4 novembre 2026 — questa revisione aggiuntiva è prevista per il 12 novembre 2026, separatamente dalla revisione annunciata il 1 novembre e prevista per il 9 novembre e dall’informativa precedentemente in vigore.*
+*Ultimo aggiornamento: 13 novembre 2026 — la revisione 1.0.17 è stata annunciata il 13 novembre e deve entrare in vigore il 20 novembre 2026. Consultare gli avvisi sopra per le revisioni precedenti.*
